@@ -137,11 +137,48 @@ async function guiE2E() {
     expect('inbox: agent output uses the answer', ib.color === 'blue', ib);
     expect('inbox: approval item shown and approved', ib.approvalShown && ib.approvedStatus === 'done', ib);
   };
+  // Chat view (shots 17-20) from injected state: room with bubbles + chips + inline question, thread pane, working indicator, @mention -> task.
+  const chatShots = async () => {
+    await waitFor(`return !!document.querySelector('#tpl-select option')`); await ex(`await refresh();`); const cur = await ex(`return { p: ctx.p, t: S.teamId }`);
+    const ps = pm.store(cur.p || pid(), cur.t); let nodes = ps.getTeam().nodes;
+    if (nodes.length < 2) { ps.addNode({ name: 'Pia', role: 'PM', x: 60, y: 60 }); ps.addNode({ name: 'Devon', role: 'Dev', x: 320, y: 160 }); nodes = ps.getTeam().nodes; }
+    const [a, b] = nodes; const t = ps.createTask({ title: 'Chat demo', assignee: b.id, createdBy: a.id });
+    ps.sendMessage({ from: a.id, to: b.id, text: 'Please keep it vanilla JS.', taskId: t.id }); ps.commentTask(t.id, b.id, 'On it.');
+    const q = ps.addInbox({ kind: 'question', taskId: t.id, nodeId: b.id, question: 'Dark or light theme?', choices: ['dark', 'light'] });
+    const L = (ago, nodeId, kind, text) => `logs.push({ projectId: ctx.p, nodeId: '${nodeId}', kind: '${kind}', text: ${JSON.stringify(text)}, at: Date.now() - ${ago} });`;
+    await ex(`$('#tabs button[data-tab=chat]').click(); ${L(90000, b.id, 'system', '▶ ' + b.name + ' starts "Chat demo" in /x')}${L(80000, b.id, 'text', 'I will add a chat view with bubbles and tool chips.')}
+      ${L(70000, b.id, 'tool', 'Read {"file_path":"renderer/app.js"}')}${L(69000, b.id, 'tool_result', '587 lines')}${L(60000, b.id, 'tool', 'Bash {"command":"npm test"}')}${L(59000, b.id, 'tool_result', 'pass 78 fail 0')}
+      await refresh(); CH.key = ''; renderChat(); await w(300); document.querySelector('#chat-room .cchip').open = true; await w(200);`);
+    const room = await ex(`return { groups: document.querySelectorAll('#chat-room .cgroup').length, avatars: document.querySelectorAll('#chat-room .avatar').length, chips: document.querySelectorAll('#chat-room .cchip').length, question: !!document.querySelector('#chat-room .bubble.question .ch-choice'), roles: document.querySelectorAll('#chat-room .role').length, defaultTab: !!$('#tabs button[data-tab=chat]') && TABS[0] === 'chat' }`);
+    expect('chat: room with bubbles, avatars, role badges, tool chips, inline question', room.groups >= 2 && room.chips >= 2 && room.question && room.roles >= 2 && room.defaultTab, room);
+    await ex(`await refresh(); CH.key = ''; renderChat(); document.querySelector('#chat-room .cchip').open = true; await w(200);`); await shot('17-chat-room');
+    await ex(`document.querySelector('#chat-room [data-thread="${t.id}"]').click(); await w(300);`);
+    const th = await ex(`return { open: !$('#chat-thread').classList.contains('hidden'), title: $('#chat-thread .chat-head').textContent, items: document.querySelectorAll('#chat-threadroom .bubble, #chat-threadroom .cchip').length }`);
+    expect('chat: thread pane shows the task', th.open && th.title.includes('Chat demo') && th.items >= 3, th);
+    await shot('18-chat-thread');
+    const typing = await ex(`S.orch.agents = { '${b.id}': { status: 'working', taskId: '${t.id}' } }; CH.key = ''; renderChat(); return $('#chat-typing').textContent`);
+    expect('chat: working indicator', typing.includes(b.name + ' is working'), { typing });
+    await shot('19-chat-working');
+    const origRun = api.run; api.run = () => ({ stubbed: true });
+    await ex(`CH.thread = null; const i = $('#chat-input'); i.value = '@${b.name.slice(0, 2)}'; i.dispatchEvent(new Event('input')); await w(200);`);
+    const mention = await ex(`return [...document.querySelectorAll('#chat-mentions div')].map((d) => d.dataset.name)`);
+    await ex(`$('#chat-input').dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab' })); $('#chat-input').value += 'add a dark theme toggle'; $('#chat-input').dispatchEvent(new Event('input')); await w(200);`);
+    const pv = await ex(`return $('#chat-preview').textContent`); await shot('20-chat-mention');
+    await ex(`$('#chat-send').click(); await w(1200);`); api.run = origRun;
+    const made = ps.listTasks().find((x) => x.title === 'add a dark theme toggle');
+    await ex(`await refresh(); CH.key = ''; renderChat(); const b = [...document.querySelectorAll('#chat-room .ch-choice')].find((x) => x.dataset.v === 'dark'); b && b.click(); await w(800);`);
+    const cm = { mention, preview: pv, task: made && { assignee: made.assignee, createdBy: made.createdBy }, answered: ps.getInboxItem(q.id).answer };
+    console.log('[gui-e2e] chat', JSON.stringify({ room, thread: th, typing, ...cm }));
+    expect('chat: @mention autocomplete + preview + creates a task for the agent', mention.includes(b.name) && pv.includes('task for ' + b.name) && made && made.assignee === b.id, cm);
+    expect('chat: inline answer to ask_human', cm.answered === 'dark', cm);
+  };
   try {
+    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'chat') { await chatShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'firstrun') { await firstrunInbox(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'overview') { await overviewShots(); throw null; }
     // project/team management through the UI: create a project from the Startup template, then a Solo team, then switch back.
     // Wait until the template select is filled (the first refresh loads the templates) before choosing one.
+    await ex(`$('#tabs button[data-tab=team]').click(); await w(300);`); // Chat is the default tab; the flow below clicks the graph
     expect('templates loaded', await waitFor(`return !!document.querySelector('#tpl-select option[value=startup]') && !!document.querySelector('#tpl-select option[value=solo]')`));
     const answer = (sel, text) => ex(`$('#tpl-select').value = '${sel[1]}'; if ($('#tpl-select').value !== '${sel[1]}') return false; $('${sel[0]}').click(); await w(200); $('#ask-input').value = '${text}'; $('#ask-ok').click(); await w(800); return true;`);
     expect('startup template selectable', await answer(['#newproject', 'startup'], 'GUI project'));
@@ -294,6 +331,7 @@ async function guiE2E() {
     }
     await firstrunInbox();
     await overviewShots();
+    await chatShots();
     const tasks = store.listTasks();
     console.log('[gui-e2e]', JSON.stringify({ edges: store.getTeam().edges.length, tasks: tasks.map((t) => [t.title, t.status, t.iterations || 0, !!t.sessionId]), cost: orch.snapshot().totalCost }));
   } catch (e) { if (e !== null) { console.error('[gui-e2e] failed', e); failures.push('exception: ' + e.message); } }

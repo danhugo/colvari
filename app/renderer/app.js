@@ -62,7 +62,7 @@ async function refresh() {
   renderAll();
 }
 const nodeName = (id) => (S.allNodes.find((n) => n.id === id) || {}).name || (id ? id : 'unassigned');
-function renderAll() { renderSidebar(); renderGraph(); renderPreflightBar(); renderNodeForm(); renderBoard(); renderWiki(); renderObs(); renderSettings(); renderHeader(); renderUsage(); renderOverview(); renderInbox(); renderGuide(); }
+function renderAll() { renderSidebar(); renderGraph(); renderPreflightBar(); renderNodeForm(); renderBoard(); renderWiki(); renderObs(); renderSettings(); renderHeader(); renderUsage(); renderOverview(); renderInbox(); renderGuide(); renderChat(); }
 const fmtTok = (n) => { n = n || 0; return n >= 1e6 ? (n / 1e6).toFixed(2) + 'M' : n >= 1e4 ? (n / 1e3).toFixed(1) + 'k' : String(n); };
 const COST_NOTE = { subscription: 'Covered by subscription — not billed per token', other: 'API-equivalent (reported by Claude CLI)' };
 const costCell = (usd, source) => source === 'subscription' ? `<span class="costnote" title="API-equivalent $${(usd || 0).toFixed(4)} (reported by Claude CLI)">${COST_NOTE.subscription}</span>` : `$${(usd || 0).toFixed(4)} <span class="costnote">API-equivalent</span>`;
@@ -142,7 +142,7 @@ $('#run').onclick = async () => {
   } else if (!S.tasks.some((t) => t.status === 'todo')) { alert('Type a goal next to Run (or create a todo task in Board) first.'); return $('#goal').focus(); }
   const bad = S.allNodes.filter((n) => ['fail', 'untested', 'stale'].includes(pfState(n)));
   if (bad.length && !confirm(`Preflight not passed for ${bad.length} agent(s):\n${bad.map((n) => `- ${n.name}: ${n.preflightStatus === 'fail' ? 'FAILED' + (n.preflight && n.preflight.error ? ' (' + n.preflight.error.slice(0, 120) + ')' : '') : n.preflightStatus === 'stale' ? 'config changed since test' : 'untested'}`).join('\n')}\n\nRun anyway? (Use "Test team" in the Team tab to check them.)`)) return showTab('team');
-  showTab('obs'); await call('run'); refresh();
+  if (!$('#tab-chat.active')) showTab('obs'); await call('run'); refresh();
 };
 $('#stop').onclick = async () => { await call('stop'); refresh(); };
 
@@ -506,6 +506,65 @@ $('#ov-task').onchange = renderOverview;
 document.querySelector('#tabs button[data-tab=overview]').addEventListener('click', () => setTimeout(renderOverview));
 setInterval(renderOverview, 1000);
 
+// ---------- chat: #company room, task threads, working indicator, composer ----------
+const CH = { thread: null, key: '', mi: 0 };
+const who = (id) => { const n = S.allNodes.find((x) => x.id === id); return n ? { name: n.name, role: n.role, color: Chat.avatarColor(n.id), ini: Chat.initials(n.name) } : id === 'human' ? { name: 'You', role: 'Head', color: '#5b6275', ini: 'You' } : { name: id || 'system', role: '', color: '#3a3f4b', ini: '⚙' }; };
+function bubble(e) {
+  const link = e.taskId && !CH.thread ? ` data-thread="${e.taskId}"` : ''; const tl = link ? `<span class="tlink">↳ ${esc(taskTitle(e.taskId).slice(0, 40))}</span>` : '';
+  if (e.type === 'tool') return `<details class="cchip"><summary>🔧 ${esc(e.label)}</summary><pre>${esc(e.text)}${e.result != null ? '\n→ ' + esc(String(e.result).slice(0, 2000)) : ''}</pre></details>${tl ? `<span class="bubble linked"${link}>${tl}</span>` : ''}<br>`;
+  if (e.type === 'question') return `<div class="bubble question" data-iid="${e.inboxId}">❓ <b>Question for you</b>${tl}<br>${esc(e.text)}<br>${e.choices.map((c) => `<button class="primary ch-choice" data-v="${esc(c)}">${esc(c)}</button>`).join('')}<textarea class="ch-ans" rows="1" placeholder="Or type an answer"></textarea><button class="ch-send">Answer</button></div>`;
+  const text = e.type === 'handoff' ? `📋 assigned “${e.text}” to @${who(e.to).name}` : e.type === 'message' ? `✉ @${who(e.to).name} ${e.text}` : e.type === 'comment' ? `💬 ${e.text}` : e.text;
+  return `<div class="bubble ${e.type}${link ? ' linked' : ''}"${link}>${esc(text)}${tl}</div>`;
+}
+const renderGroups = (events, working) => Chat.group(events).map((g) => { const w = who(g.who);
+  return `<div class="cgroup"><div class="avatar${working.has(g.who) ? ' working' : ''}" style="background:${w.color}">${esc(w.ini)}</div><div class="cbody"><div class="cname">${esc(w.name)}${w.role ? `<span class="role">${esc(w.role)}</span>` : ''}<time>${new Date(g.at).toLocaleTimeString()}</time></div>${g.items.map(bubble).join('')}</div></div>`; }).join('');
+function renderChat() {
+  if (!$('#tab-chat.active')) return;
+  const ev = Chat.roomEvents(projLogs(), S.tasks, S.messages, S.inbox); const working = new Set(Object.keys(S.orch.agents || {}).filter((id) => S.orch.agents[id].status === 'working'));
+  const key = [ctx.p, ev.length, (ev[ev.length - 1] || {}).at, [...working].join(), CH.thread, S.allNodes.map((n) => n.name).join()].join('|');
+  $('#chat-typing').innerHTML = [...working].map((id) => `<span>${esc(who(id).name)} is working<span class="dots"></span></span>`).join(' · ');
+  if (key === CH.key) return; CH.key = key;
+  const room = $('#chat-room'); const atBottom = room.scrollHeight - room.scrollTop - room.clientHeight < 40;
+  room.innerHTML = ev.length ? renderGroups(ev, working) : S.team.nodes.length ? `<div class="cempty"><b>#company is quiet</b>Type a goal below, or @mention an agent (e.g. <code>@${esc(S.team.nodes[0].name)} write hello.txt</code>).</div>` : '<div class="cempty"><b>No team yet</b>Create your team in the Team tab (or use the first-run guide), then chat with it here.</div>';
+  if (atBottom) room.scrollTop = room.scrollHeight;
+  const th = $('#chat-thread'); const t = S.tasks.find((x) => x.id === CH.thread); th.classList.toggle('hidden', !t);
+  if (t) { const tev = ev.filter((e) => e.taskId === t.id);
+    th.innerHTML = `<div class="chat-head"><b>🧵 ${esc(t.title)}</b><span class="role">${esc(t.status)}</span><span class="spacer"></span><button id="ch-close" title="Close thread">✕</button></div><div id="chat-threadroom">${tev.length ? renderGroups(tev, working) : '<p class="muted" style="padding:16px">Nothing in this thread yet.</p>'}</div>`;
+    $('#ch-close').onclick = () => { CH.thread = null; renderChat(); }; }
+  document.querySelectorAll('#tab-chat [data-thread]').forEach((b) => b.onclick = () => { CH.thread = b.dataset.thread; renderChat(); });
+  document.querySelectorAll('#tab-chat .bubble.question').forEach((d) => {
+    const answer = (v) => act(async () => { if (!v) return; await call('answerInbox', d.dataset.iid, v); refresh(); })();
+    d.querySelectorAll('.ch-choice').forEach((b) => b.onclick = () => answer(b.dataset.v)); d.querySelector('.ch-send').onclick = () => answer(d.querySelector('.ch-ans').value.trim());
+  });
+}
+function chatPreview() {
+  const v = $('#chat-input').value; const p = Chat.parseComposer(v, S.team.nodes); const pv = $('#chat-preview');
+  pv.textContent = Chat.preview(p); pv.className = p ? p.kind : 'muted';
+  const ms = Chat.mentionMatches(v, S.team.nodes); const box = $('#chat-mentions'); box.classList.toggle('hidden', !ms || !ms.length);
+  CH.mi = Math.min(CH.mi, Math.max(0, (ms || []).length - 1));
+  box.innerHTML = (ms || []).map((n, i) => `<div data-name="${esc(n.name)}" class="${i === CH.mi ? 'sel' : ''}"><span class="avatar" style="background:${Chat.avatarColor(n.id)}">${esc(Chat.initials(n.name))}</span>${esc(n.name)} <span class="role">${esc(n.role)}</span></div>`).join('');
+  box.querySelectorAll('div').forEach((d) => d.onmousedown = (e) => { e.preventDefault(); pickMention(d.dataset.name); });
+}
+function pickMention(name) { const i = $('#chat-input'); i.value = i.value.replace(/@(\w*)$/, '@' + name + ' '); i.focus(); CH.mi = 0; chatPreview(); }
+async function chatSend() {
+  const i = $('#chat-input'); const p = Chat.parseComposer(i.value, S.team.nodes); if (!p) return;
+  if (p.kind === 'error') return chatPreview();
+  if (p.kind === 'task') { await call('createTask', { title: p.text.slice(0, 80), description: p.text, assignee: p.nodeId }); if (!S.orch.running) await call('run'); }
+  else if (p.kind === 'message') await call('sendToAgent', p.nodeId, p.text);
+  else { if (!confirm(`Start a new goal for the team?\n\n“${p.text.slice(0, 200)}”\n\nThis runs your agents (may cost tokens).`)) return; $('#goal').value = p.text; await $('#run').onclick(); }
+  i.value = ''; chatPreview(); CH.key = ''; refresh();
+}
+$('#chat-input').addEventListener('input', chatPreview);
+$('#chat-input').addEventListener('keydown', (e) => {
+  const box = $('#chat-mentions'); const open = !box.classList.contains('hidden'); const items = box.querySelectorAll('div');
+  if (open && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) { e.preventDefault(); CH.mi = (CH.mi + (e.key === 'ArrowDown' ? 1 : items.length - 1)) % items.length; chatPreview(); }
+  else if (open && (e.key === 'Tab' || e.key === 'Enter')) { e.preventDefault(); pickMention(items[CH.mi].dataset.name); }
+  else if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); act(chatSend)(); }
+});
+$('#chat-send').onclick = act(chatSend);
+document.querySelector('#tabs button[data-tab=chat]').addEventListener('click', () => setTimeout(() => { CH.key = ''; renderChat(); }));
+setInterval(renderChat, 1000);
+
 // ---------- human inbox (ask_human questions + approvals) ----------
 function renderInbox() {
   const items = S.inbox || []; const n = items.length ? String(items.length) : '';
@@ -537,10 +596,10 @@ squad.on('notify', (n) => {
   $('#toasts').appendChild(d); setTimeout(() => d.remove(), 8000);
 });
 // Keyboard shortcuts: Ctrl/Cmd+1..6 tabs, Ctrl/Cmd+Enter Run, Ctrl/Cmd+. Stop, Esc clear selection / close, ? help.
-const TABS = ['team', 'board', 'wiki', 'obs', 'usage', 'settings', 'overview', 'inbox'];
+const TABS = ['chat', 'team', 'board', 'wiki', 'obs', 'usage', 'settings', 'overview', 'inbox'];
 document.addEventListener('keydown', (e) => {
   const mod = e.metaKey || e.ctrlKey; const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName);
-  if (mod && e.key >= '1' && e.key <= '8') { e.preventDefault(); showTab(TABS[+e.key - 1]); }
+  if (mod && e.key >= '1' && e.key <= '9') { e.preventDefault(); showTab(TABS[+e.key - 1]); }
   else if (mod && e.key === 'Enter') { e.preventDefault(); $('#run').click(); }
   else if (mod && e.key === '.') { e.preventDefault(); $('#stop').click(); }
   else if (e.key === 'Escape' && !$('#askdlg').open) { if ($('#helpdlg').open) return; if (typing) return document.activeElement.blur(); sel = { ...sel, node: null, edge: null, task: null }; connectMode = false; connectFrom = null; $('#connect').classList.remove('on'); renderGraph(); renderNodeForm(); renderBoard(); }

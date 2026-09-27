@@ -84,3 +84,24 @@ header .pill { font-variant-numeric:tabular-nums; } .pill.quiet { color:var(--mu
 #guide { position: fixed; right: 16px; bottom: 16px; width: 380px; max-height: 80vh; overflow: auto; background: var(--panel, #fff); border: 1px solid #8884; border-radius: 8px; padding: 12px 14px; box-shadow: 0 4px 20px #0003; z-index: 50; }
 #guide .gstep { border-top: 1px solid #8883; padding: 8px 0; } #guide .gstep.off { opacity: .45; pointer-events: none; }
 #guide h4 { margin: 0 0 4px; } #guide .gdone::before { content: '✓ '; color: green; } #guide textarea { width: 100%; box-sizing: border-box; }
+
+/* Chat (#company room) — Slack/Discord-like, always dark. */
+#tab-chat { padding:0; } .chat { display:flex; height:100%; background:#1a1d23; color:#dde1ea; } .chat-main { flex:1; display:flex; flex-direction:column; min-width:0; }
+.chat-head { display:flex; align-items:center; gap:8px; padding:10px 16px; border-bottom:1px solid #2a2e37; } .chat .muted { color:#8a92a5; }
+#chat-room { flex:1; overflow:auto; padding:8px 0; } .cgroup { display:flex; gap:10px; padding:6px 16px; } .cgroup:hover { background:#20242c; }
+.avatar { flex:0 0 36px; height:36px; border-radius:50%; display:flex; align-items:center; justify-content:center; color:#fff; font-weight:700; font-size:13px; position:relative; }
+.avatar.working::after { content:''; position:absolute; right:-1px; bottom:-1px; width:10px; height:10px; border-radius:50%; background:#3fbf75; border:2px solid #1a1d23; }
+.cbody { min-width:0; flex:1; } .cname { font-weight:700; } .role { font-size:10px; padding:0 6px; border-radius:6px; background:#2e3440; color:#aeb6c8; margin-left:6px; font-weight:600; } .cname time { color:#6f778a; font-size:11px; font-weight:400; margin-left:6px; }
+.bubble { margin:3px 0; white-space:pre-wrap; word-break:break-word; line-height:1.4; } .bubble.thought { color:#b8bfcd; } .bubble.action, .bubble.handoff { color:#9fb4ff; } .bubble.error { color:#ef6b73; }
+.bubble.linked { cursor:pointer; } .bubble.linked:hover .tlink { text-decoration:underline; } .tlink { color:#7aa2ff; font-size:11px; margin-left:6px; }
+.cchip { display:inline-block; margin:2px 0; } .cchip summary { list-style:none; cursor:pointer; display:inline-block; background:#262b34; border:1px solid #353b47; border-radius:12px; padding:1px 10px; font:11px ui-monospace,monospace; color:#e5c07b; }
+.cchip pre { white-space:pre-wrap; word-break:break-word; background:#12151a; border-radius:6px; padding:6px 8px; font-size:11px; margin:4px 0; max-width:720px; }
+.bubble.question { border:1px solid #b0469c; background:#2a1f2c; border-radius:8px; padding:8px 10px; } .bubble.question textarea { width:100%; margin-top:6px; background:#1a1d23; color:#dde1ea; border-color:#444; }
+.bubble.question button, .composer button { margin:6px 6px 0 0; }
+#chat-typing { color:#3fbf75; font-size:12px; } #chat-typing .dots::after { content:'…'; animation:blink 1.2s infinite; } @keyframes blink { 50% { opacity:.2; } }
+.composer { border-top:1px solid #2a2e37; padding:8px 16px 12px; } .composer .row { display:flex; gap:8px; align-items:flex-end; } .composer textarea { flex:1; background:#23272f; color:#dde1ea; border:1px solid #353b47; border-radius:8px; resize:none; }
+#chat-preview { min-height:16px; font-size:11px; margin-bottom:4px; } #chat-preview.task { color:#7aa2ff; } #chat-preview.message { color:#3fbf75; } #chat-preview.goal { color:#e5c07b; } #chat-preview.error { color:#ef6b73; }
+#chat-mentions { margin:0 16px; background:#23272f; border:1px solid #353b47; border-radius:8px; padding:4px; } #chat-mentions div { padding:4px 8px; border-radius:6px; cursor:pointer; display:flex; gap:8px; align-items:center; }
+#chat-mentions div.sel, #chat-mentions div:hover { background:#2f3542; } #chat-mentions .avatar { flex-basis:22px; height:22px; font-size:10px; }
+#chat-thread { width:360px; border-left:1px solid #2a2e37; overflow:auto; display:flex; flex-direction:column; } #chat-thread .chat-head button { background:none; border:none; color:#aaa; }
+.cempty { margin:auto; text-align:center; padding:40px; color:#8a92a5; } .cempty b { color:#dde1ea; font-size:16px; display:block; margin-bottom:6px; }

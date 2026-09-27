@@ -6,7 +6,7 @@
 <header>
   <strong>Agents Squad</strong>
   <nav id="tabs">
-    <button data-tab="team" class="active">Team</button><button data-tab="board">Board</button><button data-tab="wiki">Wiki</button><button data-tab="obs">Observability</button><button data-tab="usage">Usage</button><button data-tab="settings">Settings</button><button data-tab="overview">Overview</button><button data-tab="inbox">Inbox <span class="badge" id="inbox-tab-badge"></span></button>
+    <button data-tab="chat" class="active">Chat</button><button data-tab="team">Team</button><button data-tab="board">Board</button><button data-tab="wiki">Wiki</button><button data-tab="obs">Observability</button><button data-tab="usage">Usage</button><button data-tab="settings">Settings</button><button data-tab="overview">Overview</button><button data-tab="inbox">Inbox <span class="badge" id="inbox-tab-badge"></span></button>
   </nav>
   <span class="spacer"></span>
   <span id="runstate" class="pill">idle</span>
@@ -28,7 +28,15 @@
   <select id="tpl-select"></select>
 </aside>
 <main>
-  <section id="tab-team" class="tab active">
+  <section id="tab-chat" class="tab active">
+    <div class="chat"><div class="chat-main">
+      <div class="chat-head"><b># company</b> <span class="muted">everything your team says and does</span><span class="spacer"></span><span id="chat-typing"></span></div>
+      <div id="chat-room"></div>
+      <div id="chat-mentions" class="hidden"></div>
+      <div class="composer"><div id="chat-preview" class="muted"></div><div class="row"><textarea id="chat-input" rows="2" placeholder="Message #company — @Name task · @Name? question · plain text starts a goal"></textarea><button id="chat-send" class="primary">Send</button></div></div>
+    </div><aside id="chat-thread" class="hidden"></aside></div>
+  </section>
+  <section id="tab-team" class="tab">
     <div class="toolbar"><button id="addnode">+ Agent</button><button id="connect">Connect (A → B)</button><select id="edgetype" title="Type of new edges"><option>assign</option><option>message</option><option>review</option></select><button id="delsel">Delete selected</button><button id="testteam">Test team</button><span id="pf-summary" class="pill"></span><span id="hint" class="muted">Drag nodes to move. Click an edge to select it.</span></div>
     <div class="split"><svg id="graph"></svg><aside id="nodeform" class="panel"></aside></div>
   </section>
@@ -66,7 +74,7 @@
 </div>
 <dialog id="askdlg"><form method="dialog"><p id="ask-title"></p><input id="ask-input" style="width:280px"><p><button value="cancel">Cancel</button> <button id="ask-ok" value="ok" class="primary">OK</button></p></form></dialog>
 <dialog id="helpdlg"><form method="dialog"><h3>Keyboard shortcuts</h3><table>
-  <tr><td>Ctrl/Cmd + 1…8</td><td>Team, Board, Wiki, Observability, Usage, Settings, Overview, Inbox</td></tr>
+  <tr><td>Ctrl/Cmd + 1…9</td><td>Chat, Team, Board, Wiki, Observability, Usage, Settings, Overview, Inbox</td></tr>
   <tr><td>Ctrl/Cmd + Enter</td><td>Run</td></tr><tr><td>Ctrl/Cmd + .</td><td>Stop all agents</td></tr>
   <tr><td>/</td><td>Focus the goal box</td></tr><tr><td>n</td><td>New task (Board tab)</td></tr>
   <tr><td>Esc</td><td>Clear selection / leave a field</td></tr><tr><td>?</td><td>This help</td></tr></table>
@@ -74,5 +82,6 @@
 <div id="guide" class="hidden"></div>
 <div id="toasts"></div>
 <script src="../src/overview.js"></script>
+<script src="../src/chat.js"></script>
 <script src="app.js"></script>
 </body></html>
