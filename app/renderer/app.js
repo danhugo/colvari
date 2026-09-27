@@ -225,7 +225,9 @@ async function renderLimitMeter() {
   const part = (label, u, ms) => {
     if (!u.limit) return `<span class="lm-part lm-pending" title="No ${esc(label)} limit set — set one in Usage &amp; limits to see a % meter here."><b>${esc(label)}</b> <small>–</small></span>`;
     const pct = Math.min(100, Math.round(u.pct * 100)); const cls = u.pause ? 'danger' : u.warn ? 'warn' : 'ok';
-    return `<span class="lm-part lm-${cls}" title="${esc(label)}: ${pct}% used · resets in ${fmtCountdown(ms)}"><b>${esc(label)}</b> ${pct}%<i class="lm-bar"><i class="lm-fill" style="width:${pct}%"></i></i><small>↻${fmtCountdown(ms)}</small></span>`; };
+    const resetTitle = ms > 0 ? ` · resets in ${fmtCountdown(ms)}` : '';
+    const resetChip = ms > 0 ? `<small>↻${fmtCountdown(ms)}</small>` : '';
+    return `<span class="lm-part lm-${cls}" title="${esc(label)}: ${pct}% used${resetTitle}"><b>${esc(label)}</b> ${pct}%<i class="lm-bar"><i class="lm-fill" style="width:${pct}%"></i></i>${resetChip}</span>`; };
   m.innerHTML = (st.pause ? '<span class="lm-flag lm-danger">paused</span>' : st.warn ? '<span class="lm-flag lm-warn">near limit</span>' : '') +
     part('5h', st.fiveHour, resetIn(5 * 3600000)) + part('weekly', st.weekly, resetIn(7 * 24 * 3600000));
 }
@@ -800,20 +802,23 @@ async function renderDiscovery() {
   const box = $('#us-discovery'); if (!box) return;
   const snap = discoverySnapshot();
   let st; try { st = await call('usageStatus'); } catch { st = null; }
+  const cnt = (n) => n > 0 ? String(n) : '—';
   const limPart = (label, u) => {
     if (!u || !u.limit) return `<span class="lm-part lm-pending" title="No ${esc(label)} limit set or reported yet"><b>${esc(label)}</b> <small>–</small></span>`;
     const pct = Math.min(100, Math.round(u.pct * 100)); const cls = u.pause ? 'danger' : u.warn ? 'warn' : 'ok';
     const ms = u.resetsAt ? new Date(u.resetsAt).getTime() - Date.now() : 0;
-    return `<span class="lm-part lm-${cls}" title="${esc(label)}: ${pct}% used · resets in ${fmtCountdown(ms)}"><b>${esc(label)}</b> ${pct}%<i class="lm-bar"><i class="lm-fill" style="width:${pct}%"></i></i><small>↻${fmtCountdown(ms)}</small></span>`;
+    const resetTitle = ms > 0 ? ` · resets in ${fmtCountdown(ms)}` : '';
+    const resetChip = ms > 0 ? `<small>↻${fmtCountdown(ms)}</small>` : '';
+    return `<span class="lm-part lm-${cls}" title="${esc(label)}: ${pct}% used${resetTitle}"><b>${esc(label)}</b> ${pct}%<i class="lm-bar"><i class="lm-fill" style="width:${pct}%"></i></i>${resetChip}</span>`;
   };
   const hasLimits = st && (st.fiveHour.limit || st.weekly.limit);
   const asOf = snap && snap.capturedAt ? snap.capturedAt : hasLimits ? new Date() : null;
   box.innerHTML = `<h3>Discovery</h3>` +
     (!snap ? '<p class="muted">Not probed yet — click Refresh on an agent in the Team tab to discover its modes, skills and commands.</p>' :
       `<div class="cards">
-        <div class="stat"><small>Skills</small><b>${snap.skills.length}</b></div>
-        <div class="stat"><small>Commands</small><b>${snap.commands.length}</b></div>
-        <div class="stat"><small>Modes</small><b>${snap.modes.length}</b><small>${snap.modes.map(esc).join(', ') || 'none found'}</small></div>
+        <div class="stat"><small>Skills</small><b>${cnt(snap.skills.length)}</b></div>
+        <div class="stat"><small>Commands</small><b>${cnt(snap.commands.length)}</b></div>
+        <div class="stat"><small>Modes</small><b>${cnt(snap.modes.length)}</b><small>${snap.modes.map(esc).join(', ') || 'none found'}</small></div>
       </div>`) +
     `<div class="limitmeter" style="margin:8px 0 4px">${limPart('5h', st && st.fiveHour)}${limPart('weekly', st && st.weekly)}</div>` +
     `<small class="muted">as of ${asOf ? esc(asOf.toLocaleString()) : '–'}</small>`;
