@@ -588,6 +588,9 @@ function runningIds() {
   return w.length || !r ? w : [...new Set(S.tasks.filter((t) => t.status === 'in_progress' && t.assignee).map((t) => t.assignee))];
 }
 const presence = (id) => (S.orch.idle ? S.orch.idle.includes(id) : !runningIds().includes(id)) ? 'idle' : 'busy';
+// A task stuck in_progress whose assignee has no live agent process: the orchestrator will reset/re-dispatch it,
+// but until then it needs to be visible so a stalled run isn't mistaken for one still working.
+function orphanedTasks() { const r = runningIds(); return S.tasks.filter((t) => t.status === 'in_progress' && t.assignee && !r.includes(t.assignee)); }
 function renderIdle() {
   const idle = S.team.nodes.filter((n) => presence(n.id) === 'idle'); const show = S.team.nodes.length && idle.length;
   document.querySelectorAll('.idlebanner').forEach((b) => { b.classList.toggle('hidden', !show); if (!show) return;
@@ -605,7 +608,8 @@ function renderBoard() {
   $('#columns').innerHTML = STATUSES.map((st) => `<div class="col"><h3>${st.replaceAll('_', ' ')} (${S.tasks.filter((t) => t.status === st).length})</h3>${
     S.tasks.filter((t) => t.status === st).map((t) => { const bl = openBlockers(t); const w = (S.orch.agents[t.assignee] || {}); const live = (w.status === 'working' && w.taskId === t.id) || (!w.status && t.status === 'in_progress' && runningIds().includes(t.assignee));
       const ready = !bl.length && ['todo', 'backlog'].includes(t.status);
-      return `<div class="card ${sel.task === t.id ? 'sel' : ''}${t.awaitingApproval ? ' approval' : ''}" data-id="${t.id}"><b>${esc(t.title)}</b>${live ? '<span class="tag live">live</span>' : ''}${bl.length ? `<span class="tag blocked" title="waits for: ${esc(bl.map(taskTitle).join(', '))}">Blocked by ${esc(taskTitle(bl[0]).slice(0, 28))}${bl.length > 1 ? ` +${bl.length - 1}` : ''}</span>` : ready ? '<span class="tag ready">Ready</span>' : ''}${t.awaitingApproval ? '<span class="tag approval">needs approval</span>' : ''}<small>${esc(nodeName(t.assignee))} · ${t.comments.length} comments</small></div>`; }).join('')}</div>`).join('');
+      const noWorker = t.status === 'in_progress' && t.assignee && !live;
+      return `<div class="card ${sel.task === t.id ? 'sel' : ''}${t.awaitingApproval ? ' approval' : ''}" data-id="${t.id}"><b>${esc(t.title)}</b>${live ? '<span class="tag live">live</span>' : ''}${noWorker ? `<span class="tag noworker" title="in_progress but no live agent process for ${esc(nodeName(t.assignee))}">No worker</span>` : ''}${bl.length ? `<span class="tag blocked" title="waits for: ${esc(bl.map(taskTitle).join(', '))}">Blocked by ${esc(taskTitle(bl[0]).slice(0, 28))}${bl.length > 1 ? ` +${bl.length - 1}` : ''}</span>` : ready ? '<span class="tag ready">Ready</span>' : ''}${t.awaitingApproval ? '<span class="tag approval">needs approval</span>' : ''}<small>${esc(nodeName(t.assignee))} · ${t.comments.length} comments</small></div>`; }).join('')}</div>`).join('');
   document.querySelectorAll('.card').forEach((c) => c.onclick = () => { sel.task = c.dataset.id; renderBoard(); });
   const d = $('#taskdetail'); const t = S.tasks.find((x) => x.id === sel.task);
   if (!t) { d.innerHTML = '<p class="muted">Create a goal task, assign it to an agent (usually the PM), then press Run.</p>'; return; }
@@ -713,8 +717,10 @@ function renderObs() {
   document.querySelectorAll('#logagents .logagent-row[data-id]').forEach((d) => d.onclick = (e) => { if (e.target.closest('.lactions')) return; $('#logfilter').value = d.dataset.id; renderLog(); renderObs(); });
   document.querySelectorAll('[data-stopagent]').forEach((b) => b.onclick = act(async (e) => { e.stopPropagation(); await call('stopAgent', b.dataset.stopagent); refresh(); }));
   document.querySelectorAll('[data-msgagent]').forEach((b) => b.onclick = act(async (e) => { e.stopPropagation(); const v = await ask(`Message to ${nodeName(b.dataset.msgagent)} (a running agent is interrupted and resumed with it)`); if (v) { await call('sendToAgent', b.dataset.msgagent, v); refresh(); } }));
-  const bs = S.orch.budgetStop; const st = S.settings;
-  $('#budgetbar').innerHTML = (st.budgetUsd || st.budgetTokens ? `Run budget: ${st.budgetUsd ? `$${(S.orch.runCost || 0).toFixed(4)} / $${st.budgetUsd}` : ''}${st.budgetUsd && st.budgetTokens ? ' · ' : ''}${st.budgetTokens ? `${fmtTok(S.orch.runTokens)} / ${fmtTok(st.budgetTokens)} tok` : ''}` : '') + (bs ? ` <span class="warn">Stopped: ${esc(bs)}</span>` : '');
+  const bs = S.orch.budgetStop ? esc(S.orch.budgetStop) : ''; const st = S.settings; const orphans = orphanedTasks();
+  const orphanNote = orphans.length ? `${orphans.length} task${orphans.length > 1 ? 's' : ''} stuck in_progress with no live worker (${esc(orphans.slice(0, 3).map((t) => t.title).join(', '))}${orphans.length > 3 ? '…' : ''})` : '';
+  const stopMsg = !S.orch.running ? [bs, orphanNote].filter(Boolean).join(' · ') : (bs ? [bs, orphanNote].filter(Boolean).join(' · ') : '');
+  $('#budgetbar').innerHTML = (st.budgetUsd || st.budgetTokens ? `Run budget: ${st.budgetUsd ? `$${(S.orch.runCost || 0).toFixed(4)} / $${st.budgetUsd}` : ''}${st.budgetUsd && st.budgetTokens ? ' · ' : ''}${st.budgetTokens ? `${fmtTok(S.orch.runTokens)} / ${fmtTok(st.budgetTokens)} tok` : ''}` : '') + (stopMsg ? ` <span class="warn">Stopped: ${stopMsg}</span>` : '');
   const f = $('#logfilter'); f.innerHTML = '<option value="">All agents</option>' + nodes.map((n) => `<option value="${n.id}">${esc(n.name)}</option>`).join(''); f.value = cur;
 }
 const LOG_LEVEL = { error: 'error', stderr: 'error', tool_error: 'error', system: 'info', tool: 'tool', tool_result: 'tool', result: 'ok', raw: 'muted' };
