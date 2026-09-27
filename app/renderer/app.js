@@ -435,7 +435,7 @@ function renderNodeForm() {
     </fieldset>
     <fieldset id="nf-effort"><legend>Effort &amp; context</legend>
       <label>Reasoning effort</label><select id="nf-effort-sel">${['low', 'medium', 'high', 'xhigh', 'max'].map((v) => `<option value="${v}" ${(n.effort || 'low') === v ? 'selected' : ''}>${v[0].toUpperCase() + v.slice(1)}</option>`).join('')}</select>
-      <label>Auto-compact at, % of context <span class="muted">(0 = runtime default)</span></label><input id="nf-autocompact" type="number" min="0" max="100" step="5" value="${n.autoCompact || 0}">
+      <label>Auto-compact window <span class="muted">(blank = runtime default, "auto", or a token count 100k-1M)</span></label><input id="nf-autocompact" placeholder="auto or 100000-1000000" value="${esc(n.autoCompact || '')}">
     </fieldset>
     <fieldset id="nf-caps-box"><legend>Discovered capabilities <button id="nf-caps-refresh" type="button">Refresh</button></legend>
       <div id="nf-caps-view" class="muted">${capsView(n)}</div>
@@ -472,7 +472,7 @@ function renderNodeForm() {
     runtime: $('#nf-runtime').value, name: $('#nf-name').value, role: $('#nf-role').value.trim() || 'Dev', model: $('#nf-model').value.trim(), workdir: $('#nf-workdir').value.trim(), systemPrompt: $('#nf-prompt').value,
     permissionMode: $('#nf-perm').value, allowedTools: $('#nf-allowed').value, disallowedTools: $('#nf-disallowed').value, maxTurns: +$('#nf-maxturns').value || 0,
     appendSystemPrompt: $('#nf-append').value, addDirs: $('#nf-adddirs').value, env: $('#nf-env').value, extraArgs: $('#nf-extra').value.trim(),
-    effort: $('#nf-effort-sel').value, autoCompact: +$('#nf-autocompact').value || 0,
+    effort: $('#nf-effort-sel').value, autoCompact: $('#nf-autocompact').value.trim(),
     mode: $('#nf-mode').value, goalCondition: $('#nf-goalcond').value, maxIterations: +$('#nf-maxiter').value || 5, checkModel: $('#nf-checkmodel').value.trim(),
     loopCount: +$('#nf-loopcount').value || 3, slashCommand: $('#nf-slash').value.trim(), continueSession: $('#nf-continue').checked,
     billingMode: $('#nf-billing').value, billingBaseUrl: $('#nf-billurl').value.trim(),
