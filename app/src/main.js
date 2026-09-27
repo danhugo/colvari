@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, Notification } = require('electron');
+const { app, BrowserWindow, ipcMain, Notification, nativeTheme } = require('electron');
 const path = require('path');
 const { Orchestrator } = require('./orchestrator');
 const { ProjectManager, TEMPLATES } = require('./projects');
@@ -43,7 +43,11 @@ async function autorun(file) {
 }
 
 function createWindow() {
-  win = new BrowserWindow({ width: 1400, height: 900, title: 'Agents Squad', webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false } });
+  const theme = getPrefs().theme; nativeTheme.themeSource = ['light', 'dark'].includes(theme) ? theme : 'system';
+  const mac = process.platform === 'darwin';
+  win = new BrowserWindow({ width: 1400, height: 900, title: 'Agents Squad', backgroundColor: BG[nativeTheme.shouldUseDarkColors ? 'dark' : 'light'],
+    ...(mac ? { titleBarStyle: 'hiddenInset', vibrancy: 'sidebar', visualEffectState: 'followWindow' } : { titleBarStyle: 'hidden', titleBarOverlay: true }),
+    webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false } });
   win.webContents.on('console-message', (_e, level, message) => { if (level >= 2) console.error('[renderer]', message); });
   win.webContents.on('did-finish-load', async () => {
     console.log('[agents-squad] renderer loaded');
@@ -348,6 +352,17 @@ const TS = (c) => { const ts = pm.get(c.p).teams; return pm.store(c.p, (ts.find(
 const withPF = (nodes, settings) => nodes.map((n) => ({ ...n, preflightStatus: PF.preflightStatus(n, settings) }));
 // Test one agent with its exact config and save the result on the node (in whichever team owns it).
 async function testAgent(c, nodeId) {
+    // Main screens in light + dark (the renderer themes via prefers-color-scheme, driven by nativeTheme).
+    const { nativeTheme } = require('electron');
+    for (const theme of ['light', 'dark']) {
+      nativeTheme.themeSource = theme; await ex(`await w(300);`);
+      for (const tab of ['chat', 'team', 'board', 'inbox', 'overview']) { await ex(`$('#tabs button[data-tab=${tab}]').click(); await w(500);`); await shot(`main-${tab}-${theme}`); }
+      await ex(`$('#tabs button[data-tab=team]').click(); $('#reopenguide').click(); await w(400);`); await shot(`main-firstrun-${theme}`);
+      expect(`firstrun guide opens (${theme})`, await ex(`return !$('#guide').classList.contains('hidden')`));
+      await ex(`$('#guide').classList.add('hidden'); await w(200);`);
+      expect(`theme ${theme} applied`, await ex(`return matchMedia('(prefers-color-scheme: dark)').matches`) === (theme === 'dark'));
+    }
+    nativeTheme.themeSource = 'system';
   const s = ST(c); const settings = s.getSettings();
   const team = pm.get(c.p).teams.find((t) => pm.store(c.p, t.id).getTeam().nodes.some((n) => n.id === nodeId));
   if (!team) throw new Error('no agent ' + nodeId);
@@ -406,7 +421,9 @@ function pollInbox(first) {
     for (const it of items) if (!seenInbox.has(it.id)) {
       seenInbox.add(it.id); if (first) continue;
       const n = { title: it.kind === 'approval' ? 'Approval needed' : 'Agent asks you', body: it.question, taskId: it.taskId, inbox: true };
+  getPrefs: () => getPrefs(), setPrefs: (_c, patch) => setPrefs(patch || {}),
       send('notify', { ...n, projectId: p.id }); notify(n, p.id);
+nativeTheme.on('updated', () => { applyTheme(getPrefs().theme); send('theme', { dark: nativeTheme.shouldUseDarkColors }); });
     }
   }
 }
