@@ -779,7 +779,32 @@ async function guiE2E() {
     for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`await w(300);`); await shot(`31-conflict-board-${t}`); }
     require('electron').nativeTheme.themeSource = 'system';
   };
+  // TEMP evidence scenario for t_04f36a69 (helpycode runtime/model selectable + persisted), not a permanent fixture.
+  const helpycodeShots = async () => {
+    await waitFor(`return !!document.querySelector('#tpl-select option')`); await ex(`await refresh();`); const cur = await ex(`return { p: ctx.p, t: S.teamId }`);
+    const ps = pm.store(cur.p || pid(), cur.t); let nodes = ps.getTeam().nodes;
+    if (!nodes.length) { ps.addNode({ name: 'Devon', role: 'Dev', x: 60, y: 60 }); nodes = ps.getTeam().nodes; }
+    const n = nodes[0];
+    await ex(`$('#tabs button[data-tab=settings]').click(); await refresh(); await w(300); $('#rt-path').value = 'helpycode'; $('#rt-detect').click(); await w(4000);`);
+    const draft = await ex(`return { label: $('#rd-label') && $('#rd-label').value, models: $('#rd-models') && $('#rd-models').value, stub: !!document.querySelector('#rt-draft .costnote') }`);
+    expect('helpycode: Detect populates a real (non-stub) draft', draft.label === 'helpycode' && !draft.stub, draft);
+    // helpycode's `models` subcommand output isn't parsed into names by the introspector yet, so the reviewer
+    // fills in the model list by hand from `helpycode models` output, same as any other free-text CLI model id.
+    await ex(`$('#rd-models').value = 'elice/z-ai/glm-5.3-flash, elice/z-ai/glm-5.3'; $('#rd-defmodel').value = 'elice/z-ai/glm-5.3-flash'; $('#rd-save').click(); await w(300);`);
+    const rtId = await ex(`return (JSON.parse(localStorage.getItem('customRuntimes')) || []).find((r) => r.bin === 'helpycode')?.id`);
+    await ex(`$('#tabs button[data-tab=team]').click(); await refresh(); selectNode('${n.id}'); await w(300); $('#nf-runtime').value = '${rtId}'; $('#nf-runtime').dispatchEvent(new Event('change')); await w(200);`);
+    const modelOpts = await ex(`return [...document.querySelectorAll('#modellist option')].map((o) => o.value)`);
+    const model = modelOpts.find((m) => /glm/i.test(m)) || modelOpts[0];
+    await ex(`$('#nf-model').value = ${JSON.stringify(model)}; $('#nf-save').click(); await w(400);`);
+    await shot('helpycode-node-config');
+    await ex(`await refresh(); selectNode('${n.id}'); await w(300);`);
+    const saved = await ex(`const nn = S.team.nodes.find((x) => x.id === '${n.id}'); return { runtime: nn.runtime, model: nn.model, formRuntime: $('#nf-runtime').value, formModel: $('#nf-model').value };`);
+    expect('helpycode: runtime+model persisted on the node and reflected in the form after reload', saved.runtime === rtId && saved.model === model && saved.formRuntime === rtId && saved.formModel === model, saved);
+    await shot('helpycode-node-config-reloaded');
+    console.log('[gui-e2e] helpycode', JSON.stringify({ draft, rtId, model, saved }));
+  };
   try {
+    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'helpycode') { await helpycodeShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'wikilogs') { await wikiLogsShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'conflict') { await conflictShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'graph') { await graphShots(); for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`$('#tabs button[data-tab=team]').click(); await w(500);`); await shot(`graph-${t}`); } require('electron').nativeTheme.themeSource = 'system'; throw null; }
@@ -1036,7 +1061,7 @@ function toDraftProfile(bin, profile) {
   };
 }
 const api = {
-  introspectRuntime: (bin) => toDraftProfile(bin, runIntrospectRuntime(bin)),
+  introspectRuntime: (_c, bin) => toDraftProfile(bin, runIntrospectRuntime(bin)),
   listProjects: () => ({ projects: pm.list().map((p) => ({ ...p, running: !!(orchs.get(p.id) || {}).running })), templates: Object.fromEntries(Object.entries(TEMPLATES).map(([k, v]) => [k, v.label])) }),
   createProject: (_c, name, tpl) => pm.create(name, tpl), renameProject: (_c, pid, name) => pm.rename(pid, name),
   deleteProject: (_c, pid) => { if ((orchs.get(pid) || {}).running) throw new Error('stop the project first'); orchs.delete(pid); return pm.remove(pid); },
