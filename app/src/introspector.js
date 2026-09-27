@@ -102,6 +102,10 @@ function findFormatFlag(text) {
 function findMcp(text) {
   if (/--mcp-config\b/.test(text)) return { method: 'json-flag', flag: '--mcp-config' };
   if (/mcp_servers\.|mcp[- ]servers?\b/i.test(text)) return { method: 'toml-override', flag: '-c' };
+  // CLI with its own `<bin> mcp` management subcommand (opencode-style): servers live in a config file,
+  // passed per run via <BIN>_CONFIG (see runtimes.js buildArgs).
+  const sub = text.match(/^\s*(\S+)\s+mcp\b.*\bmcp\b/im);
+  if (sub) return { method: 'file', flag: sub[1].split('/').pop() + '.json' };
   return { method: 'none', flag: '' };
 }
 
