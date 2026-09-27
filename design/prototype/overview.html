@@ -1,0 +1,452 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8"><title>Agents Squad — Overview (prototype)</title>
+<link rel="stylesheet" href="../tokens.css">
+<style>
+*{box-sizing:border-box;margin:0}
+body{font:var(--fw-regular) var(--text-md)/var(--lh-body) var(--font-sans);color:var(--fg-primary);background:var(--bg-app);height:100vh;display:grid;grid-template-columns:248px 1fr;overflow:hidden;-webkit-font-smoothing:antialiased}
+button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
+/* sidebar (shared shell) */
+.side{background:var(--bg-sidebar);border-right:1px solid var(--border);display:flex;flex-direction:column;padding:var(--space-4) var(--space-3);gap:var(--space-5);overflow:auto}
+.brand{display:flex;align-items:center;gap:var(--space-2);font-weight:var(--fw-bold);font-size:var(--text-lg);padding:0 var(--space-2)}
+.logo{width:28px;height:28px;border-radius:var(--radius-sm);background:linear-gradient(135deg,var(--agent-1),var(--agent-2));display:grid;place-items:center;color:#fff;font-size:14px;box-shadow:var(--shadow-md)}
+.sec h6{font-size:var(--text-xs);text-transform:uppercase;letter-spacing:.06em;color:var(--fg-muted);font-weight:var(--fw-semibold);padding:0 var(--space-2) var(--space-2)}
+.item{display:flex;align-items:center;gap:var(--space-2);width:100%;padding:6px var(--space-2);border-radius:var(--radius-sm);color:var(--fg-secondary);font-size:var(--text-md);text-decoration:none;transition:background var(--dur-fast) var(--ease-out)}
+.item:hover{background:var(--bg-hover)}
+.item.on{background:var(--bg-active);color:var(--fg-primary);font-weight:var(--fw-semibold)}
+.item .ic{width:18px;flex:none;display:inline-flex;align-items:center;justify-content:center;color:var(--fg-muted)}
+.item.on .ic{color:var(--accent)}
+.badge{margin-left:auto;background:var(--accent);color:#fff;font-size:var(--text-xs);font-weight:var(--fw-bold);border-radius:var(--radius-full);padding:0 7px;line-height:18px}
+.sub{margin-left:auto;font-size:var(--text-xs);color:var(--fg-muted)}
+.av{--c:var(--agent-1);position:relative;flex:none;width:32px;height:32px;border-radius:var(--radius-md);display:grid;place-items:center;font-size:13px;font-weight:var(--fw-bold);color:#fff;background:linear-gradient(145deg,var(--c),color-mix(in srgb,var(--c) 70%,#000))}
+.av.sm{width:22px;height:22px;border-radius:var(--radius-sm);font-size:10px}
+.av.xs{width:16px;height:16px;border-radius:4px;font-size:8px}
+.av.human{background:var(--bg-raised);color:var(--fg-primary);border:1px solid var(--border-strong)}
+.dot{position:absolute;right:-3px;bottom:-3px;width:10px;height:10px;border-radius:50%;border:2px solid var(--bg-sidebar);background:var(--fg-muted)}
+.dot.working{background:var(--success);animation:pulse 1.6s infinite}
+.dot.idle{background:var(--fg-muted)}.dot.waiting{background:var(--warning)}
+@keyframes pulse{0%{box-shadow:0 0 0 0 color-mix(in srgb,var(--success) 60%,transparent)}70%{box-shadow:0 0 0 6px transparent}100%{box-shadow:0 0 0 0 transparent}}
+.side .foot{margin-top:auto;display:flex;gap:var(--space-2)}
+.chip-btn{flex:1;border:1px solid var(--border);background:var(--bg-surface);border-radius:var(--radius-sm);padding:6px;font-size:var(--text-sm);color:var(--fg-secondary)}
+/* main */
+main{display:grid;height:100vh;min-height:0;grid-template-rows:auto 1fr;min-width:0;position:relative}
+.top{display:flex;align-items:center;gap:var(--space-3);padding:var(--space-3) var(--space-6);border-bottom:1px solid var(--border);background:var(--bg-surface)}
+.top h1{font-size:var(--text-lg);font-weight:var(--fw-bold)}
+.top p{color:var(--fg-muted);font-size:var(--text-sm)}
+.tabs{display:flex;gap:2px;background:var(--bg-app);border:1px solid var(--border);border-radius:var(--radius-md);padding:2px;margin-left:var(--space-4)}
+.tab{padding:5px 14px;border-radius:var(--radius-sm);font-size:var(--text-sm);font-weight:var(--fw-medium);color:var(--fg-secondary)}
+.tab.on{background:var(--bg-surface);color:var(--fg-primary);box-shadow:var(--shadow-sm)}
+.theme{margin-left:auto;border:1px solid var(--border);border-radius:var(--radius-sm);padding:4px 10px;font-size:var(--text-sm);color:var(--fg-secondary)}
+
+/* ---- graph ---- */
+.view{position:relative;overflow:hidden;min-height:0}
+#graph{display:none}
+#graph.on{display:block}
+.canvas{position:absolute;inset:0;overflow:hidden;background:
+  radial-gradient(circle at 1px 1px,var(--border) 1px,transparent 0) 0 0/22px 22px;}
+.stage{position:absolute;left:0;top:0;transform-origin:0 0;transition:transform var(--dur-base) var(--ease-out)}
+svg.edges{position:absolute;left:0;top:0;overflow:visible;pointer-events:none}
+.edge-arrow{fill:var(--edge)}
+.edge-line{stroke:var(--edge);stroke-width:1.75;fill:none}
+.edge-line.dashed{stroke-dasharray:5 4}
+.edge-line.active{stroke:var(--accent);stroke-dasharray:6 5;animation:dash 1.1s linear infinite}
+@keyframes dash{to{stroke-dashoffset:-22}}
+.frame{position:absolute;border:1.5px dashed var(--border-strong);border-radius:var(--radius-lg);background:var(--bg-subtle,color-mix(in srgb,var(--bg-surface) 60%,transparent));}
+.frame .flabel{position:absolute;top:-11px;left:14px;background:var(--bg-app);padding:0 8px;font-size:var(--text-xs);font-weight:var(--fw-semibold);color:var(--fg-muted);text-transform:uppercase;letter-spacing:.05em}
+.frame .fsummary{position:absolute;top:-11px;right:14px;background:var(--bg-app);padding:0 8px;font-size:var(--text-xs);color:var(--fg-muted)}
+.node{position:absolute;width:172px;background:var(--bg-raised);border:1px solid var(--border);border-radius:var(--radius-lg);box-shadow:var(--shadow-md);padding:var(--space-3);display:grid;gap:6px;cursor:pointer;transition:transform var(--dur-fast) var(--ease-out),box-shadow var(--dur-fast)}
+.node:hover{transform:translateY(-2px);box-shadow:var(--shadow-lg);border-color:var(--border-strong)}
+.node .hd{display:flex;align-items:center;gap:8px}
+.node .nm{font-weight:var(--fw-semibold);font-size:var(--text-sm);color:var(--fg-primary);transform-origin:left center;white-space:nowrap}
+.node .rl{font-size:10px;color:var(--fg-muted);display:block}
+.node .chip{font-size:var(--text-xs);color:var(--fg-secondary);background:var(--bg-app);border-radius:var(--radius-xs);padding:3px 6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.stage.lod .node .rl,.stage.lod .node .chip{display:none}
+.stage.lod .node{padding:8px}
+.zoom{position:absolute;right:var(--space-4);bottom:var(--space-4);display:flex;align-items:center;gap:2px;background:var(--bg-raised);border:1px solid var(--border);border-radius:var(--radius-md);box-shadow:var(--shadow-md);padding:3px}
+.zoom button{width:26px;height:26px;border-radius:var(--radius-sm)}
+.zoom button:hover{background:var(--bg-hover)}
+.zoom .pct{font-size:var(--text-xs);color:var(--fg-muted);width:40px;text-align:center}
+.minimap{position:absolute;left:var(--space-4);bottom:var(--space-4);width:140px;height:90px;background:var(--bg-raised);border:1px solid var(--border);border-radius:var(--radius-md);box-shadow:var(--shadow-md);overflow:hidden;display:none}
+.minimap.show{display:block}
+.minimap .mv{position:absolute;border:1.5px solid var(--accent);background:color-mix(in srgb,var(--accent) 10%,transparent);border-radius:2px}
+.minimap .mnode{position:absolute;border-radius:1px;background:var(--border-strong)}
+.minimap .mframe{position:absolute;border:1px dashed var(--border-strong);border-radius:2px}
+.scaletoggle{border:1px solid var(--border);border-radius:var(--radius-sm);padding:4px 10px;font-size:var(--text-sm);color:var(--fg-secondary);margin-left:var(--space-2)}
+.scaletoggle:hover{background:var(--bg-hover)}
+
+/* ---- timeline ---- */
+#timeline{display:none;grid-template-rows:auto 1fr auto;min-height:0}
+#timeline.on{display:grid}
+.taxis{position:relative;height:28px;border-bottom:1px solid var(--border);background:var(--bg-surface);margin-left:160px}
+.tick{position:absolute;top:0;bottom:0;border-left:1px solid var(--border);font-size:10px;color:var(--fg-muted);padding-left:4px;padding-top:6px}
+.now{position:absolute;top:0;bottom:-2000px;width:0;border-left:2px solid var(--accent);z-index:3}
+.now::before{content:'now';position:absolute;top:-16px;left:-14px;font-size:9px;color:var(--accent);font-weight:var(--fw-semibold)}
+.lanes{overflow:auto;position:relative}
+.lane{display:flex;border-bottom:1px solid var(--border);min-height:48px}
+.lane .lbl{position:sticky;left:0;width:160px;flex:none;display:flex;align-items:center;gap:6px;padding:0 var(--space-2);background:var(--bg-surface);border-right:1px solid var(--border);font-size:var(--text-sm);font-weight:var(--fw-medium);z-index:2}
+.lane .track{position:relative;flex:1;min-width:900px}
+.bar2{position:absolute;top:9px;height:30px;border-radius:var(--radius-sm);border-left:3px solid var(--c);background:color-mix(in srgb,var(--c) 20%,var(--bg-surface));display:flex;align-items:center;padding:0 8px;font-size:11px;font-weight:var(--fw-medium);color:var(--fg-primary);overflow:hidden;white-space:nowrap;cursor:pointer;box-shadow:var(--shadow-sm)}
+.bar2:hover{outline:1.5px solid var(--c)}
+.bar2.wait{background:repeating-linear-gradient(45deg,var(--warning-soft),var(--warning-soft) 6px,color-mix(in srgb,var(--warning) 30%,var(--warning-soft)) 6px,color-mix(in srgb,var(--warning) 30%,var(--warning-soft)) 12px);border-left-color:var(--warning)}
+.conn{position:absolute;top:24px;height:0;border-top:1.5px dotted var(--fg-muted)}
+.idle-toggle{padding:6px var(--space-3);font-size:var(--text-sm);color:var(--fg-muted);border-bottom:1px solid var(--border);background:var(--bg-app)}
+.legend{display:flex;align-items:center;gap:var(--space-4);padding:var(--space-2) var(--space-4);border-top:1px solid var(--border);background:var(--bg-surface);font-size:var(--text-xs);color:var(--fg-secondary)}
+.legend .sw{display:inline-flex;align-items:center;gap:5px}
+.legend i{width:10px;height:10px;border-radius:3px;display:inline-block}
+.ranges{margin-left:auto;display:flex;gap:2px;background:var(--bg-app);border:1px solid var(--border);border-radius:var(--radius-sm);padding:2px}
+.ranges button{padding:3px 9px;border-radius:4px;font-size:11px}
+.ranges button.on{background:var(--bg-surface);box-shadow:var(--shadow-sm);color:var(--fg-primary);font-weight:var(--fw-semibold)}
+.tooltip{position:absolute;background:var(--fg-primary);color:var(--bg-surface);font-size:11px;padding:6px 9px;border-radius:var(--radius-sm);box-shadow:var(--shadow-lg);pointer-events:none;z-index:20;max-width:220px;display:none}
+.tooltip b{display:block;margin-bottom:2px}
+
+/* ---- agent / task pane ---- */
+.pane{position:absolute;top:0;right:0;bottom:0;width:360px;background:var(--bg-surface);border-left:1px solid var(--border);box-shadow:var(--shadow-lg);transform:translateX(100%);transition:transform var(--dur-slow) var(--ease-out);display:flex;flex-direction:column;z-index:10}
+.pane.open{transform:none}
+.pane header{padding:var(--space-4);border-bottom:1px solid var(--border);display:grid;gap:8px;position:relative}
+.pane header .x{position:absolute;right:12px;top:12px;color:var(--fg-muted);font-size:18px}
+.pane .body{padding:var(--space-4);display:flex;flex-direction:column;gap:var(--space-3);overflow:auto;flex:1}
+.crumb{font-size:var(--text-xs);color:var(--fg-muted)}
+.status{font-size:var(--text-xs);font-weight:var(--fw-semibold);border-radius:var(--radius-full);padding:1px 8px;display:inline-block;width:fit-content}
+.s-prog{background:var(--accent-soft);color:var(--accent)}.s-done{background:var(--success-soft);color:var(--success)}.s-wait{background:var(--warning-soft);color:var(--warning)}.s-todo{background:var(--bg-hover);color:var(--fg-muted)}
+.chips{display:flex;flex-wrap:wrap;gap:6px}
+.chipx{font-size:11px;background:var(--bg-app);border:1px solid var(--border);border-radius:var(--radius-full);padding:2px 8px;color:var(--fg-secondary)}
+.feedrow{display:flex;gap:8px;font-size:var(--text-sm)}
+.feedrow.sys{color:var(--fg-muted);font-size:11px;align-items:center}
+.feedrow .bub{background:var(--bg-bubble);border:1px solid var(--border);border-radius:4px var(--radius-md) var(--radius-md) var(--radius-md);padding:6px 10px;flex:1}
+.feedrow .tool{font-family:var(--font-mono);font-size:11px;background:var(--bg-code);border:1px solid var(--border);border-radius:var(--radius-sm);padding:4px 8px;color:var(--fg-secondary)}
+.pane .composer{border-top:1px solid var(--border);padding:var(--space-3);display:flex;gap:6px}
+.pane .composer input{flex:1;border:1px solid var(--border);border-radius:var(--radius-md);padding:8px 10px;background:var(--bg-app);font:inherit}
+.pane .composer button{background:var(--accent);color:#fff;border-radius:var(--radius-md);padding:0 12px}
+.empty{margin:auto;text-align:center;color:var(--fg-muted);font-size:var(--text-sm);padding:var(--space-6)}
+</style>
+</head>
+<body>
+<aside class="side">
+  <div class="brand"><div class="logo">✦</div>Agents Squad</div>
+  <div class="sec"><h6>Views</h6>
+    <a class="item" href="index.html"><span class="ic"><svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"><path d="M2 3.4h12v7.2H6.6L3 13.4v-2.8H2z"/></svg></span>Chat</a>
+    <a class="item on" href="overview.html"><span class="ic"><svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2" y="2" width="5" height="5" rx="1"/><rect x="9" y="2" width="5" height="5" rx="1"/><rect x="2" y="9" width="5" height="5" rx="1"/><rect x="9" y="9" width="5" height="5" rx="1"/></svg></span>Overview</a>
+    <a class="item" href="logs.html"><span class="ic"><svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M5 4h9M5 8h9M5 12h9"/><circle cx="2" cy="4" r=".9" fill="currentColor" stroke="none"/><circle cx="2" cy="8" r=".9" fill="currentColor" stroke="none"/><circle cx="2" cy="12" r=".9" fill="currentColor" stroke="none"/></svg></span>Logs</a>
+    <a class="item" href="wiki.html"><span class="ic"><svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" stroke-linecap="round"><path d="M4 1.6h5.2L12 4.4v10H4z"/><path d="M6 6.6h4M6 9h4M6 11.4h2.4"/></svg></span>Wiki</a>
+  </div>
+  <div class="sec"><h6>Agents · 3 working</h6>
+    <button class="item"><span class="av sm" style="--c:var(--agent-1)">M<span class="dot working"></span></span>Mira<span class="sub">working</span></button>
+    <button class="item"><span class="av sm" style="--c:var(--agent-2)">N<span class="dot working"></span></span>Nova<span class="sub">working</span></button>
+    <button class="item"><span class="av sm" style="--c:var(--agent-3)">L<span class="dot waiting"></span></span>Leo<span class="sub">needs you</span></button>
+    <button class="item"><span class="av sm" style="--c:var(--agent-4)">V<span class="dot working"></span></span>Vex<span class="sub">working</span></button>
+    <button class="item"><span class="av sm" style="--c:var(--agent-5)">K<span class="dot idle"></span></span>Kai<span class="sub">idle</span></button>
+  </div>
+  <div class="foot"><button class="chip-btn">＋ Agent</button><button class="chip-btn">⚙ Settings</button></div>
+</aside>
+<main>
+  <div class="top"><div><h1>Overview</h1><p>Team graph &amp; activity timeline</p></div>
+    <div class="tabs"><button class="tab on" data-tab="graph">Graph</button><button class="tab" data-tab="timeline">Timeline</button></div>
+    <button class="scaletoggle" id="scaleToggle">⤢ 24-agent demo</button>
+    <button class="theme" id="theme">◐ Theme</button></div>
+
+  <div class="view">
+    <div id="graph" class="on">
+      <div class="canvas" id="canvas">
+        <div class="stage" id="stage">
+          <svg class="edges" id="edges" width="900" height="560"></svg>
+          <div class="frame" id="frameUI" style="left:20px;top:20px;width:520px;height:300px"><span class="flabel">UI Research team</span></div>
+          <div class="frame" id="frameCore" style="left:600px;top:60px;width:240px;height:180px"><span class="flabel">Core team</span></div>
+
+          <div class="node" id="n-mira" style="left:60px;top:70px" data-agent="mira">
+            <div class="hd"><span class="av sm" style="--c:var(--agent-1)">M<span class="dot working"></span></span><span><span class="nm">Mira</span><span class="rl">Design Lead</span></span></div>
+            <div class="chip">Overview/Logs/Wiki direction</div>
+          </div>
+          <div class="node" id="n-nova" style="left:300px;top:70px" data-agent="nova">
+            <div class="hd"><span class="av sm" style="--c:var(--agent-2)">N<span class="dot working"></span></span><span><span class="nm">Nova</span><span class="rl">Prototyper</span></span></div>
+            <div class="chip">Prototype Overview/Logs/Wiki</div>
+          </div>
+          <div class="node" id="n-leo" style="left:60px;top:230px" data-agent="leo">
+            <div class="hd"><span class="av sm" style="--c:var(--agent-3)">L<span class="dot waiting"></span></span><span><span class="nm">Leo</span><span class="rl">UX Researcher</span></span></div>
+            <div class="chip">Views audit — needs input</div>
+          </div>
+          <div class="node" id="n-vex" style="left:300px;top:230px" data-agent="vex">
+            <div class="hd"><span class="av sm" style="--c:var(--agent-4)">V<span class="dot idle"></span></span><span><span class="nm">Vex</span><span class="rl">Design Critic</span></span></div>
+            <div class="chip">Blocked by Leo, Nova</div>
+          </div>
+          <div class="node" id="n-kai" style="left:640px;top:110px" data-agent="kai">
+            <div class="hd"><span class="av sm" style="--c:var(--agent-5)">K<span class="dot idle"></span></span><span><span class="nm">Kai</span><span class="rl">Core Engineer</span></span></div>
+            <div class="chip">Idle</div>
+          </div>
+        </div>
+      </div>
+      <div class="minimap" id="minimap"></div>
+      <div class="zoom">
+        <button id="zout">−</button><span class="pct" id="zpct">100%</span><button id="zin">+</button><button id="zfit" title="Fit to view">⤢</button>
+      </div>
+    </div>
+
+    <div id="timeline">
+      <div class="taxis" id="taxis"></div>
+      <div class="idle-toggle">Showing 4 active agents · <button style="color:var(--accent);font-weight:var(--fw-medium)">Show idle (1)</button></div>
+      <div class="lanes" id="lanes">
+        <div class="lane"><div class="lbl"><span class="av xs" style="--c:var(--agent-1)">M</span>Mira</div>
+          <div class="track">
+            <div class="bar2" style="--c:var(--agent-1);left:40px;width:180px" data-tip="Overview/Logs/Wiki direction · Mira · 22m · in progress">Overview/Logs/Wiki direction</div>
+            <div class="bar2" style="--c:var(--success);left:260px;width:90px" data-tip="Chat tokens review · Mira · 9m · done">Chat tokens review</div>
+          </div></div>
+        <div class="lane"><div class="lbl"><span class="av xs" style="--c:var(--agent-2)">N</span>Nova</div>
+          <div class="track">
+            <div class="bar2" style="--c:var(--agent-2);left:70px;width:220px" data-tip="Prototype Overview/Logs/Wiki · Nova · 28m · in progress">Prototype Overview/Logs/Wiki</div>
+          </div></div>
+        <div class="lane"><div class="lbl"><span class="av xs" style="--c:var(--agent-3)">L</span>Leo</div>
+          <div class="track">
+            <div class="bar2 wait" style="left:150px;width:140px" data-tip="Views audit · Leo · waiting for human">Views audit</div>
+          </div></div>
+        <div class="lane"><div class="lbl"><span class="av xs" style="--c:var(--agent-4)">V</span>Vex</div>
+          <div class="track">
+            <div class="bar2" style="--c:var(--fg-muted);left:330px;width:30px" data-tip="Critique views · Vex · blocked by Leo, Nova">···</div>
+            <div class="conn" style="left:150px;width:180px"></div>
+          </div></div>
+      </div>
+      <div class="legend">
+        <span class="sw"><i style="background:var(--accent)"></i>in progress</span>
+        <span class="sw"><i style="background:var(--success)"></i>done</span>
+        <span class="sw"><i style="background:var(--warning)" ></i>waiting for human</span>
+        <span class="sw"><i style="background:var(--fg-muted)"></i>blocked</span>
+        <div class="ranges"><button>15m</button><button class="on">1h</button><button>Today</button><button>All</button></div>
+      </div>
+    </div>
+  </div>
+
+  <aside class="pane" id="agentPane">
+    <header style="--c:var(--agent-2)"><button class="x" id="closeAgent">×</button>
+      <div style="display:flex;gap:10px;align-items:center"><span class="av" style="--c:var(--agent-2)">N</span><div><strong style="font-size:var(--text-lg)">Nova</strong><div class="crumb">Prototyper · UI Research team</div></div></div>
+      <span class="status s-prog" style="width:fit-content">working</span></header>
+    <div class="body">
+      <div><div class="crumb" style="margin-bottom:6px">TASKS</div>
+        <div class="chips">
+          <span class="chipx">Prototype Overview/Logs/Wiki</span>
+          <span class="chipx">Chat prototype (done)</span>
+        </div></div>
+      <div><div class="crumb" style="margin-bottom:6px">RECENT ACTIVITY</div>
+        <div class="feedrow"><div class="bub">Extending design/prototype/ with overview.html, logs.html, wiki.html.</div></div>
+        <div class="feedrow sys">• wrote design/prototype/overview.html</div>
+        <div class="feedrow sys">• status → in progress</div>
+      </div>
+    </div>
+    <div class="composer"><input placeholder="Message Nova…"><button>Send</button></div>
+  </aside>
+
+  <aside class="pane" id="taskPane">
+    <header style="--c:var(--agent-4)"><button class="x" id="closeTask">×</button>
+      <div class="crumb">Overview/Logs/Wiki direction ▸ subtask</div>
+      <strong style="font-size:var(--text-lg)">Critique views</strong>
+      <div style="display:flex;gap:6px;align-items:center"><span class="status s-wait">blocked</span><span class="av xs" style="--c:var(--agent-4)">V</span><span class="crumb">Vex</span></div>
+      <div class="chips"><span class="chipx">blocked by Leo · views audit</span><span class="chipx">blocked by Nova · prototype</span></div>
+    </header>
+    <div class="body">
+      <div class="feedrow sys">• task created by Mira</div>
+      <div class="feedrow"><span class="av xs" style="--c:var(--agent-4)">V</span><div class="bub">Waiting on the research + prototype before I can critique — flagging as blocked for now.</div></div>
+      <div class="feedrow sys">• status → blocked</div>
+    </div>
+    <div class="composer"><input placeholder="Add a comment…"><button>Send</button></div>
+  </aside>
+</main>
+<script>
+const q=s=>document.querySelector(s), qa=s=>[...document.querySelectorAll(s)];
+q('#theme').onclick=()=>document.documentElement.dataset.theme=document.documentElement.dataset.theme==='dark'?'light':'dark';
+
+// tabs
+qa('.tab').forEach(t=>t.onclick=()=>{
+  qa('.tab').forEach(x=>x.classList.remove('on')); t.classList.add('on');
+  const isGraph=t.dataset.tab==='graph';
+  q('#graph').classList.toggle('on',isGraph);
+  q('#timeline').classList.toggle('on',!isGraph);
+});
+
+// time axis ticks
+const taxis=q('#taxis'); const labels=['09:00','09:10','09:20','09:30','09:40','09:50','10:00'];
+labels.forEach((l,i)=>{const d=document.createElement('div');d.className='tick';d.style.left=(i*140)+'px';d.textContent=l;taxis.appendChild(d)});
+const now=document.createElement('div'); now.className='now'; now.style.left='620px'; taxis.appendChild(now);
+
+// tooltip
+const tip=document.createElement('div'); tip.className='tooltip'; document.body.appendChild(tip);
+qa('.bar2').forEach(b=>{
+  b.addEventListener('mousemove',e=>{
+    tip.style.display='block'; tip.style.left=(e.clientX+12)+'px'; tip.style.top=(e.clientY+12)+'px';
+    const [title,rest]=(b.dataset.tip||'').split(' · ').reduce((a,c,i)=>i===0?[c,'']:[a[0],a[1]+' · '+c],['','']);
+    tip.innerHTML=`<b>${title}</b>${rest.slice(3)}`;
+  });
+  b.addEventListener('mouseleave',()=>tip.style.display='none');
+  b.onclick=()=>{q('#agentPane').classList.remove('open'); q('#taskPane').classList.add('open')};
+});
+
+// ---- edges: orthogonal elbow routing with visible arrowheads ----
+// unscaled (stage-local) geometry, read from style.left/top/offsetWidth/Height — independent of the current zoom transform
+function rectOf(el){return {l:parseFloat(el.style.left)||0,t:parseFloat(el.style.top)||0,w:el.offsetWidth,h:el.offsetHeight}}
+function sideOf(el,fromRight){const r=rectOf(el);return {x:fromRight?r.l+r.w:r.l,y:r.t+r.h/2}}
+function edge(svg,a,b,opts={}){
+  const na=q('#'+a),nb=q('#'+b); if(!na||!nb)return;
+  const goingRight=rectOf(na).l<=rectOf(nb).l;
+  const p1=sideOf(na,goingRight), p2=sideOf(nb,!goingRight);
+  const r=8; // corner radius for the orthogonal elbow
+  let d;
+  if(opts.over){
+    // route cross-team edges above the frames on a shared rail so they don't cut through unrelated nodes
+    const railY=Math.min(p1.y,p2.y)-opts.railOffset;
+    const sy1=railY<p1.y?-1:1, sy2=railY<p2.y?-1:1;
+    d=`M${p1.x},${p1.y} L${p1.x},${railY+r*sy1} Q${p1.x},${railY} ${p1.x+r},${railY} L${p2.x-r},${railY} Q${p2.x},${railY} ${p2.x},${railY+r*sy2} L${p2.x},${p2.y}`;
+  } else {
+    const midx=(p1.x+p2.x)/2;
+    const dy=p2.y-p1.y, sy=dy>0?1:-1;
+    d = Math.abs(dy)<1
+      ? `M${p1.x},${p1.y} L${p2.x},${p2.y}`
+      : `M${p1.x},${p1.y} L${midx-r},${p1.y} Q${midx},${p1.y} ${midx},${p1.y+r*sy} L${midx},${p2.y-r*sy} Q${midx},${p2.y} ${midx+r},${p2.y} L${p2.x},${p2.y}`;
+  }
+  const path=document.createElementNS('http://www.w3.org/2000/svg','path');
+  path.setAttribute('d',d); path.setAttribute('class','edge-line'+(opts.dashed?' dashed':'')+(opts.active?' active':''));
+  path.setAttribute('marker-end','url(#arrow)');
+  svg.appendChild(path);
+}
+function drawEdges(){
+  const svg=q('#edges');
+  svg.innerHTML=`<defs><marker id="arrow" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="edge-arrow"/></marker></defs>`;
+  currentEdges.forEach(e=>edge(svg,e.a,e.b,e));
+}
+window.addEventListener('resize',()=>{fitToView();updateMinimap()});
+
+// ---- small (default) 5-node graph ----
+let currentEdges=[
+  {a:'n-mira',b:'n-nova',active:true},
+  {a:'n-mira',b:'n-leo'},
+  {a:'n-mira',b:'n-vex'},
+  {a:'n-nova',b:'n-leo',dashed:true},
+  {a:'n-nova',b:'n-vex',dashed:true},
+];
+
+// ---- 24-agent / 4-team demo, built programmatically to prove the graph scales ----
+const BIG_TEAMS=[
+  {id:'ui',label:'UI Research',agents:[['Mira','Lead','working'],['Nova','Prototyper','working'],['Leo','Researcher','waiting'],['Vex','Critic','idle'],['Kai','Support','working'],['Uma','Reviewer','idle']]},
+  {id:'core',label:'Core Engineering',agents:[['Zoe','Lead','working'],['Dax','Engineer','working'],['Iris','Engineer','idle'],['Theo','Engineer','waiting'],['Nyla','Reviewer','working'],['Ravi','Support','idle']]},
+  {id:'qa',label:'QA & Release',agents:[['Sana','Lead','working'],['Eli','Tester','idle'],['Juno','Tester','working'],['Otto','Release','waiting'],['Pia','Support','idle'],['Rex','Reviewer','working']]},
+  {id:'growth',label:'Growth & Support',agents:[['Tara','Lead','idle'],['Wes','Analyst','working'],['Yara','Support','working'],['Cole','Support','waiting'],['Ivy','Analyst','idle'],['Max','Reviewer','working']]},
+];
+function buildBigGraph(){
+  const stage=q('#stage'); stage.querySelectorAll('.frame,.node').forEach(n=>n.remove());
+  const NODE_W=172,NODE_H=84,COLS=2,GAPX=12,GAPY=10,PAD=26,TEAM_GAPX=100,TEAM_GAPY=80,LEFT=40,TOP=40;
+  const frameW=PAD*2+COLS*NODE_W+(COLS-1)*GAPX;
+  const rows=Math.ceil(6/COLS); const frameH=PAD*2+rows*NODE_H+(rows-1)*GAPY;
+  const GRID_COLS=2; // 2x2 team layout — reads like a real org map instead of one long strip
+  const edges=[];
+  BIG_TEAMS.forEach((team,ti)=>{
+    const gc=ti%GRID_COLS, gr=Math.floor(ti/GRID_COLS);
+    const x=LEFT+gc*(frameW+TEAM_GAPX), y=TOP+gr*(frameH+TEAM_GAPY);
+    const frame=document.createElement('div'); frame.className='frame'; frame.id='f-'+team.id;
+    frame.style.left=x+'px'; frame.style.top=y+'px'; frame.style.width=frameW+'px'; frame.style.height=frameH+'px';
+    const working=team.agents.filter(a=>a[2]==='working').length, waiting=team.agents.filter(a=>a[2]==='waiting').length, idle=team.agents.filter(a=>a[2]==='idle').length;
+    frame.innerHTML=`<span class="flabel">${team.label}</span><span class="fsummary">${working} working · ${waiting} waiting · ${idle} idle</span>`;
+    stage.appendChild(frame);
+    let leadId=null;
+    team.agents.forEach((ag,ai)=>{
+      const [name,role,status]=ag; const col=ai%COLS,row=Math.floor(ai/COLS);
+      const nx=x+PAD+col*(NODE_W+GAPX), ny=y+PAD+row*(NODE_H+GAPY);
+      const id='n-big-'+team.id+'-'+ai; const colorIdx=((ti*6+ai)%8)+1;
+      const node=document.createElement('div'); node.className='node'; node.id=id;
+      node.style.left=nx+'px'; node.style.top=ny+'px';
+      node.innerHTML=`<div class="hd"><span class="av sm" style="--c:var(--agent-${colorIdx})">${name[0]}<span class="dot ${status}"></span></span><span><span class="nm">${name}</span><span class="rl">${role}</span></span></div><div class="chip">${status==='waiting'?'Needs you':status==='idle'?'Idle':'Working…'}</div>`;
+      node.onclick=()=>{q('#taskPane').classList.remove('open'); q('#agentPane').classList.add('open')};
+      stage.appendChild(node);
+      if(ai===0)leadId=id;
+      else if(ai%COLS===0) edges.push({a:leadId,b:id});
+    });
+  });
+  // cross-team edges between leads in the same row, routed above their pair's frames so they never cut through unrelated nodes
+  edges.push({a:'n-big-ui-0',b:'n-big-core-0',active:true,over:true,railOffset:26});
+  edges.push({a:'n-big-qa-0',b:'n-big-growth-0',dashed:true,over:true,railOffset:26});
+  currentEdges=edges;
+  fitToView();
+}
+function buildSmallGraph(){
+  location.reload(); // simplest reliable reset: static markup for the default 5-node graph
+}
+let bigMode=false;
+q('#scaleToggle').onclick=()=>{
+  bigMode=!bigMode;
+  q('#scaleToggle').textContent=bigMode?'← 5-agent demo':'⤢ 24-agent demo';
+  if(bigMode) buildBigGraph(); else buildSmallGraph();
+};
+
+// ---- fit-to-view: measure the real bounding box of frames+nodes, then centre + scale ----
+let zoom=1, tx=0, ty=0;
+function contentBBox(){
+  const stage=q('#stage'); const items=[...stage.querySelectorAll('.frame,.node')];
+  if(!items.length) return {x:0,y:0,w:0,h:0};
+  let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity;
+  items.forEach(it=>{
+    const l=parseFloat(it.style.left)||0, t=parseFloat(it.style.top)||0;
+    const w=it.offsetWidth, h=it.offsetHeight;
+    minX=Math.min(minX,l); minY=Math.min(minY,t);
+    maxX=Math.max(maxX,l+w); maxY=Math.max(maxY,t+h);
+  });
+  return {x:minX,y:minY,w:maxX-minX,h:maxY-minY};
+}
+function applyTransform(){
+  q('#stage').style.transform=`translate(${tx}px,${ty}px) scale(${zoom})`;
+  q('#zpct').textContent=Math.round(zoom*100)+'%';
+  // LOD: keep names >=11px on screen regardless of zoom; hide role/chip below 60% zoom to declutter
+  const nameFloor=11/12.5;
+  const nameScale = zoom<nameFloor ? nameFloor/zoom : 1;
+  qa('.node .nm').forEach(n=>n.style.transform= nameScale>1?`scale(${nameScale})`:'');
+  q('#stage').classList.toggle('lod', zoom<0.6);
+  requestAnimationFrame(()=>{drawEdges();updateMinimap()});
+}
+function fitToView(){
+  const canvas=q('#canvas'); const cw=canvas.clientWidth, ch=canvas.clientHeight;
+  const box=contentBBox(); if(!box.w||!box.h)return;
+  const PAD=48;
+  zoom=Math.max(.2,Math.min(1.3,(cw-PAD*2)/box.w,(ch-PAD*2)/box.h));
+  tx=(cw-box.w*zoom)/2 - box.x*zoom;
+  ty=(ch-box.h*zoom)/2 - box.y*zoom;
+  applyTransform();
+}
+function updateMinimap(){
+  const canvas=q('#canvas'); const cw=canvas.clientWidth, ch=canvas.clientHeight;
+  const box=contentBBox();
+  // minimap only earns its place when the graph's natural size clearly exceeds the viewport (>150%) — otherwise fit-to-view already shows everything
+  const needed = box.w>cw*1.5 || box.h>ch*1.5;
+  const mm=q('#minimap'); mm.classList.toggle('show',needed);
+  if(!needed){mm.innerHTML='';return}
+  const mmW=140,mmH=90; const s=Math.min(mmW/box.w,mmH/box.h);
+  mm.innerHTML='';
+  [...q('#stage').querySelectorAll('.frame')].forEach(f=>{
+    const l=parseFloat(f.style.left)||0,t=parseFloat(f.style.top)||0;
+    const d=document.createElement('div'); d.className='mframe';
+    d.style.left=((l-box.x)*s)+'px'; d.style.top=((t-box.y)*s)+'px';
+    d.style.width=(f.offsetWidth*s)+'px'; d.style.height=(f.offsetHeight*s)+'px';
+    mm.appendChild(d);
+  });
+  // viewport indicator: the content-space rect currently visible through the canvas, clipped to the graph's bounds
+  const visX=Math.max(box.x,-tx/zoom), visY=Math.max(box.y,-ty/zoom);
+  const visX2=Math.min(box.x+box.w,(cw-tx)/zoom), visY2=Math.min(box.y+box.h,(ch-ty)/zoom);
+  if(visX2>visX && visY2>visY){
+    const mv=document.createElement('div'); mv.className='mv';
+    mv.style.left=((visX-box.x)*s)+'px'; mv.style.top=((visY-box.y)*s)+'px';
+    mv.style.width=((visX2-visX)*s)+'px'; mv.style.height=((visY2-visY)*s)+'px';
+    mm.appendChild(mv);
+  }
+}
+window.addEventListener('load',()=>{fitToView();updateMinimap()});
+
+function zoomBy(factor){
+  const canvas=q('#canvas'); const cx=canvas.clientWidth/2, cy=canvas.clientHeight/2;
+  const newZoom=Math.max(.2,Math.min(1.6,zoom*factor));
+  // zoom around the canvas centre so the graph doesn't jump
+  tx=cx-((cx-tx)/zoom)*newZoom; ty=cy-((cy-ty)/zoom)*newZoom;
+  zoom=newZoom; applyTransform();
+}
+q('#zin').onclick=()=>zoomBy(1.15);
+q('#zout').onclick=()=>zoomBy(1/1.15);
+q('#zfit').onclick=()=>fitToView();
+
+// node click -> agent pane
+qa('.node').forEach(n=>n.onclick=()=>{q('#taskPane').classList.remove('open'); q('#agentPane').classList.add('open')});
+q('#closeAgent').onclick=()=>q('#agentPane').classList.remove('open');
+q('#closeTask').onclick=()=>q('#taskPane').classList.remove('open');
+</script>
+</body></html>

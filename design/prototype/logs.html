@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8"><title>Agents Squad — Logs (prototype)</title>
+<link rel="stylesheet" href="../tokens.css">
+<style>
+*{box-sizing:border-box;margin:0}
+body{font:var(--fw-regular) var(--text-md)/var(--lh-body) var(--font-sans);color:var(--fg-primary);background:var(--bg-app);height:100vh;display:grid;grid-template-columns:248px 1fr;overflow:hidden;-webkit-font-smoothing:antialiased}
+button,input{font:inherit;color:inherit}
+button{background:none;border:0;cursor:pointer}
+.side{background:var(--bg-sidebar);border-right:1px solid var(--border);display:flex;flex-direction:column;padding:var(--space-4) var(--space-3);gap:var(--space-5);overflow:auto}
+.brand{display:flex;align-items:center;gap:var(--space-2);font-weight:var(--fw-bold);font-size:var(--text-lg);padding:0 var(--space-2)}
+.logo{width:28px;height:28px;border-radius:var(--radius-sm);background:linear-gradient(135deg,var(--agent-1),var(--agent-2));display:grid;place-items:center;color:#fff;font-size:14px;box-shadow:var(--shadow-md)}
+.sec h6{font-size:var(--text-xs);text-transform:uppercase;letter-spacing:.06em;color:var(--fg-muted);font-weight:var(--fw-semibold);padding:0 var(--space-2) var(--space-2)}
+.item{display:flex;align-items:center;gap:var(--space-2);width:100%;padding:6px var(--space-2);border-radius:var(--radius-sm);color:var(--fg-secondary);font-size:var(--text-md);text-decoration:none;transition:background var(--dur-fast) var(--ease-out)}
+.item:hover{background:var(--bg-hover)}
+.item.on{background:var(--bg-active);color:var(--fg-primary);font-weight:var(--fw-semibold)}
+.item .ic{width:18px;flex:none;display:inline-flex;align-items:center;justify-content:center;color:var(--fg-muted)}
+.item.on .ic{color:var(--accent)}
+.sub{margin-left:auto;font-size:var(--text-xs);color:var(--fg-muted)}
+.av{--c:var(--agent-1);position:relative;flex:none;width:32px;height:32px;border-radius:var(--radius-md);display:grid;place-items:center;font-size:13px;font-weight:var(--fw-bold);color:#fff;background:linear-gradient(145deg,var(--c),color-mix(in srgb,var(--c) 70%,#000))}
+.av.sm{width:22px;height:22px;border-radius:var(--radius-sm);font-size:10px}
+.av.xs{width:16px;height:16px;border-radius:4px;font-size:8px}
+.dot{position:absolute;right:-3px;bottom:-3px;width:10px;height:10px;border-radius:50%;border:2px solid var(--bg-sidebar);background:var(--fg-muted)}
+.dot.working{background:var(--success);animation:pulse 1.6s infinite}
+.dot.idle{background:var(--fg-muted)}.dot.waiting{background:var(--warning)}
+@keyframes pulse{0%{box-shadow:0 0 0 0 color-mix(in srgb,var(--success) 60%,transparent)}70%{box-shadow:0 0 0 6px transparent}100%{box-shadow:0 0 0 0 transparent}}
+.side .foot{margin-top:auto;display:flex;gap:var(--space-2)}
+.chip-btn{flex:1;border:1px solid var(--border);background:var(--bg-surface);border-radius:var(--radius-sm);padding:6px;font-size:var(--text-sm);color:var(--fg-secondary)}
+main{display:grid;height:100vh;min-height:0;grid-template-rows:auto auto 1fr;min-width:0}
+.top{display:flex;align-items:center;gap:var(--space-3);padding:var(--space-3) var(--space-6);border-bottom:1px solid var(--border);background:var(--bg-surface)}
+.top h1{font-size:var(--text-lg);font-weight:var(--fw-bold)}
+.top p{color:var(--fg-muted);font-size:var(--text-sm)}
+.theme{margin-left:auto;border:1px solid var(--border);border-radius:var(--radius-sm);padding:4px 10px;font-size:var(--text-sm);color:var(--fg-secondary)}
+.filters{display:flex;align-items:center;gap:var(--space-2);padding:var(--space-2) var(--space-6);border-bottom:1px solid var(--border);background:var(--bg-surface);flex-wrap:wrap}
+.fbtn{display:flex;align-items:center;gap:6px;border:1px solid var(--border);background:var(--bg-app);border-radius:var(--radius-sm);padding:5px 10px;font-size:var(--text-sm);color:var(--fg-secondary)}
+.fbtn.on{border-color:var(--accent);color:var(--accent);background:var(--accent-soft)}
+.lvl{display:flex;gap:4px}
+.lvl button{display:flex;align-items:center;gap:5px;padding:4px 10px;border-radius:var(--radius-sm);font-size:11px;font-weight:var(--fw-medium);border:1px solid var(--border);background:var(--bg-app);color:var(--fg-muted)}
+.lvl button::before{content:'○';font-size:9px;line-height:1;opacity:.6}
+.lvl button.on::before{content:'✓';opacity:1}
+.lvl .info.on{background:color-mix(in srgb,var(--info) 14%,var(--bg-surface));border-color:var(--info);color:var(--info)}
+.lvl .warn.on{background:color-mix(in srgb,var(--warning) 18%,var(--bg-surface));border-color:var(--warning);color:var(--warning-text)}
+.lvl .err.on{background:color-mix(in srgb,var(--danger) 14%,var(--bg-surface));border-color:var(--danger);color:var(--danger)}
+.search{margin-left:auto;display:flex;align-items:center;gap:6px;border:1px solid var(--border-strong);background:var(--bg-app);border-radius:var(--radius-sm);padding:4px 10px;width:260px}
+.search input{flex:1;border:0;outline:0;background:none;font-size:var(--text-sm)}
+.kbd{font-size:10px;color:var(--fg-muted);border:1px solid var(--border);border-radius:4px;padding:0 4px}
+.actions{display:flex;gap:6px}
+.actions button{border:1px solid var(--border);border-radius:var(--radius-sm);padding:5px 10px;font-size:var(--text-sm);color:var(--fg-secondary);background:var(--bg-app)}
+.tablewrap{overflow:auto;position:relative;background:var(--bg-surface)}
+table{width:100%;border-collapse:collapse;font-size:var(--text-sm);table-layout:fixed}
+thead th{position:sticky;top:0;background:var(--bg-app);text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--fg-muted);font-weight:var(--fw-semibold);padding:7px var(--space-3);border-bottom:1px solid var(--border);z-index:2}
+tbody tr{border-bottom:1px solid var(--border)}
+tbody tr:hover{background:var(--bg-hover)}
+tbody tr.err{border-left:3px solid var(--danger)}
+tbody tr.warn{border-left:3px solid var(--warning)}
+td{padding:6px var(--space-3);vertical-align:top}
+.t-time{font-family:var(--font-mono);font-size:11.5px;color:var(--fg-muted);white-space:nowrap}
+.t-lvl{white-space:nowrap;font-weight:var(--fw-semibold);font-size:11px}
+.t-lvl.info{color:var(--info)}.t-lvl.warn{color:var(--warning-text)}.t-lvl.err{color:var(--danger)}
+.t-agent{white-space:nowrap;display:flex;align-items:center;gap:6px}
+.t-msg{font-family:var(--font-mono);font-size:12.5px;color:var(--fg-primary);overflow:hidden}
+.t-msg .row{display:flex;align-items:baseline;min-width:0}
+.t-msg .line{flex:1;display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer;min-width:0}
+.t-msg .full{display:none;white-space:pre-wrap;background:var(--bg-code);border:1px solid var(--border);border-radius:var(--radius-sm);padding:8px;margin-top:4px}
+.t-msg.open .full{display:block}
+.t-msg.open .line{white-space:normal}
+.t-task{font-size:11px;color:var(--accent);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer}
+.grouped{font-size:10.5px;color:var(--fg-muted);background:var(--bg-hover);border-radius:var(--radius-full);padding:0 6px;margin-left:8px;white-space:nowrap}
+.follow{position:sticky;bottom:14px;left:50%;transform:translateX(-50%);width:fit-content;background:var(--fg-primary);color:var(--bg-surface);font-size:12px;font-weight:var(--fw-medium);border-radius:var(--radius-full);padding:6px 14px;box-shadow:var(--shadow-lg);display:none;align-items:center;gap:6px}
+.follow.show{display:flex}
+.empty{margin:60px auto;text-align:center;color:var(--fg-muted);font-size:var(--text-sm)}
+</style>
+</head>
+<body>
+<aside class="side">
+  <div class="brand"><div class="logo">✦</div>Agents Squad</div>
+  <div class="sec"><h6>Views</h6>
+    <a class="item" href="index.html"><span class="ic"><svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"><path d="M2 3.4h12v7.2H6.6L3 13.4v-2.8H2z"/></svg></span>Chat</a>
+    <a class="item" href="overview.html"><span class="ic"><svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2" y="2" width="5" height="5" rx="1"/><rect x="9" y="2" width="5" height="5" rx="1"/><rect x="2" y="9" width="5" height="5" rx="1"/><rect x="9" y="9" width="5" height="5" rx="1"/></svg></span>Overview</a>
+    <a class="item on" href="logs.html"><span class="ic"><svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M5 4h9M5 8h9M5 12h9"/><circle cx="2" cy="4" r=".9" fill="currentColor" stroke="none"/><circle cx="2" cy="8" r=".9" fill="currentColor" stroke="none"/><circle cx="2" cy="12" r=".9" fill="currentColor" stroke="none"/></svg></span>Logs</a>
+    <a class="item" href="wiki.html"><span class="ic"><svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" stroke-linecap="round"><path d="M4 1.6h5.2L12 4.4v10H4z"/><path d="M6 6.6h4M6 9h4M6 11.4h2.4"/></svg></span>Wiki</a>
+  </div>
+  <div class="sec"><h6>Agents · 3 working</h6>
+    <button class="item"><span class="av sm" style="--c:var(--agent-1)">M<span class="dot working"></span></span>Mira<span class="sub">working</span></button>
+    <button class="item"><span class="av sm" style="--c:var(--agent-2)">N<span class="dot working"></span></span>Nova<span class="sub">working</span></button>
+    <button class="item"><span class="av sm" style="--c:var(--agent-3)">L<span class="dot waiting"></span></span>Leo<span class="sub">needs you</span></button>
+    <button class="item"><span class="av sm" style="--c:var(--agent-4)">V<span class="dot idle"></span></span>Vex<span class="sub">idle</span></button>
+    <button class="item"><span class="av sm" style="--c:var(--agent-5)">K<span class="dot idle"></span></span>Kai<span class="sub">idle</span></button>
+  </div>
+  <div class="foot"><button class="chip-btn">＋ Agent</button><button class="chip-btn">⚙ Settings</button></div>
+</aside>
+<main>
+  <div class="top"><div><h1>Logs</h1><p>Live tool &amp; system output across all agents</p></div>
+    <button class="theme" id="theme">◐ Theme</button></div>
+  <div class="filters">
+    <button class="fbtn on">👤 All agents</button>
+    <div class="lvl"><button class="info on">info</button><button class="warn on">warn</button><button class="err on">error</button></div>
+    <button class="fbtn">🔗 Task: any</button>
+    <div class="search"><span>⌕</span><input placeholder="Filter logs…"><span class="kbd">⌘F</span></div>
+    <div class="actions"><button>⧉ Copy</button><button>⇩ Export</button></div>
+  </div>
+  <div class="tablewrap" id="wrap">
+    <table>
+      <colgroup><col style="width:96px"><col style="width:78px"><col style="width:120px"><col><col style="width:150px"></colgroup>
+      <thead><tr><th>Time</th><th>Level</th><th>Agent</th><th>Message</th><th>Task</th></tr></thead>
+      <tbody id="rows">
+        <tr><td class="t-time">10:02:41</td><td class="t-lvl info">● info</td><td class="t-agent"><span class="av xs" style="--c:var(--agent-1)">M</span>Mira</td><td class="t-msg"><span class="row"><span class="line">create_task → "Prototype Overview/Logs/Wiki" assigned to Nova</span></span></td><td class="t-task" title="t_f83719af">Prototype Overview/Logs/Wiki</td></tr>
+        <tr><td class="t-time">10:02:55</td><td class="t-lvl info">● info</td><td class="t-agent"><span class="av xs" style="--c:var(--agent-2)">N</span>Nova</td><td class="t-msg"><span class="row"><span class="line">read_wiki("Overview, Logs &amp; Wiki Direction") → 2114 bytes</span></span></td><td class="t-task" title="t_f83719af">Prototype Overview/Logs/Wiki</td></tr>
+        <tr><td class="t-time">10:03:10</td><td class="t-lvl info">● info</td><td class="t-agent"><span class="av xs" style="--c:var(--agent-2)">N</span>Nova</td><td class="t-msg" data-json='{"tool":"write_file","path":"design/prototype/overview.html","bytes":15234}'><span class="row"><span class="line">write_file(design/prototype/overview.html) → ok</span><span class="grouped">×3</span></span></td><td class="t-task" title="t_f83719af">Prototype Overview/Logs/Wiki</td></tr>
+        <tr class="warn"><td class="t-time">10:04:02</td><td class="t-lvl warn">▲ warn</td><td class="t-agent"><span class="av xs" style="--c:var(--agent-3)">L</span>Leo</td><td class="t-msg"><span class="row"><span class="line">ask_human blocked: no response after 4m, task waiting_for_human</span></span></td><td class="t-task" title="t_524ded0f">Audit Overview/Logs/Wiki</td></tr>
+        <tr><td class="t-time">10:04:19</td><td class="t-lvl info">● info</td><td class="t-agent"><span class="av xs" style="--c:var(--agent-4)">V</span>Vex</td><td class="t-msg"><span class="row"><span class="line">list_tasks(status="review") → 0 results</span></span></td><td class="t-task" title="t_f2268d21">Critique Overview/Logs/Wiki</td></tr>
+        <tr class="err"><td class="t-time">10:05:47</td><td class="t-lvl err">✕ error</td><td class="t-agent"><span class="av xs" style="--c:var(--agent-2)">N</span>Nova</td><td class="t-msg" data-json='{"error":"ENOENT","path":"design/shots/after-overview-dark.png","tool":"screenshot"}'><span class="row"><span class="line">screenshot(design/shots/after-overview-dark.png) → ENOENT: no such file or directory</span></span></td><td class="t-task" title="t_f83719af">Prototype Overview/Logs/Wiki</td></tr>
+        <tr><td class="t-time">10:06:03</td><td class="t-lvl info">● info</td><td class="t-agent"><span class="av xs" style="--c:var(--agent-2)">N</span>Nova</td><td class="t-msg"><span class="row"><span class="line">mkdir(design/shots) → ok, retry screenshot → ok</span></span></td><td class="t-task" title="t_f83719af">Prototype Overview/Logs/Wiki</td></tr>
+        <tr><td class="t-time">10:06:40</td><td class="t-lvl info">● info</td><td class="t-agent"><span class="av xs" style="--c:var(--agent-1)">M</span>Mira</td><td class="t-msg"><span class="row"><span class="line">write_wiki("UI Handoff to Core team") → updated</span></span></td><td class="t-task" title="t_f83719af">Prototype Overview/Logs/Wiki</td></tr>
+      </tbody>
+    </table>
+    <div class="follow" id="follow">↓ 3 new</div>
+  </div>
+</main>
+<script>
+const q=s=>document.querySelector(s), qa=s=>[...document.querySelectorAll(s)];
+q('#theme').onclick=()=>document.documentElement.dataset.theme=document.documentElement.dataset.theme==='dark'?'light':'dark';
+qa('.t-msg').forEach(m=>m.onclick=()=>{
+  if(!m.dataset.json){m.classList.toggle('open');return}
+  m.classList.toggle('open');
+  if(m.classList.contains('open')&&!m.querySelector('.full')){
+    const pre=document.createElement('div'); pre.className='full';
+    pre.textContent=JSON.stringify(JSON.parse(m.dataset.json),null,2);
+    m.appendChild(pre);
+  }
+});
+qa('.lvl button').forEach(b=>b.onclick=()=>b.classList.toggle('on'));
+const wrap=q('#wrap'); const follow=q('#follow');
+// auto-follow the tail like a live log stream; only surface "N new" once the user has scrolled up
+wrap.scrollTop=wrap.scrollHeight;
+wrap.addEventListener('scroll',()=>{
+  const atBottom=wrap.scrollHeight-wrap.scrollTop-wrap.clientHeight<40;
+  follow.classList.toggle('show',!atBottom);
+});
+follow.onclick=()=>wrap.scrollTo({top:wrap.scrollHeight,behavior:'smooth'});
+</script>
+</body></html>
