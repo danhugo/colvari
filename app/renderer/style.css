@@ -84,7 +84,7 @@ h3 .pill { font-size:10px; font-weight:600; vertical-align:middle; }
 .pf-err { color:var(--danger); white-space:pre-wrap; word-break:break-word; margin:4px 0; }
 
 .tag { display:inline-block; margin-left:6px; padding:0 6px; border-radius:8px; font-size:10px; font-weight:600; border:1px solid var(--line); }
-.tag.blocked { color:var(--warn); border-color:var(--warn); } .tag.approval { color:var(--fg-on-accent); background:var(--accent); border-color:var(--accent); } .tag.live { color:var(--fg-on-accent); background:var(--ok); border-color:var(--ok); }
+.tag.blocked { color:var(--warn); border-color:var(--warn); } .tag.approval { color:var(--fg-on-accent); background:var(--accent); border-color:var(--accent); } .tag.live { color:var(--fg-on-accent); background:var(--ok); border-color:var(--ok); } .tag.noworker { color:var(--danger); border-color:var(--danger); }
 .card.approval { border-color:var(--accent); } .approvebox { border:1px solid var(--accent); border-radius:6px; padding:6px 8px; margin:6px 0; }
 .livebox { border:1px solid var(--ok); border-radius:6px; padding:6px; margin:6px 0; } .livebox .spacer { flex:1; }
 #td-live { max-height:220px; overflow:auto; background:var(--term-bg); color:var(--term-fg); border-radius:6px; padding:6px; margin:4px 0 0; font:11px ui-monospace,monospace; white-space:pre-wrap; }
@@ -204,6 +204,7 @@ button:focus-visible, input:focus, select:focus, textarea:focus { outline:none; 
 .tag { border-radius:var(--radius-full); } .tag.blocked { color:var(--warning-text); background:var(--warning-soft); border-color:transparent; }
 .tag.live { background:var(--success-soft); color:var(--success-text); border-color:transparent; }
 .tag.ready { background:var(--accent-soft, var(--success-soft)); color:var(--accent-text, var(--accent)); border-color:transparent; }
+.tag.noworker { background:var(--danger-soft); color:var(--danger); border-color:transparent; }
 .badge { background:var(--danger); border-radius:var(--radius-full); font-weight:var(--fw-semibold); }
 .toast { background:var(--bg-raised); border-color:var(--border); border-left-color:var(--accent); border-radius:var(--radius-md); box-shadow:var(--shadow-lg); animation:rise var(--dur-base) var(--ease-spring); }
 @keyframes rise { from { opacity:0; transform:translateY(8px); } }
