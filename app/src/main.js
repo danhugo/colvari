@@ -237,10 +237,27 @@ async function guiE2E() {
       const pos = ps.getTeam().nodes.map((n) => `${n.x},${n.y}`); g.layout = { changed: JSON.stringify(ps.getTeam().nodes.map((n) => [n.x, n.y])) !== p0, unique: new Set(pos).size === pos.length };
       expect('graph: auto-layout repositions 12 nodes without overlap', g.layout.changed && g.layout.unique, g.layout); await shot('23-graph-layout');
     } else console.log('[gui-e2e] graph: auto-layout UI pending');
-    const [cx, cy] = await at(target.id); win.webContents.sendInputEvent({ type: 'contextMenu', x: cx, y: cy, button: 'right' }); await ex(`await w(300);`);
-    const menu = await has(['.ctxmenu:not(.hidden)', '#graph-menu:not(.hidden)', '.contextmenu:not(.hidden)']);
-    if (menu) { g.menu = await ex(`return [...document.querySelectorAll('${menu} button, ${menu} li')].map((x) => x.textContent.trim())`); expect('graph: node context menu has actions', g.menu.length >= 2, g); await shot('24-graph-menu'); await ex(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })); document.body.click(); await w(200);`); }
-    else console.log('[gui-e2e] graph: context menu UI pending');
+    // Context menus: real right-clicks on a node, an edge and empty canvas; each must open #ctxmenu with actions (no pending fallback).
+    const rclick = async ([x, y]) => { for (const type of ['mouseDown', 'mouseUp']) win.webContents.sendInputEvent({ type, x, y, button: 'right', clickCount: 1 }); win.webContents.sendInputEvent({ type: 'contextMenu', x, y, button: 'right' }); await ex(`await w(300);`); };
+    const readMenu = () => ex(`const m = $('#ctxmenu'); return m && !m.classList.contains('hidden') ? [...m.querySelectorAll('button')].map((x) => x.textContent.trim()) : null`);
+    const closeMenu = () => ex(`hideMenus(); await w(150);`);
+    const edgeAt = () => ex(`const p = document.querySelector('#graph .edges:not(.cross-layer) .edge'); const L = p.getTotalLength(); const m = p.getScreenCTM(); const q = p.getPointAtLength(L / 2); return [Math.round(q.x * m.a + m.e), Math.round(q.y * m.d + m.f)];`);
+    const canvasAt = () => ex(`const r = $('#graph').getBoundingClientRect(); return [Math.round(r.left + 24), Math.round(r.top + 60)];`);
+    const menu = {};
+    await rclick(await at(target.id)); menu.node = await readMenu(); await closeMenu();
+    await rclick(await edgeAt()); menu.edge = await readMenu(); await closeMenu();
+    await rclick(await canvasAt()); menu.canvas = await readMenu(); await closeMenu();
+    expect('graph: right-click opens node, edge and canvas context menus with actions', ['node', 'edge', 'canvas'].every((k) => menu[k] && menu[k].length >= 2), menu);
+    // Guide must not cover the editor: it collapses to a chip once the team exists.
+    g.guide = await ex(`const r = $('#guide').getBoundingClientRect(); return $('#guide').classList.contains('hidden') ? 'hidden' : r.width < 300 ? 'mini' : 'open'`);
+    expect('graph: Get started guide does not cover the editor', g.guide !== 'open', g);
+    g.idle = await ex(`renderIdle(); return document.querySelector('.idlebanner[data-where=team]').textContent`);
+    expect('graph: idle banner counts only this team (no cross-team ghost)', /12 agents idle/.test(g.idle), g);
+    for (const t of ['light', 'dark']) {
+      require('electron').nativeTheme.themeSource = t; await ex(`await w(400); fitView(); selectNode('${target.id}'); await w(300);`);
+      await rclick(await at(target.id)); await shot(`24-graph-menu-${t}`); await closeMenu(); await shot(`25-graph-panel-${t}`);
+    }
+    require('electron').nativeTheme.themeSource = 'system';
     console.log('[gui-e2e] graph', JSON.stringify({ ...g, zoomIn, fit, layout, menu }));
   };
   try {
