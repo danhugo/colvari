@@ -294,5 +294,30 @@ function providerUsageStatus(rateLimits, ctx = {}) {
   return { available: true, reason: null, fiveHour: rateLimits.fiveHour || null, weekly: rateLimits.weekly || null };
 }
 
+// Context-window usage: the CLI resends the whole conversation as input on every turn, so the LAST assistant
+// message's own (uncombined) usage is the live context size — never sum across turns like tokensFromResult does.
+// 200k is the standard window; "[1m]" model ids (e.g. "claude-sonnet-5[1m]") get the 1M beta context window.
+const CONTEXT_WINDOW_DEFAULT = 200000;
+const CONTEXT_WINDOW_1M = 1000000;
+function contextWindowFor(model) { return /\[1m\]/i.test(String(model || '')) ? CONTEXT_WINDOW_1M : CONTEXT_WINDOW_DEFAULT; }
+// One assistant stream-json event -> { messageId, model, contextTokens } or null if not a usable usage event.
+// Deliberately excludes output_tokens: context is what gets resent next turn, i.e. input + cache read + cache
+// creation. Stream-json can emit several deltas for the same message id; caller dedupes by messageId.
+function contextFromAssistant(ev) {
+  if (!ev || ev.type !== 'assistant' || !ev.message) return null;
+  const msg = ev.message; const u = msg.usage; const messageId = msg.id;
+  if (!u || !messageId) return null;
+  const contextTokens = (+u.input_tokens || 0) + (+u.cache_read_input_tokens || 0) + (+u.cache_creation_input_tokens || 0);
+  return { messageId, model: msg.model || '', contextTokens };
+}
+// system/compact_boundary event -> { preTokens, postTokens, trigger } or null. Emitted by the CLI right after
+// it compacts a session's history (manual /compact or automatic, incl. via CLAUDE_AUTOCOMPACT_PCT_OVERRIDE).
+function parseCompactBoundary(ev) {
+  if (!ev || ev.type !== 'system' || ev.subtype !== 'compact_boundary') return null;
+  const cm = ev.compact_metadata || {};
+  return { preTokens: +cm.pre_tokens || 0, postTokens: +cm.post_tokens || 0, trigger: cm.trigger || 'unknown' };
+}
+
 module.exports = { resultSnapshot, tokensForRun, BILLING_MODES, BILLING_SOURCES, normalizeBilling, applyBillingEnv, detectBilling, costNote, tokensFromResult, totalTokens, newRun, applyEvent, finishRun, summarize, total, modelStats, toCSV, CSV_COLS,
-  LIMITS_DEFAULTS, normalizeLimits, authType, windowUsage, limitStatus, usageStatus, applyCliRateLimits, parseRateLimitWindow, parseRateLimits, subscriptionGuard, providerUsageStatus, GUARD_DEFAULT_PCT };
+  LIMITS_DEFAULTS, normalizeLimits, authType, windowUsage, limitStatus, usageStatus, applyCliRateLimits, parseRateLimitWindow, parseRateLimits, subscriptionGuard, providerUsageStatus, GUARD_DEFAULT_PCT,
+  CONTEXT_WINDOW_DEFAULT, CONTEXT_WINDOW_1M, contextWindowFor, contextFromAssistant, parseCompactBoundary };
