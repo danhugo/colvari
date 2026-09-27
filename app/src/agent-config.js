@@ -84,7 +84,8 @@ function normalizeNode(n = {}, base = NODE_DEFAULTS) {
   if (String(r.autoCompact).trim().toLowerCase() === 'auto') r.autoCompact = 'auto';
   else {
     const tokens = parseInt(r.autoCompact, 10);
-    r.autoCompact = tokens ? String(Math.min(1000000, Math.max(100000, tokens))) : '';
+    // Legacy autoCompact values <=100 were percentages; migrate them to the CLI default instead of clamping.
+    r.autoCompact = (tokens && tokens > 100) ? String(Math.min(1000000, Math.max(100000, tokens))) : '';
   }
   Object.assign(r, normalizeMode(r), normalizeBilling(r));
   return r;
