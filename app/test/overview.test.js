@@ -44,3 +44,19 @@ test('task thread: comments, messages and tool chips in time order', () => {
   assert.deepEqual(th.map((x) => x.type), ['message', 'tool', 'comment']);
   assert.equal(th[1].summary, 'Write · a.txt');
 });
+
+test('laneAttention: waiting_for_human beats blocked beats error; idle lane is null', () => {
+  const tasks = [
+    { id: 't1', status: 'waiting_for_human' },
+    { id: 't2', status: 'todo', blockedBy: ['t3'] },
+    { id: 't3', status: 'in_progress' },
+  ];
+  const agents = { a: { taskId: 't1' }, b: { taskId: 't2' }, c: { taskId: null, lastError: { text: 'boom' } }, d: { taskId: null } };
+  assert.deepEqual(O.laneAttention(['a', 'b', 'c', 'd'], agents, tasks), { a: 'waiting_for_human', b: 'blocked', c: 'error', d: null });
+});
+
+test('sortByAttention: needs-attention lanes sort first, ties keep input order', () => {
+  const tasks = [{ id: 't1', status: 'waiting_for_human' }, { id: 't2', status: 'in_progress' }];
+  const agents = { Cx1: { taskId: null }, Cx2: { taskId: 't1' }, Cx3: { taskId: null, lastError: { text: 'x' } }, Cx4: { taskId: 't2' } };
+  assert.deepEqual(O.sortByAttention(['Cx1', 'Cx2', 'Cx3', 'Cx4'], agents, tasks), ['Cx2', 'Cx3', 'Cx1', 'Cx4']);
+});

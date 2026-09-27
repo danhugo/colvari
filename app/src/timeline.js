@@ -54,4 +54,4 @@ function wikiPages(pages = {}) {
   return Object.values(pages).map((p) => ({ title: p.title, body: p.content || '', updatedAt: p.updatedAt || null, author: p.author || '' }));
 }
 
-module.exports = { timeline, logEntries, wikiPages };
+module.exports = { timeline, logEntries, wikiPages, levelOf };
