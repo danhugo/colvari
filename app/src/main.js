@@ -3,6 +3,7 @@ const path = require('path');
 const { Orchestrator } = require('./orchestrator');
 const { ProjectManager, TEMPLATES } = require('./projects');
 const AC = require('./agent-config');
+const WT = require('./worktree');
 const U = require('./usage');
 const PF = require('./preflight');
 
@@ -236,6 +237,7 @@ async function testTeam(c) {
   await Promise.all(Array.from({ length: Math.min(limit, nodes.length) }, async () => { while (i < nodes.length) { const n = nodes[i++]; try { out[n.id] = await testAgent(c, n.id); } catch (e) { out[n.id] = { ok: false, error: e.message }; } } }));
   return out;
 }
+const wtTask = (c, id) => { const t = ST(c).listTasks().find((x) => x.id === id); if (!t || !t.worktreePath) throw new Error('task has no worktree'); return t; };
 const api = {
   listProjects: () => ({ projects: pm.list().map((p) => ({ ...p, running: !!(orchs.get(p.id) || {}).running })), templates: Object.fromEntries(Object.entries(TEMPLATES).map(([k, v]) => [k, v.label])) }),
   createProject: (_c, name, tpl) => pm.create(name, tpl), renameProject: (_c, pid, name) => pm.rename(pid, name),
@@ -257,6 +259,9 @@ const api = {
   testAgent, testTeam,
   stopAgent: (c, nodeId) => orchFor(c.p).stopAgent(nodeId), sendToAgent: (c, nodeId, text, taskId) => orchFor(c.p).sendToAgent(nodeId, text, taskId),
   approveTask: (c, id, ok, note) => ST(c).approveTask(id, ok, note), getLogs: (c, n) => ST(c).readLogs(n || 2000), clearLogs: (c) => ST(c).clearLogs(),
+  taskDiff: (c, id) => WT.worktreeDiff(wtTask(c, id)),
+  taskMerge: (c, id) => { const r = WT.worktreeMerge(wtTask(c, id)); ST(c).commentTask(id, 'human', `merged ${r.branch} into ${r.base}`); return r; },
+  taskDiscard: (c, id) => { const r = WT.worktreeDiscard(wtTask(c, id)); ST(c).updateTask(id, { worktreePath: null, worktreeBranch: null }); return r; },
   run: (c) => orchFor(c.p).start(), stop: (c) => orchFor(c.p).stop(),
 };
 ipcMain.handle('api', async (_e, name, ctx, ...args) => {

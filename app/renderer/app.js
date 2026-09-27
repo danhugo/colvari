@@ -319,7 +319,12 @@ function renderBoard() {
     ${t.sessionId ? `<p class="muted">Session <code>${esc(t.sessionId)}</code>${t.iterations ? ` · ${t.iterations} iteration(s)` : ''}</p>` : ''}
     <label>Comments</label>${t.comments.map((c) => `<div class="comment"><b>${esc(c.author)}</b>: ${esc(c.text)}</div>`).join('') || '<p class="muted">none</p>'}
     <textarea id="td-comment" rows="2" placeholder="Add comment"></textarea>
-    <p><button id="td-addc">Comment</button> <button id="td-del">Delete task</button></p>`;
+    <p><button id="td-addc">Comment</button> <button id="td-del">Delete task</button>${t.worktreePath ? ` <button id="td-diff">Diff</button> <button id="td-merge">Merge</button> <button id="td-discard">Discard</button>` : ''}</p><div id="td-diffbox"></div>`;
+  if ($('#td-diff')) {
+    $('#td-diff').onclick = act(async () => { const r = await call('taskDiff', t.id); $('#td-diffbox').innerHTML = `<p class="muted">${esc(r.branch)} vs ${esc(r.base)}</p>${r.files.map((f) => `<div><code>${esc(f.status)}</code> ${esc(f.file)}</div>`).join('') || '<p class="muted">no changes</p>'}<pre>${esc(r.diff)}</pre>`; });
+    $('#td-merge').onclick = act(async () => { if (!confirm('Merge ' + t.worktreeBranch + ' into the base branch?')) return; await call('taskMerge', t.id); refresh(); });
+    $('#td-discard').onclick = act(async () => { if (!confirm('Remove the worktree and delete ' + t.worktreeBranch + '?')) return; await call('taskDiscard', t.id); refresh(); });
+  }
   $('#td-status').onchange = async (e) => { await call('updateTask', t.id, { status: e.target.value }); refresh(); };
   $('#td-assignee').onchange = async (e) => { await call('updateTask', t.id, { assignee: e.target.value }); refresh(); };
   $('#td-addc').onclick = async () => { const v = $('#td-comment').value.trim(); if (v) { await call('commentTask', t.id, v); refresh(); } };

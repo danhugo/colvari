@@ -20,4 +20,30 @@ function ensureWorktree(repoDir, taskId) {
   } catch (e) { return { cwd: repoDir, warning: `worktree creation failed (${String(e.stderr || e.message).trim()}), using shared dir` }; }
 }
 
-module.exports = { ensureWorktree };
+// Repo root owning a worktree at <root>/.squad/worktrees/<taskId>; base = the root's current branch.
+const rootOf = (t) => path.resolve(t.worktreePath, '..', '..', '..');
+const baseOf = (root) => git(root, ['symbolic-ref', '--short', 'HEAD']);
+const errOf = (e) => String(e.stderr || e.message).trim();
+
+function worktreeDiff(t) {
+  const root = rootOf(t); const base = baseOf(root); const range = `${base}...${t.worktreeBranch}`;
+  const files = git(root, ['diff', '--name-status', range]).split('\n').filter(Boolean).map((l) => { const [status, ...f] = l.split('\t'); return { status, file: f.join(' -> ') }; });
+  return { base, branch: t.worktreeBranch, files, diff: git(root, ['diff', range]) };
+}
+
+// Merge branch into base; on conflict abort so nothing is left half-merged.
+function worktreeMerge(t) {
+  const root = rootOf(t); const base = baseOf(root);
+  try { git(root, ['merge', '--no-ff', '--no-edit', t.worktreeBranch]); }
+  catch (e) { try { git(root, ['merge', '--abort']); } catch {} throw new Error(`merge of ${t.worktreeBranch} into ${base} failed, aborted: ${errOf(e)}`); }
+  return { base, branch: t.worktreeBranch };
+}
+
+function worktreeDiscard(t) {
+  const root = rootOf(t);
+  try { git(root, ['worktree', 'remove', '--force', t.worktreePath]); } catch (e) { if (fs.existsSync(t.worktreePath)) throw new Error(errOf(e)); }
+  try { git(root, ['branch', '-D', t.worktreeBranch]); } catch {}
+  return { ok: true };
+}
+
+module.exports = { ensureWorktree, worktreeDiff, worktreeMerge, worktreeDiscard };
