@@ -5,6 +5,13 @@ const IN = require('../src/introspector');
 const helpycodeHelp = fs.readFileSync(path.join(__dirname, 'fixtures/help-helpycode.txt'), 'utf8');
 const claudeHelp = fs.readFileSync(path.join(__dirname, 'fixtures/help-claude.txt'), 'utf8');
 const codexHelp = fs.readFileSync(path.join(__dirname, 'fixtures/help-codex.txt'), 'utf8');
+// Captured from a real installed `helpycode` binary (`helpycode --help` / `helpycode run --help`,
+// merging stdout+stderr — this CLI prints help to stderr even on exit 0). Unlike the fictional
+// help-helpycode.txt fixture above, real helpycode prefixes every command with the binary name
+// ("  helpycode run [message..]     run ...") and uses "--variant"/"-s, --session" instead of
+// "--effort"/"resume" — this is the shape that broke the original parser (docs/helpycode-smoke.md).
+const realHelpycodeTop = fs.readFileSync(path.join(__dirname, 'fixtures/help-helpycode-real-top.txt'), 'utf8');
+const realHelpycodeRun = fs.readFileSync(path.join(__dirname, 'fixtures/help-helpycode-real-run.txt'), 'utf8');
 
 test('parseCommands / pickRunCommand work on a fictional CLI (no CLI-specific code)', () => {
   const cmds = IN.parseCommands(helpycodeHelp);
@@ -64,4 +71,27 @@ test('introspectRuntime derives a full draft profile for the fictional "helpycod
   assert.strictEqual(profile.eventMapping.sessionIdPath, 'session_id');
   assert.strictEqual(profile.eventMapping.costPath, 'total_cost_usd');
   assert.strictEqual(profile.eventMapping.inputPath, 'usage.input_tokens');
+});
+
+test('parseCommands strips the repeated "helpycode <cmd>" prefix real helpycode --help uses', () => {
+  const cmds = IN.parseCommands(realHelpycodeTop);
+  assert.ok(cmds.some((c) => c.name === 'run'), 'expected a run command, got ' + JSON.stringify(cmds));
+  assert.ok(cmds.some((c) => c.name === 'models'));
+  assert.ok(!cmds.some((c) => c.name === 'helpycode'));
+  assert.strictEqual(IN.pickRunCommand(cmds), 'run');
+});
+
+test('introspectRuntime derives a working profile against real installed-helpycode --help output', () => {
+  const exec = (bin, args) => {
+    assert.strictEqual(bin, 'helpycode');
+    if (args[0] === 'run' && args.includes('--help')) return realHelpycodeRun;
+    if (args.includes('--help')) return realHelpycodeTop;
+    throw new Error('unexpected exec ' + JSON.stringify(args));
+  };
+  const profile = IN.introspectRuntime('helpycode', exec, { id: 'helpycode', label: 'HelpyCode', probe: false });
+  assert.deepStrictEqual(profile.argsTemplate, ['run', '--format', 'json', '--model', '{model}', '--variant', '{variant}', '{prompt}']);
+  assert.deepStrictEqual(profile.modelsCommand, ['models']);
+  assert.strictEqual(profile.effortFlag, '--variant');
+  assert.deepStrictEqual(profile.effortValues, ['high', 'max', 'minimal']);
+  assert.strictEqual(profile.resumeFlag, '-s');
 });
