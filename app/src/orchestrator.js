@@ -75,7 +75,9 @@ class Orchestrator extends EventEmitter {
     // init/rate_limit_event handling below) so a restarted app shows the CLI's last-known 5h/weekly usage
     // immediately, instead of waiting for a fresh run to repopulate this in-memory map.
     this.subscriptionRateLimits = {};
-    try { for (const n of store.getTeam().nodes) if (n.rateLimits) this.subscriptionRateLimits[n.id] = n.rateLimits; } catch {}
+    // Only restore still-live snapshots: one whose resetsAt passed while the app was down describes a
+    // window that already reset, and must not pause dispatch (usage.js liveRateLimits).
+    try { for (const n of store.getTeam().nodes) { const rl = U.liveRateLimits(n.rateLimits); if (rl) this.subscriptionRateLimits[n.id] = rl; } } catch {}
   }
   agent(id) { return (this.agents[id] ||= { runCost: 0, runTokens: 0, pendingHuman: [], stopRequested: false, budgetStop: null, status: 'idle', iteration: 0, cost: 0, inputTokens: 0, outputTokens: 0, cacheTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, runs: 0, taskId: null, task: null, model: '', runtime: '', billingSource: '', contextTokens: null, contextWindow: 0, contextPct: null, lastContextMessageId: null }); }
   // modelStats: per-model aggregate across this project's persisted runs + tasks (see usage.js modelStats for the field shape).
@@ -133,7 +135,9 @@ class Orchestrator extends EventEmitter {
   checkUsageLimits(nodeId) {
     const settings = this.store.getSettings();
     const status = U.usageStatus(this.store.listRuns(), settings.usageLimits);
-    const rlAll = Object.values(this.subscriptionRateLimits || {});
+    // Drop readings whose resetsAt passed since they were stored (usage.js liveRateLimits): a stale pct
+    // describes a window that already reset, and the freshest still-live reading is what counts.
+    const rlAll = Object.values(this.subscriptionRateLimits || {}).map((rl) => U.liveRateLimits(rl)).filter(Boolean);
     const combinedRL = rlAll.reduce((acc, rl) => ({
       fiveHour: (!acc.fiveHour || (rl.fiveHour && rl.fiveHour.pct > acc.fiveHour.pct)) ? rl.fiveHour : acc.fiveHour,
       weekly: (!acc.weekly || (rl.weekly && rl.weekly.pct > acc.weekly.pct)) ? rl.weekly : acc.weekly,

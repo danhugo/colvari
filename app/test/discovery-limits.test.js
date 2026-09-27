@@ -179,7 +179,9 @@ test('refresh regression: a smaller --help-only probe never reduces an already-r
   assert.equal(CAP.mergeCapabilities(null, narrower), narrower);
 });
 
-test('real event: usageStatus prefers the CLI-reported rate-limit snapshot even with an empty in-memory map (persisted node.rateLimits fallback)', () => {
+test('real event: usageStatus prefers the CLI-reported rate-limit snapshot even with an empty in-memory map (persisted node.rateLimits fallback)', (t) => {
+  // Freeze just before the recorded reset: a reading whose resetsAt has passed is stale and doesn't count.
+  t.mock.timers.enable({ apis: ['Date'], now: 1790520600 * 1000 - 60_000 });
   const rateLimitEvent = JSON.parse(fixture('real-rate-limit-event.json'));
   const rl = U.parseRateLimits(rateLimitEvent);
   const runs = []; // no local runs at all — an empty in-memory subscriptionRateLimits map, only a persisted snapshot
@@ -187,6 +189,19 @@ test('real event: usageStatus prefers the CLI-reported rate-limit snapshot even 
   const merged = U.applyCliRateLimits(status, [rl], 80);
   assert.equal(Math.round(merged.fiveHour.pct * 100), 38);
   assert.equal(Math.round(merged.weekly.pct * 100), 22);
+});
+
+test('real event: applyCliRateLimits ignores a stale reading (resetsAt past) and uses the freshest live one', () => {
+  const future = new Date(Date.now() + 3600e3).toISOString();
+  const past = new Date(Date.now() - 60e3).toISOString();
+  const status = U.usageStatus([], { fiveHourLimit: 0, weeklyLimit: 0, warnPct: 80 });
+  // One node's snapshot outlived its own reset at 97%; another node's live rate_limit_event reported 3%.
+  const merged = U.applyCliRateLimits(status, [
+    { fiveHour: { pct: 0.97, resetsAt: past }, weekly: null },
+    { fiveHour: { pct: 0.03, resetsAt: future }, weekly: null },
+  ], 90);
+  assert.equal(Math.round(merged.fiveHour.pct * 100), 3);
+  assert.equal(merged.pause, false, 'the stale reading must not pause dispatch');
 });
 
 test('real event: recorded rate_limit_event parses to numeric 5h/weekly percentages', (t) => {
