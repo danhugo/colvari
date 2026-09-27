@@ -44,6 +44,14 @@ Each agent has a **Billing** mode: auto (detect only), subscription (API key, ba
 
 The UI shows measured tokens first. `total_cost_usd` is only shown as "API-equivalent (reported by Claude CLI)"; for subscription runs it says "Covered by subscription — not billed per token". The **Usage** tab has totals by agent, model, billing source and task, a per-run history table, and CSV export (this project or all projects).
 
+### Usage limits, dispatch guard, node badges and capability auto-discovery
+
+The Usage tab's **Usage limits** panel (`src/usage.js`'s `usageStatus`, configured per project in `settings.usageLimits`, 0 = disabled) tracks four independent caps: subscription runs in the rolling 5h and weekly windows (request-count based — there is no cost to a Pro/Max login), and API-key/proxy runs by reported cost and total tokens. Each shows a meter bar and "N% used", turning `warn` at the configured `warnPct` (default 80%) and `pause` at 100%; runs older than the window are excluded automatically, so the meter naturally resets as old runs age out rather than accumulating forever. `Orchestrator.checkUsageLimits()` (called after every agent run) mirrors the same status into `usagePaused`, and the dispatch loop (`tick()`) skips every `todo` task while that flag is set — already-running agents are left alone, only new dispatch is paused — with a once-per-crossing log line and OS notification.
+
+Every graph node shows small vendor/model chips (e.g. `Claude` / `opus`) next to its avatar, driven by the node's `runtime`/`model` fields (or the live run's, once one starts). Capabilities (slash commands, skills, permission modes — probed straight from the runtime's own `--help` output or a live init event, never a hard-coded per-runtime list, see `src/capabilities.js`) used to require clicking "Refresh" in the node form; `addNode` (`src/main.js`) now probes a brand-new agent immediately, so its "Discovered capabilities" panel is already populated instead of reading "Not probed yet".
+
+`npm run gui-e2e:limits` (also run as part of the full `npm run gui-e2e`) stubs 5h-window runs directly into `runs.json` (no real model calls) and checks: the meter reads 60% used with a stale run outside the window correctly excluded, then crosses warn (86%) and pause (100%) as the configured limit tightens; a real `Orchestrator` refuses to start a ready `todo` task while paused; graph badges render both agents' runtime/model; and a freshly added agent's capabilities panel is populated right away. Shots: `limits-meter-{light,dark}`, `limits-pause-banner`, `limits-graph-badges-{light,dark}`.
+
 ## Agent run modes and sessions
 
 Each agent has a **Run mode**, set in the agent panel (`src/agent-modes.js`):
