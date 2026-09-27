@@ -397,6 +397,54 @@ async function guiE2E() {
     console.log('[gui-e2e] limits', JSON.stringify({ under, cli, warn, pause, guardTaskStatus: s.getTask(guardTask.id).status, chips, effortChips, probeBefore: dotBefore, probeAfter: dotAfter, discovered: !!added.capabilities }));
     require('electron').nativeTheme.themeSource = 'system';
   };
+  // Existing-data scenario: a project that predates capability probing, usage limits and reasoning-effort
+  // fields (nodes added straight through the store, like a real legacy project.json). Nothing here should
+  // crash or silently no-op: probing still works on demand, the limit meter still shows up once the CLI's
+  // own init event reports a rate limit (even with usageLimits never configured), and effort falls back to 'low'.
+  const existingDataShots = async () => {
+    await waitFor(`return !!document.querySelector('#tpl-select option')`); await ex(`await refresh();`); const cur = await ex(`return { p: ctx.p, t: S.teamId }`);
+    const p = cur.p || pid(); const ts = pm.store(p, cur.t); const s = pm.store(p); const o = orchFor(p);
+    // Legacy nodes: added via the store directly (no capabilities/capabilitiesProbedAt/effort fields), the
+    // same shape a project created before those features existed would have on disk.
+    const pm1 = ts.addNode({ name: 'LegacyPM', role: 'PM', runtime: 'claude', model: 'opus', x: 60, y: 60 });
+    const dev = ts.addNode({ name: 'LegacyDev', role: 'Dev', runtime: 'claude', model: 'sonnet', x: 320, y: 60 });
+    expect('existing-data: fixture nodes start with no capabilities (never probed)', !pm1.capabilities && !dev.capabilities, { pm1: pm1.capabilities, dev: dev.capabilities });
+    expect('existing-data: fixture nodes normalize to the default "low" effort (unset on input)', pm1.effort === 'low' && dev.effort === 'low', { pm1: pm1.effort, dev: dev.effort });
+    expect('existing-data: settings have no usageLimits configured', JSON.stringify(s.getSettings().usageLimits) === '{}', s.getSettings().usageLimits);
+    await ex(`$('#tabs button[data-tab=team]').click(); await refresh(); renderGraph(); await w(300);`);
+    const dotBefore = await ex(`return document.querySelector('g[data-id="${pm1.id}"] .capsdot')?.getAttribute('class')`);
+    expect('existing-data: legacy node graph badge starts on the untested dot', dotBefore === 'capsdot caps-none', dotBefore);
+    await ex(`sel.node = '${pm1.id}'; renderNodeForm(); await w(200);`);
+    const before = await ex(`return $('#nf-caps-view').textContent`);
+    expect('existing-data: node form shows "Not probed yet" for a legacy node', /Not probed yet/.test(before), before.slice(0, 120));
+    // Probe runs: same "Refresh" action a user would click on the node form for any never-probed agent.
+    await ex(`document.querySelector('#nf-caps-refresh').click(); await w(400);`);
+    const after = await ex(`return $('#nf-caps-view').textContent`);
+    expect('existing-data: probe runs and clears "Not probed yet"', !/Not probed yet/.test(after), after.slice(0, 120));
+    await ex(`await refresh(); renderGraph(); await w(300);`);
+    const dotAfter = await ex(`return document.querySelector('g[data-id="${pm1.id}"] .capsdot')?.getAttribute('class')`);
+    expect('existing-data: graph badge flips off the untested dot once probed', dotAfter !== 'capsdot caps-none', dotAfter);
+    // Limits meter: no usageLimits configured, but the CLI's own init event (stubbed here) reports a
+    // subscription rate-limit % — the meter must still surface that, not stay hidden just because the
+    // project never had a limits config saved.
+    const meterHiddenBefore = await ex(`return document.querySelector('#limitmeter').classList.contains('hidden')`);
+    expect('existing-data: limit meter is hidden with no limits config and no CLI-reported rate limit yet', meterHiddenBefore, meterHiddenBefore);
+    o.subscriptionRateLimits = { [pm1.id]: { fiveHour: { pct: 0.42, resetsAt: new Date(Date.now() + 3600000).toISOString() } } };
+    await ex(`await refresh(); await w(400);`);
+    const meterQ = `{ hidden: $('#limitmeter').classList.contains('hidden'), pct: $('#limitmeter .lm-fill')?.style.width, text: $('#limitmeter').textContent }`;
+    const meter = await ex(`return ${meterQ}`);
+    expect('existing-data: limit meter becomes visible from the CLI-reported rate limit alone', meter.hidden === false && meter.pct === '42%', meter);
+    o.subscriptionRateLimits = {};
+    for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`await w(200);`); await shot(`existingdata-limits-${t}`); }
+    // Effort badge: never set on this node, so the node form must fall back to the 'low' default.
+    const effortSel = await ex(`return $('#nf-effort-sel').value`);
+    expect("existing-data: effort select defaults to 'low' for a node with no effort field", effortSel === 'low', effortSel);
+    const effortChips = await ex(`return [...document.querySelectorAll('#graph .chip-em text')].map((t) => t.textContent)`);
+    expect('existing-data: no E: chip on the graph for default-effort nodes', !effortChips.some((c) => c.startsWith('E:')), effortChips);
+    for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`await w(200);`); await shot(`existingdata-graph-${t}`); }
+    console.log('[gui-e2e] existingdata', JSON.stringify({ dotBefore, dotAfter, before: before.slice(0, 80), after: after.slice(0, 80), meterHiddenBefore, meter, effortSel, effortChips }));
+    require('electron').nativeTheme.themeSource = 'system';
+  };
   // Wiki + Logs tabs: empty states, page list + rendered markdown typography, readable log rows (time/avatar/level), filter by agent + search, auto-scroll.
   const wikiLogsShots = async () => {
     await waitFor(`return !!document.querySelector('#tpl-select option')`); await ex(`await refresh();`); const cur = await ex(`return { p: ctx.p, t: S.teamId }`);
@@ -654,6 +702,7 @@ async function guiE2E() {
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'parallel') { await parallelShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'mixed') { await mixedShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'limits') { await limitsShots(); throw null; }
+    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'existingdata') { await existingDataShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'polish') { await polishShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'mainlogswiki') { await mainLogsWikiShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'critique') { await critiqueShots(); throw null; }
