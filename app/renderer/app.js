@@ -600,25 +600,30 @@ function renderIdle() {
 }
 
 // ---------- board ----------
+const PRIORITIES = ['P0', 'P1', 'P2', 'P3'];
+const priorityOf = (t) => PRIORITIES.includes(t.priority) ? t.priority : 'P2';
+const priorityBadge = (t) => `<span class="tag prio prio-${priorityOf(t)}" title="Priority ${priorityOf(t)}">${priorityOf(t)}</span>`;
+const byPriorityThenTitle = (a, b) => PRIORITIES.indexOf(priorityOf(a)) - PRIORITIES.indexOf(priorityOf(b)) || a.title.localeCompare(b.title);
 function renderBoard() {
   const sa = $('#nt-assignee'); const cur = sa.value;
   sa.innerHTML = S.allNodes.map((n) => `<option value="${n.id}">${esc(n.name)} (${n.role})</option>`).join('') || '<option value="">(add agents first)</option>';
   if (cur) sa.value = cur;
   renderIdle();
   $('#columns').innerHTML = STATUSES.map((st) => `<div class="col"><h3>${st.replaceAll('_', ' ')} (${S.tasks.filter((t) => t.status === st).length})</h3>${
-    S.tasks.filter((t) => t.status === st).map((t) => { const bl = openBlockers(t); const w = (S.orch.agents[t.assignee] || {}); const live = (w.status === 'working' && w.taskId === t.id) || (!w.status && t.status === 'in_progress' && runningIds().includes(t.assignee));
+    S.tasks.filter((t) => t.status === st).slice().sort(byPriorityThenTitle).map((t) => { const bl = openBlockers(t); const w = (S.orch.agents[t.assignee] || {}); const live = (w.status === 'working' && w.taskId === t.id) || (!w.status && t.status === 'in_progress' && runningIds().includes(t.assignee));
       const ready = !bl.length && ['todo', 'backlog'].includes(t.status);
       const noWorker = t.status === 'in_progress' && t.assignee && !live;
-      return `<div class="card ${sel.task === t.id ? 'sel' : ''}${t.awaitingApproval ? ' approval' : ''}" data-id="${t.id}"><b>${esc(t.title)}</b>${live ? '<span class="tag live">live</span>' : ''}${noWorker ? `<span class="tag noworker" title="in_progress but no live agent process for ${esc(nodeName(t.assignee))}">No worker</span>` : ''}${bl.length ? `<span class="tag blocked" title="waits for: ${esc(bl.map(taskTitle).join(', '))}">Blocked by ${esc(taskTitle(bl[0]).slice(0, 28))}${bl.length > 1 ? ` +${bl.length - 1}` : ''}</span>` : ready ? '<span class="tag ready">Ready</span>' : ''}${t.awaitingApproval ? '<span class="tag approval">needs approval</span>' : ''}<small>${esc(nodeName(t.assignee))} · ${t.comments.length} comments</small></div>`; }).join('')}</div>`).join('');
+      return `<div class="card ${sel.task === t.id ? 'sel' : ''}${t.awaitingApproval ? ' approval' : ''}" data-id="${t.id}">${priorityBadge(t)} <b>${esc(t.title)}</b>${live ? '<span class="tag live">live</span>' : ''}${noWorker ? `<span class="tag noworker" title="in_progress but no live agent process for ${esc(nodeName(t.assignee))}">No worker</span>` : ''}${bl.length ? `<span class="tag blocked" title="waits for: ${esc(bl.map(taskTitle).join(', '))}">Blocked by ${esc(taskTitle(bl[0]).slice(0, 28))}${bl.length > 1 ? ` +${bl.length - 1}` : ''}</span>` : ready ? '<span class="tag ready">Ready</span>' : ''}${t.awaitingApproval ? '<span class="tag approval">needs approval</span>' : ''}<small>${esc(nodeName(t.assignee))} · ${t.comments.length} comments</small></div>`; }).join('')}</div>`).join('');
   document.querySelectorAll('.card').forEach((c) => c.onclick = () => { sel.task = c.dataset.id; renderBoard(); });
   const d = $('#taskdetail'); const t = S.tasks.find((x) => x.id === sel.task);
   if (!t) { d.innerHTML = '<p class="muted">Create a goal task, assign it to an agent (usually the PM), then press Run.</p>'; return; }
   const keep = Object.fromEntries(['td-msg', 'td-note', 'td-comment'].map((k) => [k, $('#' + k) && $('#' + k).value])); const focused = document.activeElement && document.activeElement.id;
   const ag = S.orch.agents[t.assignee] || {}; const live = ag.status === 'working' && ag.taskId === t.id; const bl = openBlockers(t); const deps = new Set(t.blockedBy || []);
-  d.innerHTML = `<h3>${esc(t.title)}</h3><p class="muted">${t.id} · by ${esc(t.createdBy === 'human' ? 'human' : nodeName(t.createdBy))}</p>
+  d.innerHTML = `<h3>${priorityBadge(t)} ${esc(t.title)}</h3><p class="muted">${t.id} · by ${esc(t.createdBy === 'human' ? 'human' : nodeName(t.createdBy))}</p>
     ${t.awaitingApproval ? `<div class="approvebox"><b>Waiting for your approval.</b> The agent marked this task done.<textarea id="td-note" rows="2" placeholder="Note (optional; required context when requesting changes)"></textarea><p><button id="td-approve" class="primary">Approve → done</button> <button id="td-reject">Request changes → todo</button></p></div>` : ''}
     ${live || (t.assignee && ag.status === 'working') ? `<div class="livebox"><div class="toolbar"><b>${live ? 'Live' : esc(nodeName(t.assignee)) + ' is working on another task'}</b>${live ? `<span class="muted">iteration ${ag.iteration || 1}${ag.pendingHuman ? ' · message queued' : ''}</span><span class="spacer"></span><button id="td-stopagent">Stop agent</button>` : ''}</div>${live ? '<pre id="td-live"></pre>' : ''}</div>` : ''}
     ${t.assignee ? `<label>Message ${esc(nodeName(t.assignee))} <span class="muted">(${live ? 'interrupts the run and resumes the same session with your message' : 'stored in the agent inbox for its next run'})</span></label><div class="toolbar"><input id="td-msg" placeholder="Answer or instruction for the agent" style="flex:1"><button id="td-send">Send</button></div>` : ''}
+    <label>Priority</label><select id="td-priority">${PRIORITIES.map((p) => `<option ${p === priorityOf(t) ? 'selected' : ''}>${p}</option>`).join('')}</select>
     <label>Status</label><select id="td-status">${STATUSES.map((s) => `<option ${s === t.status ? 'selected' : ''}>${s}</option>`).join('')}</select>
     <label>Assignee</label><select id="td-assignee">${S.allNodes.map((n) => `<option value="${n.id}" ${n.id === t.assignee ? 'selected' : ''}>${esc(n.name)}</option>`).join('')}</select>
     <label>Blocked by <span class="muted">(runs only after these are done${bl.length ? ` · ${bl.length} open` : ''})</span></label>
@@ -633,6 +638,7 @@ function renderBoard() {
     $('#td-merge').onclick = act(async () => { if (!confirm('Merge ' + t.worktreeBranch + ' into the base branch?')) return; await call('taskMerge', t.id); refresh(); });
     $('#td-discard').onclick = act(async () => { if (!confirm('Remove the worktree and delete ' + t.worktreeBranch + '?')) return; await call('taskDiscard', t.id); refresh(); });
   }
+  $('#td-priority').onchange = async (e) => { await call('updateTask', t.id, { priority: e.target.value }); refresh(); };
   $('#td-status').onchange = async (e) => { await call('updateTask', t.id, { status: e.target.value }); refresh(); };
   $('#td-assignee').onchange = async (e) => { await call('updateTask', t.id, { assignee: e.target.value }); refresh(); };
   $('#td-addc').onclick = async () => { const v = $('#td-comment').value.trim(); if (v) { await call('commentTask', t.id, v); refresh(); } };
