@@ -175,21 +175,47 @@ class Store {
     return t;
   }
   // Merge a done task's squad/<id> branch into base. On conflict, abort, mark the task 'merge_conflict'
-  // (not done) and create a follow-up conflict-resolution task for the same assignee.
+  // (not done) and hand the SAME branch to a follow-up conflict-resolution task (never a new branch),
+  // so resolving it re-merges the original work instead of stranding it behind a chain of tasks.
   _mergeOnDone(t) {
     try {
       WT.worktreeMerge(t);
       this.commentTask(t.id, 'system', `auto-merged ${t.worktreeBranch} into base`);
       return this.getTask(t.id);
     } catch (e) {
-      this._updateTask(t.id, { status: 'merge_conflict' });
-      this.commentTask(t.id, 'system', `auto-merge blocked, task moved to merge_conflict: ${e.message}`);
-      const title = `Resolve merge conflict: ${t.title}`;
-      if (!this.listTasks().some((x) => x.parentId === t.id && x.title === title && x.status !== 'done')) {
-        this.createTask({ title, description: `Auto-merge of ${t.worktreeBranch} failed:\n${e.message}\n\nResolve the conflict (e.g. merge the branch manually, fix conflicts, commit), then re-mark the original task done.`, assignee: t.assignee, createdBy: 'system', parentId: t.id });
+      return this._onMergeConflict(t, e);
+    }
+  }
+  static MAX_CONFLICT_RETRIES = 3;
+  _onMergeConflict(t, e) {
+    this._updateTask(t.id, { status: 'merge_conflict' });
+    this.commentTask(t.id, 'system', `auto-merge blocked, task moved to merge_conflict: ${e.message}`);
+    // A resolve task's own completion re-runs this same merge. If it still conflicts, reopen the
+    // *same* task (bounded retries) instead of spawning another "Resolve merge conflict: ..." task.
+    if (t.isConflictResolution) {
+      const retries = (t.conflictRetries || 0) + 1;
+      if (retries >= Store.MAX_CONFLICT_RETRIES) {
+        this.commentTask(t.id, 'system', `merge of ${t.worktreeBranch} still conflicts after ${retries} attempts; escalating to a human instead of retrying again.`);
+        this.askHuman({ taskId: t.id, nodeId: t.assignee, question: `Merge conflict on ${t.worktreeBranch} persists after ${retries} attempts: ${e.message}. Please resolve manually.` });
+        return this.getTask(t.id);
       }
+      this.commentTask(t.id, 'system', `still conflicts; reopening this same task to retry resolving ${t.worktreeBranch} (attempt ${retries}/${Store.MAX_CONFLICT_RETRIES}).`);
+      return this._updateTask(t.id, { status: 'todo', conflictRetries: retries });
+    }
+    // Dedupe by branch + flag (not by title prefix): at most one open resolve task per branch.
+    const dup = this.listTasks().find((x) => x.isConflictResolution && x.conflictBranch === t.worktreeBranch && x.status !== 'done');
+    if (dup) {
+      this.commentTask(t.id, 'system', `an open resolve task already exists for ${t.worktreeBranch} (${dup.id}); not creating another.`);
       return this.getTask(t.id);
     }
+    const baseTitle = t.title.replace(/^Resolve merge conflict:\s*/, '');
+    const task = this.createTask({
+      title: `Resolve merge conflict: ${baseTitle}`,
+      description: `Auto-merge of ${t.worktreeBranch} failed:\n${e.message}\n\nResolve the conflict directly on ${t.worktreeBranch} (rebase on the base branch, fix conflicts, commit), then mark this task done — that re-runs the merge of the SAME branch. Do not create another conflict task.`,
+      assignee: t.assignee, createdBy: 'system', parentId: t.id,
+    });
+    this._updateTask(task.id, { isConflictResolution: true, conflictBranch: t.worktreeBranch, worktreePath: t.worktreePath, worktreeBranch: t.worktreeBranch });
+    return this.getTask(t.id);
   }
   // Unmerged squad/<id> branches across every git repo referenced by a task's worktreePath.
   listUnmergedBranches() {
@@ -202,7 +228,7 @@ class Store {
       if (patch.status && !STATUSES.includes(patch.status)) throw new Error('bad status ' + patch.status);
       if (patch.blockedBy !== undefined) t.blockedBy = C.validateDeps(tid, patch.blockedBy, b.tasks);
       if (patch.status && patch.status !== 'review') t.awaitingApproval = false;
-      for (const k of ['title', 'description', 'assignee', 'status', 'sessionId', 'iterations', 'awaitingApproval', 'reopenCount', 'worktreePath', 'worktreeBranch']) if (patch[k] !== undefined) t[k] = patch[k];
+      for (const k of ['title', 'description', 'assignee', 'status', 'sessionId', 'iterations', 'awaitingApproval', 'reopenCount', 'worktreePath', 'worktreeBranch', 'isConflictResolution', 'conflictBranch', 'conflictRetries']) if (patch[k] !== undefined) t[k] = patch[k];
       t.updatedAt = new Date().toISOString();
       // Parent auto-complete: when the last open subtask is done, the parent moves to done.
       for (let c = t; c.status === 'done' && c.parentId;) {
