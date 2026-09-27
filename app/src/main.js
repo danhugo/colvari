@@ -325,6 +325,55 @@ async function guiE2E() {
     console.log('[gui-e2e] mixed', JSON.stringify({ chips, st, rt }));
     s.saveSettings({ claudePath: prev.claudePath, codexPath: prev.codexPath });
   };
+  // Usage limits meter (stubbed rate-limit runs, no real model calls), the dispatch guard pausing at threshold,
+  // graph vendor/model badges, and capability auto-discovery firing the moment a new agent is added.
+  const limitsShots = async () => {
+    await waitFor(`return !!document.querySelector('#tpl-select option')`); await ex(`await refresh();`); const cur = await ex(`return { p: ctx.p, t: S.teamId }`);
+    const p = cur.p || pid(); const ts = pm.store(p, cur.t); const s = pm.store(p); const o = orchFor(p);
+    let nodes = ts.getTeam().nodes;
+    if (nodes.length < 2) { ts.addNode({ name: 'Pia', role: 'PM', runtime: 'claude', model: 'opus', x: 60, y: 60 }); ts.addNode({ name: 'Devon', role: 'Dev', runtime: 'codex', model: 'gpt-5.6-terra', x: 320, y: 60 }); nodes = ts.getTeam().nodes; }
+    const [pm1, dev] = nodes;
+    // Stub subscription runs: 6 inside the 5h window (below a limit of 10 -> 60%, under the 80% warn line) plus
+    // one stale run from 6h ago that must NOT count (proves the window "resets" rather than accumulating forever).
+    for (let i = 0; i < 6; i++) s.addRun({ id: 'lim-' + i, projectId: p, nodeId: pm1.id, agent: pm1.name, kind: 'agent', billingSource: 'subscription', startedAt: new Date(Date.now() - i * 1000).toISOString(), inputTokens: 10, outputTokens: 5 });
+    s.addRun({ id: 'lim-stale', projectId: p, nodeId: pm1.id, agent: pm1.name, kind: 'agent', billingSource: 'subscription', startedAt: new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString(), inputTokens: 10, outputTokens: 5 });
+    const prevLim = s.getSettings().usageLimits; s.saveSettings({ usageLimits: { fiveHourLimit: 10, weeklyLimit: 0, tokenLimit: 0, costLimit: 0, warnPct: 80 } });
+    await ex(`$('#tabs button[data-tab=usage]').click(); await refresh(); await w(500);`);
+    const under = await ex(`return { fill: $('#us-limits .meter-fill').style.width, pct: $('#us-limits .stat small.warn, #us-limits .stat small.muted')?.textContent, warn: /Approaching a usage limit/.test($('#us-limits').textContent), pause: /limit has been reached/.test($('#us-limits').textContent) }`);
+    expect('usage limits: meter shows 60% used, 6 stale-excluded, no warn/pause yet', under.fill === '60%' && /60% used/.test(under.pct) && !under.warn && !under.pause, under);
+    for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`await w(200);`); await shot(`limits-meter-${t}`); }
+    // Cross the warn line (80%), then the pause line (100%) — both computed straight off the same stubbed runs.
+    s.saveSettings({ usageLimits: { fiveHourLimit: 7, weeklyLimit: 0, tokenLimit: 0, costLimit: 0, warnPct: 80 } });
+    await ex(`await refresh(); await w(400);`);
+    const warn = await ex(`return { pct: $('#us-limits .meter-fill').style.width, warn: /Approaching a usage limit/.test($('#us-limits').textContent) }`);
+    expect('usage limits: 6/7 = 86% crosses the warn line', warn.pct === '86%' && warn.warn, warn);
+    s.saveSettings({ usageLimits: { fiveHourLimit: 6, weeklyLimit: 0, tokenLimit: 0, costLimit: 0, warnPct: 80 } });
+    await ex(`await refresh(); await w(400);`);
+    const pause = await ex(`return { pct: $('#us-limits .meter-fill').style.width, pause: /limit has been reached/.test($('#us-limits').textContent) }`);
+    expect('usage limits: 6/6 = 100% crosses the pause line', pause.pct === '100%' && pause.pause, pause);
+    await shot('limits-pause-banner');
+    // The dispatch guard itself: a real orchestrator with a todo task ready to run must NOT start it while paused.
+    o.checkUsageLimits(pm1.id);
+    expect('usage limits: checkUsageLimits() flips the in-memory guard on at 100%', o.usagePaused === true, { usagePaused: o.usagePaused });
+    const guardTask = s.createTask({ title: 'Should stay paused', assignee: pm1.id });
+    o.start(); await new Promise((r) => setTimeout(r, 500)); o.stop();
+    expect('usage limits: guard blocks dispatch, task never left todo', s.getTask(guardTask.id).status === 'todo', s.getTask(guardTask.id).status);
+    s.saveSettings({ usageLimits: prevLim }); o.usagePaused = false;
+    // Graph node badges: vendor/model chips on the two existing nodes.
+    await ex(`$('#tabs button[data-tab=team]').click(); await refresh(); renderGraph(); await w(300);`);
+    const chips = await ex(`return [...document.querySelectorAll('#graph .chip text')].map((t) => t.textContent)`);
+    expect('graph: node badges render runtime + model chips', ['claude', 'opus', 'codex', 'gpt-5.6-terra'].every((c) => chips.some((x) => x.toLowerCase() === c)), chips);
+    for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`await w(200);`); await shot(`limits-graph-badges-${t}`); }
+    // Capability auto-discovery: adding a new agent through the real UI (#addnode -> IPC addNode) probes it
+    // immediately, so the node form never shows "Not probed yet" for it.
+    await ex(`document.querySelector('#addnode').click(); await w(600);`);
+    const added = ts.getTeam().nodes.find((n) => !['Pia', 'Devon', pm1.name, dev.name].includes(n.name)) || ts.getTeam().nodes[ts.getTeam().nodes.length - 1];
+    await ex(`sel.node = '${added.id}'; renderNodeForm(); await w(200);`);
+    const disc = await ex(`return $('#nf-caps-view').textContent`);
+    expect('discovery: auto-runs on a newly added agent (not "not probed yet")', !/Not probed yet/.test(disc) && added.capabilities != null, { disc: disc.slice(0, 120), capabilities: added.capabilities });
+    console.log('[gui-e2e] limits', JSON.stringify({ under, warn, pause, guardTaskStatus: s.getTask(guardTask.id).status, chips, discovered: !!added.capabilities }));
+    require('electron').nativeTheme.themeSource = 'system';
+  };
   // Wiki + Logs tabs: empty states, page list + rendered markdown typography, readable log rows (time/avatar/level), filter by agent + search, auto-scroll.
   const wikiLogsShots = async () => {
     await waitFor(`return !!document.querySelector('#tpl-select option')`); await ex(`await refresh();`); const cur = await ex(`return { p: ctx.p, t: S.teamId }`);
@@ -581,6 +630,7 @@ async function guiE2E() {
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'overview') { await overviewShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'parallel') { await parallelShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'mixed') { await mixedShots(); throw null; }
+    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'limits') { await limitsShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'polish') { await polishShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'mainlogswiki') { await mainLogsWikiShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'critique') { await critiqueShots(); throw null; }
@@ -773,6 +823,7 @@ async function guiE2E() {
     }
     if (!process.env.SKIP_WIKILOGS) await mainLogsWikiShots();
     if (!process.env.SKIP_CRITIQUE) await critiqueShots();
+    if (!process.env.SKIP_LIMITS) await limitsShots();
     nativeTheme.themeSource = 'system';
     const tasks = store.listTasks();
     console.log('[gui-e2e]', JSON.stringify({ edges: store.getTeam().edges.length, tasks: tasks.map((t) => [t.title, t.status, t.iterations || 0, !!t.sessionId]), cost: orch.snapshot().totalCost }));
@@ -813,7 +864,17 @@ const api = {
   exportTeam: (c, tid) => pm.exportTeam(c.p, tid), importTeam: (c, json) => pm.importTeam(c.p, json),
   getAll: (c) => { const s = ST(c); const t = TS(c); return { project: s.meta(), teamId: t.teamId, dir: s.dir, team: { ...t.getTeam(), nodes: withPF(t.getTeam().nodes, s.getSettings()) }, allNodes: withPF(s.getTeam().nodes, s.getSettings()), tasks: s.listTasks(), wiki: s.listWiki(), settings: s.getSettings(), messages: s.listMessages().slice(-200), orch: orchFor(c.p).snapshot(),
     config: { runtimes: runtimes(s.getSettings()), billingModes: U.BILLING_MODES, permissionModes: AC.PERMISSION_MODES, edgeTypes: AC.EDGE_TYPES, boardTools: AC.BOARD_TOOLS, roles: AC.roleSuggestions(s.getSettings().rolePresets, s.getTeam().nodes) } }; },
-  addNode: (c, n) => TS(c).addNode(n), updateNode: (c, id, p) => TS(c).updateNode(id, p), removeNode: (c, id) => TS(c).removeNode(id),
+  // New agents are auto-probed for capabilities right away (same probe as the manual Refresh button) so the
+  // node form and graph badges never sit on "not probed yet" for an agent the user just added.
+  addNode: (c, n) => {
+    const node = TS(c).addNode(n);
+    try {
+      const rt = RT.getRuntime(node.runtime);
+      const capabilities = CAP.discoverCapabilities(rt, ST(c).getSettings());
+      return TS(c).updateNode(node.id, { capabilities, capabilitiesProbedAt: capabilities.probedAt });
+    } catch (e) { return node; }
+  },
+  updateNode: (c, id, p) => TS(c).updateNode(id, p), removeNode: (c, id) => TS(c).removeNode(id),
   addEdge: (c, a, b, type) => TS(c).addEdge(a, b, type), updateEdge: (c, id, p) => TS(c).updateEdge(id, p),
   savePreset: (c, p) => ST(c).savePreset(p), deletePreset: (c, name) => ST(c).deletePreset(name), removeEdge: (c, id) => TS(c).removeEdge(id),
   createTask: (c, t) => ST(c).createTask(t), updateTask: (c, id, p) => ST(c).updateTask(id, p), deleteTask: (c, id) => ST(c).deleteTask(id),

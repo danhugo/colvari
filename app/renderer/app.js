@@ -706,7 +706,7 @@ function renderUsage() {
 // ---------- usage limits (5h/weekly for subscription, tokens/cost for API) ----------
 function usageLimitBar(label, u, fmt) {
   if (!u || !u.limit) return `<div class="stat"><small>${esc(label)}</small><b>${fmt((u && u.used) || 0)}</b><small class="muted">no limit set</small></div>`;
-  const pct = Math.min(100, Math.round(u.pct != null ? u.pct : (u.used / u.limit) * 100));
+  const pct = Math.min(100, Math.round((u.pct != null ? u.pct : (u.used / u.limit)) * 100));
   const cls = u.pause ? 'danger' : u.warn ? 'warn' : 'ok';
   return `<div class="stat"><small>${esc(label)}</small><b>${fmt(u.used)} <span class="muted">/ ${fmt(u.limit)}</span></b>
     <div class="meter"><div class="meter-fill ${cls}" style="width:${pct}%"></div></div>
