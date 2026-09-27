@@ -1055,7 +1055,8 @@ const api = {
     const settings = ST(c).getSettings();
     const prevCap = node.capabilities;
     const hasPrevInit = !!(prevCap && prevCap.source === 'init-event');
-    let capabilities = CAP.discoverCapabilities(rt, settings);
+    const prevSlashCommands = (prevCap && Array.isArray(prevCap.slashCommands)) ? prevCap.slashCommands : [];
+    let capabilities = CAP.discoverCapabilities(rt, settings, { prevSlashCommands });
     if (hasPrevInit) {
       capabilities = { ...capabilities, source: prevCap.source, slashCommands: prevCap.slashCommands, skills: prevCap.skills, modes: prevCap.modes, categorized: prevCap.categorized };
     }

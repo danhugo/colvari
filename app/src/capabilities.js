@@ -119,14 +119,18 @@ function fromInitEvent(ev = {}) {
 
 // Probe one runtime adapter (from ./runtimes RUNTIMES[id]) for this project's settings. Merges a live init
 // event's data over the --help probe when available (init events are more accurate but only exist after a run).
-function discoverCapabilities(rt, settings = {}, { exec, initEvent, cwd, home } = {}) {
+function discoverCapabilities(rt, settings = {}, { exec, initEvent, cwd, home, prevSlashCommands } = {}) {
   const help = probeHelp(rt.bin(settings), ['--help'], exec);
   const local = scanLocalPlugins(cwd || settings.workdir || process.cwd(), { home });
   const skills = [...new Set(local.skills)];
   const mcpServers = Object.keys((settings.mcpServers && typeof settings.mcpServers === 'object') ? settings.mcpServers : {});
+  // A --help-only probe (manual Refresh) can miss slash commands a prior real probe already saw (transient CLI
+  // hiccup, --help omitting them, etc). Union in the runtime's previously observed real slash-command list so a
+  // weaker probe this time doesn't blank out modes (goal/loop) it already knows are real. Ignored once an
+  // initEvent is present below — that's the CLI's own authoritative report and replaces this as-is.
   let base = {
     runtime: rt.id,
-    slashCommands: [...new Set([...(help.slashCommands || []), ...local.commands])],
+    slashCommands: [...new Set([...(help.slashCommands || []), ...local.commands, ...(prevSlashCommands || [])])],
     commands: help.commands || [],
     skills, modes: [], ok: help.ok, error: help.error, probedAt: help.probedAt,
   };

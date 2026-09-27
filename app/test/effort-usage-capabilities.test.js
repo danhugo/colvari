@@ -110,6 +110,20 @@ test('capabilities: init event data replaces the --help probe as-is, no union wi
   assert.equal(c.runtime, 'claude');
 });
 
+test('capabilities: Refresh (--help-only probe) unions in the runtime\'s previously observed real slash commands so modes already known (goal/loop) survive a weaker --help probe', () => {
+  const fs = require('fs'); const os = require('os'); const path = require('path');
+  const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'cap-home-'));
+  const rt = { id: 'claude', bin: () => 'claude' };
+  // This --help probe alone (no /goal or /loop mentioned, nothing scanned locally) would report zero modes.
+  const c = CAP.discoverCapabilities(rt, {}, { exec: () => 'usage: claude', cwd: fakeHome, home: fakeHome, prevSlashCommands: ['/goal', '/loop'] });
+  const modeNames = c.categorized.filter((x) => x.category === 'mode').map((x) => x.name).sort();
+  assert.deepEqual(modeNames, ['goal', 'loop']);
+  assert.ok(c.slashCommands.includes('/goal') && c.slashCommands.includes('/loop'));
+  // An initEvent, when present, is still the CLI's own authoritative report and is not unioned with anything.
+  const withInit = CAP.discoverCapabilities(rt, {}, { exec: () => 'usage: claude', cwd: fakeHome, home: fakeHome, prevSlashCommands: ['/goal', '/loop'], initEvent: { slash_commands: ['review'] } });
+  assert.deepEqual(withInit.slashCommands, ['/review']);
+});
+
 test('usage: subscription rate limits parsed as % of window + reset time, not $', () => {
   const future = new Date(Date.now() + 3600e3).toISOString();
   const rl = U.parseRateLimits({ rate_limits: { five_hour: { utilization: 0.95, resets_at: future }, week: { used: 50, limit: 100 } } });
