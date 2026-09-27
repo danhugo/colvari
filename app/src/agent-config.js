@@ -17,6 +17,7 @@ const NODE_DEFAULTS = {
   billingMode: 'auto', billingBaseUrl: '',
   requireApproval: false, budgetUsd: 0, budgetTokens: 0,
   effort: 'low', autoCompact: '', // autoCompact: '' = CLI default; 'auto', or a token window 100000-1000000
+  enabledCapabilities: [], // names from node.capabilities.categorized (mode/skill/command/mcp) this agent should use
   ...MODE_DEFAULTS,
 };
 const NODE_FIELDS = Object.keys(NODE_DEFAULTS);
@@ -70,6 +71,7 @@ function normalizeNode(n = {}, base = NODE_DEFAULTS) {
   r.name = String(r.name || 'Agent'); r.role = String(r.role || '').trim() || 'Dev';
   if (r.permissionMode && !PERMISSION_MODES.includes(r.permissionMode)) throw new Error('bad permission mode ' + r.permissionMode);
   r.allowedTools = toList(r.allowedTools); r.disallowedTools = toList(r.disallowedTools); r.addDirs = toList(r.addDirs);
+  r.enabledCapabilities = toList(r.enabledCapabilities);
   r.disabledBoardTools = toList(r.disabledBoardTools).filter((t) => BOARD_TOOLS.includes(t));
   r.env = toEnv(r.env); r.maxTurns = Math.max(0, parseInt(r.maxTurns, 10) || 0);
   r.extraArgs = String(r.extraArgs || ''); splitArgs(r.extraArgs); // validate
@@ -131,7 +133,9 @@ function buildClaudeArgs(node, prompt, settings, mcpConfig, opts = {}) {
   }
   if (n.disallowedTools.length) args.push('--disallowedTools', n.disallowedTools.join(','));
   if (n.maxTurns) args.push('--max-turns', String(n.maxTurns));
-  if (n.appendSystemPrompt) args.push('--append-system-prompt', n.appendSystemPrompt);
+  const capNote = n.enabledCapabilities.length ? `Enabled capabilities for this agent: ${n.enabledCapabilities.join(', ')}. Use them when relevant.` : '';
+  const sysPrompt = [n.appendSystemPrompt, capNote].filter(Boolean).join('\n\n');
+  if (sysPrompt) args.push('--append-system-prompt', sysPrompt);
   for (const d of n.addDirs) args.push('--add-dir', d);
   args.push(...splitArgs(n.extraArgs));
   return args;

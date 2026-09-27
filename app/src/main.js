@@ -1001,6 +1001,14 @@ const api = {
     const fiveHour = pick('fiveHour'), weekly = pick('weekly');
     return { ...status, fiveHour, weekly, warn: status.warn || fiveHour.warn || weekly.warn, pause: status.pause || fiveHour.pause || weekly.pause };
   },
+  // Real per-provider subscription usage (5h/weekly used % + reset time) for one agent, as self-reported by its
+  // own CLI's init event — with an explicit reason when there is nothing to report yet.
+  providerUsage: (c, nodeId) => {
+    const s = ST(c); const node = TS(c).getTeam().nodes.find((n) => n.id === nodeId); if (!node) throw new Error('no agent ' + nodeId);
+    const rl = (orchFor(c.p).subscriptionRateLimits || {})[nodeId] || null;
+    const installed = runtimes(s.getSettings())[node.runtime] ? runtimes(s.getSettings())[node.runtime].installed : undefined;
+    return U.providerUsageStatus(rl, { installed, billingMode: node.billingMode });
+  },
   discoverCapabilities: (c, nodeId) => {
     const node = TS(c).getTeam().nodes.find((n) => n.id === nodeId); if (!node) throw new Error('no agent ' + nodeId);
     const rt = RT.getRuntime(node.runtime);

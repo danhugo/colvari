@@ -3,6 +3,9 @@
 // from what the installed CLI version really offers. Results are cached on the node (capabilities /
 // capabilitiesProbedAt) by the caller and refreshed on demand.
 const { execFileSync } = require('child_process');
+const fs = require('fs');
+const path = require('path');
+const { RUN_MODES } = require('./agent-modes');
 
 // Pull plausible "slash commands" (/foo) and bare subcommand-looking tokens out of free-form --help text.
 function parseHelpText(text) {
@@ -12,14 +15,63 @@ function parseHelpText(text) {
   return { slashCommands, commands };
 }
 
+// The app's own run modes (single/goal/loop/workflow — see agent-modes.js) are always available regardless of
+// what the underlying CLI reports, so discovery should never show "Modes: none found" for them. Additionally,
+// scan for well-known goal/loop/workflow-style CLI features so the same modes are recognized when the CLI itself
+// (Claude Code's own /loop skill, workflow tooling, Codex "goal mode") advertises them in --help text.
+function detectAppModes(helpText = '') {
+  const s = String(helpText || '').toLowerCase();
+  const found = new Set(RUN_MODES);
+  if (/\bworkflow(s)?\b/.test(s)) found.add('workflow');
+  if (/\bgoal\b/.test(s)) found.add('goal');
+  if (/\bloop\b/.test(s)) found.add('loop');
+  return [...found];
+}
+
+// Read one directory level of skill/command definitions (Claude Code style: .claude/skills/<name>/SKILL.md,
+// .claude/commands/<name>.md) from the project directory, so plugin-provided skills/commands are found even
+// without a live CLI session. Never throws; missing dirs just yield []. Scoped to the project (not the user's
+// home) so discovery results stay deterministic and specific to this project's own plugins.
+function scanLocalPlugins(cwd) {
+  const skills = [], commands = [];
+  const roots = [cwd].filter(Boolean).map((d) => path.join(d, '.claude'));
+  for (const root of roots) {
+    try {
+      const skillsDir = path.join(root, 'skills');
+      for (const name of fs.readdirSync(skillsDir, { withFileTypes: true })) {
+        if (name.isDirectory()) skills.push(name.name);
+      }
+    } catch {}
+    try {
+      const cmdDir = path.join(root, 'commands');
+      for (const name of fs.readdirSync(cmdDir, { withFileTypes: true })) {
+        if (name.isFile() && name.name.endsWith('.md')) commands.push('/' + name.name.replace(/\.md$/, ''));
+      }
+    } catch {}
+  }
+  return { skills: [...new Set(skills)], commands: [...new Set(commands)] };
+}
+
+// Group discovered names into the four categories the UI shows: mode (run modes like goal/loop/workflow),
+// skill (Claude Code skills / Codex-style plugins), command (slash commands), mcp (configured MCP servers).
+function categorize({ modes = [], skills = [], slashCommands = [], commands = [], mcpServers = [] } = {}) {
+  const cat = [];
+  for (const m of modes) cat.push({ name: m, category: 'mode' });
+  for (const s of skills) cat.push({ name: s, category: 'skill' });
+  for (const s of slashCommands) cat.push({ name: s, category: 'command' });
+  for (const c of commands) cat.push({ name: c, category: 'command' });
+  for (const m of mcpServers) cat.push({ name: m, category: 'mcp' });
+  return cat;
+}
+
 // One runtime binary --help probe. exec is injectable for tests. Returns { ok, probedAt, ... } — never throws.
 function probeHelp(bin, args = ['--help'], exec = (b, a) => execFileSync(b, a, { encoding: 'utf8', timeout: 10000, stdio: ['ignore', 'pipe', 'pipe'] })) {
   const probedAt = new Date().toISOString();
   try {
     const out = exec(bin, args);
-    return { ok: true, probedAt, ...parseHelpText(out) };
+    return { ok: true, probedAt, helpText: String(out || ''), ...parseHelpText(out) };
   } catch (e) {
-    try { const out = e.stdout ? String(e.stdout) : ''; if (out) return { ok: true, probedAt, ...parseHelpText(out) }; } catch {}
+    try { const out = e.stdout ? String(e.stdout) : ''; if (out) return { ok: true, probedAt, helpText: out, ...parseHelpText(out) }; } catch {}
     return { ok: false, probedAt, error: e.code === 'ENOENT' ? 'not installed' : e.message, slashCommands: [], commands: [] };
   }
 }
@@ -35,13 +87,30 @@ function fromInitEvent(ev = {}) {
 
 // Probe one runtime adapter (from ./runtimes RUNTIMES[id]) for this project's settings. Merges a live init
 // event's data over the --help probe when available (init events are more accurate but only exist after a run).
-function discoverCapabilities(rt, settings = {}, { exec, initEvent } = {}) {
+function discoverCapabilities(rt, settings = {}, { exec, initEvent, cwd } = {}) {
   const help = probeHelp(rt.bin(settings), ['--help'], exec);
-  const base = { runtime: rt.id, slashCommands: help.slashCommands || [], commands: help.commands || [], skills: [], modes: [], ok: help.ok, error: help.error, probedAt: help.probedAt };
+  const local = scanLocalPlugins(cwd || settings.workdir || process.cwd());
+  const skills = [...new Set(local.skills)];
+  const mcpServers = Object.keys((settings.mcpServers && typeof settings.mcpServers === 'object') ? settings.mcpServers : {});
+  let base = {
+    runtime: rt.id,
+    slashCommands: [...new Set([...(help.slashCommands || []), ...local.commands])],
+    commands: help.commands || [],
+    skills, modes: [], ok: help.ok, error: help.error, probedAt: help.probedAt,
+  };
   if (initEvent) {
     const fromInit = fromInitEvent(initEvent);
-    return { ...base, ...fromInit, slashCommands: [...new Set([...base.slashCommands, ...fromInit.slashCommands])], probedAt: fromInit.probedAt };
+    base = { ...base, ...fromInit,
+      slashCommands: [...new Set([...base.slashCommands, ...fromInit.slashCommands])],
+      skills: [...new Set([...base.skills, ...fromInit.skills])],
+      modes: [...new Set([...base.modes, ...fromInit.modes])],
+      probedAt: fromInit.probedAt };
   }
+  // The app's own goal/loop/workflow run modes (plus any CLI/plugin-native ones mentioned in --help) are always
+  // shown in the categorized view, independent of the flat `modes` field above (which stays permission-mode only,
+  // for back-compat) — this is what fixes "Modes: none found" for projects whose CLI never reported permission_modes.
+  const appModes = [...new Set([...detectAppModes(help.helpText), ...base.modes])];
+  base.categorized = categorize({ modes: appModes, skills: base.skills, slashCommands: base.slashCommands, mcpServers });
   return base;
 }
 
@@ -66,4 +135,4 @@ function needsReprobe(node = {}, signature, { ttlMs = TTL_MS, now = Date.now() }
 // only matters once a node already has a first probe on record.
 const needsInitialProbe = (node = {}) => !node.capabilities;
 
-module.exports = { parseHelpText, probeHelp, fromInitEvent, discoverCapabilities, capabilitySignature, needsReprobe, needsInitialProbe, TTL_MS };
+module.exports = { parseHelpText, probeHelp, fromInitEvent, discoverCapabilities, capabilitySignature, needsReprobe, needsInitialProbe, detectAppModes, scanLocalPlugins, categorize, TTL_MS };

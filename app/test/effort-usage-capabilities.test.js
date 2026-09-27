@@ -125,3 +125,44 @@ test('usage: subscriptionGuard pauses at the configured threshold (default 90%)'
   assert.equal(U.subscriptionGuard(rl, 80).pause, true);
   assert.equal(U.subscriptionGuard(null).pause, false);
 });
+
+test('usage: providerUsageStatus reports real usage or an explicit reason', () => {
+  const rl = { fiveHour: { pct: 0.5, resetsAt: 't1' }, weekly: { pct: 0.2, resetsAt: 't2' } };
+  const ok = U.providerUsageStatus(rl, { installed: true, billingMode: 'subscription' });
+  assert.equal(ok.available, true); assert.equal(ok.reason, null);
+  assert.equal(ok.fiveHour.pct, 0.5); assert.equal(ok.weekly.pct, 0.2);
+  const notInstalled = U.providerUsageStatus(null, { installed: false });
+  assert.equal(notInstalled.available, false); assert.equal(notInstalled.reason, 'runtime not installed');
+  const apiBilled = U.providerUsageStatus(rl, { installed: true, billingMode: 'api' });
+  assert.equal(apiBilled.available, false); assert.match(apiBilled.reason, /not subscription-based/);
+  const neverReported = U.providerUsageStatus(null, { installed: true, billingMode: 'auto' });
+  assert.equal(neverReported.available, false); assert.match(neverReported.reason, /no usage reported yet/);
+});
+
+test('capabilities: goal/loop/workflow run modes and mcp servers are always categorized (fixes "Modes: none found")', () => {
+  const rt = { id: 'claude', bin: () => 'claude' };
+  const c = CAP.discoverCapabilities(rt, { mcpServers: { board: {} } }, { exec: () => 'usage: claude' });
+  const modeNames = c.categorized.filter((x) => x.category === 'mode').map((x) => x.name).sort();
+  assert.deepEqual(modeNames, ['goal', 'loop', 'single', 'workflow']);
+  const mcpNames = c.categorized.filter((x) => x.category === 'mcp').map((x) => x.name);
+  assert.deepEqual(mcpNames, ['board']);
+});
+
+test('capabilities: scanLocalPlugins finds project .claude/skills and .claude/commands, never throws on missing dirs', () => {
+  const fs = require('fs'); const os = require('os'); const path = require('path');
+  assert.deepEqual(CAP.scanLocalPlugins('/no/such/dir'), { skills: [], commands: [] });
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cap-test-'));
+  fs.mkdirSync(path.join(dir, '.claude', 'skills', 'my-skill'), { recursive: true });
+  fs.mkdirSync(path.join(dir, '.claude', 'commands'), { recursive: true });
+  fs.writeFileSync(path.join(dir, '.claude', 'commands', 'review.md'), '# review');
+  const r = CAP.scanLocalPlugins(dir);
+  assert.deepEqual(r.skills, ['my-skill']); assert.deepEqual(r.commands, ['/review']);
+});
+
+test('agent-config: enabledCapabilities persist on the node and are passed to the run via the system prompt', () => {
+  const n = normalizeNode({ enabledCapabilities: 'loop, /review' });
+  assert.deepEqual(n.enabledCapabilities, ['loop', '/review']);
+  const args = buildClaudeArgs({ enabledCapabilities: ['loop', '/review'] }, 'hi', {}, {});
+  const idx = args.indexOf('--append-system-prompt');
+  assert.ok(idx !== -1); assert.match(args[idx + 1], /Enabled capabilities.*loop, \/review/);
+});

@@ -250,5 +250,20 @@ function subscriptionGuard(rateLimits, thresholdPct = GUARD_DEFAULT_PCT) {
   return { fiveHour, weekly, pause: fiveHour.pause || weekly.pause, thresholdPct };
 }
 
+// Real per-provider subscription usage (5h + weekly used %, reset time), with an explicit reason when it can't
+// be reported. rateLimits is the CLI's own self-reported window (usage.js parseRateLimits, from the most recent
+// init event) — there is no separate network call: the CLI is the provider's own client and already knows this.
+// ctx: { installed, billingMode } — why it might be unavailable even before any rate-limit data exists.
+function providerUsageStatus(rateLimits, ctx = {}) {
+  if (ctx.installed === false) return { available: false, reason: 'runtime not installed', fiveHour: null, weekly: null };
+  if (ctx.billingMode && ctx.billingMode !== 'auto' && ctx.billingMode !== 'subscription') {
+    return { available: false, reason: `billing mode "${ctx.billingMode}" is not subscription-based`, fiveHour: null, weekly: null };
+  }
+  if (!rateLimits || (!rateLimits.fiveHour && !rateLimits.weekly)) {
+    return { available: false, reason: 'no usage reported yet by the CLI (run this agent once to get real usage)', fiveHour: null, weekly: null };
+  }
+  return { available: true, reason: null, fiveHour: rateLimits.fiveHour || null, weekly: rateLimits.weekly || null };
+}
+
 module.exports = { resultSnapshot, tokensForRun, BILLING_MODES, BILLING_SOURCES, normalizeBilling, applyBillingEnv, detectBilling, costNote, tokensFromResult, totalTokens, newRun, applyEvent, finishRun, summarize, total, modelStats, toCSV, CSV_COLS,
-  LIMITS_DEFAULTS, normalizeLimits, authType, windowUsage, limitStatus, usageStatus, parseRateLimitWindow, parseRateLimits, subscriptionGuard, GUARD_DEFAULT_PCT };
+  LIMITS_DEFAULTS, normalizeLimits, authType, windowUsage, limitStatus, usageStatus, parseRateLimitWindow, parseRateLimits, subscriptionGuard, providerUsageStatus, GUARD_DEFAULT_PCT };
