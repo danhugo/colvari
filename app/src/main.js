@@ -24,6 +24,27 @@ function orchFor(pid) {
   }
   return o;
 }
+// Startup sweep: any node still showing "not probed yet" (added before capability probing existed, imported
+// from another machine, etc.) gets probed lazily — one setImmediate tick per node so a slow/missing CLI binary
+// never blocks app start or other nodes' probes. Best-effort: a probe failure just leaves the node unprobed for
+// next time (manual Refresh, or the next run's init event via orchestrator.js).
+function probeNodeLater(pid, node) {
+  if (!CAP.needsInitialProbe(node)) return;
+  setImmediate(() => {
+    try {
+      const s = pm.store(pid, node.teamId || null);
+      const rt = RT.getRuntime(node.runtime);
+      const capabilities = CAP.discoverCapabilities(rt, s.getSettings());
+      s.updateNode(node.id, { capabilities, capabilitiesProbedAt: capabilities.probedAt });
+    } catch {}
+  });
+}
+function probeUnprobedAgents(pid) {
+  for (const p of pid ? [{ id: pid }] : pm.list()) {
+    let nodes = []; try { nodes = pm.store(p.id).getTeam().nodes; } catch { continue; }
+    for (const node of nodes) probeNodeLater(p.id, node);
+  }
+}
 let win;
 // Desktop notification (approval needed, budget reached, run finished) when the window is not focused.
 function notify(n, pid) {
@@ -885,7 +906,7 @@ const api = {
   createTeam: (c, name, tpl) => pm.createTeam(c.p, name, tpl), renameTeam: (c, tid, name) => pm.renameTeam(c.p, tid, name),
   deleteTeam: (c, tid) => pm.removeTeam(c.p, tid), duplicateTeam: (c, tid) => pm.duplicateTeam(c.p, tid),
   exportTeam: (c, tid) => pm.exportTeam(c.p, tid), importTeam: (c, json) => pm.importTeam(c.p, json),
-  getAll: (c) => { const s = ST(c); const t = TS(c); return { project: s.meta(), teamId: t.teamId, dir: s.dir, team: { ...t.getTeam(), nodes: withPF(t.getTeam().nodes, s.getSettings()) }, allNodes: withPF(s.getTeam().nodes, s.getSettings()), tasks: s.listTasks(), wiki: s.listWiki(), settings: s.getSettings(), messages: s.listMessages().slice(-200), orch: orchFor(c.p).snapshot(),
+  getAll: (c) => { const s = ST(c); const t = TS(c); probeUnprobedAgents(c.p); return { project: s.meta(), teamId: t.teamId, dir: s.dir, team: { ...t.getTeam(), nodes: withPF(t.getTeam().nodes, s.getSettings()) }, allNodes: withPF(s.getTeam().nodes, s.getSettings()), tasks: s.listTasks(), wiki: s.listWiki(), settings: s.getSettings(), messages: s.listMessages().slice(-200), orch: orchFor(c.p).snapshot(),
     config: { runtimes: runtimes(s.getSettings()), billingModes: U.BILLING_MODES, permissionModes: AC.PERMISSION_MODES, edgeTypes: AC.EDGE_TYPES, boardTools: AC.BOARD_TOOLS, roles: AC.roleSuggestions(s.getSettings().rolePresets, s.getTeam().nodes) } }; },
   // New agents are auto-probed for capabilities right away (same probe as the manual Refresh button) so the
   // node form and graph badges never sit on "not probed yet" for an agent the user just added.
@@ -973,6 +994,7 @@ function pollInbox(first) {
 
 app.whenReady().then(() => {
   createWindow();
+  probeUnprobedAgents();
   pollInbox(true); setInterval(() => pollInbox(false), 1500);
   console.log('[agents-squad] ready, data root:', pm.root);
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });

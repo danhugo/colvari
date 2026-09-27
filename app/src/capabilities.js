@@ -61,4 +61,9 @@ function needsReprobe(node = {}, signature, { ttlMs = TTL_MS, now = Date.now() }
   return !(age >= 0 && age < ttlMs);
 }
 
-module.exports = { parseHelpText, probeHelp, fromInitEvent, discoverCapabilities, capabilitySignature, needsReprobe, TTL_MS };
+// Whether a node has never been probed at all ("Not probed yet" in the UI) — the narrower check used for the
+// startup/agent-load sweep, as opposed to needsReprobe's broader staleness check (TTL, signature change) which
+// only matters once a node already has a first probe on record.
+const needsInitialProbe = (node = {}) => !node.capabilities;
+
+module.exports = { parseHelpText, probeHelp, fromInitEvent, discoverCapabilities, capabilitySignature, needsReprobe, needsInitialProbe, TTL_MS };

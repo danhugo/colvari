@@ -43,6 +43,15 @@ test('buildClaudeArgs passes --effort and --autocompact', () => {
   assert.ok(!args2.includes('--autocompact'));
 });
 
+test('needsInitialProbe: true only when a node has never been probed', () => {
+  assert.equal(CAP.needsInitialProbe({}), true);
+  assert.equal(CAP.needsInitialProbe({ runtime: 'claude' }), true);
+  assert.equal(CAP.needsInitialProbe({ capabilities: null }), true);
+  assert.equal(CAP.needsInitialProbe({ capabilities: { ok: true } }), false);
+  // stale-but-already-probed nodes are left to needsReprobe (TTL/signature), not the startup sweep
+  assert.equal(CAP.needsInitialProbe({ capabilities: { ok: false, error: 'not installed' } }), false);
+});
+
 test('usage: authType splits subscription vs everything else', () => {
   assert.equal(U.authType('subscription'), 'subscription');
   assert.equal(U.authType('api'), 'api'); assert.equal(U.authType('proxy'), 'api'); assert.equal(U.authType('unknown'), 'api');
