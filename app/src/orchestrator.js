@@ -18,6 +18,11 @@ const CAP = require('./capabilities');
 
 const MCP_SERVER = path.join(__dirname, 'mcp-server.js');
 
+// Wake-on-message: how often the orchestrator looks for unread agent->agent messages, how long a burst
+// may coalesce into one dispatch, and the ping-pong guard (max auto-wakes per sender->recipient pair
+// per window). Exported so tests can shorten the timings.
+const WAKE = { SWEEP_MS: 1000, DEBOUNCE_MS: 1500, MAX_PER_PAIR: 3, PAIR_WINDOW_MS: 10 * 60 * 1000 };
+
 function buildPrompt(team, node, task, extra = {}) {
   node = { ...normalizeNode(applyPreset(node, extra.presets)), id: node.id };
   const nm = (id) => { const n = team.nodes.find((x) => x.id === id); return n ? `${n.name} (${n.role}, id=${n.id})` : id; };
@@ -62,6 +67,20 @@ function humanPrompt(text, base = null) {
   return [base, `Message from the human operator (answer or act on it, then continue your task):\n${text}`].filter(Boolean).join('\n\n');
 }
 
+// Prompt for a wake run: an idle agent dispatched purely to handle unread teammate messages.
+function wakePrompt(team, node, msgs) {
+  const nm = (id) => { const n = team.nodes.find((x) => x.id === id); return n ? `${n.name} (${n.role}, id=${n.id})` : id; };
+  return [
+    `You are "${node.name}", role ${node.role}, in an agent team called Agents Squad (your node id: ${node.id}).`,
+    'You were idle and have been woken by unread teammate message(s). Handle them now:',
+    'reply with send_message where an answer is expected, or act on the request, then stop.',
+    'Coordinate ONLY through the "board" MCP tools.',
+    '',
+    'Unread messages:',
+    ...msgs.map((m) => `- from ${nm(m.from)}: ${m.text}`),
+  ].join('\n');
+}
+
 class Orchestrator extends EventEmitter {
   constructor(store) {
     super();
@@ -78,6 +97,12 @@ class Orchestrator extends EventEmitter {
     // Only restore still-live snapshots: one whose resetsAt passed while the app was down describes a
     // window that already reset, and must not pause dispatch (usage.js liveRateLimits).
     try { for (const n of store.getTeam().nodes) { const rl = U.liveRateLimits(n.rateLimits); if (rl) this.subscriptionRateLimits[n.id] = rl; } } catch {}
+    // Wake-on-message state: per-recipient debounce timers and per-pair ping-pong counters.
+    this.userStopped = false;
+    this.wakeTimers = new Map(); // nodeId -> debounce timeout
+    this.wakePairs = new Map(); // 'from>to' -> {count, since}
+    this._wakeTimer = setInterval(() => this.sweepWakes(), WAKE.SWEEP_MS);
+    if (this._wakeTimer.unref) this._wakeTimer.unref();
   }
   agent(id) { return (this.agents[id] ||= { runCost: 0, runTokens: 0, pendingHuman: [], stopRequested: false, budgetStop: null, status: 'idle', iteration: 0, cost: 0, inputTokens: 0, outputTokens: 0, cacheTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, runs: 0, taskId: null, task: null, model: '', runtime: '', billingSource: '', contextTokens: null, contextWindow: 0, contextPct: null, lastContextMessageId: null }); }
   // modelStats: per-model aggregate across this project's persisted runs + tasks (see usage.js modelStats for the field shape).
@@ -175,11 +200,91 @@ class Orchestrator extends EventEmitter {
     this.changed();
     return { ...m, delivered: live ? 'interrupt' : 'inbox' };
   }
+
+  // ---- wake on message: an idle agent that receives a send_message is dispatched with its unread
+  // messages as the prompt. The sender's send_message has already returned (it only writes to the
+  // store); delivery happens here, in the background, debounced and loop-capped. ----
+  sweepWakes() {
+    if (this.userStopped) { for (const t of this.wakeTimers.values()) clearTimeout(t); this.wakeTimers.clear(); return; }
+    try {
+      const team = this.store.getTeam();
+      for (const node of team.nodes) {
+        if (this.procs.has(node.id) || this.agent(node.id).status === 'working') continue;
+        const unread = this.wakeUnread(node.id, team);
+        if (!unread.length) continue;
+        // Debounce: a burst of messages coalesces into the one dispatch this timer fires.
+        if (!this.wakeTimers.has(node.id)) this.wakeTimers.set(node.id, setTimeout(() => {
+          this.wakeTimers.delete(node.id);
+          this.dispatchWake(node.id).catch((e) => this.log(node.id, 'error', 'wake dispatch: ' + e.message));
+        }, WAKE.DEBOUNCE_MS));
+      }
+    } catch (e) { this.log(null, 'error', 'wake sweep: ' + e.message); }
+  }
+  // Unread agent->agent messages for a node (human and system senders have their own delivery paths).
+  wakeUnread(nodeId, team = this.store.getTeam()) {
+    return this.store.listMessages({ to: nodeId })
+      .filter((m) => !m.read && m.from !== nodeId && m.from !== 'human' && m.from !== 'system' && team.nodes.some((n) => n.id === m.from));
+  }
+  async dispatchWake(nodeId) {
+    const team = this.store.getTeam();
+    const node = team.nodes.find((n) => n.id === nodeId);
+    if (!node || this.userStopped || this.procs.has(nodeId)) return;
+    const a = this.agent(nodeId);
+    if (a.status === 'working' || a.budgetStop) return; // busy (or over budget): stay unread, the next sweep retries
+    const settings = this.store.getSettings();
+    if (settings.maxConcurrency > 0 && this.procs.size >= settings.maxConcurrency) return;
+    const msgs = this.wakeUnread(nodeId, team);
+    if (!msgs.length) return;
+    const now = Date.now();
+    const senders = [...new Set(msgs.map((m) => m.from))];
+    const capped = (f) => { const e = this.wakePairs.get(f + '>' + nodeId); return e && now - e.since < WAKE.PAIR_WINDOW_MS && e.count >= WAKE.MAX_PER_PAIR; };
+    if (senders.every(capped)) return; // ping-pong loop: every sender pair is at its cap, stay quiet
+    for (const f of senders) {
+      const k = f + '>' + nodeId; const e = this.wakePairs.get(k);
+      if (!e || now - e.since >= WAKE.PAIR_WINDOW_MS) this.wakePairs.set(k, { count: 1, since: now });
+      else { e.count++; if (e.count === WAKE.MAX_PER_PAIR) this.log(nodeId, 'system', `wake cap reached for messages from ${f}: no more auto-wakes from this pair for a while`); }
+    }
+    this.store.markMessagesRead(msgs.map((m) => m.id)); // delivered verbatim in the prompt below
+    this.emit('woken_by_message', { nodeId, by: senders, messageIds: msgs.map((m) => m.id) });
+    const nameOf = (id) => (team.nodes.find((n) => n.id === id) || {}).name || id;
+    this.log(nodeId, 'system', `✉ woken by message from ${senders.map(nameOf).join(', ')}: ${msgs[0].text.slice(0, 200)}`);
+    await this.wakeRun(node, msgs, team, settings);
+  }
+  // One background run delivering the messages (resumes the agent's last session when it has one).
+  async wakeRun(node, msgs, team, settings) {
+    const a = this.agent(node.id);
+    a.status = 'working'; a.lastError = null; a.taskId = null; a.task = null; a.iteration = 0; a.stopRequested = false;
+    a.runs++; this.runs++;
+    this.procs.set(node.id, { kill() {} }); // reserve the slot synchronously
+    this.changed();
+    let cfg;
+    try { cfg = normalizeNode(applyPreset(node, settings.rolePresets || [])); } catch (e) { cfg = { env: {}, mode: 'single' }; this.log(node.id, 'error', 'bad agent settings: ' + e.message); }
+    const bill = U.applyBillingEnv(cfg, this.env(cfg)); const env = bill.env;
+    for (const w of bill.warnings) this.log(node.id, 'error', w);
+    const meta = { billingMode: cfg.billingMode || 'auto', runtime: cfg.runtime || 'claude' };
+    a.runtime = meta.runtime; a.model = cfg.model || '';
+    if (!this.cwds) this.cwds = new Map();
+    let cwd = node.workdir || this.store.dir;
+    fs.mkdirSync(cwd, { recursive: true });
+    this.cwds.set(node.id, cwd);
+    const resume = this.lastSession(node.id);
+    this.log(node.id, 'system', `▶ ${node.name} wakes to handle messages in ${cwd}${resume ? ' [resume ' + resume + ']' : ''}`);
+    let args = null;
+    try { args = RT.getRuntime(cfg.runtime).buildArgs(cfg, wakePrompt(team, node, msgs), settings, this.mcpConfig(node), { resume, cwd, env }); }
+    catch (e) { this.log(node.id, 'error', 'bad agent settings: ' + e.message); }
+    const r = await this.spawnRun(node, args, cwd, env, settings, { ...meta, resumedFrom: args && resume ? resume : null });
+    this.procs.delete(node.id); this.cwds.delete(node.id);
+    a.status = 'idle'; a.iteration = 0;
+    this.log(node.id, 'system', `■ ${node.name} finished the wake run (exit ${r.code})`);
+    this.changed();
+    if (this.running) setImmediate(() => this.tick());
+  }
   changed() { this.emit('state', this.snapshot()); }
 
   start() {
     if (this.running) return;
     this.running = true; this.runs = 0; this.runCost = 0; this.runTokens = 0; this.budgetStop = null;
+    this.userStopped = false;
     for (const a of Object.values(this.agents)) { a.runCost = 0; a.runTokens = 0; a.budgetStop = null; }
     this.reconcileOrphanedTasks();
     this.log(null, 'system', 'Orchestrator started');
@@ -188,6 +293,8 @@ class Orchestrator extends EventEmitter {
   }
   stop() {
     this.running = false;
+    this.userStopped = true; // a human pressed stop: no wake dispatches behind their back
+    for (const t of this.wakeTimers.values()) clearTimeout(t); this.wakeTimers.clear();
     this.log(null, 'system', 'Orchestrator stopped');
     this.changed();
     // Only report the run done once every agent process has actually exited (kill is async: SIGTERM
@@ -606,4 +713,4 @@ class Orchestrator extends EventEmitter {
     }
   }
 }
-module.exports = { Orchestrator, buildPrompt, humanPrompt };
+module.exports = { Orchestrator, buildPrompt, humanPrompt, wakePrompt, WAKE };
