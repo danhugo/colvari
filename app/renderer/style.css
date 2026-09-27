@@ -265,6 +265,7 @@ header .pill { border:none; background:none; color:var(--fg-muted); font-size:va
 .limitmeter .lm-fill { display:block; height:100%; background:var(--accent); }
 .limitmeter .lm-warn .lm-fill { background:var(--warning); } .limitmeter .lm-danger .lm-fill { background:var(--danger); }
 .limitmeter .lm-part small { color:var(--fg-muted); font-variant-numeric:tabular-nums; }
+.limitmeter .lm-part.lm-pending { opacity:.6; }
 .tlink { font-size:10.5px; opacity:.8; } .bubble { font-size:var(--text-sm); }
 
 /* Idle/busy by shape: idle = hollow ring, busy = spinning arc. */
@@ -289,6 +290,7 @@ header .pill { border:none; background:none; color:var(--fg-muted); font-size:va
 #graph .avtext { fill:#fff; font-size:11px; font-weight:var(--fw-bold); } #graph .nname { font-size:13px; font-weight:var(--fw-semibold); } #graph .nrole { font-size:11px; fill:var(--fg-muted); }
 #graph .chip rect { fill:var(--bg-code); stroke:var(--border); } #graph .chip text { font-size:9.5px; fill:var(--fg-secondary); font-family:var(--font-mono); }
 #graph .chip-em rect { fill:var(--accent-soft); stroke:var(--accent); } #graph .chip-em text { fill:var(--accent); font-weight:var(--fw-semibold); }
+#graph .chip-em.chip-default rect { fill:var(--bg-code); stroke:var(--border); } #graph .chip-em.chip-default text { fill:var(--fg-secondary); font-weight:var(--fw-normal, normal); }
 #graph .capsdot circle { fill:var(--fg-muted); opacity:.55; } #graph .capsdot.caps-ok circle { fill:var(--success); opacity:1; } #graph .capsdot.caps-error circle { fill:var(--danger); opacity:1; }
 #graph .status circle { fill:var(--fg-muted); } #graph .status.s-working circle { fill:var(--success); } #graph .status.s-needs-human circle { fill:var(--warning-strong); }
 #graph .handle { fill:var(--bg-raised); stroke:var(--accent); stroke-width:2; opacity:0; cursor:crosshair; transition:opacity var(--dur-fast), r var(--dur-fast); }

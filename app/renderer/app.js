@@ -166,7 +166,14 @@ function resetIn(windowMs) {
 async function renderLimitMeter() {
   let st; try { st = await call('usageStatus'); } catch { st = null; }
   const m = $('#limitmeter');
-  if (!st || (!st.fiveHour.limit && !st.weekly.limit)) { m.classList.add('hidden'); m.innerHTML = ''; return; }
+  const isSubscriptionUser = S.team.nodes.some((n) => (n.billingMode || 'auto') !== 'api' && (n.billingMode || 'auto') !== 'proxy');
+  if (!st || (!st.fiveHour.limit && !st.weekly.limit)) {
+    if (!isSubscriptionUser) { m.classList.add('hidden'); m.innerHTML = ''; return; }
+    m.classList.remove('hidden');
+    m.innerHTML = `<span class="lm-part lm-pending" title="Subscription 5h/weekly usage appears here once the CLI reports it (after a run) or a limit is set in Usage &amp; limits."><b>5h</b> <small>–</small></span>` +
+      `<span class="lm-part lm-pending"><b>weekly</b> <small>–</small></span>`;
+    return;
+  }
   m.classList.remove('hidden');
   const part = (label, u, ms) => { if (!u.limit) return ''; const pct = Math.min(100, Math.round(u.pct * 100)); const cls = u.pause ? 'danger' : u.warn ? 'warn' : 'ok';
     return `<span class="lm-part lm-${cls}" title="${esc(label)}: ${pct}% used · resets in ${fmtCountdown(ms)}"><b>${esc(label)}</b> ${pct}%<i class="lm-bar"><i class="lm-fill" style="width:${pct}%"></i></i><small>↻${fmtCountdown(ms)}</small></span>`; };
@@ -275,7 +282,7 @@ function renderGraph() {
     el('text', { x: 52, y: 38, class: 'nrole' }, g).textContent = clipText(n.role, 20);
     let cx = 12; for (const chip of [VENDOR[ns.runtime || n.runtime || 'claude'] || ns.runtime || n.runtime, ns.model || n.model || 'default'].filter(Boolean)) { const t = clipText(chip, 14); const w = 10 + t.length * 5.6; const cg = el('g', { class: 'chip', transform: `translate(${cx},46)` }, g); el('rect', { width: w, height: 14, rx: 7 }, cg); el('text', { x: w / 2, y: 10.5, 'text-anchor': 'middle' }, cg).textContent = t; cx += w + 4; }
     const effort = n.effort || 'low';
-    for (const chip of [effort !== 'low' ? `E:${effort}` : null, n.autoCompact ? `AC:${n.autoCompact}` : null].filter(Boolean)) { const t = clipText(chip, 14); const w = 10 + t.length * 5.6; const cg = el('g', { class: 'chip chip-em', transform: `translate(${cx},46)` }, g); el('title', {}, cg).textContent = chip.startsWith('E:') ? `Reasoning effort: ${effort}` : `Auto-compact window: ${n.autoCompact}`; el('rect', { width: w, height: 14, rx: 7 }, cg); el('text', { x: w / 2, y: 10.5, 'text-anchor': 'middle' }, cg).textContent = t; cx += w + 4; }
+    for (const chip of [`E:${effort}`, n.autoCompact ? `AC:${n.autoCompact}` : null].filter(Boolean)) { const t = clipText(chip, 14); const w = 10 + t.length * 5.6; const isDefaultEffort = chip === `E:${effort}` && !n.effort; const cg = el('g', { class: 'chip chip-em' + (isDefaultEffort ? ' chip-default' : ''), transform: `translate(${cx},46)` }, g); el('title', {}, cg).textContent = chip.startsWith('E:') ? `Reasoning effort: ${effort}${isDefaultEffort ? ' (default)' : ''}` : `Auto-compact window: ${n.autoCompact}`; el('rect', { width: w, height: 14, rx: 7 }, cg); el('text', { x: w / 2, y: 10.5, 'text-anchor': 'middle' }, cg).textContent = t; cx += w + 4; }
     const capsSt = !n.capabilities ? 'none' : (n.capabilities.error || n.capabilities.ok === false) ? 'error' : 'ok';
     const cb = el('g', { class: 'capsdot caps-' + capsSt, transform: `translate(10,${H - 8})` }, g); el('circle', { r: 4 }, cb);
     el('title', {}, cb).textContent = capsSt === 'none' ? 'Capabilities not probed yet' : capsSt === 'error' ? 'Capability probe failed' : `Capabilities probed${n.capabilitiesProbedAt ? ' ' + new Date(n.capabilitiesProbedAt).toLocaleString() : ''}`;
@@ -491,6 +498,7 @@ function renderNodeForm() {
   $('#nf-mode').onchange = showMode; showMode();
   $('#nf-perms').ontoggle = () => { sel.permsOpen = $('#nf-perms').open; };
   $('#nf-caps-refresh').onclick = () => refreshCaps(n);
+  if (!n.capabilities && !CAPS_LOADING.has(n.id)) refreshCaps(n);
   const read = () => ({
     runtime: $('#nf-runtime').value, name: $('#nf-name').value, role: $('#nf-role').value.trim() || 'Dev', model: $('#nf-model').value.trim(), workdir: $('#nf-workdir').value.trim(), systemPrompt: $('#nf-prompt').value,
     permissionMode: $('#nf-perm').value, allowedTools: $('#nf-allowed').value, disallowedTools: $('#nf-disallowed').value, maxTurns: +$('#nf-maxturns').value || 0,
