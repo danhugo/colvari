@@ -5,7 +5,6 @@
 const { execFileSync, spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
-const { RUN_MODES } = require('./agent-modes');
 
 // Pull plausible "slash commands" (/foo) and bare subcommand-looking tokens out of free-form --help text.
 function parseHelpText(text) {
@@ -15,17 +14,13 @@ function parseHelpText(text) {
   return { slashCommands, commands };
 }
 
-// The app's own run modes (single/goal/loop/workflow — see agent-modes.js) are always available regardless of
-// what the underlying CLI reports, so discovery should never show "Modes: none found" for them. Additionally,
-// scan for well-known goal/loop/workflow-style CLI features so the same modes are recognized when the CLI itself
-// (Claude Code's own /loop skill, workflow tooling, Codex "goal mode") advertises them in --help text.
+// Modes are derived only from what the CLI actually reports (slash commands / --help text), not a constant
+// injected list — a runtime that never mentions goal/loop/workflow shows no such modes.
 function detectAppModes(helpText = '', slashCommands = []) {
-  const s = String(helpText || '').toLowerCase();
   const cmds = (slashCommands || []).map((c) => String(c).toLowerCase());
-  const found = new Set(RUN_MODES);
-  if (/\bworkflow(s)?\b/.test(s) || cmds.includes('/workflow')) found.add('workflow');
-  if (/\bgoal\b/.test(s) || cmds.includes('/goal')) found.add('goal');
-  if (/\bloop\b/.test(s) || cmds.includes('/loop')) found.add('loop');
+  const found = new Set();
+  if (cmds.includes('/goal')) found.add('goal');
+  if (cmds.includes('/loop')) found.add('loop');
   return [...found];
 }
 
@@ -136,16 +131,13 @@ function discoverCapabilities(rt, settings = {}, { exec, initEvent, cwd, home } 
     skills, modes: [], ok: help.ok, error: help.error, probedAt: help.probedAt,
   };
   if (initEvent) {
+    // A live init event is the CLI's own authoritative report of what this session actually has — use its
+    // slash_commands/skills as-is rather than unioning with the (possibly stale/unrelated) --help/local scan.
     const fromInit = fromInitEvent(initEvent);
-    base = { ...base, ...fromInit,
-      slashCommands: [...new Set([...base.slashCommands, ...fromInit.slashCommands])],
-      skills: [...new Set([...base.skills, ...fromInit.skills])],
-      modes: [...new Set([...base.modes, ...fromInit.modes])],
-      probedAt: fromInit.probedAt };
+    base = { ...base, ...fromInit };
   }
-  // The app's own goal/loop/workflow run modes (plus any CLI/plugin-native ones mentioned in --help) are always
-  // shown in the categorized view, independent of the flat `modes` field above (which stays permission-mode only,
-  // for back-compat) — this is what fixes "Modes: none found" for projects whose CLI never reported permission_modes.
+  // Modes shown in the categorized view are the slash commands that actually look like goal/loop run modes,
+  // plus any permission_modes the CLI reported — never a constant injected app-modes list.
   const appModes = [...new Set([...detectAppModes(help.helpText, base.slashCommands), ...base.modes])];
   base.categorized = categorize({ modes: appModes, skills: base.skills, slashCommands: base.slashCommands, mcpServers });
   return base;

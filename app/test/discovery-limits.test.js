@@ -36,7 +36,7 @@ test('discovery: codex --help fixture surfaces its goal-mode subcommand', () => 
   assert.deepEqual(c.slashCommands.sort(), ['/diff', '/explain']);
 });
 
-test('discovery: a live init event\'s modes/skills win over --help for the same runtime', () => {
+test('discovery: a live init event is used as-is, not unioned with --help/local scan', () => {
   const rt = { id: 'claude', bin: () => 'claude' };
   const help = fixture('help-claude.txt');
   const c = CAP.discoverCapabilities(rt, {}, {
@@ -44,9 +44,9 @@ test('discovery: a live init event\'s modes/skills win over --help for the same 
     initEvent: { slash_commands: ['loop', 'workflow'], skills: ['superpowers:test-driven-development'], permission_modes: ['default', 'plan', 'acceptEdits'] },
     ...FS_OPTS,
   });
-  // union of --help + init-event slash commands, deduped
-  assert.ok(c.slashCommands.includes('/review')); // from --help
-  assert.ok(c.slashCommands.includes('/loop')); // from both
+  // init event replaces --help's slash commands entirely (no union) — /review only exists in --help and must not leak in
+  assert.ok(!c.slashCommands.includes('/review'));
+  assert.deepEqual(c.slashCommands.sort(), ['/loop', '/workflow']);
   assert.deepEqual(c.modes, ['default', 'plan', 'acceptEdits']);
   assert.deepEqual(c.skills, ['superpowers:test-driven-development']);
   assert.equal(c.source, 'init-event');
@@ -123,6 +123,28 @@ test('real event: recorded system/init event has the shape discoverCapabilities 
   assert.equal(c.source, 'init-event');
   assert.deepEqual(c.skills, initEvent.skills);
   assert.equal(c.slashCommands.length, initEvent.slash_commands.length);
+});
+
+test('real event: init event alone (no --help/local union) yields exactly 123 slash commands / 58 skills', () => {
+  const initEvent = JSON.parse(fixture('real-init-event.json'));
+  const rt = { id: 'claude', bin: () => 'claude' };
+  // A non-empty --help fixture and local .claude scan are both present here to prove they're ignored once a
+  // live init event exists — the bug this guards against unioned them in, inflating counts past what the CLI
+  // session actually reported.
+  const help = fixture('help-claude.txt');
+  const c = CAP.discoverCapabilities(rt, {}, { exec: () => help, initEvent, ...FS_OPTS });
+  assert.equal(c.slashCommands.length, 123);
+  assert.equal(c.skills.length, 58);
+});
+
+test('real event: usageStatus prefers the CLI-reported rate-limit snapshot even with an empty in-memory map (persisted node.rateLimits fallback)', () => {
+  const rateLimitEvent = JSON.parse(fixture('real-rate-limit-event.json'));
+  const rl = U.parseRateLimits(rateLimitEvent);
+  const runs = []; // no local runs at all — an empty in-memory subscriptionRateLimits map, only a persisted snapshot
+  const status = U.usageStatus(runs, { fiveHourLimit: 0, weeklyLimit: 0, warnPct: 80 });
+  const merged = U.applyCliRateLimits(status, [rl], 80);
+  assert.equal(Math.round(merged.fiveHour.pct * 100), 38);
+  assert.equal(Math.round(merged.weekly.pct * 100), 22);
 });
 
 test('real event: recorded rate_limit_event parses to numeric 5h/weekly percentages', () => {

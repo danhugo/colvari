@@ -100,12 +100,12 @@ test('capabilities: needsReprobe triggers on missing/expired cache and signature
   assert.equal(CAP.needsReprobe(stale, 'claude|1.0|opus|auto', { now }), true); // TTL lapsed
 });
 
-test('capabilities: init event data merges over --help probe, no hard-coded lists', () => {
+test('capabilities: init event data replaces the --help probe as-is, no union with hard-coded/local lists', () => {
   const fs = require('fs'); const os = require('os'); const path = require('path');
   const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'cap-home-'));
   const rt = { id: 'claude', bin: () => 'claude' };
   const c = CAP.discoverCapabilities(rt, {}, { exec: () => '/compact', initEvent: { slash_commands: ['review'], skills: ['pdf'], permission_modes: ['default', 'plan'] }, cwd: fakeHome, home: fakeHome });
-  assert.deepEqual(c.slashCommands.sort(), ['/compact', '/review']);
+  assert.deepEqual(c.slashCommands, ['/review']);
   assert.deepEqual(c.skills, ['pdf']); assert.deepEqual(c.modes, ['default', 'plan']);
   assert.equal(c.runtime, 'claude');
 });
@@ -148,13 +148,13 @@ test('usage: providerUsageStatus reports real usage or an explicit reason', () =
   assert.equal(neverReported.available, false); assert.match(neverReported.reason, /no usage reported yet/);
 });
 
-test('capabilities: goal/loop/workflow run modes and mcp servers are always categorized (fixes "Modes: none found")', () => {
+test('capabilities: modes are only the goal/loop slash commands the CLI actually reports (+ permission_modes), plus configured mcp servers', () => {
   const fs = require('fs'); const os = require('os'); const path = require('path');
   const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'cap-home-'));
   const rt = { id: 'claude', bin: () => 'claude' };
   const c = CAP.discoverCapabilities(rt, { mcpServers: { board: {} } }, { exec: () => 'usage: claude', cwd: fakeHome, home: fakeHome });
   const modeNames = c.categorized.filter((x) => x.category === 'mode').map((x) => x.name).sort();
-  assert.deepEqual(modeNames, ['goal', 'loop', 'single', 'workflow']);
+  assert.deepEqual(modeNames, []); // "usage: claude" --help mentions no /goal or /loop slash commands
   const mcpNames = c.categorized.filter((x) => x.category === 'mcp').map((x) => x.name);
   assert.deepEqual(mcpNames, ['board']);
 });

@@ -222,6 +222,21 @@ function usageStatus(runs, limits, now = Date.now()) {
   return { authTypes, fiveHour, weekly, tokens, cost, warn, pause };
 }
 
+// Fold each node's CLI-reported subscription rate-limit % (from rlAll — one parseRateLimits() result per node,
+// live in-memory or the last persisted node.rateLimits snapshot) over the run-derived usageStatus. The CLI's own
+// number is always the more trustworthy one when present: other clients sharing the same subscription window
+// aren't reflected in this project's local run count, so it wins outright rather than only when higher.
+function applyCliRateLimits(status, rlAll, warnPct) {
+  const pick = (key) => {
+    const cli = rlAll.map((rl) => rl && rl[key]).filter(Boolean).sort((a, b) => b.pct - a.pct)[0];
+    const runBased = status[key];
+    if (!cli) return runBased;
+    return { used: runBased.used, limit: runBased.limit || 1, pct: cli.pct, warn: cli.pct * 100 >= warnPct, pause: cli.pct >= 1, resetsAt: cli.resetsAt };
+  };
+  const fiveHour = pick('fiveHour'), weekly = pick('weekly');
+  return { ...status, fiveHour, weekly, warn: status.warn || fiveHour.warn || weekly.warn, pause: status.pause || fiveHour.pause || weekly.pause };
+}
+
 // Subscription rate-limit snapshot as reported by the CLI's init event (percent of window used + reset time,
 // not $ — subscription auth isn't billed per token). Field names are read generically/defensively since they
 // vary across CLI versions; an unrecognized shape just yields null rather than a guessed value.
@@ -271,4 +286,4 @@ function providerUsageStatus(rateLimits, ctx = {}) {
 }
 
 module.exports = { resultSnapshot, tokensForRun, BILLING_MODES, BILLING_SOURCES, normalizeBilling, applyBillingEnv, detectBilling, costNote, tokensFromResult, totalTokens, newRun, applyEvent, finishRun, summarize, total, modelStats, toCSV, CSV_COLS,
-  LIMITS_DEFAULTS, normalizeLimits, authType, windowUsage, limitStatus, usageStatus, parseRateLimitWindow, parseRateLimits, subscriptionGuard, providerUsageStatus, GUARD_DEFAULT_PCT };
+  LIMITS_DEFAULTS, normalizeLimits, authType, windowUsage, limitStatus, usageStatus, applyCliRateLimits, parseRateLimitWindow, parseRateLimits, subscriptionGuard, providerUsageStatus, GUARD_DEFAULT_PCT };

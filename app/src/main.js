@@ -991,15 +991,13 @@ const api = {
     const s = ST(c); const settings = s.getSettings();
     const status = U.usageStatus(s.listRuns(), settings.usageLimits);
     const warnPct = (settings.usageLimits && settings.usageLimits.warnPct) || 80;
-    const rlAll = Object.values(orchFor(c.p).subscriptionRateLimits || {});
-    const pick = (key) => {
-      const cli = rlAll.map((rl) => rl[key]).filter(Boolean).sort((a, b) => b.pct - a.pct)[0];
-      const runBased = status[key];
-      if (!cli || (runBased.limit && runBased.pct >= cli.pct)) return runBased;
-      return { used: runBased.used, limit: runBased.limit || 1, pct: cli.pct, warn: cli.pct * 100 >= warnPct, pause: cli.pct >= 1, resetsAt: cli.resetsAt };
-    };
-    const fiveHour = pick('fiveHour'), weekly = pick('weekly');
-    return { ...status, fiveHour, weekly, warn: status.warn || fiveHour.warn || weekly.warn, pause: status.pause || fiveHour.pause || weekly.pause };
+    const inMemory = orchFor(c.p).subscriptionRateLimits || {};
+    // The in-memory map is only populated after a run/probe this session, so it's empty right after a restart —
+    // fall back to each node's persisted rateLimits snapshot (discoverCapabilities/orchestrator writes
+    // node.rateLimits alongside the in-memory map) so a restart doesn't lose the last known real CLI %.
+    const nodes = TS(c).getTeam().nodes;
+    const rlAll = nodes.map((n) => inMemory[n.id] || n.rateLimits).filter(Boolean);
+    return U.applyCliRateLimits(status, rlAll, warnPct);
   },
   // Real per-provider subscription usage (5h/weekly used % + reset time) for one agent, as self-reported by its
   // own CLI's init event — with an explicit reason when there is nothing to report yet.
@@ -1027,7 +1025,7 @@ const api = {
           patch.capabilities = capabilities; patch.capabilitiesProbedAt = capabilities.probedAt;
         }
         const rl = rateLimit ? U.parseRateLimits(rateLimit) : null;
-        if (rl) { patch.rateLimits = rl; patch.rateLimitsAt = new Date().toISOString(); orchFor(c.p).subscriptionRateLimits[nodeId] = rl; }
+        if (rl) { patch.rateLimits = rl; patch.rateLimitsAt = new Date().toISOString(); (orchFor(c.p).subscriptionRateLimits ||= {})[nodeId] = rl; }
       } catch {}
     }
     TS(c).updateNode(nodeId, patch);
