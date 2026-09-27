@@ -91,8 +91,11 @@ let capsSearch = '';
 // Groups shown in this fixed order: Modes first, then Skills, Commands, MCP.
 function capsGroups(n) {
   const c = n.capabilities || {};
+  // Modes come from the categorized 'mode' entries (goal/loop/workflow run modes detected from --help/init
+  // event), not the raw c.modes field, which holds CLI permission_modes (default/plan/acceptEdits) or is empty.
+  const modes = [...new Set((c.categorized || []).filter((x) => x.category === 'mode').map((x) => x.name))];
   return [
-    { key: 'modes', label: 'Modes', items: c.modes || [] },
+    { key: 'modes', label: 'Modes', items: modes },
     { key: 'skills', label: 'Skills', items: c.skills || [] },
     { key: 'commands', label: 'Commands', items: [...new Set([...(c.slashCommands || []), ...(c.commands || [])])] },
     { key: 'mcp', label: 'MCP', items: ['board', ...(n.allowedTools || []).filter((t) => t.startsWith('mcp__') && !t.startsWith('mcp__board')).map((t) => t.slice(5).split('__')[0])].filter((v, i, a) => a.indexOf(v) === i) },
