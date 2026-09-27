@@ -1,7 +1,7 @@
 :root { --bg:var(--bg-app); --fg:var(--fg-primary); --muted:var(--fg-muted); --card:var(--bg-surface); --line:var(--border); --acc:var(--accent); --ok:var(--success); --warn:var(--warning-strong); --panel:var(--bg-raised); }
 * { box-sizing:border-box; } body { margin:0; font:13px -apple-system,system-ui,sans-serif; background:var(--bg); color:var(--fg); height:100vh; display:flex; flex-direction:column; }
 header { display:flex; align-items:center; gap:8px; padding:8px 12px; border-bottom:1px solid var(--line); background:var(--card); }
-nav button { border:none; background:none; padding:6px 10px; } nav button.active { color:var(--acc); border-bottom:2px solid var(--acc); }
+nav button { border:none; background:none; padding:6px 10px; text-decoration:none; } nav button.active { color:var(--acc); }
 .spacer { flex:1; } .pill { padding:3px 8px; border-radius:10px; border:1px solid var(--line); } .pill.on { background:var(--ok); color:var(--fg-on-accent); }
 button, input, select, textarea { font:inherit; color:var(--fg); background:var(--card); border:1px solid var(--line); border-radius:6px; padding:5px 9px; }
 button { cursor:pointer; } button.primary { background:var(--acc); color:var(--fg-on-accent); border-color:var(--acc); } button.on { outline:2px solid var(--acc); }
@@ -46,7 +46,7 @@ main { flex:1; overflow:hidden; } .tab { display:none; height:100%; padding:10px
 .logtext { flex:1; min-width:0; white-space:pre-wrap; word-break:break-word; }
 .logrow.lv-error, .loglevel.lv-error { color:var(--term-red); } .logrow.lv-tool, .loglevel.lv-tool { color:var(--term-yellow); }
 .logrow.lv-info, .loglevel.lv-info { color:var(--term-blue); } .logrow.lv-ok, .loglevel.lv-ok { color:var(--term-green); }
-.logrow.lv-muted, .loglevel.lv-muted { color:var(--term-dim); }
+.logrow.lv-muted, .loglevel.lv-muted { color:var(--term-dim); } .logrow.lv-text, .loglevel.lv-text { color:var(--term-fg); }
 .logempty { padding:24px 4px; text-align:center; }
 table { border-collapse:collapse; background:var(--card); } td, th { border:1px solid var(--line); padding:5px 10px; text-align:left; } .st-working { color:var(--ok); font-weight:600; }
 #body { flex:1; display:flex; min-height:0; } #body main { flex:1; min-width:0; }
@@ -108,7 +108,7 @@ header .pill { font-variant-numeric:tabular-nums; } .pill.quiet { color:var(--mu
 #ov-graph .avtext { fill:#fff; font-size:11px; font-weight:var(--fw-bold); } #ov-graph .nname { font-size:13px; font-weight:var(--fw-semibold); } #ov-graph .nrole { font-size:11px; fill:var(--fg-muted); }
 #ov-graph .node.stuck .nrole { fill:var(--warning-strong); }
 #ov-graph .status circle { fill:var(--fg-muted); } #ov-graph .status.s-working circle { fill:var(--success); } #ov-graph .status.s-needs-human circle { fill:var(--warning-strong); }
-#ov-graph .edge { fill:none; stroke:var(--fg-muted); stroke-width:1.75; }
+#ov-graph .edge { fill:none; stroke:var(--edge); stroke-width:1.75; }
 #ov-graph .edge-assign { stroke:var(--accent); } #ov-graph .edge-message { stroke:var(--info); } #ov-graph .edge-review { stroke:var(--warning-strong); }
 #ov-graph .arrow-assign { fill:var(--accent); } #ov-graph .arrow-message { fill:var(--info); } #ov-graph .arrow-review { fill:var(--warning-strong); }
 #ov-graph .edge.flash { stroke:var(--acc); stroke-width:3; animation:flash 1s ease-in-out infinite; }
@@ -281,7 +281,7 @@ header .pill { border:none; background:none; color:var(--fg-muted); font-size:va
 #graph .qacts { opacity:0; pointer-events:none; transition:opacity var(--dur-fast); } #graph .node:hover .qacts { opacity:1; pointer-events:all; }
 #graph .qa { cursor:pointer; } #graph .qa rect { fill:var(--bg-raised); stroke:var(--border-strong); } #graph .qa:hover rect { fill:var(--accent-soft); stroke:var(--accent); } #graph .qa text { font-size:12px; }
 #graph .ghost rect { fill:none; stroke:var(--border-strong); stroke-width:1.5; stroke-dasharray:6 4; } #graph .ghost text { fill:var(--fg-muted); }
-#graph .edge { fill:none; stroke:var(--fg-muted); stroke-width:1.75; pointer-events:none; } #graph .edgehit { fill:none; stroke:transparent; stroke-width:14; cursor:pointer; }
+#graph .edge { fill:none; stroke:var(--edge); stroke-width:1.75; pointer-events:none; } #graph .edgehit { fill:none; stroke:transparent; stroke-width:14; cursor:pointer; }
 #graph .edge-assign { stroke:var(--accent); } #graph .edge-message { stroke:var(--info); } #graph .edge-review { stroke:var(--warning-strong); }
 #graph .edge.cross { stroke-dasharray:7 5; } #graph .edge.sel { stroke:var(--fg-primary); stroke-width:3; } #graph .edge.linking { stroke:var(--accent); stroke-dasharray:4 4; }
 #graph .arrow-assign { fill:var(--accent); } #graph .arrow-message { fill:var(--info); } #graph .arrow-review { fill:var(--warning-strong); } #graph .arrow-sel { fill:var(--fg-primary); }
@@ -318,4 +318,27 @@ header .pill { border:none; background:none; color:var(--fg-muted); font-size:va
 #graph.lod-far .nrole, #graph.lod-far .chip, #graph.lod-far .qa, #graph.lod-far .elabel { display:none; }
 .vbadge { display:inline-flex; align-items:center; gap:4px; margin-left:6px; padding:0 6px; border-radius:8px; font:500 10.5px/16px var(--font-mono); background:var(--bg-code); border:1px solid var(--border); color:var(--fg-secondary); vertical-align:middle; white-space:nowrap; }
 .vbadge i { font-style:normal; opacity:.75; } .vbadge.vb-codex { border-color:var(--success-text); } .vbadge.vb-opencode { border-color:var(--danger); }
+#minimap.hidden { display:none; }
+/* level filter: filled chip with a check when active, outline when off */
+.lvchips { display:flex; gap:4px; align-items:center; }
+.lvchip { display:inline-flex; align-items:center; gap:3px; padding:2px 8px; border-radius:var(--radius-full); border:1px solid var(--border-strong); background:var(--bg-code); color:var(--fg-muted); font-size:10.5px; font-weight:var(--fw-medium); cursor:pointer; text-transform:uppercase; letter-spacing:.02em; }
+.lvchip .ck { display:none; }
+.lvchip.on { color:var(--fg-on-accent); border-color:transparent; }
+.lvchip.on .ck { display:inline; }
+.lvchip.lv-error { color:var(--term-red); } .lvchip.lv-tool { color:var(--term-yellow); } .lvchip.lv-info { color:var(--term-blue); } .lvchip.lv-ok { color:var(--term-green); } .lvchip.lv-muted, .lvchip.lv-text { color:var(--fg-muted); }
+.lvchip.on.lv-error { background:var(--term-red); } .lvchip.on.lv-tool { background:var(--term-yellow); } .lvchip.on.lv-info { background:var(--term-blue); } .lvchip.on.lv-ok { background:var(--term-green); } .lvchip.on.lv-muted, .lvchip.on.lv-text { background:var(--fg-muted); }
+/* Logs task column: truncated title, id in the tooltip; deep-links into the Board task */
+.logtask { flex:0 0 auto; max-width:160px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:11px; color:var(--accent-text); cursor:pointer; padding:0 4px; border-radius:4px; }
+.logtask:hover { background:var(--bg-hover); text-decoration:underline; }
+/* chat: repeat-count badge at the end of a collapsed run of identical messages */
+.repeat { display:inline-block; margin-left:6px; padding:0 5px; border-radius:8px; font-size:10px; font-weight:var(--fw-semibold); background:var(--bg-code); color:var(--fg-muted); border:1px solid var(--border); vertical-align:middle; }
+/* chat: "N new" pill, shown only while scrolled up */
+#chat-newpill { position:absolute; left:50%; bottom:14px; transform:translateX(-50%); z-index:5; padding:5px 12px; border-radius:var(--radius-full); background:var(--accent); color:var(--fg-on-accent); border:none; box-shadow:var(--shadow-md); font-size:12px; font-weight:var(--fw-medium); cursor:pointer; }
+.chat-main { position:relative; }
+/* wiki backlinks (cheap: tasks whose title/description mention the page) */
+.wk-backlinks { margin-top:var(--space-4); padding-top:var(--space-3); border-top:1px solid var(--border); font-size:var(--text-sm); color:var(--fg-secondary); }
+.wk-backlinks b { display:block; margin-bottom:var(--space-1); font-size:var(--text-xs); text-transform:uppercase; letter-spacing:.04em; color:var(--fg-muted); }
+.wk-backlinks ul { margin:0; padding-left:18px; }
+.wk-backlinks li { cursor:pointer; color:var(--accent-text); }
+.wk-backlinks li:hover { text-decoration:underline; }
 .rtpresets { flex-wrap:wrap; gap:4px; align-items:center; } .rtpresets small { opacity:.7; font-family:var(--font-mono); }

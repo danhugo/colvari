@@ -24,6 +24,8 @@
   --success: #12a150; --success-soft: #dcf5e6; --warning: #d98a00; --warning-soft: #fff1d6; --danger: #e5484d; --danger-soft: #ffe3e3; --info: #0b8ad9;
   /* AA text-safe status colours (≥4.5:1 on bg + soft) */
   --success-text: #0f7a3d; --warning-text: #8f5b00; --warning-strong: #b35f00;
+  /* graph edges: ≥3:1 contrast on bg-surface in both themes (see design/critique-views.md #1) */
+  --edge: #8a90a0;
   /* shadows */
   --shadow-sm: 0 1px 2px rgba(16,20,40,.06);
   --shadow-md: 0 2px 8px rgba(16,20,40,.07), 0 1px 2px rgba(16,20,40,.05);
@@ -53,6 +55,7 @@
   --agent-5: #4db5ff; --agent-6: #d57ef0; --agent-7: #ff7a70; --agent-8: #3dd6c3; --human: #eceef3;
   --agent-1-text: #8f83ff; --agent-2-text: #ff7fa8; --agent-3-text: #34c79c; --agent-4-text: #ffa94d;
   --agent-5-text: #4db5ff; --agent-6-text: #d57ef0; --agent-7-text: #ff7a70; --agent-8-text: #3dd6c3;
+  --edge: #6b7285;
 }
 
 /* follow the OS theme unless explicitly set */
@@ -69,4 +72,5 @@
   --agent-5: #4db5ff; --agent-6: #d57ef0; --agent-7: #ff7a70; --agent-8: #3dd6c3; --human: #eceef3;
   --agent-1-text: #8f83ff; --agent-2-text: #ff7fa8; --agent-3-text: #34c79c; --agent-4-text: #ffa94d;
   --agent-5-text: #4db5ff; --agent-6-text: #d57ef0; --agent-7-text: #ff7a70; --agent-8-text: #3dd6c3;
+  --edge: #6b7285;
 } }

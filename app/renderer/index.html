@@ -19,10 +19,10 @@
   <div id="inbox-side" class="inbox-side" title="Open questions and approvals for you">Inbox <span class="badge" id="inbox-badge"></span></div>
   <section class="sb-sec"><h4>Projects</h4>
   <div id="projectlist"></div>
-  <div class="sb-actions"><button id="newproject" title="New project">＋ New</button><button id="renproject" title="Rename project">✎ Rename</button><button id="delproject" class="danger" title="Delete project">🗑</button></div></section>
+  <div class="sb-actions"><button id="newproject" title="New project">＋ New</button><button id="renproject" title="Rename project">✎ Rename</button><button id="delproject" class="danger" title="Delete project">✕</button></div></section>
   <section class="sb-sec"><h4>Team</h4>
   <div id="teamlist"></div>
-  <div class="sb-actions"><button id="newteam" title="New team">＋ New</button><button id="renteam" title="Rename team">✎ Rename</button><button id="dupteam" title="Duplicate team">⧉ Copy</button><button id="delteam" class="danger" title="Delete team">🗑</button></div></section>
+  <div class="sb-actions"><button id="newteam" title="New team">＋ New</button><button id="renteam" title="Rename team">✎ Rename</button><button id="dupteam" title="Duplicate team">⧉ Copy</button><button id="delteam" class="danger" title="Delete team">✕</button></div></section>
   <section class="sb-sec"><h4>Import / Export</h4>
   <div class="sb-actions"><button id="exportteam" title="Export team as JSON">⤓ Export</button><button id="importteam" title="Import team from JSON">⤒ Import</button><input id="importfile" type="file" accept=".json,application/json" class="hidden"></div></section>
   <section class="sb-sec"><h4>Settings</h4>
@@ -34,13 +34,14 @@
     <div class="chat"><div class="chat-main">
       <div class="chat-head"><b># company</b> <span class="muted">everything your team says and does</span><span class="spacer"></span><span id="chat-typing"></span></div>
       <div id="chat-room"></div>
+      <button id="chat-newpill" class="hidden">↓ <span></span> new</button>
       <div id="chat-mentions" class="hidden"></div>
       <div id="chat-yourturn" class="hidden"></div>
       <div class="composer"><div id="chat-preview" class="muted"></div><div class="row"><textarea id="chat-input" rows="2" placeholder="Message #company — @Name task · @Name? question · plain text starts a goal"></textarea><button id="chat-send" class="primary">Send</button></div></div>
     </div><aside id="chat-thread" class="hidden"></aside></div>
   </section>
   <section id="tab-team" class="tab">
-    <div class="toolbar gtoolbar"><div class="tgroup"><button id="addnode" class="primary" title="Add agent (or right-click the canvas)">＋ Agent</button><button id="testteam" title="Run a cheap preflight check on every agent">Test team</button></div><div class="tgroup"><button id="connect" class="icon" title="Connect mode: click source then target (or drag from a node's right handle)">⤳</button><select id="edgetype" title="Type for click-connect edges"><option>assign</option><option>message</option><option>review</option></select><button id="delsel" class="icon" title="Delete selected (⌫)">🗑</button></div><span id="pf-summary" class="pill"></span><span id="hint" class="muted">Drag a node's handle to connect · right-click for actions · scroll to pan, ⌘/pinch to zoom</span></div>
+    <div class="toolbar gtoolbar"><div class="tgroup"><button id="addnode" class="primary" title="Add agent (or right-click the canvas)">＋ Agent</button><button id="testteam" title="Run a cheap preflight check on every agent">Test team</button></div><div class="tgroup"><button id="connect" class="icon" title="Connect mode: click source then target (or drag from a node's right handle)">⤳</button><select id="edgetype" title="Type for click-connect edges"><option>assign</option><option>message</option><option>review</option></select><button id="delsel" class="icon" title="Delete selected (⌫)">✕</button></div><span id="pf-summary" class="pill"></span><span id="hint" class="muted">Drag a node's handle to connect · right-click for actions · scroll to pan, ⌘/pinch to zoom</span></div>
     <div class="idlebanner hidden" data-where="team"></div>
     <div class="split"><div class="canvas"><svg id="graph"></svg>
       <div class="gcontrols"><button id="zoomout" title="Zoom out">−</button><span id="zoomlvl">100%</span><button id="zoomin" title="Zoom in">＋</button><span class="gsep"></span><button id="fit" title="Fit view">⤢</button><button id="autolayout" title="Auto-layout (layered)">⇶</button></div>
