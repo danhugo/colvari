@@ -13,10 +13,10 @@ const tools = makeTools(store, arg('--node'));
 // Only register the tools enabled for this agent (checked again on every call).
 const enabled = new Set(enabledTools(store.getTeam().nodes.find((n) => n.id === arg('--node'))));
 const server = new McpServer({ name: 'board', version: '0.1.0' });
-const STATUS = z.enum(['todo', 'in_progress', 'review', 'done']);
+const STATUS = z.enum(['todo', 'in_progress', 'review', 'done', 'waiting_for_human']);
 
 const reg = (name, description, shape) => enabled.has(name) && server.tool(name, description, shape, async (args) => {
-  try { return { content: [{ type: 'text', text: JSON.stringify(tools[name](args || {}), null, 2) }] }; }
+  try { return { content: [{ type: 'text', text: JSON.stringify(await tools[name](args || {}), null, 2) }] }; }
   catch (e) { return { isError: true, content: [{ type: 'text', text: String(e.message || e) }] }; }
 });
 
@@ -27,6 +27,7 @@ reg('update_task_status', 'Change a task status (todo, in_progress, review, done
 reg('comment_task', 'Add a comment to a task.', { taskId: z.string(), text: z.string() });
 reg('send_message', 'Send a direct message to a teammate you have a message or assign edge to (id or name).', { to: z.string(), text: z.string(), taskId: z.string().optional() });
 reg('read_messages', 'Read your inbox (messages from teammates with an edge to you, and from the human). Marks them read.', { unreadOnly: z.boolean().optional(), from: z.string().optional() });
+reg('ask_human', 'Ask the human a question and WAIT for the answer (blocks until answered in the Inbox). Your task goes to waiting_for_human meanwhile. Returns {answer}.', { question: z.string(), choices: z.array(z.string()).optional().describe('optional answer buttons'), taskId: z.string().optional() });
 reg('read_wiki', 'Read a wiki page by title, or list page titles when title is omitted.', { title: z.string().optional() });
 reg('write_wiki', 'Create or overwrite a markdown wiki page.', { title: z.string(), content: z.string() });
 

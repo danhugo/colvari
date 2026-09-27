@@ -66,6 +66,18 @@ function makeTools(store, nodeId) {
       store.markMessagesRead(ms.filter((m) => !m.read).map((m) => m.id));
       return ms.map((m) => ({ ...m, fromName: m.from === 'human' ? 'human' : nodeName(t, m.from) }));
     },
+    // Blocks (async) until a human answers in the Inbox; returns the answer text.
+    async ask_human({ question, choices = [], taskId, pollMs = 1000 }) {
+      const t = me();
+      const tk = taskId ? store.getTask(taskId) : store.listTasks().find((x) => x.assignee === nodeId && x.status === 'in_progress');
+      if (taskId && (!tk || !visibleTask(t, nodeId, tk))) throw new Error('no visible task ' + taskId);
+      const item = store.askHuman({ taskId: tk ? tk.id : null, nodeId, question, choices });
+      for (;;) {
+        const it = store.getInboxItem(item.id);
+        if (it && it.status === 'answered') return { answer: it.answer };
+        await new Promise((r) => setTimeout(r, pollMs));
+      }
+    },
     read_wiki({ title } = {}) {
       me();
       if (!title) return Object.keys(store.listWiki());

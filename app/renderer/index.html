@@ -6,7 +6,7 @@
 <header>
   <strong>Agents Squad</strong>
   <nav id="tabs">
-    <button data-tab="team" class="active">Team</button><button data-tab="board">Board</button><button data-tab="wiki">Wiki</button><button data-tab="obs">Observability</button><button data-tab="usage">Usage</button><button data-tab="settings">Settings</button><button data-tab="overview">Overview</button>
+    <button data-tab="team" class="active">Team</button><button data-tab="board">Board</button><button data-tab="wiki">Wiki</button><button data-tab="obs">Observability</button><button data-tab="usage">Usage</button><button data-tab="settings">Settings</button><button data-tab="overview">Overview</button><button data-tab="inbox">Inbox <span class="badge" id="inbox-tab-badge"></span></button>
   </nav>
   <span class="spacer"></span>
   <span id="runstate" class="pill">idle</span>
@@ -16,6 +16,7 @@
 </header>
 <div id="body">
 <aside id="sidebar">
+  <div id="inbox-side" class="inbox-side" title="Open questions and approvals for you">Inbox <span class="badge" id="inbox-badge"></span></div>
   <h4>Projects</h4>
   <div id="projectlist"></div>
   <div class="toolbar"><button id="newproject">+ Project</button><button id="renproject">Rename</button><button id="delproject">Delete</button></div>
@@ -59,12 +60,13 @@
     <div class="split"><svg id="ov-graph"></svg><aside class="panel" id="ov-threadpanel"><label>Task thread</label><select id="ov-task"></select><div id="ov-thread"></div></aside></div>
     <div id="ov-timeline"></div>
   </section>
+  <section id="tab-inbox" class="tab"><div id="inboxlist" class="scroll"></div></section>
   <section id="tab-settings" class="tab"><div class="panel" id="settingsform"></div></section>
 </main>
 </div>
 <dialog id="askdlg"><form method="dialog"><p id="ask-title"></p><input id="ask-input" style="width:280px"><p><button value="cancel">Cancel</button> <button id="ask-ok" value="ok" class="primary">OK</button></p></form></dialog>
 <dialog id="helpdlg"><form method="dialog"><h3>Keyboard shortcuts</h3><table>
-  <tr><td>Ctrl/Cmd + 1…7</td><td>Team, Board, Wiki, Observability, Usage, Settings, Overview</td></tr>
+  <tr><td>Ctrl/Cmd + 1…8</td><td>Team, Board, Wiki, Observability, Usage, Settings, Overview, Inbox</td></tr>
   <tr><td>Ctrl/Cmd + Enter</td><td>Run</td></tr><tr><td>Ctrl/Cmd + .</td><td>Stop all agents</td></tr>
   <tr><td>/</td><td>Focus the goal box</td></tr><tr><td>n</td><td>New task (Board tab)</td></tr>
   <tr><td>Esc</td><td>Clear selection / leave a field</td></tr><tr><td>?</td><td>This help</td></tr></table>

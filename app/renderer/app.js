@@ -3,7 +3,7 @@ const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const MODELS = ['opus', 'sonnet', 'haiku', 'claude-opus-5-5', 'claude-sonnet-5', 'claude-haiku-4-5-20251001'];
 const RUN_MODES = [['single', 'Single: one run per task'], ['goal', 'Goal: resume until condition met'], ['loop', 'Loop: repeat N times'], ['workflow', 'Workflow: slash command / skill']];
-const STATUSES = ['todo', 'in_progress', 'review', 'done'];
+const STATUSES = ['todo', 'in_progress', 'waiting_for_human', 'review', 'done'];
 const call = (name, ...args) => squad.call(name, ctx, ...args); // every call is scoped to the selected project/team
 let ctx = (() => { try { return JSON.parse(localStorage.getItem('ctx')) || {}; } catch { return {}; } })();
 let P = { projects: [], templates: {} };
@@ -57,12 +57,12 @@ function pfDetail(n) {
 async function refresh() {
   P = await call('listProjects');
   if (!P.projects.some((p) => p.id === ctx.p)) ctx = { p: P.projects[0].id };
-  S = await call('getAll'); ctx.t = S.teamId; await loadRuns(); await loadLogs(ctx.p);
+  S = await call('getAll'); S.inbox = await call('listInbox'); ctx.t = S.teamId; await loadRuns(); await loadLogs(ctx.p);
   try { localStorage.setItem('ctx', JSON.stringify(ctx)); } catch {}
   renderAll();
 }
 const nodeName = (id) => (S.allNodes.find((n) => n.id === id) || {}).name || (id ? id : 'unassigned');
-function renderAll() { renderSidebar(); renderGraph(); renderPreflightBar(); renderNodeForm(); renderBoard(); renderWiki(); renderObs(); renderSettings(); renderHeader(); renderUsage(); renderOverview(); }
+function renderAll() { renderSidebar(); renderGraph(); renderPreflightBar(); renderNodeForm(); renderBoard(); renderWiki(); renderObs(); renderSettings(); renderHeader(); renderUsage(); renderOverview(); renderInbox(); }
 const fmtTok = (n) => { n = n || 0; return n >= 1e6 ? (n / 1e6).toFixed(2) + 'M' : n >= 1e4 ? (n / 1e3).toFixed(1) + 'k' : String(n); };
 const COST_NOTE = { subscription: 'Covered by subscription — not billed per token', other: 'API-equivalent (reported by Claude CLI)' };
 const costCell = (usd, source) => source === 'subscription' ? `<span class="costnote" title="API-equivalent $${(usd || 0).toFixed(4)} (reported by Claude CLI)">${COST_NOTE.subscription}</span>` : `$${(usd || 0).toFixed(4)} <span class="costnote">API-equivalent</span>`;
@@ -303,7 +303,7 @@ function renderBoard() {
   const sa = $('#nt-assignee'); const cur = sa.value;
   sa.innerHTML = S.allNodes.map((n) => `<option value="${n.id}">${esc(n.name)} (${n.role})</option>`).join('') || '<option value="">(add agents first)</option>';
   if (cur) sa.value = cur;
-  $('#columns').innerHTML = STATUSES.map((st) => `<div class="col"><h3>${st.replace('_', ' ')} (${S.tasks.filter((t) => t.status === st).length})</h3>${
+  $('#columns').innerHTML = STATUSES.map((st) => `<div class="col"><h3>${st.replaceAll('_', ' ')} (${S.tasks.filter((t) => t.status === st).length})</h3>${
     S.tasks.filter((t) => t.status === st).map((t) => { const bl = openBlockers(t); const w = (S.orch.agents[t.assignee] || {}); const live = w.status === 'working' && w.taskId === t.id;
       return `<div class="card ${sel.task === t.id ? 'sel' : ''}${t.awaitingApproval ? ' approval' : ''}" data-id="${t.id}"><b>${esc(t.title)}</b>${live ? '<span class="tag live">live</span>' : ''}${bl.length ? `<span class="tag blocked" title="waits for: ${esc(bl.map(taskTitle).join(', '))}">blocked (${bl.length})</span>` : ''}${t.awaitingApproval ? '<span class="tag approval">needs approval</span>' : ''}<small>${esc(nodeName(t.assignee))} · ${t.comments.length} comments</small></div>`; }).join('')}</div>`).join('');
   document.querySelectorAll('.card').forEach((c) => c.onclick = () => { sel.task = c.dataset.id; renderBoard(); });
@@ -506,6 +506,25 @@ $('#ov-task').onchange = renderOverview;
 document.querySelector('#tabs button[data-tab=overview]').addEventListener('click', () => setTimeout(renderOverview));
 setInterval(renderOverview, 1000);
 
+// ---------- human inbox (ask_human questions + approvals) ----------
+function renderInbox() {
+  const items = S.inbox || []; const n = items.length ? String(items.length) : '';
+  $('#inbox-badge').textContent = n; $('#inbox-tab-badge').textContent = n;
+  const taskTitle = (id) => (S.tasks.find((t) => t.id === id) || {}).title || '';
+  $('#inboxlist').innerHTML = items.length ? items.map((i) => `<div class="inboxitem" data-iid="${i.id}">
+    <small>${i.kind === 'approval' ? 'Approval' : 'Question'} from <b>${esc(nodeName(i.nodeId))}</b>${i.taskId ? ' · task: ' + esc(taskTitle(i.taskId)) : ''} · ${esc(new Date(i.at).toLocaleString())}</small>
+    <p>${esc(i.question)}</p>
+    <p>${(i.kind === 'approval' ? ['approve'] : i.choices).map((c) => `<button class="ib-choice primary" data-v="${esc(c)}">${esc(c)}</button>`).join(' ')}</p>
+    <textarea class="ib-text" rows="2" placeholder="${i.kind === 'approval' ? 'Or describe the changes you want' : 'Your answer'}"></textarea>
+    <p><button class="ib-send">${i.kind === 'approval' ? 'Request changes' : 'Send answer'}</button></p></div>`).join('') : '<p class="muted">Nothing waiting for you.</p>';
+  document.querySelectorAll('.inboxitem').forEach((d) => {
+    const answer = (v) => act(async () => { if (!v) return; await call('answerInbox', d.dataset.iid, v); refresh(); })();
+    d.querySelectorAll('.ib-choice').forEach((b) => b.onclick = () => answer(b.dataset.v));
+    d.querySelector('.ib-send').onclick = () => answer(d.querySelector('.ib-text').value.trim());
+  });
+}
+$('#inbox-side').onclick = () => showTab('inbox');
+
 // ---------- live updates ----------
 let pending = null, pendingP = null;
 squad.on('log', (l) => { logs.push(l); if (logs.length > 8000) logs.splice(0, 1000); renderLog(); renderLive(); });
@@ -513,14 +532,15 @@ squad.on('log', (l) => { logs.push(l); if (logs.length > 8000) logs.splice(0, 10
 squad.on('notify', (n) => {
   if (n.projectId && n.projectId !== ctx.p) return;
   const d = document.createElement('div'); d.className = 'toast'; d.innerHTML = `<b>${esc(n.title)}</b><br>${esc(n.body)}`;
-  d.onclick = () => { if (n.taskId) { sel.task = n.taskId; showTab('board'); renderBoard(); } d.remove(); };
+  if (n.inbox) refresh();
+  d.onclick = () => { if (n.inbox) { showTab('inbox'); d.remove(); return; } if (n.taskId) { sel.task = n.taskId; showTab('board'); renderBoard(); } d.remove(); };
   $('#toasts').appendChild(d); setTimeout(() => d.remove(), 8000);
 });
 // Keyboard shortcuts: Ctrl/Cmd+1..6 tabs, Ctrl/Cmd+Enter Run, Ctrl/Cmd+. Stop, Esc clear selection / close, ? help.
-const TABS = ['team', 'board', 'wiki', 'obs', 'usage', 'settings', 'overview'];
+const TABS = ['team', 'board', 'wiki', 'obs', 'usage', 'settings', 'overview', 'inbox'];
 document.addEventListener('keydown', (e) => {
   const mod = e.metaKey || e.ctrlKey; const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName);
-  if (mod && e.key >= '1' && e.key <= '7') { e.preventDefault(); showTab(TABS[+e.key - 1]); }
+  if (mod && e.key >= '1' && e.key <= '8') { e.preventDefault(); showTab(TABS[+e.key - 1]); }
   else if (mod && e.key === 'Enter') { e.preventDefault(); $('#run').click(); }
   else if (mod && e.key === '.') { e.preventDefault(); $('#stop').click(); }
   else if (e.key === 'Escape' && !$('#askdlg').open) { if ($('#helpdlg').open) return; if (typing) return document.activeElement.blur(); sel = { ...sel, node: null, edge: null, task: null }; connectMode = false; connectFrom = null; $('#connect').classList.remove('on'); renderGraph(); renderNodeForm(); renderBoard(); }

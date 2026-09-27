@@ -52,3 +52,20 @@ test('changing an agent role to a preset fills its empty prompt, tools and permi
   s.updateNode(n.id, { systemPrompt: '' });
   assert.equal(s.getTeam().nodes.find((x) => x.id === n.id).systemPrompt, '', 'no refill without a role change');
 });
+
+test('human inbox: ask_human blocks until answered, approvals create items', async () => {
+  const os = require('os'); const fs = require('fs'); const path = require('path');
+  const { Store } = require('../src/store'); const { makeTools } = require('../src/board-tools');
+  const s = new Store(fs.mkdtempSync(path.join(os.tmpdir(), 'inbox-')));
+  const n = s.addNode({ name: 'Dev', role: 'Dev' });
+  const t = s.createTask({ title: 'x', assignee: n.id }); s.updateTask(t.id, { status: 'in_progress' });
+  const p = makeTools(s, n.id).ask_human({ question: 'Which DB?', choices: ['pg', 'sqlite'], pollMs: 10 });
+  await new Promise((r) => setTimeout(r, 30));
+  const [q] = s.listInbox({ status: 'open' });
+  assert.equal(q.question, 'Which DB?'); assert.equal(s.getTask(t.id).status, 'waiting_for_human');
+  s.answerInbox(q.id, 'pg');
+  assert.deepEqual(await p, { answer: 'pg' }); assert.equal(s.getTask(t.id).status, 'in_progress');
+  s.updateTask(t.id, { status: 'review', awaitingApproval: true });
+  const [a] = s.listInbox({ status: 'open' }); assert.equal(a.kind, 'approval');
+  s.answerInbox(a.id, 'approve'); assert.equal(s.getTask(t.id).status, 'done'); assert.equal(s.listInbox({ status: 'open' }).length, 0);
+});

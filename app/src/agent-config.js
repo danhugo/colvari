@@ -6,7 +6,7 @@ const { normalizeBilling } = require('./usage');
 const SUGGESTED_ROLES = ['PM', 'Planner', 'Dev', 'Reviewer', 'QA'];
 const PERMISSION_MODES = ['default', 'acceptEdits', 'bypassPermissions', 'plan'];
 const EDGE_TYPES = ['assign', 'message', 'review'];
-const BOARD_TOOLS = ['list_team', 'list_tasks', 'create_task', 'update_task_status', 'comment_task', 'send_message', 'read_messages', 'read_wiki', 'write_wiki'];
+const BOARD_TOOLS = ['list_team', 'list_tasks', 'create_task', 'update_task_status', 'comment_task', 'send_message', 'read_messages', 'ask_human', 'read_wiki', 'write_wiki'];
 
 // Fields every node carries. '' / 0 / [] / {} mean "not set" (use the project default or the CLI default).
 const NODE_DEFAULTS = {

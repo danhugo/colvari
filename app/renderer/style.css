@@ -77,3 +77,7 @@ header .pill { font-variant-numeric:tabular-nums; } .pill.quiet { color:var(--mu
 #ov-stuck:empty { display:none; } .stuckbar { border:1px solid var(--warn); color:var(--warn); border-radius:6px; padding:4px 8px; margin-bottom:4px; display:flex; gap:8px; align-items:center; }
 #ov-thread .chip { display:block; font:11px ui-monospace,monospace; background:var(--bg); border:1px solid var(--line); border-radius:10px; padding:1px 8px; margin:3px 0; }
 #ov-thread details pre { white-space:pre-wrap; word-break:break-word; font-size:11px; margin:2px 0 6px; } #ov-thread .msg { border-left-color:var(--acc); }
+
+.badge { display:inline-block; min-width:16px; padding:0 5px; border-radius:8px; background:#d64550; color:#fff; font-size:11px; text-align:center; } .badge:empty { display:none; }
+.inbox-side { cursor:pointer; padding:4px 6px; border:1px solid var(--muted); border-radius:6px; margin-bottom:6px; }
+.inboxitem { border:1px solid #b0469c; border-radius:6px; padding:8px; margin:0 0 8px; } .inboxitem textarea { width:100%; }

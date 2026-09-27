@@ -10,7 +10,7 @@ const pick = (o, ks) => Object.fromEntries(ks.map((k) => [k, o[k]]));
 const { normalizeNode, normalizePatch, normalizePreset, applyPreset, EDGE_TYPES, SUGGESTED_ROLES } = require('./agent-config');
 
 const ROLES = SUGGESTED_ROLES; // suggestions only: roles are free text
-const STATUSES = ['todo', 'in_progress', 'review', 'done'];
+const STATUSES = ['todo', 'in_progress', 'review', 'done', 'waiting_for_human'];
 
 function defaultProjectDir(name = 'default') {
   return path.join(os.homedir(), '.agents-squad', name);
@@ -131,6 +131,12 @@ class Store {
     return task;
   }
   updateTask(tid, patch) {
+    const t = this._updateTask(tid, patch);
+    // Every approval request also shows up in the human inbox.
+    if (patch.awaitingApproval && !this.listInbox({ status: 'open' }).some((i) => i.kind === 'approval' && i.taskId === tid)) this.addInbox({ kind: 'approval', taskId: tid, nodeId: t.assignee, question: `Approve "${t.title}"?`, choices: ['approve'] });
+    return t;
+  }
+  _updateTask(tid, patch) {
     return this.update('board', { tasks: [] }, (b) => {
       const t = b.tasks.find((x) => x.id === tid); if (!t) throw new Error('no task ' + tid);
       if (patch.status && !STATUSES.includes(patch.status)) throw new Error('bad status ' + patch.status);
@@ -146,7 +152,37 @@ class Store {
   approveTask(tid, approve = true, note = '') {
     const t = this.getTask(tid); if (!t) throw new Error('no task ' + tid);
     if (note || !approve) this.commentTask(tid, 'human', (approve ? 'Approved' : 'Changes requested') + (note ? ': ' + note : ''));
+    this.closeInbox((i) => i.kind === 'approval' && i.taskId === tid && i.status === 'open', approve ? 'approved' : 'changes requested');
     return this.updateTask(tid, { status: approve ? 'done' : 'todo', awaitingApproval: false });
+  }
+
+  // ---- human inbox: questions (ask_human) and approval requests ----
+  listInbox(filter = {}) { let xs = this.read('inbox', { items: [] }).items; if (filter.status) xs = xs.filter((i) => i.status === filter.status); return xs; }
+  getInboxItem(iid) { return this.listInbox().find((i) => i.id === iid); }
+  addInbox({ kind = 'question', taskId = null, nodeId = null, question, choices = [] }) {
+    if (!question) throw new Error('question required');
+    const item = { id: id('q'), kind, taskId, nodeId, question, choices: (choices || []).map(String), status: 'open', answer: null, at: new Date().toISOString() };
+    this.update('inbox', { items: [] }, (d) => { d.items.push(item); });
+    return item;
+  }
+  closeInbox(match, answer) { this.update('inbox', { items: [] }, (d) => { for (const i of d.items) if (match(i)) Object.assign(i, { status: 'answered', answer, answeredAt: new Date().toISOString() }); }); }
+  // ask_human: store the question and park the task in waiting_for_human.
+  askHuman({ taskId, nodeId, question, choices }) {
+    const item = this.addInbox({ kind: 'question', taskId, nodeId, question, choices });
+    if (taskId && this.getTask(taskId)) this.updateTask(taskId, { status: 'waiting_for_human' });
+    return item;
+  }
+  // Answer an item. Questions: the task goes back to in_progress (the blocked agent tool call returns the answer).
+  // Approvals: answer 'approve' / anything else = changes requested with that note.
+  answerInbox(iid, answer) {
+    const it = this.getInboxItem(iid); if (!it) throw new Error('no inbox item ' + iid);
+    if (it.status !== 'open') throw new Error('already answered');
+    answer = String(answer ?? '').trim(); if (!answer) throw new Error('answer required');
+    if (it.kind === 'approval') { const ok = answer === 'approve'; return this.approveTask(it.taskId, ok, ok ? '' : answer); }
+    this.closeInbox((i) => i.id === iid, answer);
+    const t = it.taskId && this.getTask(it.taskId);
+    if (t) { this.commentTask(t.id, 'human', `Q: ${it.question}\nA: ${answer}`); if (t.status === 'waiting_for_human') this.updateTask(t.id, { status: 'in_progress' }); }
+    return this.getInboxItem(iid);
   }
   commentTask(tid, author, text) {
     return this.update('board', { tasks: [] }, (b) => {

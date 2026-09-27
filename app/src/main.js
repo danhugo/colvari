@@ -298,6 +298,8 @@ const api = {
   usageByProject: () => pm.list().map((p) => ({ id: p.id, name: p.name, ...U.total(pm.store(p.id).listRuns()) })),
   testAgent, testTeam,
   stopAgent: (c, nodeId) => orchFor(c.p).stopAgent(nodeId), sendToAgent: (c, nodeId, text, taskId) => orchFor(c.p).sendToAgent(nodeId, text, taskId),
+  listInbox: (c) => ST(c).listInbox({ status: 'open' }), answerInbox: (c, id, answer) => ST(c).answerInbox(id, answer),
+  inboxCounts: () => Object.fromEntries(pm.list().map((p) => [p.id, pm.store(p.id).listInbox({ status: 'open' }).length])),
   approveTask: (c, id, ok, note) => ST(c).approveTask(id, ok, note), getLogs: (c, n) => ST(c).readLogs(n || 2000), clearLogs: (c) => ST(c).clearLogs(),
   taskDiff: (c, id) => WT.worktreeDiff(wtTask(c, id)),
   taskMerge: (c, id) => { const r = WT.worktreeMerge(wtTask(c, id)); ST(c).commentTask(id, 'human', `merged ${r.branch} into ${r.base}`); return r; },
@@ -309,8 +311,22 @@ ipcMain.handle('api', async (_e, name, ctx, ...args) => {
   return api[name](ctx || {}, ...args);
 });
 
+// Human inbox watcher: MCP servers write inbox.json from other processes, so poll for new open items.
+const seenInbox = new Set();
+function pollInbox(first) {
+  for (const p of pm.list()) {
+    let items = []; try { items = pm.store(p.id).listInbox({ status: 'open' }); } catch {}
+    for (const it of items) if (!seenInbox.has(it.id)) {
+      seenInbox.add(it.id); if (first) continue;
+      const n = { title: it.kind === 'approval' ? 'Approval needed' : 'Agent asks you', body: it.question, taskId: it.taskId, inbox: true };
+      send('notify', { ...n, projectId: p.id }); notify(n, p.id);
+    }
+  }
+}
+
 app.whenReady().then(() => {
   createWindow();
+  pollInbox(true); setInterval(() => pollInbox(false), 1500);
   console.log('[agents-squad] ready, data root:', pm.root);
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });
