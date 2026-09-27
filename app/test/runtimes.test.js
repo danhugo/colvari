@@ -25,7 +25,7 @@ test('codex event parsing (real event shapes from codex-cli 0.144.6)', () => {
 });
 test('capabilities are honest: opencode claims nothing, codex no cost/mcp', () => {
   assert.deepStrictEqual(RT.RUNTIMES.opencode.capabilities, { tokens: false, cost: false, mcp: false, resume: false });
-  assert.strictEqual(RT.RUNTIMES.codex.capabilities.cost, false); assert.strictEqual(RT.RUNTIMES.codex.capabilities.mcp, false);
+  assert.strictEqual(RT.RUNTIMES.codex.capabilities.cost, false); assert.strictEqual(RT.RUNTIMES.codex.capabilities.mcp, true);
 });
 test('detectRuntimes marks missing binaries not installed', () => {
   const exec = (bin) => { if (bin === 'opencode') { const e = new Error('spawn opencode ENOENT'); e.code = 'ENOENT'; throw e; } return bin === 'codex' ? 'codex-cli 0.144.6\n' : '2.1.0 (Claude Code)\n'; };
@@ -36,4 +36,15 @@ test('detectRuntimes marks missing binaries not installed', () => {
 test('detectRuntimes on this machine', () => {
   const d = RT.detectRuntimes({}, { ...process.env, PATH: process.env.PATH + ':' + require('os').homedir() + '/.local/bin' });
   assert.strictEqual(typeof d.opencode.installed, 'boolean');
+});
+
+test('codex gets board MCP via -c overrides and honors model', () => {
+  const R = require('../src/runtimes');
+  const mcp = { mcpServers: { board: { command: '/bin/node', args: ['srv.js', '--node', 'n1'], env: { ELECTRON_RUN_AS_NODE: '1' } } } };
+  const a = R.RUNTIMES.codex.buildArgs({ model: 'gpt-5' }, 'hi', {}, mcp);
+  assert.ok(a.includes('mcp_servers.board.command="/bin/node"'));
+  assert.ok(a.includes('mcp_servers.board.args=["srv.js","--node","n1"]'));
+  assert.ok(a.includes('mcp_servers.board.env.ELECTRON_RUN_AS_NODE="1"'));
+  assert.deepEqual(a.slice(a.indexOf('-m'), a.indexOf('-m') + 2), ['-m', 'gpt-5']);
+  assert.equal(a[a.length - 1], 'hi');
 });

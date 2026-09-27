@@ -70,7 +70,7 @@ class Orchestrator extends EventEmitter {
     this.totalCost = 0;
     this.runs = 0;
   }
-  agent(id) { return (this.agents[id] ||= { runCost: 0, runTokens: 0, pendingHuman: [], stopRequested: false, budgetStop: null, status: 'idle', iteration: 0, cost: 0, inputTokens: 0, outputTokens: 0, cacheTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, runs: 0, taskId: null, model: '', billingSource: '' }); }
+  agent(id) { return (this.agents[id] ||= { runCost: 0, runTokens: 0, pendingHuman: [], stopRequested: false, budgetStop: null, status: 'idle', iteration: 0, cost: 0, inputTokens: 0, outputTokens: 0, cacheTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, runs: 0, taskId: null, model: '', runtime: '', billingSource: '' }); }
   snapshot() { return { running: this.running, totalCost: this.totalCost, billedCost: this.billedCost || 0, subCost: this.subCost || 0, runs: this.runs, active: [...this.procs.keys()].map((id) => ({ nodeId: id, taskId: this.agent(id).taskId, cwd: this.cwds && this.cwds.get(id) || null })), runCost: this.runCost || 0, runTokens: this.runTokens || 0, budgetStop: this.budgetStop || null, agents: Object.fromEntries(Object.entries(this.agents).map(([k, a]) => [k, { ...a, pendingHuman: a.pendingHuman.length }])), tokens: this.tokens || { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 } }; }
   // Account one finished run: agent counters, session totals, persisted history.
   record(rec) {
@@ -219,7 +219,7 @@ class Orchestrator extends EventEmitter {
         while ((i = buf.indexOf('\n')) >= 0) { const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1); if (line) this.onEvent(node, line, run, rt.id); }
       });
       child.stderr.on('data', (d) => this.log(node.id, 'stderr', String(d).trim()));
-      child.on('error', (e) => this.log(node.id, 'error', 'spawn failed: ' + e.message));
+      child.on('error', (e) => this.log(node.id, 'error', e.code === 'ENOENT' ? `${rt.label} binary not found: "${rt.bin(settings)}". Install it or set its path in Settings (run failed, no fallback).` : 'spawn failed: ' + e.message));
       child.on('close', (code) => {
         if (buf.trim()) this.onEvent(node, buf.trim(), run, rt.id);
         delete usage.baseline;
@@ -297,6 +297,7 @@ class Orchestrator extends EventEmitter {
     const bill = U.applyBillingEnv(cfg, this.env(cfg)); const env = bill.env;
     for (const w of bill.warnings) this.log(node.id, 'error', w);
     const meta = { taskId: task.id, task: task.title, billingMode: cfg.billingMode || 'auto', runtime: cfg.runtime || 'claude' };
+    a.runtime = meta.runtime; a.model = cfg.model || '';
     let resume = task.sessionId || (m.continueSession ? this.lastSession(node.id) : null);
     this.log(node.id, 'system', `▶ ${node.name} starts "${task.title}" in ${cwd} [mode=${m.mode}${resume ? ', resume ' + resume : ''}]`);
     let code = 1; let judge = null; let i = 0; let reason = ''; let human = null;
