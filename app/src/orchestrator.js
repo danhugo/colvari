@@ -71,7 +71,7 @@ class Orchestrator extends EventEmitter {
     this.runs = 0;
   }
   agent(id) { return (this.agents[id] ||= { runCost: 0, runTokens: 0, pendingHuman: [], stopRequested: false, budgetStop: null, status: 'idle', iteration: 0, cost: 0, inputTokens: 0, outputTokens: 0, cacheTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, runs: 0, taskId: null, model: '', billingSource: '' }); }
-  snapshot() { return { running: this.running, totalCost: this.totalCost, billedCost: this.billedCost || 0, subCost: this.subCost || 0, runs: this.runs, runCost: this.runCost || 0, runTokens: this.runTokens || 0, budgetStop: this.budgetStop || null, agents: Object.fromEntries(Object.entries(this.agents).map(([k, a]) => [k, { ...a, pendingHuman: a.pendingHuman.length }])), tokens: this.tokens || { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 } }; }
+  snapshot() { return { running: this.running, totalCost: this.totalCost, billedCost: this.billedCost || 0, subCost: this.subCost || 0, runs: this.runs, active: [...this.procs.keys()].map((id) => ({ nodeId: id, taskId: this.agent(id).taskId, cwd: this.cwds && this.cwds.get(id) || null })), runCost: this.runCost || 0, runTokens: this.runTokens || 0, budgetStop: this.budgetStop || null, agents: Object.fromEntries(Object.entries(this.agents).map(([k, a]) => [k, { ...a, pendingHuman: a.pendingHuman.length }])), tokens: this.tokens || { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 } }; }
   // Account one finished run: agent counters, session totals, persisted history.
   record(rec) {
     const a = this.agent(rec.nodeId); const t = (this.tokens ||= { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 });
@@ -163,7 +163,7 @@ class Orchestrator extends EventEmitter {
     const todo = all.filter((t) => t.status === 'todo' && team.nodes.some((n) => n.id === t.assignee));
     const ready = todo.filter((t) => !C.isBlocked(t, all) && !this.agent(t.assignee).budgetStop);
     for (const task of ready) {
-      if (this.procs.size >= s.maxConcurrency) break;
+      if (s.maxConcurrency > 0 && this.procs.size >= s.maxConcurrency) break; // 0 = unlimited
       if (this.procs.has(task.assignee)) continue;
       if (this.runs >= s.maxRuns) { this.log(null, 'system', `maxRuns (${s.maxRuns}) reached`); break; }
       this.runTask(team.nodes.find((n) => n.id === task.assignee), task, team, s);
@@ -272,7 +272,11 @@ class Orchestrator extends EventEmitter {
     const mcp = this.mcpConfig(node);
     let cwd = node.workdir || this.store.dir;
     fs.mkdirSync(cwd, { recursive: true });
-    if (settings.useWorktrees) {
+    // Concurrent runs sharing a workdir each get their own git worktree/branch so their edits don't collide.
+    if (!this.cwds) this.cwds = new Map();
+    const shared = [...this.cwds.entries()].some(([id, d]) => id !== node.id && d === cwd);
+    this.cwds.set(node.id, cwd);
+    if (settings.useWorktrees || shared) {
       const w = WT.ensureWorktree(cwd, task.id);
       if (w.warning) this.log(node.id, 'error', 'warning: ' + w.warning);
       else { cwd = w.cwd; this.store.updateTask(task.id, { worktreePath: w.worktreePath, worktreeBranch: w.worktreeBranch }); }
@@ -329,7 +333,7 @@ class Orchestrator extends EventEmitter {
       this.runs++; a.runs++;
       if (t && t.status !== 'in_progress') this.store.updateTask(task.id, { status: 'in_progress' });
     }
-    this.procs.delete(node.id);
+    this.procs.delete(node.id); this.cwds.delete(node.id);
     const stoppedWhy = a.stopRequested; a.stopRequested = false;
     a.status = 'idle'; a.taskId = null; a.iteration = 0;
     const t = this.store.getTask(task.id);
