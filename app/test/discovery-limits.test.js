@@ -137,6 +137,36 @@ test('real event: init event alone (no --help/local union) yields exactly 123 sl
   assert.equal(c.skills.length, 58);
 });
 
+test('real event: categorized panel data is 58 skills / 123 commands (incl. goal+loop modes), modes > 0', () => {
+  const initEvent = JSON.parse(fixture('real-init-event.json'));
+  const rt = { id: 'claude', bin: () => 'claude' };
+  const help = fixture('help-claude.txt');
+  const c = CAP.discoverCapabilities(rt, {}, { exec: () => help, initEvent, ...FS_OPTS });
+  const byCat = (cat) => c.categorized.filter((x) => x.category === cat).map((x) => x.name);
+  assert.equal(byCat('skill').length, 58);
+  assert.equal(byCat('command').length, 123);
+  const modes = byCat('mode');
+  assert.ok(modes.length > 0, 'modes discovered');
+  assert.ok(modes.includes('goal') && modes.includes('loop'), modes);
+});
+
+test('refresh regression: a smaller --help-only probe never reduces an already-richer init-event snapshot', () => {
+  const initEvent = JSON.parse(fixture('real-init-event.json'));
+  const rt = { id: 'claude', bin: () => 'claude' };
+  const rich = CAP.discoverCapabilities(rt, {}, { exec: () => fixture('help-claude.txt'), initEvent, ...FS_OPTS });
+  assert.equal(rich.categorized.length, 123 + 58 + rich.categorized.filter((x) => x.category === 'mode').length);
+  // Simulates a later manual Refresh: no live init event this time, just --help + local scan — strictly narrower.
+  const narrower = CAP.discoverCapabilities(rt, {}, { exec: () => fixture('help-claude.txt'), ...FS_OPTS });
+  assert.ok(narrower.categorized.length < rich.categorized.length, 'fixture sanity: --help alone is smaller');
+  const merged = CAP.mergeCapabilities(rich, narrower);
+  assert.equal(merged, rich, 'keeps the richer snapshot instead of the smaller probe');
+  // A larger/equal probe (e.g. another live init event) is still accepted.
+  const merged2 = CAP.mergeCapabilities(narrower, rich);
+  assert.equal(merged2, rich);
+  // No previous snapshot at all: the new probe (even a narrow one) is used as-is.
+  assert.equal(CAP.mergeCapabilities(null, narrower), narrower);
+});
+
 test('real event: usageStatus prefers the CLI-reported rate-limit snapshot even with an empty in-memory map (persisted node.rateLimits fallback)', () => {
   const rateLimitEvent = JSON.parse(fixture('real-rate-limit-event.json'));
   const rl = U.parseRateLimits(rateLimitEvent);

@@ -1036,6 +1036,8 @@ const api = {
         if (rl) { patch.rateLimits = rl; patch.rateLimitsAt = new Date().toISOString(); (orchFor(c.p).subscriptionRateLimits ||= {})[nodeId] = rl; }
       } catch {}
     }
+    const kept = capabilities !== node.capabilities && CAP.mergeCapabilities(node.capabilities, capabilities) === node.capabilities;
+    if (kept) { capabilities = node.capabilities; patch.capabilities = node.capabilities; patch.capabilitiesProbedAt = node.capabilitiesProbedAt; }
     TS(c).updateNode(nodeId, patch);
     return capabilities;
   },
