@@ -98,7 +98,17 @@ class Store {
     for (const tid of this.teamIds()) if ('team-' + tid !== this.teamFile()) this.update('team-' + tid, { nodes: [], edges: [] }, (t) => { t.edges = t.edges.filter((e) => e.to !== nid); });
   }
   teamIds() { const m = this.meta(); return (m && m.teams || []).map((t) => t.id); }
+  teamName(tid) { const m = this.meta(); const t = m && m.teams && m.teams.find((x) => x.id === tid); return t ? t.name : null; }
   nodeTeam(nid) { return this.teamIds().find((tid) => this.read('team-' + tid, { nodes: [] }).nodes.some((n) => n.id === nid)) || null; }
+  // {nodeId: {teamId, teamName}} for every node across all teams; used to tag log/timeline entries for renderer filtering.
+  nodeTeamMap() {
+    const out = {};
+    for (const tid of this.teamIds()) {
+      const teamName = this.teamName(tid);
+      for (const n of this.read('team-' + tid, { nodes: [] }).nodes) out[n.id] = { teamId: tid, teamName };
+    }
+    return out;
+  }
   // Edges from other teams that point into this team (stored in the source team's file), flagged crossTeam.
   incomingCrossEdges() {
     const mine = new Set(this.getTeam().nodes.map((n) => n.id)); const out = [];

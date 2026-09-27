@@ -22,6 +22,14 @@ test('cross-team edge: validated, persisted in source team, visible to target te
   assert.equal(pm.store(pid, t1).getTeam().edges.length, 0);
 });
 
+test('nodeTeamMap: maps every node id to its {teamId, teamName} across all teams', () => {
+  const { pm, pid, t1, t2, a, b } = setup();
+  const map = pm.store(pid).nodeTeamMap();
+  assert.deepEqual(map[a.id], { teamId: t1, teamName: 'Main' });
+  assert.deepEqual(map[b.id], { teamId: t2, teamName: 'B' });
+  assert.equal(pm.store(pid).nodeTeam(a.id), t1);
+});
+
 test('positions and viewport persist per team', () => {
   const { pm, pid, t1, t2, a } = setup();
   pm.store(pid, t1).setPositions({ [a.id]: { x: 300, y: 120 }, bogus: { x: 1, y: 1 } });
