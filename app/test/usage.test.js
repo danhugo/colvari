@@ -175,3 +175,48 @@ test('approveTask(false) bumps task.reopenCount, feeding modelStats.reopened', (
   assert.equal(s.getTask(t.id).reopenCount, 1);
   assert.equal(s.getTask(t.id).status, 'done');
 });
+
+test('modelStats end-to-end: 3 models (mixed runtime w/ unknown cost, a reopen, a rejection), persisted and re-derived after restart', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-modelstats-'));
+  const s = new Store(path.join(dir, 'p'));
+  const opus = s.addNode(normalizeNode({ name: 'PM', role: 'PM', model: 'claude-opus-4' }));
+  const sonnet = s.addNode(normalizeNode({ name: 'Dev', role: 'Dev', model: 'claude-sonnet-5' }));
+  const codex = s.addNode(normalizeNode({ name: 'CodexDev', role: 'Dev', runtime: 'codex' }));
+
+  // claude-opus-4: one task, done first try.
+  const tPlan = s.createTask({ title: 'plan', assignee: opus.id });
+  s.addRun(U.newRun({ kind: 'agent', nodeId: opus.id, taskId: tPlan.id, model: 'claude-opus-4', inputTokens: 100, outputTokens: 50, reportedCostUsd: 0.5 }));
+  s.updateTask(tPlan.id, { status: 'done' });
+
+  // claude-sonnet-5: one task, sent back for changes once before being accepted (reopen).
+  const tBuild = s.createTask({ title: 'build', assignee: sonnet.id });
+  s.addRun(U.newRun({ kind: 'agent', nodeId: sonnet.id, taskId: tBuild.id, model: 'claude-sonnet-5', inputTokens: 40, outputTokens: 20, reportedCostUsd: 0.2 }));
+  s.updateTask(tBuild.id, { status: 'review', awaitingApproval: true });
+  s.approveTask(tBuild.id, false, 'not quite'); // reopen: back to todo, reopenCount 1
+  s.addRun(U.newRun({ kind: 'agent', nodeId: sonnet.id, taskId: tBuild.id, model: 'claude-sonnet-5', inputTokens: 10, outputTokens: 10, reportedCostUsd: 0.1 }));
+  s.updateTask(tBuild.id, { status: 'review', awaitingApproval: true });
+  s.approveTask(tBuild.id, true); // now done, but not first-pass (reopenCount stays 1)
+
+  // codex (mixed runtime): reportedCostUsd unknown -> 0, task still open (rejected review, never reopened count towards done).
+  const tCheck = s.createTask({ title: 'check', assignee: codex.id });
+  s.addRun(U.newRun({ kind: 'agent', nodeId: codex.id, taskId: tCheck.id, model: 'gpt-5-codex', inputTokens: 30, outputTokens: 15, reportedCostUsd: 0 }));
+  s.updateTask(tCheck.id, { status: 'review', awaitingApproval: true });
+  s.approveTask(tCheck.id, false, 'needs work'); // rejected: reopenCount 1, back to todo (not done)
+
+  const check = (store) => {
+    const stats = new Orchestrator(store).snapshot().modelStats;
+    assert.equal(stats['claude-opus-4'].runs, 1);
+    assert.ok(Math.abs(stats['claude-opus-4'].costUsd - 0.5) < 1e-9);
+    assert.equal(stats['claude-opus-4'].tasksDone, 1); assert.equal(stats['claude-opus-4'].firstPassAccepted, 1); assert.equal(stats['claude-opus-4'].reopened, 0);
+
+    assert.equal(stats['claude-sonnet-5'].runs, 2);
+    assert.ok(Math.abs(stats['claude-sonnet-5'].costUsd - 0.3) < 1e-9);
+    assert.equal(stats['claude-sonnet-5'].tasksDone, 1); assert.equal(stats['claude-sonnet-5'].firstPassAccepted, 0); assert.equal(stats['claude-sonnet-5'].reopened, 1);
+
+    assert.equal(stats['gpt-5-codex'].runs, 1);
+    assert.equal(stats['gpt-5-codex'].costUsd, 0); // unknown/unreported cost never counted as a positive number
+    assert.equal(stats['gpt-5-codex'].tasksDone, 0); assert.equal(stats['gpt-5-codex'].firstPassAccepted, 0); assert.equal(stats['gpt-5-codex'].reopened, 1);
+  };
+  check(s);
+  check(new Store(s.dir)); // aggregates are re-derived from persisted runs/tasks, not in-memory counters -> survive a restart
+});
