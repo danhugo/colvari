@@ -12,6 +12,7 @@ npm run e2e        # real claude CLI in a temp dir: preflight, PM -> Dev team, t
 npm run gui-e2e    # drives the real UI (templates, agent panel, preflight, Run, usage, F6), asserts every check, exits 1 on failure;
                    # screenshots go to e2e-shots/. Uses a fresh temp project dir via AGENTS_SQUAD_PROJECT (set by the script).
 npm run smoke      # launches Electron, clicks through the UI, then exits
+npm run smoke:real # real-machine check (no fixtures): discovery against real $HOME + this project, one tiny real claude turn for real skills/commands/rate-limits
 ```
 
 You need the `claude` CLI on your PATH and logged in.
