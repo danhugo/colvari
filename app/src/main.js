@@ -339,17 +339,28 @@ async function guiE2E() {
     s.addRun({ id: 'lim-stale', projectId: p, nodeId: pm1.id, agent: pm1.name, kind: 'agent', billingSource: 'subscription', startedAt: new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString(), inputTokens: 10, outputTokens: 5 });
     const prevLim = s.getSettings().usageLimits; s.saveSettings({ usageLimits: { fiveHourLimit: 10, weeklyLimit: 0, tokenLimit: 0, costLimit: 0, warnPct: 80 } });
     await ex(`$('#tabs button[data-tab=usage]').click(); await refresh(); await w(500);`);
-    const under = await ex(`return { fill: $('#limitmeter .lm-fill').style.width, pct: $('#us-limits .stat small.warn, #us-limits .stat small.muted')?.textContent, warn: /Approaching a usage limit/.test($('#us-limits').textContent), pause: /limit has been reached/.test($('#us-limits').textContent) }`);
-    expect('usage limits: meter shows 60% used, 6 stale-excluded, no warn/pause yet', under.fill === '60%' && /60% used/.test(under.pct) && !under.warn && !under.pause, under);
+    const meterQ = `{ pct: $('#limitmeter .lm-fill')?.style.width, text: $('#limitmeter').textContent, warn: /near limit/.test($('#limitmeter').textContent), pause: /paused/.test($('#limitmeter').textContent) }`;
+    const under = await ex(`return ${meterQ}`);
+    expect('usage limits: top-bar #limitmeter shows 60% used, 6 stale-excluded, no warn/pause yet', under.pct === '60%' && !under.warn && !under.pause, under);
+    expect('usage limits: #limitmeter includes a reset countdown', /↻\d+[hm]/.test(under.text), under.text);
+    // The meter must also honor the CLI's own reported subscription rate-limit % (usage.js parseRateLimits,
+    // fed into orch.subscriptionRateLimits off the CLI's init event), not only the local run-derived count —
+    // other clients sharing the same subscription window aren't reflected in this project's local runs.
+    o.subscriptionRateLimits = { [pm1.id]: { fiveHour: { pct: 0.97, resetsAt: new Date(Date.now() + 3600000).toISOString() } } };
+    await ex(`await refresh(); await w(400);`);
+    const cli = await ex(`return ${meterQ}`);
+    expect('usage limits: #limitmeter prefers the higher CLI-reported rate-limit % (97%) over the 60% local count', cli.pct === '97%' && cli.warn && !cli.pause, cli);
+    o.subscriptionRateLimits = {};
+    await ex(`await refresh(); await w(400);`);
     for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`await w(200);`); await shot(`limits-meter-${t}`); }
     // Cross the warn line (80%), then the pause line (100%) — both computed straight off the same stubbed runs.
     s.saveSettings({ usageLimits: { fiveHourLimit: 7, weeklyLimit: 0, tokenLimit: 0, costLimit: 0, warnPct: 80 } });
     await ex(`await refresh(); await w(400);`);
-    const warn = await ex(`return { pct: $('#limitmeter .lm-fill').style.width, warn: /Approaching a usage limit/.test($('#us-limits').textContent) }`);
+    const warn = await ex(`return ${meterQ}`);
     expect('usage limits: 6/7 = 86% crosses the warn line', warn.pct === '86%' && warn.warn, warn);
     s.saveSettings({ usageLimits: { fiveHourLimit: 6, weeklyLimit: 0, tokenLimit: 0, costLimit: 0, warnPct: 80 } });
     await ex(`await refresh(); await w(400);`);
-    const pause = await ex(`return { pct: $('#limitmeter .lm-fill').style.width, pause: /limit has been reached/.test($('#us-limits').textContent) }`);
+    const pause = await ex(`return ${meterQ}`);
     expect('usage limits: 6/6 = 100% crosses the pause line', pause.pct === '100%' && pause.pause, pause);
     await shot('limits-pause-banner');
     // The dispatch guard itself: a real orchestrator with a todo task ready to run must NOT start it while paused.
@@ -359,19 +370,31 @@ async function guiE2E() {
     o.start(); await new Promise((r) => setTimeout(r, 500)); o.stop();
     expect('usage limits: guard blocks dispatch, task never left todo', s.getTask(guardTask.id).status === 'todo', s.getTask(guardTask.id).status);
     s.saveSettings({ usageLimits: prevLim }); o.usagePaused = false;
-    // Graph node badges: vendor/model chips on the two existing nodes.
+    // Graph node badges: vendor/model chips on the two existing nodes, plus an effort chip on one of them.
+    ts.updateNode(pm1.id, { effort: 'high' });
     await ex(`$('#tabs button[data-tab=team]').click(); await refresh(); renderGraph(); await w(300);`);
     const chips = await ex(`return [...document.querySelectorAll('#graph .chip text')].map((t) => t.textContent)`);
     expect('graph: node badges render runtime + model chips', ['claude', 'opus', 'codex', 'gpt-5.6-terra'].every((c) => chips.some((x) => x.toLowerCase() === c)), chips);
+    const effortChips = await ex(`return [...document.querySelectorAll('#graph .chip-em text')].map((t) => t.textContent)`);
+    expect('graph: effort chip renders for the node with effort set', effortChips.includes('E:high'), effortChips);
     for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`await w(200);`); await shot(`limits-graph-badges-${t}`); }
+    // Probe badge: a node added directly (bypassing the auto-probe IPC path) starts on the untested dot
+    // (.capsdot.caps-none), and flips off it once probed — the same transition a stubbed CLI init event drives.
+    const untested = ts.addNode({ name: 'Unprobed', role: 'QA', runtime: 'claude', model: 'sonnet', x: 500, y: 200 });
+    await ex(`await refresh(); renderGraph(); await w(200);`);
+    const dotBefore = await ex(`return document.querySelector('g[data-id="${untested.id}"] .capsdot')?.getAttribute('class')`);
+    expect('probe badge: manually-added node starts on the untested dot', dotBefore === 'capsdot caps-none', dotBefore);
+    await ex(`await call('discoverCapabilities', '${untested.id}'); await refresh(); renderGraph(); await w(200);`);
+    const dotAfter = await ex(`return document.querySelector('g[data-id="${untested.id}"] .capsdot')?.getAttribute('class')`);
+    expect('probe badge: flips off the untested dot once probed (stubbed init event)', dotAfter !== 'capsdot caps-none', dotAfter);
     // Capability auto-discovery: adding a new agent through the real UI (#addnode -> IPC addNode) probes it
     // immediately, so the node form never shows "Not probed yet" for it.
     await ex(`document.querySelector('#addnode').click(); await w(600);`);
-    const added = ts.getTeam().nodes.find((n) => !['Pia', 'Devon', pm1.name, dev.name].includes(n.name)) || ts.getTeam().nodes[ts.getTeam().nodes.length - 1];
+    const added = ts.getTeam().nodes.find((n) => !['Pia', 'Devon', 'Unprobed', pm1.name, dev.name].includes(n.name)) || ts.getTeam().nodes[ts.getTeam().nodes.length - 1];
     await ex(`sel.node = '${added.id}'; renderNodeForm(); await w(200);`);
     const disc = await ex(`return $('#nf-caps-view').textContent`);
     expect('discovery: auto-runs on a newly added agent (not "not probed yet")', !/Not probed yet/.test(disc) && added.capabilities != null, { disc: disc.slice(0, 120), capabilities: added.capabilities });
-    console.log('[gui-e2e] limits', JSON.stringify({ under, warn, pause, guardTaskStatus: s.getTask(guardTask.id).status, chips, discovered: !!added.capabilities }));
+    console.log('[gui-e2e] limits', JSON.stringify({ under, cli, warn, pause, guardTaskStatus: s.getTask(guardTask.id).status, chips, effortChips, probeBefore: dotBefore, probeAfter: dotAfter, discovered: !!added.capabilities }));
     require('electron').nativeTheme.themeSource = 'system';
   };
   // Wiki + Logs tabs: empty states, page list + rendered markdown typography, readable log rows (time/avatar/level), filter by agent + search, auto-scroll.
@@ -885,7 +908,24 @@ const api = {
   saveSettings: (c, s) => ST(c).saveSettings(s),
   listRuns: (c, f) => ST(c).listRuns(f || {}), clearRuns: (c) => ST(c).clearRuns(), usageCSV: (c, all) => U.toCSV(all ? pm.list().flatMap((p) => pm.store(p.id).listRuns()) : ST(c).listRuns()),
   usageByProject: () => pm.list().map((p) => ({ id: p.id, name: p.name, ...U.total(pm.store(p.id).listRuns()) })),
-  usageStatus: (c) => U.usageStatus(ST(c).listRuns(), ST(c).getSettings().usageLimits),
+  // Run-derived counts alone miss it when the CLI itself reports a higher subscription rate-limit %
+  // (e.g. usage from other clients sharing the same subscription window), so fold in the CLI's own
+  // reported utilization (usage.js parseRateLimits, fed by orchestrator's init-event handling) whenever
+  // it's more constraining than the local run count.
+  usageStatus: (c) => {
+    const s = ST(c); const settings = s.getSettings();
+    const status = U.usageStatus(s.listRuns(), settings.usageLimits);
+    const warnPct = (settings.usageLimits && settings.usageLimits.warnPct) || 80;
+    const rlAll = Object.values(orchFor(c.p).subscriptionRateLimits || {});
+    const pick = (key) => {
+      const cli = rlAll.map((rl) => rl[key]).filter(Boolean).sort((a, b) => b.pct - a.pct)[0];
+      const runBased = status[key];
+      if (!cli || (runBased.limit && runBased.pct >= cli.pct)) return runBased;
+      return { used: runBased.used, limit: runBased.limit || 1, pct: cli.pct, warn: cli.pct * 100 >= warnPct, pause: cli.pct >= 1, resetsAt: cli.resetsAt };
+    };
+    const fiveHour = pick('fiveHour'), weekly = pick('weekly');
+    return { ...status, fiveHour, weekly, warn: status.warn || fiveHour.warn || weekly.warn, pause: status.pause || fiveHour.pause || weekly.pause };
+  },
   discoverCapabilities: (c, nodeId) => {
     const node = TS(c).getTeam().nodes.find((n) => n.id === nodeId); if (!node) throw new Error('no agent ' + nodeId);
     const rt = RT.getRuntime(node.runtime);
