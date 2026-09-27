@@ -10,7 +10,7 @@ let P = { projects: [], templates: {} };
 let S = { allNodes: [], team: { nodes: [], edges: [] }, tasks: [], wiki: {}, settings: { rolePresets: [] }, messages: [], orch: { agents: {} }, config: { permissionModes: [], edgeTypes: ['assign'], boardTools: [], roles: [] } };
 const EDGE_DESC = { assign: 'can assign tasks to and message', message: 'can send messages to', review: 'is reviewed by' };
 const list = (v) => (Array.isArray(v) ? v : []).join('\n');
-let sel = { node: null, edge: null, task: null, page: null };
+let sel = { node: null, edge: null, task: null, page: null, logTeam: '' };
 let connectFrom = null, connectMode = false, wikiEdit = false;
 const logs = [];
 const logsLoaded = new Set(); // projects whose persisted logs.jsonl was merged into logs
@@ -570,21 +570,27 @@ $('#wk-save').onclick = async () => { const t = $('#wk-title').value.trim(); if 
 $('#wk-del').onclick = async () => { if (sel.page && confirm('Delete page?')) { await call('deleteWiki', sel.page); sel.page = null; $('#wk-title').value = ''; $('#wk-content').value = ''; refresh(); } };
 
 // ---------- observability ----------
+const logTeamNodes = () => sel.logTeam ? S.allNodes.filter((n) => n.teamId === sel.logTeam) : S.allNodes;
 function renderObs() {
-  const cur = $('#logfilter').value;
+  const teams = (S.project && S.project.teams) || [];
+  const tf = $('#logteam'); tf.innerHTML = '<option value="">All teams</option>' + teams.map((t) => `<option value="${t.id}">${esc(t.name)}</option>`).join(''); tf.value = sel.logTeam;
+  const nodes = logTeamNodes();
+  let cur = $('#logfilter').value;
+  if (cur && !nodes.some((n) => n.id === cur)) cur = '';
   const counts = {}; let total = 0;
-  for (const l of logs) if (l.projectId === ctx.p) { counts[l.nodeId] = (counts[l.nodeId] || 0) + 1; total++; }
-  const rows = S.allNodes.map((n) => { const a = S.orch.agents[n.id] || {}; const w = who(n.id);
+  const ids = new Set(nodes.map((n) => n.id));
+  for (const l of logs) if (l.projectId === ctx.p && ids.has(l.nodeId)) { counts[l.nodeId] = (counts[l.nodeId] || 0) + 1; total++; }
+  const rows = nodes.map((n) => { const a = S.orch.agents[n.id] || {}; const w = who(n.id);
     const task = a.taskId ? esc((S.tasks.find((t) => t.id === a.taskId) || {}).title || a.taskId) : '';
     return `<div class="logagent-row ${cur === n.id ? 'sel' : ''}" data-id="${n.id}"><span class="avatar sm ${a.status === 'working' ? 'working' : ''}" style="background:${w.color}" title="${esc(w.name)}">${esc(w.ini)}</span><span class="lameta"><b>${esc(n.name)}</b> ${vbadge(n)}<br><small class="muted st-${a.status || 'idle'}">${a.status || 'idle'}${task ? ` · ${task}` : ''}</small></span><span class="lacount" title="log lines">${counts[n.id] || 0}</span><span class="lactions">${a.status === 'working' ? `<button data-stopagent="${n.id}" title="Stop">⏹</button>` : ''}<button data-msgagent="${n.id}" title="Message">✉</button></span></div>`; }).join('');
   $('#logagents').innerHTML = `<div class="logagent-row ${!cur ? 'sel' : ''}" data-id=""><span class="avatar sm" style="background:#3a3f4b">∀</span><span class="lameta"><b>All agents</b><br><small class="muted">every session</small></span><span class="lacount" title="log lines">${total}</span></div>` +
-    (rows || '<p class="muted logempty">No agents yet — add one in Team.</p>');
+    (rows || '<p class="muted logempty">No agents in this team.</p>');
   document.querySelectorAll('#logagents .logagent-row[data-id]').forEach((d) => d.onclick = (e) => { if (e.target.closest('.lactions')) return; $('#logfilter').value = d.dataset.id; renderLog(); renderObs(); });
   document.querySelectorAll('[data-stopagent]').forEach((b) => b.onclick = act(async (e) => { e.stopPropagation(); await call('stopAgent', b.dataset.stopagent); refresh(); }));
   document.querySelectorAll('[data-msgagent]').forEach((b) => b.onclick = act(async (e) => { e.stopPropagation(); const v = await ask(`Message to ${nodeName(b.dataset.msgagent)} (a running agent is interrupted and resumed with it)`); if (v) { await call('sendToAgent', b.dataset.msgagent, v); refresh(); } }));
   const bs = S.orch.budgetStop; const st = S.settings;
   $('#budgetbar').innerHTML = (st.budgetUsd || st.budgetTokens ? `Run budget: ${st.budgetUsd ? `$${(S.orch.runCost || 0).toFixed(4)} / $${st.budgetUsd}` : ''}${st.budgetUsd && st.budgetTokens ? ' · ' : ''}${st.budgetTokens ? `${fmtTok(S.orch.runTokens)} / ${fmtTok(st.budgetTokens)} tok` : ''}` : '') + (bs ? ` <span class="warn">Stopped: ${esc(bs)}</span>` : '');
-  const f = $('#logfilter'); f.innerHTML = '<option value="">All agents</option>' + S.allNodes.map((n) => `<option value="${n.id}">${esc(n.name)}</option>`).join(''); f.value = cur;
+  const f = $('#logfilter'); f.innerHTML = '<option value="">All agents</option>' + nodes.map((n) => `<option value="${n.id}">${esc(n.name)}</option>`).join(''); f.value = cur;
 }
 const LOG_LEVEL = { error: 'error', stderr: 'error', tool_error: 'error', system: 'info', tool: 'tool', tool_result: 'tool', result: 'ok', raw: 'muted' };
 function logRow(l) {
@@ -593,13 +599,15 @@ function logRow(l) {
 }
 function renderLog() {
   const f = $('#logfilter').value; const q = ($('#logsearch').value || '').trim().toLowerCase();
+  const teamIds = sel.logTeam ? new Set(logTeamNodes().map((n) => n.id)) : null;
   const box = $('#log'); const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 20;
-  const all = logs.filter((l) => l.projectId === ctx.p);
+  const all = logs.filter((l) => l.projectId === ctx.p && (!teamIds || teamIds.has(l.nodeId)));
   const rows = all.filter((l) => (!f || l.nodeId === f) && (!q || l.text.toLowerCase().includes(q)));
   box.innerHTML = rows.length ? rows.slice(-800).map(logRow).join('')
     : `<p class="muted logempty">${all.length ? 'No log lines match your filter.' : 'No activity yet — run the team to see agent logs here.'}</p>`;
   if (atBottom && $('#logauto').checked) box.scrollTop = box.scrollHeight;
 }
+$('#logteam').onchange = () => { sel.logTeam = $('#logteam').value; $('#logfilter').value = ''; renderObs(); renderLog(); };
 $('#logfilter').onchange = renderLog;
 $('#logsearch').oninput = renderLog;
 $('#clearlog').onclick = act(async () => { if (!confirm('Clear the log of this project (also the saved log file)?')) return; for (let i = logs.length - 1; i >= 0; i--) if (logs[i].projectId === ctx.p) logs.splice(i, 1); await call('clearLogs'); renderLog(); });
