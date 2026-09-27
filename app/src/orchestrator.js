@@ -100,7 +100,7 @@ class Orchestrator extends EventEmitter {
   }
   log(nodeId, kind, text) {
     const a = nodeId && this.agents[nodeId];
-    const l = { nodeId, kind, text, at: Date.now(), taskId: (a && a.taskId) || null, task: (a && a.task) || null };
+    const l = { nodeId, kind, text, at: Date.now(), taskId: (a && a.taskId) || null, task: (a && a.task) || null, level: TL.levelOf(kind) };
     try { this.store.appendLog(l); } catch {}
     this.emit('log', l);
     // Keep the latest error reason on the agent so the UI can show why it failed (and push it now, not at next run end).

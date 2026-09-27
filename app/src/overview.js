@@ -28,6 +28,32 @@
     return lanes;
   }
 
+  // Ids of unfinished tasks a task waits for (self-contained copy of controls.openBlockers: this file is
+  // also loaded as a plain <script> in the renderer, so it can't require() controls.js).
+  const depIds = (v) => [...new Set((Array.isArray(v) ? v : String(v || '').split(/[,\s]+/)).map((x) => String(x).trim()).filter(Boolean))];
+  const isBlocked = (task, tasks) => { const byId = new Map(tasks.map((t) => [t.id, t])); return depIds(task.blockedBy).some((id) => byId.has(id) && byId.get(id).status !== 'done'); };
+
+  const ATTENTION_RANK = { waiting_for_human: 0, blocked: 1, error: 2 };
+  // Why a node's lane needs a human right now (its current task is waiting_for_human/blocked, or its last run errored), or null.
+  function laneAttention(nodeIds, agents = {}, tasks = []) {
+    const byId = new Map(tasks.map((t) => [t.id, t]));
+    const out = {};
+    for (const id of nodeIds) {
+      const a = agents[id] || {}; const t = a.taskId && byId.get(a.taskId);
+      if (t && t.status === 'waiting_for_human') out[id] = 'waiting_for_human';
+      else if (t && isBlocked(t, tasks)) out[id] = 'blocked';
+      else if (a.lastError) out[id] = 'error';
+      else out[id] = null;
+    }
+    return out;
+  }
+  // Node ids ordered needs-attention first (waiting_for_human, then blocked, then error); ties keep input order.
+  function sortByAttention(nodeIds, agents, tasks) {
+    const attn = laneAttention(nodeIds, agents, tasks);
+    const rank = (id) => (attn[id] ? ATTENTION_RANK[attn[id]] : 3);
+    return nodeIds.map((id, i) => [id, i]).sort((a, b) => rank(a[0]) - rank(b[0]) || a[1] - b[1]).map(([id]) => id);
+  }
+
   // Edges that carried an assign (create_task) or send_message within the last FLASH_MS.
   function edgeFlashes(logs, edges, now, windowMs = FLASH_MS) {
     const hot = new Set();
@@ -56,5 +82,5 @@
     return items.sort((a, b) => a.at - b.at);
   }
 
-  return { FLASH_MS, stuckAgents, timeline, edgeFlashes, taskThread, toolName };
+  return { FLASH_MS, stuckAgents, timeline, edgeFlashes, taskThread, toolName, laneAttention, sortByAttention };
 });

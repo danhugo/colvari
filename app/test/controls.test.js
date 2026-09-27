@@ -49,8 +49,9 @@ test('store: blockedBy, approveTask, deleteTask cleans deps, persisted logs', ()
   s.updateTask(b.id, { status: 'review', awaitingApproval: true }); s.approveTask(b.id, true);
   assert.equal(s.getTask(b.id).status, 'done');
   s.deleteTask(a.id); assert.deepEqual(s.getTask(b.id).blockedBy, []);
-  s.appendLog({ nodeId: 'n1', kind: 'text', text: 'hello', at: 1 }); s.appendLog({ nodeId: null, kind: 'system', text: 'x', at: 2 });
-  assert.deepEqual(s.readLogs().map((l) => l.text), ['hello', 'x']);
+  s.appendLog({ nodeId: 'n1', kind: 'text', text: 'hello', at: 1 }); s.appendLog({ nodeId: null, kind: 'system', text: 'x', at: 2 }); s.appendLog({ nodeId: 'n1', kind: 'error', text: 'boom', at: 3 });
+  assert.deepEqual(s.readLogs().map((l) => l.text), ['hello', 'x', 'boom']);
+  assert.deepEqual(s.readLogs().map((l) => l.level), ['info', 'info', 'error']); // level is derived from kind so the UI can default its filter to warn+error
   assert.equal(s.readLogs(1).length, 1);
   s.clearLogs(); assert.deepEqual(s.readLogs(), []);
 });

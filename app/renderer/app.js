@@ -589,15 +589,24 @@ function renderObs() {
 const LOG_LEVEL = { error: 'error', stderr: 'error', tool_error: 'error', system: 'info', tool: 'tool', tool_result: 'tool', result: 'ok', raw: 'muted' };
 function logRow(l) {
   const w = who(l.nodeId); const lvl = LOG_LEVEL[l.kind] || 'text';
-  return `<div class="logrow lv-${lvl}"><span class="logtime">${new Date(l.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span><span class="avatar sm" style="background:${w.color}" title="${esc(w.name)}">${esc(w.ini)}</span><span class="logagent" title="${esc(w.name)}">${esc(w.name)}</span><span class="loglevel lv-${lvl}">${esc(l.kind)}</span><span class="logtext">${esc(l.text)}</span></div>`;
+  const task = l.task ? `<span class="logtask" ${l.taskId ? `data-tasklink="${esc(l.taskId)}" title="Open in task thread"` : ''}>${esc(l.task)}</span>` : '';
+  return `<div class="logrow lv-${lvl}"><span class="logtime">${new Date(l.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span><span class="avatar sm" style="background:${w.color}" title="${esc(w.name)}">${esc(w.ini)}</span><span class="logagent" title="${esc(w.name)}">${esc(w.name)}</span>${task}<span class="loglevel lv-${lvl}">${esc(l.kind)}</span><span class="logtext">${esc(l.text)}</span></div>`;
 }
+// Default view: warn+error only (info hidden behind a chip toggle, matching critique #6/#11).
+const logLevels = new Set(['warn', 'error']);
+function renderLogLevelChips() {
+  $('#loglevels').innerHTML = ['info', 'warn', 'error'].map((lv) => `<button class="lvchip lv-${lv}${logLevels.has(lv) ? ' on' : ''}" data-lv="${lv}">${lv}</button>`).join('');
+  document.querySelectorAll('#loglevels [data-lv]').forEach((b) => b.onclick = () => { const lv = b.dataset.lv; logLevels.has(lv) ? logLevels.delete(lv) : logLevels.add(lv); renderLogLevelChips(); renderLog(); });
+}
+renderLogLevelChips();
 function renderLog() {
   const f = $('#logfilter').value; const q = ($('#logsearch').value || '').trim().toLowerCase();
   const box = $('#log'); const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 20;
   const all = logs.filter((l) => l.projectId === ctx.p);
-  const rows = all.filter((l) => (!f || l.nodeId === f) && (!q || l.text.toLowerCase().includes(q)));
+  const rows = all.filter((l) => (!f || l.nodeId === f) && (!q || l.text.toLowerCase().includes(q)) && logLevels.has(l.level || 'info'));
   box.innerHTML = rows.length ? rows.slice(-800).map(logRow).join('')
     : `<p class="muted logempty">${all.length ? 'No log lines match your filter.' : 'No activity yet — run the team to see agent logs here.'}</p>`;
+  document.querySelectorAll('#log [data-tasklink]').forEach((d) => d.onclick = () => { sel.task = d.dataset.tasklink; $('#ov-task').value = ''; showTab('overview'); });
   if (atBottom && $('#logauto').checked) box.scrollTop = box.scrollHeight;
 }
 $('#logfilter').onchange = renderLog;
@@ -711,19 +720,24 @@ function renderOverview() {
   document.querySelectorAll('[data-ovstop]').forEach((b) => b.onclick = act(async () => { await call('stopAgent', b.dataset.ovstop); refresh(); }));
   document.querySelectorAll('[data-ovnudge]').forEach((b) => b.onclick = act(async () => { await call('sendToAgent', b.dataset.ovnudge, 'Status check: you have produced no output for a while. Reply with a short status (what you are doing, whether you are blocked), then continue or finish your task.'); refresh(); }));
   // Timeline: last 15 minutes, one lane per agent (idle lanes with no recent activity collapsed), auto-scrolled to now.
-  const idsAll = S.team.nodes.map((n) => n.id); const lanes = Overview.timeline(L, idsAll, now); const span = 15 * 60000, LW = 110, PX = Math.max(600, $("#ov-timeline").clientWidth - LW - 30), LH = 26;
+  const idsAll = Overview.sortByAttention(S.team.nodes.map((n) => n.id), S.orch.agents, S.tasks); const attn = Overview.laneAttention(idsAll, S.orch.agents, S.tasks);
+  const lanes = Overview.timeline(L, idsAll, now); const span = 15 * 60000, LW = 110, PX = Math.max(600, $("#ov-timeline").clientWidth - LW - 30), LH = 26;
   const x = (t) => LW + Math.max(0, (t - (now - span)) / span * PX);
-  const active = (id) => { const ln = lanes[id]; return ln.runs.some((r) => r.end >= now - span) || ln.ticks.some((k) => k.at >= now - span) || ln.marks.some((m) => m.at >= now - span); };
+  const active = (id) => attn[id] || lanes[id].runs.some((r) => r.end >= now - span) || lanes[id].ticks.some((k) => k.at >= now - span) || lanes[id].marks.some((m) => m.at >= now - span);
   const ids = idsAll.filter(active); const hiddenCount = idsAll.length - ids.length;
+  const ATTN_BADGE = { waiting_for_human: '⏳', blocked: '⛔', error: '❗' };
   const tlbox = $('#ov-timeline'); tlbox.innerHTML = '';
   if (hiddenCount) { const note = document.createElement('div'); note.className = 'ovtl-note'; note.textContent = `${hiddenCount} idle lane${hiddenCount > 1 ? 's' : ''} hidden (no activity in the last 15m)`; tlbox.appendChild(note); }
   if (!ids.length) { const empty = document.createElement('p'); empty.className = 'muted ovtl-empty'; empty.textContent = 'No agent activity in the last 15 minutes.'; tlbox.appendChild(empty); }
   else {
     const tl = el('svg', { width: LW + PX + 10, height: ids.length * LH + 18 }, null);
+    const defs = el('defs', {}, tl);
+    const hatch = el('pattern', { id: 'tl-hatch', width: 8, height: 8, patternUnits: 'userSpaceOnUse', patternTransform: 'rotate(45)' }, defs);
+    el('line', { x1: 0, y1: 0, x2: 0, y2: 8, class: 'tl-hatch-line' }, hatch);
     for (let m = 0; m <= 15; m += 5) { const gx = x(now - m * 60000); el('line', { x1: gx, x2: gx, y1: 0, y2: ids.length * LH, class: 'axisline' }, tl); }
-    ids.forEach((id, i) => { const y = i * LH; const ln = lanes[id];
-      el('rect', { x: 0, y, width: LW + PX, height: LH, class: 'lane' + (stuck.has(id) ? ' stuck' : ''), fill: 'transparent' }, tl);
-      el('text', { x: 4, y: y + 17 }, tl).textContent = (stuck.has(id) ? '⚠ ' : '') + clipText(nodeName(id), 14);
+    ids.forEach((id, i) => { const y = i * LH; const ln = lanes[id]; const at = attn[id];
+      el('rect', { x: 0, y, width: LW + PX, height: LH, class: 'lane' + (stuck.has(id) ? ' stuck' : '') + (at ? ' attn-' + at : ''), fill: at === 'waiting_for_human' ? 'url(#tl-hatch)' : 'transparent' }, tl);
+      el('text', { x: 4, y: y + 17 }, tl).textContent = (stuck.has(id) ? '⚠ ' : at ? ATTN_BADGE[at] + ' ' : '') + clipText(nodeName(id), 14);
       for (const r of ln.runs) if (r.end >= now - span) el('title', {}, el('rect', { x: x(r.start), y: y + 5, width: Math.max(2, x(r.end) - x(r.start)), height: LH - 10, rx: 3, class: 'run' + (r.live ? ' live' : '') }, tl)).textContent = r.task;
       for (const t of ln.ticks) if (t.at >= now - span) el('title', {}, el('line', { x1: x(t.at), x2: x(t.at), y1: y + 3, y2: y + LH - 3, class: 'tick' }, tl)).textContent = t.name;
       for (const m of ln.marks) if (m.at >= now - span) el('title', {}, el('circle', { cx: x(m.at), cy: y + 5, r: 4, class: 'mark' }, tl)).textContent = '→ ' + m.status; });

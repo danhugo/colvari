@@ -325,7 +325,10 @@ class Store {
     fs.appendFileSync(f, C.logLine(l) + '\n');
     try { if (fs.statSync(f).size > 3e6) { const keep = C.parseLogs(fs.readFileSync(f, 'utf8'), C.LOG_CAP); this.withLock(() => fs.writeFileSync(f, keep.map(C.logLine).join('\n') + '\n')); } } catch {}
   }
-  readLogs(limit = 2000) { try { return C.parseLogs(fs.readFileSync(path.join(this.dir, 'logs.jsonl'), 'utf8'), limit); } catch { return []; } }
+  // level (info/warn/error, derived from kind via TL.levelOf) lets the UI default its filter to warn+error.
+  readLogs(limit = 2000) {
+    try { return C.parseLogs(fs.readFileSync(path.join(this.dir, 'logs.jsonl'), 'utf8'), limit).map((l) => ({ ...l, level: TL.levelOf(l.kind) })); } catch { return []; }
+  }
   clearLogs() { try { fs.unlinkSync(path.join(this.dir, 'logs.jsonl')); } catch {} }
 
   // ---- sessions: claude sessions grouped from persisted runs (see usage.js newRun) ----
