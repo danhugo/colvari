@@ -14,6 +14,9 @@ const realHelpycodeTop = fs.readFileSync(path.join(__dirname, 'fixtures/help-hel
 const realHelpycodeRun = fs.readFileSync(path.join(__dirname, 'fixtures/help-helpycode-real-run.txt'), 'utf8');
 // Recorded from the real installed `helpycode models` (0.3.5): plain model-id lines, no JSON.
 const realHelpycodeModels = fs.readFileSync(path.join(__dirname, 'fixtures/models-helpycode.txt'), 'utf8');
+// Captured live from the installed `helpycode run --format json` (helpycode 0.3.5, 2026-09-27):
+// fields nest under part.*, run totals arrive on `step_finish` events (part.tokens.*, part.cost).
+const realHelpycodeProbe = fs.readFileSync(path.join(__dirname, 'fixtures/probe-helpycode-real.jsonl'), 'utf8');
 
 test('parseCommands / pickRunCommand work on a fictional CLI (no CLI-specific code)', () => {
   const cmds = IN.parseCommands(helpycodeHelp);
@@ -59,7 +62,7 @@ test('introspectRuntime derives a full draft profile for the fictional "helpycod
     if (args[0] === 'run') return probeOut;
     throw new Error('unexpected exec ' + JSON.stringify(args));
   };
-  const profile = IN.introspectRuntime('helpycode', exec, { id: 'helpycode', label: 'HelpyCode' });
+  const { profile, sources, models } = IN.introspectRuntime('helpycode', exec, { id: 'helpycode', label: 'HelpyCode' });
   assert.strictEqual(profile.binary, 'helpycode');
   assert.ok(profile.argsTemplate.includes('run'));
   assert.ok(profile.argsTemplate.includes('--format'));
@@ -73,6 +76,33 @@ test('introspectRuntime derives a full draft profile for the fictional "helpycod
   assert.strictEqual(profile.eventMapping.sessionIdPath, 'session_id');
   assert.strictEqual(profile.eventMapping.costPath, 'total_cost_usd');
   assert.strictEqual(profile.eventMapping.inputPath, 'usage.input_tokens');
+  // per-field provenance: every derived field names the layer that produced it
+  assert.strictEqual(sources.argsTemplate.source, 'help');
+  assert.strictEqual(sources.eventMapping.source, 'probe');
+  assert.strictEqual(sources.argsTemplate.confidence, 'high');
+  assert.strictEqual(sources.resumeFlag.source, 'help');
+  assert.strictEqual(sources.mcp.source, 'help');
+  assert.strictEqual(sources.models, undefined); // no models command in this help
+});
+
+test('introspectRuntime runs the models subcommand and parses names (layer 2)', () => {
+  const exec = (bin, args) => {
+    if (args.includes('--help')) return helpycodeHelp;
+    if (args[0] === 'models') return ['elice/z-ai/glm-5.3-flash', 'elice/z-ai/glm-5.3', '', 'PROVIDER'].join('\n');
+    throw new Error('unexpected exec ' + JSON.stringify(args));
+  };
+  const { models, sources } = IN.introspectRuntime('helpycode', exec, { id: 'helpycode', probe: false });
+  assert.deepStrictEqual(models, ['elice/z-ai/glm-5.3-flash', 'elice/z-ai/glm-5.3']); // header rows skipped
+  assert.deepStrictEqual(sources.models, { source: 'models', confidence: 'high' });
+});
+
+test('parseModelsOutput tolerates JSON arrays, wrapped objects, NDJSON and table listings', () => {
+  assert.deepStrictEqual(IN.parseModelsOutput('["m1","m2"]'), ['m1', 'm2']);
+  assert.deepStrictEqual(IN.parseModelsOutput('{"models":[{"id":"a"},{"name":"b"}]}'), ['a', 'b']);
+  assert.deepStrictEqual(IN.parseModelsOutput('{"id":"x"}\n{"id":"y"}'), ['x', 'y']);
+  assert.deepStrictEqual(IN.parseModelsOutput('- m1\n* m2'), ['m1', 'm2']);
+  assert.deepStrictEqual(IN.parseModelsOutput('banner text\nm1  details\n'), ['m1']);
+  assert.deepStrictEqual(IN.parseModelsOutput(''), []);
 });
 
 test('parseCommands strips the repeated "helpycode <cmd>" prefix real helpycode --help uses', () => {
@@ -90,26 +120,123 @@ test('introspectRuntime derives a working profile against real installed-helpyco
     if (args.includes('--help')) return realHelpycodeTop;
     throw new Error('unexpected exec ' + JSON.stringify(args));
   };
-  const profile = IN.introspectRuntime('helpycode', exec, { id: 'helpycode', label: 'HelpyCode', probe: false });
+  const { profile } = IN.introspectRuntime('helpycode', exec, { id: 'helpycode', label: 'HelpyCode', probe: false });
   assert.deepStrictEqual(profile.argsTemplate, ['run', '--format', 'json', '--model', '{model}', '--variant', '{variant}', '{prompt}']);
   assert.deepStrictEqual(profile.modelsCommand, ['models']);
   assert.strictEqual(profile.effortFlag, '--variant');
-  assert.deepStrictEqual(profile.effortValues, ['high', 'max', 'minimal']);
+  // help only advertises examples ("e.g., high, max, minimal") — not a complete vocabulary, so no
+  // values are claimed (the runner must not reject the CLI's default "low")
+  assert.deepStrictEqual(profile.effortValues, []);
   assert.strictEqual(profile.resumeFlag, '-s');
 });
 
-test('recorded `helpycode models` output: modelsCommand is derived; fixture is real model-id lines', () => {
-  const profile = IN.introspectRuntime('helpycode', (bin, args) => {
+// Recorded from the real installed `helpycode models` (0.3.5): plain model-id lines, no JSON.
+// The layered introspector runs the models subcommand and parses those bare ids into the draft.
+test('recorded `helpycode models` output: bare model-id lines are parsed into the model list', () => {
+  const { profile, models, sources } = IN.introspectRuntime('helpycode', (bin, args) => {
     assert.strictEqual(bin, 'helpycode');
     if (args[0] === 'run' && args.includes('--help')) return realHelpycodeRun;
     if (args.includes('--help')) return realHelpycodeTop;
+    if (args[0] === 'models') return realHelpycodeModels;
     throw new Error('unexpected exec ' + JSON.stringify(args));
   }, { id: 'helpycode', label: 'HelpyCode', probe: false });
   assert.deepStrictEqual(profile.modelsCommand, ['models']);
-  // The recorded fixture is the real listing shape: one bare model id per line. Known gap (see
-  // docs/onboarding-introspection.md): nothing parses these lines into the draft's model list yet,
-  // so the UI still takes model ids as free text (src/main.js helpycode gui-e2e scenario).
-  const ids = realHelpycodeModels.trim().split('\n').map((l) => l.trim()).filter(Boolean);
-  assert.ok(ids.length >= 2, 'expected the real helpycode model listing in the fixture');
-  assert.ok(ids.every((id) => /^[a-z0-9][a-z0-9._/-]*$/i.test(id)), ids.join(','));
+  assert.deepStrictEqual(models, ['elice/qwen/qwen3.8-27b', 'elice/z-ai/glm-5.3-flash']);
+  assert.deepStrictEqual(sources.models, { source: 'models', confidence: 'high' });
+});
+
+// Cato's acceptance bar (t_94eef7a1): the derived helpycode profile must be byte-equal to the old
+// hand-built HELPYCODE_PROFILE, or the diff justified, with a test asserting it. The hand-built
+// profile is restated here (it was deleted from runtimes.js) purely as the parity reference.
+test('parity: derived helpycode profile vs the deleted hand-built HELPYCODE_PROFILE', () => {
+  const exec = (bin, args) => {
+    if (args[0] === 'run' && args.includes('--help')) return realHelpycodeRun;
+    if (args.includes('--help')) return realHelpycodeTop;
+    if (args[0] === 'run') return realHelpycodeProbe;
+    throw new Error('unexpected exec ' + JSON.stringify(args));
+  };
+  const { profile: derived } = IN.introspectRuntime('helpycode', exec, { id: 'helpycode', label: 'HelpyCode' });
+  const handBuilt = {
+    argsTemplate: ['run', '--format', 'json', '--model', '{model}', '--variant', '{variant}', '{prompt}'],
+    effortValues: ['low', 'medium', 'high', 'max', 'minimal'],
+    effortFlag: '--variant', resumeFlag: '-s',
+    mcp: { method: 'file', flag: 'helpycode.json' },
+    eventMapping: { textPath: 'text', sessionIdPath: 'session_id', costPath: 'total_cost_usd', inputPath: 'usage.input_tokens', outputPath: 'usage.output_tokens', reasoningPath: 'usage.reasoning_tokens', cachePath: 'usage.cache_read_tokens' },
+  };
+  // byte-equal fields
+  assert.deepStrictEqual(derived.argsTemplate, handBuilt.argsTemplate);
+  assert.strictEqual(derived.effortFlag, handBuilt.effortFlag);
+  assert.strictEqual(derived.resumeFlag, handBuilt.resumeFlag);
+  assert.deepStrictEqual(derived.modelsCommand, ['models']);
+  // justified diffs:
+  // 1) effortValues: help only advertises examples ("e.g., high, max, minimal") — an explicitly
+  //    non-exhaustive list is not claimed as a vocabulary; the ask-agent layer (or a user edit)
+  //    completes it, since a partial list would make the runner reject the CLI's default "low".
+  assert.deepStrictEqual(derived.effortValues, []);
+  // 2) mcp: real helpycode advertises no MCP config flag (it reads a project-local helpycode.json),
+  //    so help parsing honestly derives 'none'. The ask-agent layer recovers {file, helpycode.json}.
+  assert.deepStrictEqual(derived.mcp, { method: 'none', flag: '' });
+  // 3) eventMapping: the CLI's current probe stream carries fields under part.* ("step_finish"
+  //    events with part.tokens.*), while the hand-built mapping targeted the older documented
+  //    shape — the introspector re-derives it from the actual stream instead of going stale.
+  assert.strictEqual(derived.eventMapping.textPath, 'part.text');
+  assert.strictEqual(derived.eventMapping.sessionIdPath, 'sessionID');
+  assert.strictEqual(derived.eventMapping.inputPath, 'part.tokens.input');
+  assert.strictEqual(derived.eventMapping.outputPath, 'part.tokens.output');
+  assert.strictEqual(derived.eventMapping.reasoningPath, 'part.tokens.reasoning');
+  assert.strictEqual(derived.eventMapping.costPath, 'part.cost');
+  // cachePath stays empty: the stream's leaf is just "read", too generic to claim honestly
+  assert.strictEqual(derived.eventMapping.cachePath, '');
+});
+
+test('ask-agent layer (opt-in) fills only gaps and marks fields low-confidence "agent"', () => {
+  const agentJson = JSON.stringify({
+    argsTemplate: ['run', '--format', 'json', '--model', '{model}', '--variant', '{variant}', '{prompt}'],
+    resumeFlag: '-s', effortFlag: '--variant', effortValues: ['low', 'medium', 'high', 'max', 'minimal'],
+    mcp: { method: 'file', flag: 'helpycode.json' },
+    eventMapping: { textPath: 'text', sessionIdPath: 'session_id', costPath: 'total_cost_usd', inputPath: 'usage.input_tokens', outputPath: 'usage.output_tokens', reasoningPath: 'usage.reasoning_tokens', cachePath: 'usage.cache_read_tokens' },
+  });
+  let asked = false;
+  const exec = (bin, args) => {
+    if (args[0] === 'run' && args.includes('--help')) return realHelpycodeRun;
+    if (args.includes('--help')) return realHelpycodeTop;
+    if (args.join(' ').includes('argsTemplate')) { asked = true; return agentJson; } // the profile request
+    throw new Error('unexpected exec ' + JSON.stringify(args));
+  };
+  const { profile, sources } = IN.introspectRuntime('helpycode', exec, { id: 'helpycode', label: 'HelpyCode', probe: false, askAgent: true });
+  assert.ok(asked, 'ask-agent layer did not run');
+  // observed fields are never overwritten; the effort vocabulary is unioned in, gaps filled from
+  // the agent's own description
+  assert.deepStrictEqual([...profile.effortValues].sort(), ['high', 'low', 'max', 'medium', 'minimal']);
+  assert.deepStrictEqual(profile.mcp, { method: 'file', flag: 'helpycode.json' });
+  assert.deepStrictEqual(sources.effortValues, { source: 'agent', confidence: 'low' });
+  assert.deepStrictEqual(sources.mcp, { source: 'agent', confidence: 'low' });
+  assert.strictEqual(sources.argsTemplate.source, 'help'); // help already had it — agent ignored
+  // opt-in: without askAgent the same CLI keeps the help-derived mcp 'none'
+  const { profile: quiet } = IN.introspectRuntime('helpycode', exec, { id: 'helpycode', probe: false });
+  assert.deepStrictEqual(quiet.mcp, { method: 'none', flag: '' });
+});
+
+test('validateAgentProfile rejects hallucinated/hostile JSON (Cato: never trust model output)', () => {
+  const ok = { argsTemplate: ['run', '{prompt}'] };
+  assert.strictEqual(IN.validateAgentProfile(ok, 'helpycode').binary, 'helpycode'); // binary allowlist is forced
+  assert.throws(() => IN.validateAgentProfile(null, 'helpycode'), /not a JSON object/);
+  assert.throws(() => IN.validateAgentProfile({ argsTemplate: ['sh', '-c', 'rm -rf /; {prompt}'] }, 'h'), /metacharacter/);
+  assert.throws(() => IN.validateAgentProfile({ argsTemplate: ['run'] }, 'h'), /\{prompt\} placeholder/); // must know where the prompt goes
+  assert.throws(() => IN.validateAgentProfile({ argsTemplate: ['run', '{prompt}'], mcp: { method: 'json-flag', flag: '/etc/passwd' } }, 'h'), /unsafe mcp flag/);
+  assert.throws(() => IN.validateAgentProfile({ argsTemplate: ['run', '{prompt}'], eventMapping: { textPath: '..\\evil' } }, 'h'), /unsafe eventMapping/);
+  assert.throws(() => IN.validateAgentProfile({ argsTemplate: ['run', '{prompt}'], effortFlag: 'not a flag' }, 'h'), /unsafe effort flag/);
+  // unknown fields dropped, mcp method allowlisted by normalize
+  const p = IN.validateAgentProfile({ ...ok, mcp: { method: 'deploy-arbitrary-code' }, extra: 'junk' }, 'helpycode');
+  assert.deepStrictEqual(p.mcp, { method: 'none', flag: '' });
+  assert.strictEqual(p.extra, undefined);
+});
+
+test('assertSafeArgs refuses auto-approve/bypass flags; sandboxEnv strips user secrets', () => {
+  assert.throws(() => IN.assertSafeArgs(['run', '--yes', '{prompt}']), /auto-approve|refuses/);
+  assert.throws(() => IN.assertSafeArgs(['--dangerously-bypass-approvals-and-sandbox']), /refuses/);
+  assert.throws(() => IN.assertSafeArgs(['-y']), /refuses/);
+  assert.deepStrictEqual(IN.assertSafeArgs(['run', '--format', 'json', '{prompt}']), ['run', '--format', 'json', '{prompt}']);
+  const env = IN.sandboxEnv({ PATH: '/bin', HOME: '/h', ANTHROPIC_API_KEY: 'sk-secret', MY_APP_TOKEN: 'x', LANG: 'C' });
+  assert.deepStrictEqual(env, { PATH: '/bin', HOME: '/h', LANG: 'C' });
 });
