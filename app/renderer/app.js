@@ -55,9 +55,22 @@ function pfDetail(n) {
 }
 
 async function refresh() {
-  P = await call('listProjects');
-  if (!P.projects.some((p) => p.id === ctx.p)) ctx = { p: P.projects[0].id };
-  S = await call('getAll'); S.inbox = await call('listInbox'); try { S.nstat = await call('nodeStatus'); S.cross = await call('crossEdges'); } catch { S.nstat = {}; S.cross = []; } ctx.t = S.teamId; await loadRuns(); await loadLogs(ctx.p);
+  // Fetch into locals first; only swap the live P/S/ctx (and render) once everything required succeeds,
+  // so a failed/partial IPC round-trip can't blank out a good previous render.
+  const prevCtx = ctx;
+  try {
+    const p = await call('listProjects');
+    if (!p.projects.some((pr) => pr.id === ctx.p)) ctx = { p: p.projects[0].id }; // must land on global ctx before the calls below, which read it
+    const s = await call('getAll');
+    s.inbox = await call('listInbox');
+    try { s.nstat = await call('nodeStatus'); s.cross = await call('crossEdges'); }
+    catch { s.nstat = S.nstat || {}; s.cross = S.cross || []; }
+    ctx.t = s.teamId;
+    P = p; S = s;
+  } catch (e) {
+    ctx = prevCtx; console.warn('refresh failed, keeping previous data', e); return;
+  }
+  await loadRuns(); await loadLogs(ctx.p);
   try { localStorage.setItem('ctx', JSON.stringify(ctx)); } catch {}
   renderAll();
 }
@@ -739,7 +752,7 @@ $('#clearlog').onclick = act(async () => { if (!confirm('Clear the log of this p
 
 // ---------- usage & billing ----------
 let RUNS = [];
-async function loadRuns() { try { RUNS = await call('listRuns'); } catch { RUNS = []; } }
+async function loadRuns() { try { RUNS = await call('listRuns'); } catch (e) { console.warn('listRuns failed, keeping previous runs', e); } }
 function sumRuns(rs) {
   const s = { runs: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, numTurns: 0, durationMs: 0, sub: 0, billed: 0 };
   for (const r of rs) { s.runs++; for (const k of ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheCreationTokens', 'numTurns', 'durationMs']) s[k] += r[k] || 0; if (r.billingSource === 'subscription') s.sub += r.reportedCostUsd || 0; else s.billed += r.reportedCostUsd || 0; }
