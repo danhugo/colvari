@@ -10,11 +10,14 @@ test('effort defaults to low and is validated', () => {
   for (const e of EFFORT_LEVELS) assert.equal(normalizeNode({ effort: e }).effort, e);
 });
 
-test('autoCompact clamps to 0-100', () => {
-  assert.equal(normalizeNode({}).autoCompact, 0);
-  assert.equal(normalizeNode({ autoCompact: 50 }).autoCompact, 50);
-  assert.equal(normalizeNode({ autoCompact: 500 }).autoCompact, 100);
-  assert.equal(normalizeNode({ autoCompact: -5 }).autoCompact, 0);
+test('autoCompact is "auto" or a token window clamped to 100k-1M', () => {
+  assert.equal(normalizeNode({}).autoCompact, '');
+  assert.equal(normalizeNode({ autoCompact: 'auto' }).autoCompact, 'auto');
+  assert.equal(normalizeNode({ autoCompact: 'AUTO' }).autoCompact, 'auto');
+  assert.equal(normalizeNode({ autoCompact: 500000 }).autoCompact, '500000');
+  assert.equal(normalizeNode({ autoCompact: 50000 }).autoCompact, '100000');
+  assert.equal(normalizeNode({ autoCompact: 5000000 }).autoCompact, '1000000');
+  assert.equal(normalizeNode({ autoCompact: 0 }).autoCompact, '');
 });
 
 test('migration: "--effort low" in extraArgs becomes effort=low and is stripped', () => {
@@ -30,9 +33,11 @@ test('migration: "--effort low" in extraArgs becomes effort=low and is stripped'
 });
 
 test('buildClaudeArgs passes --effort and --autocompact', () => {
-  const args = buildClaudeArgs({ effort: 'high', autoCompact: 40 }, 'hi', {}, {});
+  const args = buildClaudeArgs({ effort: 'high', autoCompact: 400000 }, 'hi', {}, {});
   assert.ok(args.includes('--effort')); assert.equal(args[args.indexOf('--effort') + 1], 'high');
-  assert.ok(args.includes('--autocompact')); assert.equal(args[args.indexOf('--autocompact') + 1], '40');
+  assert.ok(args.includes('--autocompact')); assert.equal(args[args.indexOf('--autocompact') + 1], '400000');
+  const argsAuto = buildClaudeArgs({ autoCompact: 'auto' }, 'hi', {}, {});
+  assert.equal(argsAuto[argsAuto.indexOf('--autocompact') + 1], 'auto');
   const args2 = buildClaudeArgs({}, 'hi', {}, {});
   assert.equal(args2[args2.indexOf('--effort') + 1], 'low');
   assert.ok(!args2.includes('--autocompact'));

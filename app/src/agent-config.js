@@ -16,7 +16,7 @@ const NODE_DEFAULTS = {
   maxTurns: 0, appendSystemPrompt: '', addDirs: [], disabledBoardTools: [],
   billingMode: 'auto', billingBaseUrl: '',
   requireApproval: false, budgetUsd: 0, budgetTokens: 0,
-  effort: 'low', autoCompact: 0, // autoCompact: 0 = CLI default (disabled); else % context-used threshold (1-100)
+  effort: 'low', autoCompact: '', // autoCompact: '' = CLI default; 'auto', or a token window 100000-1000000
   ...MODE_DEFAULTS,
 };
 const NODE_FIELDS = Object.keys(NODE_DEFAULTS);
@@ -79,7 +79,11 @@ function normalizeNode(n = {}, base = NODE_DEFAULTS) {
   const migrated = migrateEffortArg(r.extraArgs);
   r.extraArgs = migrated.extraArgs;
   r.effort = EFFORT_LEVELS.includes(n.effort) ? n.effort : (migrated.effort && EFFORT_LEVELS.includes(migrated.effort) ? migrated.effort : 'low');
-  r.autoCompact = Math.min(100, Math.max(0, parseInt(r.autoCompact, 10) || 0));
+  if (String(r.autoCompact).trim().toLowerCase() === 'auto') r.autoCompact = 'auto';
+  else {
+    const tokens = parseInt(r.autoCompact, 10);
+    r.autoCompact = tokens ? String(Math.min(1000000, Math.max(100000, tokens))) : '';
+  }
   Object.assign(r, normalizeMode(r), normalizeBilling(r));
   return r;
 }
@@ -120,7 +124,7 @@ function buildClaudeArgs(node, prompt, settings, mcpConfig, opts = {}) {
   if (opts.resume) args.push('--resume', String(opts.resume));
   if (n.model) args.push('--model', n.model);
   args.push('--effort', n.effort);
-  if (n.autoCompact) args.push('--autocompact', String(n.autoCompact));
+  if (n.autoCompact) args.push('--autocompact', n.autoCompact);
   if (n.allowedTools.length) {
     const tools = n.allowedTools.some((t) => t.startsWith('mcp__board')) ? n.allowedTools : [...n.allowedTools, 'mcp__board']; // keep the board usable
     args.push('--allowedTools', tools.join(','));
