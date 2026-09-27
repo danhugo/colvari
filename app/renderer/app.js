@@ -346,7 +346,26 @@ function renderGraph() {
     const badge = el('g', { class: 'pfbadge pf-' + pf, transform: `translate(${W - bw - 30},-8)` }, g);
     el('title', {}, badge).textContent = pf === 'fail' && n.preflight ? 'Preflight failed: ' + n.preflight.error : 'Preflight: ' + PF_LABEL[pf];
     el('rect', { width: bw, height: 15, rx: 7 }, badge); el('text', { x: bw / 2, y: 11, 'font-size': 9, 'text-anchor': 'middle' }, badge).textContent = PF_LABEL[pf];
+    if (live === 'working') {
+      const pctTxt = typeof ns.contextPct === 'number' ? `${Math.round(Math.max(0, Math.min(100, ns.contextPct)))}% ctx` : '— ctx';
+      const pctCls = typeof ns.contextPct !== 'number' ? 'unknown' : ns.contextPct >= 85 ? 'danger' : ns.contextPct >= (S.settings.autoCompactPct || 40) ? 'warn' : 'ok';
+      const ctxlabel = el('text', { x: W - 24, y: 30, class: 'ctxpct ctx-' + pctCls, 'text-anchor': 'end' }, g); ctxlabel.textContent = pctTxt;
+      el('title', {}, ctxlabel).textContent = typeof ns.contextPct === 'number' ? `${fmtTok(ns.contextTokens || 0)} / ${fmtTok(ns.contextWindow || 0)} tokens` : 'Context usage unknown';
+    }
+    if (ns.compactedAt && Date.now() - ns.compactedAt < 30000) {
+      const cbg = el('g', { class: 'compactbadge', transform: `translate(${W / 2 - 44},-8)` }, g);
+      el('rect', { width: 88, height: 15, rx: 7 }, cbg); el('text', { x: 44, y: 11, 'font-size': 9, 'text-anchor': 'middle' }, cbg).textContent = 'compacted';
+      el('title', {}, cbg).textContent = ns.lastCompact ? `Compacted ${fmtTok(ns.lastCompact.preTokens)}→${fmtTok(ns.lastCompact.postTokens)}` : 'Compacted';
+    }
     el('title', {}, g).textContent = `${n.name} (${n.role}) — ${live}`;
+    if (typeof ns.contextPct === 'number' && live === 'working') {
+      const pct = Math.max(0, Math.min(100, ns.contextPct));
+      const cls = pct >= 85 ? 'danger' : pct >= (S.settings.autoCompactPct || 40) ? 'warn' : 'ok';
+      const ctxg = el('g', { class: 'ctxbar', transform: `translate(0,${H - 4})` }, g);
+      el('rect', { class: 'ctxbar-bg', width: W, height: 4 }, ctxg);
+      el('rect', { class: 'ctxbar-fill ctx-' + cls, width: W * pct / 100, height: 4 }, ctxg);
+      el('title', {}, ctxg).textContent = `${Math.round(pct)}% ctx · ${fmtTok(ns.contextTokens || 0)} / ${fmtTok(ns.contextWindow || 0)} tokens`;
+    }
     // hover quick actions
     const qa = el('g', { class: 'qacts', transform: `translate(${W - 104},-30)` }, g);
     [['✎', 'Edit', () => selectNode(n.id)], ['⧉', 'Duplicate', () => duplicateNode(n)], ['→', 'Connect from here', () => startConnect(n)], ['✕', 'Delete', () => deleteNode(n)]].forEach(([ic, tip, fn], k) => {
@@ -729,7 +748,7 @@ function renderObs() {
   $('#budgetbar').innerHTML = (st.budgetUsd || st.budgetTokens ? `Run budget: ${st.budgetUsd ? `$${(S.orch.runCost || 0).toFixed(4)} / $${st.budgetUsd}` : ''}${st.budgetUsd && st.budgetTokens ? ' · ' : ''}${st.budgetTokens ? `${fmtTok(S.orch.runTokens)} / ${fmtTok(st.budgetTokens)} tok` : ''}` : '') + (stopMsg ? ` <span class="warn">Stopped: ${stopMsg}</span>` : '');
   const f = $('#logfilter'); f.innerHTML = '<option value="">All agents</option>' + nodes.map((n) => `<option value="${n.id}">${esc(n.name)}</option>`).join(''); f.value = cur;
 }
-const LOG_LEVEL = { error: 'error', stderr: 'error', tool_error: 'error', system: 'info', tool: 'tool', tool_result: 'tool', result: 'ok', raw: 'muted' };
+const LOG_LEVEL = { error: 'error', stderr: 'error', tool_error: 'error', system: 'info', tool: 'tool', tool_result: 'tool', result: 'ok', raw: 'muted', compacted: 'compact' };
 function logRow(l) {
   const w = who(l.nodeId); const lvl = LOG_LEVEL[l.kind] || 'text';
   const task = l.task ? `<span class="logtask" ${l.taskId ? `data-tasklink="${esc(l.taskId)}" title="Open in task thread"` : ''}>${esc(l.task)}</span>` : '';
@@ -887,6 +906,7 @@ function renderSettings() {
     <label>Project budget per Run, $ <span class="muted">(stops all agents; 0 = none)</span></label><input id="st-budgetusd" type="number" min="0" step="0.01" value="${s.budgetUsd || 0}">
     <label>Project token budget per Run <span class="muted">(input + output; 0 = none)</span></label><input id="st-budgettok" type="number" min="0" step="1000" value="${s.budgetTokens || 0}">
     <label>Stuck warning after N minutes without output</label><input id="st-stuck" type="number" min="1" value="${s.stuckMinutes || 5}">
+    <label>Auto-compact at % <span class="muted">(context usage that triggers /compact; 0 = off)</span></label><input id="st-autocompactpct" type="number" min="0" max="95" value="${s.autoCompactPct ?? 40}">
     <label class="inline"><input type="checkbox" id="st-approval" ${s.requireApproval ? 'checked' : ''}> Require human approval for every agent's "done"</label>
     <label class="inline"><input type="checkbox" id="st-notify" ${s.notifications === false ? '' : 'checked'}> Desktop notifications (approval needed, budget reached, run finished)</label>
     <p><button id="st-save" class="primary">Save settings</button></p>
@@ -900,7 +920,8 @@ function renderSettings() {
   document.querySelectorAll('[data-editp]').forEach((b) => b.onclick = () => { const p = s.rolePresets.find((x) => x.name === b.dataset.editp); $('#pr-name').value = p.name; $('#pr-prompt').value = p.systemPrompt; $('#pr-allowed').value = p.allowedTools.join(', '); $('#pr-disallowed').value = p.disallowedTools.join(', '); $('#pr-perm').value = p.permissionMode; });
   $('#pr-save').onclick = act(async () => { await call('savePreset', { name: $('#pr-name').value, systemPrompt: $('#pr-prompt').value, allowedTools: $('#pr-allowed').value, disallowedTools: $('#pr-disallowed').value, permissionMode: $('#pr-perm').value }); refresh(); });
   $('#st-save').onclick = async () => { await call('saveSettings', { claudePath: $('#st-claude').value.trim() || 'claude', maxConcurrency: +$('#st-conc').value || 2, maxRuns: +$('#st-runs').value || 30, permissionMode: $('#st-perm').value,
-    budgetUsd: +$('#st-budgetusd').value || 0, budgetTokens: +$('#st-budgettok').value || 0, requireApproval: $('#st-approval').checked, notifications: $('#st-notify').checked, stuckMinutes: +$('#st-stuck').value || 5 }); refresh(); };
+    budgetUsd: +$('#st-budgetusd').value || 0, budgetTokens: +$('#st-budgettok').value || 0, requireApproval: $('#st-approval').checked, notifications: $('#st-notify').checked, stuckMinutes: +$('#st-stuck').value || 5,
+    autoCompactPct: Math.max(0, Math.min(95, +$('#st-autocompactpct').value || 0)) }); refresh(); };
 }
 
 // ---------- overview ----------
