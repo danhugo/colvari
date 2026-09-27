@@ -197,13 +197,17 @@ const authType = (billingSource) => (billingSource === 'subscription' ? 'subscri
 const FIVE_HOURS_MS = 5 * 60 * 60 * 1000, WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 function windowUsage(runs, ms, now = Date.now()) {
   const cutoff = now - ms;
-  return runs.filter((r) => r.kind === 'agent' && authType(r.billingSource) === 'subscription' && new Date(r.startedAt || 0).getTime() >= cutoff).length;
+  const inWindow = runs.filter((r) => r.kind === 'agent' && authType(r.billingSource) === 'subscription' && new Date(r.startedAt || 0).getTime() >= cutoff);
+  // Rolling window: it "resets" ms after the oldest run still counted drops out of the window.
+  const oldest = inWindow.reduce((min, r) => Math.min(min, new Date(r.startedAt || 0).getTime()), Infinity);
+  const resetsAt = Number.isFinite(oldest) ? new Date(oldest + ms).toISOString() : null;
+  return { used: inWindow.length, resetsAt };
 }
 // Status against one limit: 0 disables it.
-function limitStatus(used, limit, warnPct) {
-  if (!limit) return { used, limit: 0, pct: 0, warn: false, pause: false };
+function limitStatus({ used, resetsAt }, limit, warnPct) {
+  if (!limit) return { used, limit: 0, pct: 0, warn: false, pause: false, resetsAt: null };
   const pct = used / limit;
-  return { used, limit, pct, warn: pct >= warnPct / 100, pause: pct >= 1 };
+  return { used, limit, pct, warn: pct >= warnPct / 100, pause: pct >= 1, resetsAt: used > 0 ? resetsAt : null };
 }
 // Combined limits snapshot for a project's runs, split by auth type. Callers (orchestrator) use .warn/.pause
 // to decide whether to surface a warning or pause dispatch; exposed to the renderer over IPC as-is.
@@ -213,8 +217,8 @@ function usageStatus(runs, limits, now = Date.now()) {
   const apiRuns = runs.filter((r) => r.kind === 'agent' && authType(r.billingSource) === 'api');
   const fiveHour = limitStatus(windowUsage(runs, FIVE_HOURS_MS, now), l.fiveHourLimit, l.warnPct);
   const weekly = limitStatus(windowUsage(runs, WEEK_MS, now), l.weeklyLimit, l.warnPct);
-  const tokens = limitStatus(apiRuns.reduce((a, r) => a + totalTokens(r), 0), l.tokenLimit, l.warnPct);
-  const cost = limitStatus(apiRuns.reduce((a, r) => a + (r.reportedCostUsd || 0), 0), l.costLimit, l.warnPct);
+  const tokens = limitStatus({ used: apiRuns.reduce((a, r) => a + totalTokens(r), 0), resetsAt: null }, l.tokenLimit, l.warnPct);
+  const cost = limitStatus({ used: apiRuns.reduce((a, r) => a + (r.reportedCostUsd || 0), 0), resetsAt: null }, l.costLimit, l.warnPct);
   const hasSubscription = subRuns.length > 0, hasApi = apiRuns.length > 0;
   const authTypes = [...new Set([...(hasSubscription ? ['subscription'] : []), ...(hasApi ? ['api'] : [])])];
   const warn = fiveHour.warn || weekly.warn || tokens.warn || cost.warn;
