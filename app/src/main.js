@@ -308,6 +308,14 @@ async function guiE2E() {
     fs.writeFileSync(fake, `#!/bin/sh\nsleep 20\necho '{"type":"result","subtype":"success","session_id":"s","total_cost_usd":0,"num_turns":1,"usage":{"input_tokens":1,"output_tokens":1}}'\n`); fs.chmodSync(fake, 0o755);
     const prev = s.getSettings(); s.saveSettings({ claudePath: fake, maxConcurrency: 8 });
     const [a, b] = ['ParA', 'ParB'].map((n) => pm.store(p, t1).addNode({ name: n, role: 'Dev' })); const c = pm.store(p, t2).addNode({ name: 'ParC', role: 'Dev' });
+    // These fresh nodes have no capabilities snapshot yet, which would make the very next getAll() (auto-probe,
+    // main.js probeNodeLater) run a synchronous `--help` probe against the fake claudePath above — a real CLI
+    // returns instantly, but this fake script only ever sleeps, so execFileSync's probe blocks the whole main
+    // process for its full 10s timeout per node (~30s serialized for 3 nodes), starving the child 'close' events
+    // and IPC calls this test's 18s parallel-window check depends on. Stub a capabilities snapshot upfront so the
+    // auto-probe sees them as already probed and skips it, matching what a real prior Refresh/run would leave behind.
+    const stubCaps = { ok: true, probedAt: new Date().toISOString(), source: 'stub', slashCommands: [], commands: [], skills: [], modes: [], categorized: [] };
+    pm.store(p, t1).updateNode(a.id, { capabilities: stubCaps }); pm.store(p, t1).updateNode(b.id, { capabilities: stubCaps }); pm.store(p, t2).updateNode(c.id, { capabilities: stubCaps });
     const ts = [a, b, c].map((n) => s.createTask({ title: 'Parallel ' + n.name, assignee: n.id }));
     const dep = s.createTask({ title: 'Depends on ParA', assignee: c.id, blockedBy: [ts[0].id] });
     const o = orchFor(p); const done = new Promise((r) => o.once('done', r)); o.start();
