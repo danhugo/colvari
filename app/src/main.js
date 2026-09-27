@@ -289,33 +289,40 @@ async function guiE2E() {
     expect('parallel: dependent starts after blocker ends', D[0] >= A[1], { A, D });
     s.saveSettings({ claudePath: prev.claudePath, maxConcurrency: prev.maxConcurrency });
   };
-  // Mixed vendors: a claude + codex team (fake binaries); shots show per-agent runtime/model, codex cost as tokens-only (never $0 billed).
+  // Mixed vendors: Claude/Opus PM -> Codex Dev -> Claude/Haiku Reviewer finish a chain through the board (fake bins); graph runtime/model chips + overview.
   const mixedShots = async () => {
-    const p = pid(); const s = pm.store(p); const dir = require('os').tmpdir();
-    const sh = (n, body) => { const f = path.join(dir, n); fs.writeFileSync(f, '#!/bin/sh\nsleep 12\n' + body); fs.chmodSync(f, 0o755); return f; };
-    const claude = sh('squad-mix-claude.sh', `echo '{"type":"result","subtype":"success","session_id":"s","total_cost_usd":0.12,"num_turns":1,"usage":{"input_tokens":1200,"output_tokens":300}}'\n`);
-    const codex = sh('squad-mix-codex.sh', `echo '{"type":"thread.started","thread_id":"T1"}'\necho '{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}'\necho '{"type":"turn.completed","usage":{"input_tokens":14351,"cached_input_tokens":9984,"output_tokens":42}}'\n`);
-    const prev = s.getSettings(); s.saveSettings({ claudePath: claude, codexPath: codex, maxConcurrency: 8 });
-    const c = s.addNode({ name: 'MixClaude', role: 'Dev', runtime: 'claude', model: 'claude-sonnet-5' });
-    const x = s.addNode({ name: 'MixCodex', role: 'Dev', runtime: 'codex', model: 'gpt-5.6-terra' });
-    [c, x].forEach((n) => s.createTask({ title: 'Mixed ' + n.name, assignee: n.id }));
+    await waitFor(`return !!document.querySelector('#tpl-select option')`); await ex(`await refresh();`); const cur = await ex(`return { p: ctx.p, t: S.teamId }`);
+    const p = cur.p || pid(); const ts = pm.store(p, cur.t); const s = pm.store(p); const tmp = require('os').tmpdir();
+    const cl = path.join(tmp, 'squad-mix-claude.sh'); const cx = path.join(tmp, 'squad-mix-codex.sh');
+    fs.writeFileSync(cl, `#!/bin/sh\nsleep 3\necho '{"type":"result","subtype":"success","session_id":"cs","total_cost_usd":0.01,"num_turns":1,"usage":{"input_tokens":5,"output_tokens":2}}'\n`);
+    fs.writeFileSync(cx, `#!/bin/sh\nsleep 3\necho '{"type":"thread.started","thread_id":"T1"}'\necho '{"type":"item.completed","item":{"id":"i0","type":"agent_message","text":"added hello.txt"}}'\necho '{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":7}}'\n`);
+    fs.chmodSync(cl, 0o755); fs.chmodSync(cx, 0o755);
+    const prev = s.getSettings(); s.saveSettings({ claudePath: cl, codexPath: cx });
+    const P = ts.addNode({ name: 'MixPM', role: 'PM', runtime: 'claude', model: 'opus', x: 60, y: 60 });
+    const D = ts.addNode({ name: 'MixDev', role: 'Dev', runtime: 'codex', model: 'gpt-5.6-terra', x: 320, y: 60 });
+    const R = ts.addNode({ name: 'MixRev', role: 'Reviewer', runtime: 'claude', model: 'haiku', x: 580, y: 60 });
+    ts.addEdge(P.id, D.id, 'assign'); ts.addEdge(R.id, D.id, 'review');
+    const plan = s.createTask({ title: 'Mix: plan hello.txt', assignee: P.id });
+    const impl = s.createTask({ title: 'Mix: write hello.txt', assignee: D.id, blockedBy: [plan.id] });
+    const rev = s.createTask({ title: 'Mix: review hello.txt', assignee: R.id, blockedBy: [impl.id] });
+    await ex(`$('#tabs button[data-tab=team]').click(); await refresh(); renderGraph(); await w(400);`);
+    const chips = await ex(`return [...document.querySelectorAll('#graph .chip text')].map((t) => t.textContent)`);
+    expect('mixed: graph chips show codex + claude runtimes and opus/haiku models', ['codex', 'claude', 'opus', 'haiku'].every((c) => chips.some((x) => x.toLowerCase().startsWith(c))), chips);
     const o = orchFor(p); const done = new Promise((r) => o.once('done', r)); o.start();
-    await waitFor(`await refresh(); return /2 in parallel/.test($('#runstate').textContent)`, 10000);
-    const snap = o.snapshot();
-    expect('mixed: per-agent runtime/model in snapshot', snap.agents[c.id].runtime === 'claude' && snap.agents[x.id].runtime === 'codex' && snap.agents[x.id].model === 'gpt-5.6-terra', snap.agents);
-    for (const t of ['light', 'dark']) {
-      require('electron').nativeTheme.themeSource = t;
-      await ex(`$('#tabs button[data-tab=overview]').click(); await refresh(); await w(300);`); await shot(`28-mixed-overview-live-${t}`);
-      await ex(`$('#tabs button[data-tab=team]').click(); await w(400);`); await shot(`29-mixed-team-${t}`);
-    }
+    for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`$('#tabs button[data-tab=team]').click(); await refresh(); renderGraph(); await w(400);`); await shot(`28-mixed-graph-${t}`); }
     await done;
-    for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`$('#tabs button[data-tab=overview]').click(); await refresh(); await w(300);`); await shot(`30-mixed-overview-done-${t}`); }
+    for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`$('#tabs button[data-tab=overview]').click(); await refresh(); await w(400);`); await shot(`29-mixed-overview-${t}`); }
+    const ov = await ex(`return [...document.querySelectorAll('#ov-graph .ov-vendor')].map((t) => t.textContent)`);
+    expect('mixed: overview nodes show vendor · model', ov.join() === 'Claude · opus,Codex · gpt-5.6-terra,Claude · haiku', ov);
+    for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`$('#tabs button[data-tab=usage]').click(); await refresh(); await w(600);`); await shot(`30-mixed-usage-${t}`); }
+    const us = await ex(`return [...document.querySelectorAll('#us-summary h4')].find((h) => h.textContent === 'By vendor').nextElementSibling.innerText`);
+    expect('mixed: usage By vendor splits Codex (cost —) and Claude ($)', /Codex[^\n]*107[^\n]*—/.test(us) && /Claude[^\n]*\$0\.0/.test(us), us);
     require('electron').nativeTheme.themeSource = 'system';
-    const ov = await ex(`return $('#view') ? $('#view').textContent : document.body.textContent`);
-    const fin = o.snapshot();
-    expect('mixed: codex runs never add to billed cost', fin.agents[x.id].cost === 0 && Math.abs(fin.billedCost + fin.subCost - 0.12) < 1e-9, fin);
-    expect('mixed: codex shows tokens, no $ cost', /n\/a|tokens/i.test(ov), ov.slice(0, 400));
-    s.saveSettings({ claudePath: prev.claudePath, codexPath: prev.codexPath, maxConcurrency: prev.maxConcurrency });
+    const st = [plan, impl, rev].map((t) => s.getTask(t.id).status); expect('mixed: all three tasks done', st.every((x) => x === 'done'), st);
+    const rt = [plan, impl, rev].map((t) => (s.listRuns().find((r) => r.taskId === t.id && r.kind === 'agent') || {}).runtime);
+    expect('mixed: runs recorded as claude, codex, claude', rt.join() === 'claude,codex,claude', rt);
+    console.log('[gui-e2e] mixed', JSON.stringify({ chips, st, rt }));
+    s.saveSettings({ claudePath: prev.claudePath, codexPath: prev.codexPath });
   };
   try {
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'graph') { await graphShots(); for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`$('#tabs button[data-tab=team]').click(); await w(500);`); await shot(`graph-${t}`); } require('electron').nativeTheme.themeSource = 'system'; throw null; }
@@ -485,7 +492,7 @@ async function guiE2E() {
     const { nativeTheme } = require('electron');
     for (const theme of ['light', 'dark']) {
       nativeTheme.themeSource = theme; await ex(`await w(300);`);
-      for (const tab of ['chat', 'team', 'board', 'inbox', 'overview']) { await ex(`$('#tabs button[data-tab=${tab}]').click(); await w(500);`); await shot(`main-${tab}-${theme}`); }
+      for (const tab of ['chat', 'team', 'board', 'inbox', 'overview', 'wiki', 'obs']) { await ex(`$('#tabs button[data-tab=${tab}]').click(); await w(500);`); await shot(`main-${tab === 'obs' ? 'logs' : tab}-${theme}`); }
       await ex(`$('#tabs button[data-tab=team]').click(); $('#reopenguide').click(); await w(400);`); await shot(`main-firstrun-${theme}`);
       expect(`firstrun guide opens (${theme})`, await ex(`return !$('#guide').classList.contains('hidden')`));
       await ex(`$('#guide').classList.add('hidden'); await w(200);`);
