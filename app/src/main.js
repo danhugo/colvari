@@ -464,6 +464,14 @@ async function guiE2E() {
     const roles = ['PM', 'Dev', 'Dev', 'Dev', 'Reviewer', 'Critic'];
     for (let i = cs.getTeam().nodes.length; i < 24; i++) cs.addNode({ name: `Cx${i + 1}`, role: roles[i % roles.length], x: 40 + (i % 6) * 220, y: 40 + Math.floor(i / 6) * 130 });
     const mainId = pm.get(cp.id).teams[0].id; const main = cs.getTeam();
+    // Reports-to edges within each 6-agent group (PM assigns Devs, Devs message the Reviewer, Reviewer reviews
+    // back to the PM, Critic reviews the Devs) so the 24-agent graph actually has edges to render/verify.
+    for (let g = 0; g < main.nodes.length; g += 6) {
+      const [pmN, d1, d2, d3, rev, crit] = main.nodes.slice(g, g + 6);
+      if (!pmN || !d1 || !d2 || !d3 || !rev || !crit) break;
+      for (const d of [d1, d2, d3]) { cs.addEdge(pmN.id, d.id, 'assign'); cs.addEdge(d.id, rev.id, 'message'); cs.addEdge(crit.id, d.id, 'review'); }
+      cs.addEdge(rev.id, pmN.id, 'review');
+    }
     const peerTeams = ['Peers A', 'Peers B', 'Peers C'].map((n) => pm.createTeam(cp.id, n));
     const peerStores = peerTeams.map((p) => pm.store(cp.id, p.id || p));
     peerStores.forEach((s, i) => { s.addNode({ name: `Peer${i + 1}a`, role: 'Dev', x: 60, y: 60 }); s.addNode({ name: `Peer${i + 1}b`, role: 'Reviewer', x: 300, y: 60 }); });
