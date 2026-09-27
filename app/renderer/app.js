@@ -3,7 +3,7 @@ const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const MODELS = ['opus', 'sonnet', 'haiku', 'claude-opus-5-5', 'claude-sonnet-5', 'claude-haiku-4-5-20251001'];
 const RUN_MODES = [['single', 'Single: one run per task'], ['goal', 'Goal: resume until condition met'], ['loop', 'Loop: repeat N times'], ['workflow', 'Workflow: slash command / skill']];
-const STATUSES = ['todo', 'in_progress', 'waiting_for_human', 'review', 'done'];
+const STATUSES = ['todo', 'in_progress', 'waiting_for_human', 'review', 'done', 'merge_conflict'];
 const call = (name, ...args) => squad.call(name, ctx, ...args); // every call is scoped to the selected project/team
 let ctx = (() => { try { return JSON.parse(localStorage.getItem('ctx')) || {}; } catch { return {}; } })();
 let P = { projects: [], templates: {} };

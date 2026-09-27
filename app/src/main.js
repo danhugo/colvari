@@ -389,8 +389,40 @@ async function guiE2E() {
     expect('polish: sidebar lists both teams', await ex(`return document.querySelectorAll('#teamlist [data-tid]').length >= 2`));
     require('electron').nativeTheme.themeSource = 'system'; await ex(`VP = { x: 20, y: 20, zoom: 1 }; applyVP();`); ps.setViewport({}); os.setViewport({});
   };
+  // Merge-conflict guard: a task with a real worktree branch that conflicts with base. Marking it
+  // done must abort the auto-merge, park the task as merge_conflict (visible on the Board, not hidden), and
+  // spawn a "Resolve merge conflict" follow-up.
+  const conflictShots = async () => {
+    await waitFor(`return !!document.querySelector('#tpl-select option')`); await ex(`await refresh();`); const cur = await ex(`return { p: ctx.p, t: S.teamId }`);
+    const p = cur.p || pid(); const s = pm.store(p);
+    const { execFileSync } = require('child_process'); const g = (cwd, ...a) => execFileSync('git', ['-c', 'user.email=a@b', '-c', 'user.name=a', ...a], { cwd, stdio: 'pipe' }).toString().trim();
+    const repo = fs.mkdtempSync(path.join(require('os').tmpdir(), 'squad-conflict-repo-'));
+    g(repo, 'init', '-q', '-b', 'main'); fs.writeFileSync(path.join(repo, 'a.txt'), 'base\n'); g(repo, 'add', '.'); g(repo, 'commit', '-q', '-m', 'init');
+    const { ensureWorktree } = require('./worktree'); const wt = ensureWorktree(repo, 'conflictdemo');
+    let nodes = s.getTeam().nodes; if (!nodes.length) { s.addNode({ name: 'Devon', role: 'Dev', x: 60, y: 60 }); nodes = s.getTeam().nodes; }
+    const dev = nodes.find((n) => n.role === 'Dev') || nodes[0];
+    let task = s.createTask({ title: 'Conflict demo: edit a.txt', assignee: dev.id });
+    task = s._updateTask(task.id, { worktreePath: wt.worktreePath, worktreeBranch: wt.worktreeBranch });
+    fs.writeFileSync(path.join(wt.worktreePath, 'a.txt'), 'theirs\n'); g(wt.worktreePath, 'commit', '-qam', 'theirs edit');
+    fs.writeFileSync(path.join(repo, 'a.txt'), 'ours\n'); g(repo, 'commit', '-qam', 'ours edit');
+    task = s.updateTask(task.id, { status: 'done' });
+    expect('conflict: guard parks the task as merge_conflict instead of done', task.status === 'merge_conflict', task);
+    await ex(`$('#tabs button[data-tab=board]').click(); await refresh(); await w(300);`);
+    const col = await ex(`return [...document.querySelectorAll('#columns h3')].map((h) => h.textContent)`);
+    expect('conflict: Board shows a merge conflict column (task is not hidden)', col.some((h) => /merge conflict/.test(h)), col);
+    const card = await ex(`return document.querySelector('.card[data-id="${task.id}"]')?.textContent || ''`);
+    expect('conflict: the parked card is the conflicting task', /Conflict demo/.test(card), card);
+    await ex(`document.querySelector('.card[data-id="${task.id}"]').click(); await w(200);`);
+    const detail = await ex(`return $('#taskdetail').textContent`);
+    expect('conflict: task detail explains the auto-merge was blocked', /auto-merge blocked, task moved to merge_conflict/.test(detail), detail.slice(0, 300));
+    const followUp = await ex(`return [...document.querySelectorAll('#columns .card')].map((c) => c.textContent).find((t) => /Resolve merge conflict/.test(t)) || ''`);
+    expect('conflict: a "Resolve merge conflict" follow-up task was created', /Resolve merge conflict/.test(followUp), followUp);
+    for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`await w(300);`); await shot(`31-conflict-board-${t}`); }
+    require('electron').nativeTheme.themeSource = 'system';
+  };
   try {
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'wikilogs') { await wikiLogsShots(); throw null; }
+    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'conflict') { await conflictShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'graph') { await graphShots(); for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`$('#tabs button[data-tab=team]').click(); await w(500);`); await shot(`graph-${t}`); } require('electron').nativeTheme.themeSource = 'system'; throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'chat') { await chatShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'firstrun') { await firstrunInbox(); throw null; }
