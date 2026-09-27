@@ -534,18 +534,25 @@ function renderLive() {
 
 // ---------- wiki ----------
 function md(src) {
+  if (!src.trim()) return '<p class="muted wk-empty-body">Nothing written yet. Click Edit / Preview to start writing.</p>';
   const blocks = esc(src).split(/```/);
-  return blocks.map((b, i) => i % 2 ? `<pre>${b.replace(/^\w*\n/, '')}</pre>` : b
+  const closeList = (h) => h.replace(/(?:<li>.*?<\/li>\n?)+/g, (m) => `<ul>${m.replace(/\n/g, '')}</ul>`);
+  return blocks.map((b, i) => i % 2 ? `<pre>${b.replace(/^\w*\n/, '')}</pre>` : closeList(b
     .replace(/^### (.*)$/gm, '<h3>$1</h3>').replace(/^## (.*)$/gm, '<h2>$1</h2>').replace(/^# (.*)$/gm, '<h1>$1</h1>')
+    .replace(/^&gt; (.*)$/gm, '<blockquote>$1</blockquote>')
     .replace(/^[-*] (.*)$/gm, '<li>$1</li>').replace(/\*\*(.+?)\*\*/g, '<b>$1</b>').replace(/`([^`]+)`/g, '<code>$1</code>')
-    .replace(/\n{2,}/g, '<br><br>')).join('');
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
+    .replace(/\n{2,}/g, '<br><br>'))).join('');
 }
 function renderWiki() {
   const titles = Object.keys(S.wiki).sort();
-  $('#wikilist').innerHTML = `<p><button id="wk-new">+ New page</button></p>` + titles.map((t) => `<div class="${t === sel.page ? 'sel' : ''}" data-t="${esc(t)}">${esc(t)}<br><small class="muted">${esc(S.wiki[t].author)}</small></div>`).join('');
-  document.querySelectorAll('#wikilist div').forEach((d) => d.onclick = () => { sel.page = d.dataset.t; wikiEdit = false; loadPage(); renderWiki(); });
+  $('#wikilist').innerHTML = `<p><button id="wk-new">+ New page</button></p>` + (titles.length
+    ? titles.map((t) => `<div class="${t === sel.page ? 'sel' : ''}" data-t="${esc(t)}">${esc(t)}<br><small class="muted">${esc(S.wiki[t].author)}</small></div>`).join('')
+    : '<p class="muted wk-empty-body">No pages yet.</p>');
+  document.querySelectorAll('#wikilist div[data-t]').forEach((d) => d.onclick = () => { sel.page = d.dataset.t; wikiEdit = false; loadPage(); renderWiki(); });
   $('#wk-new').onclick = () => { sel.page = null; wikiEdit = true; $('#wk-title').value = ''; $('#wk-content').value = ''; showWiki(); };
   if (sel.page && S.wiki[sel.page] && !wikiEdit) loadPage();
+  else if (!sel.page) $('#wk-view').innerHTML = titles.length ? '<p class="muted wk-empty-body">Pick a page on the left, or start a new one.</p>' : '<p class="muted wk-empty-body">No wiki pages yet. Click + New page to write the first one.</p>';
 }
 function loadPage() { const p = S.wiki[sel.page]; if (!p) return; $('#wk-title').value = p.title; $('#wk-content').value = p.content; showWiki(); }
 function showWiki() { $('#wk-content').classList.toggle('hidden', !wikiEdit); $('#wk-view').classList.toggle('hidden', wikiEdit); $('#wk-view').innerHTML = md($('#wk-content').value); }
@@ -567,12 +574,22 @@ function renderObs() {
   const f = $('#logfilter'); const cur = f.value;
   f.innerHTML = '<option value="">All agents</option>' + S.allNodes.map((n) => `<option value="${n.id}">${esc(n.name)}</option>`).join(''); f.value = cur;
 }
+const LOG_LEVEL = { error: 'error', stderr: 'error', tool_error: 'error', system: 'info', tool: 'tool', tool_result: 'tool', result: 'ok', raw: 'muted' };
+function logRow(l) {
+  const w = who(l.nodeId); const lvl = LOG_LEVEL[l.kind] || 'text';
+  return `<div class="logrow lv-${lvl}"><span class="logtime">${new Date(l.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span><span class="avatar sm" style="background:${w.color}" title="${esc(w.name)}">${esc(w.ini)}</span><span class="logagent" title="${esc(w.name)}">${esc(w.name)}</span><span class="loglevel lv-${lvl}">${esc(l.kind)}</span><span class="logtext">${esc(l.text)}</span></div>`;
+}
 function renderLog() {
-  const f = $('#logfilter').value; const box = $('#log'); const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 20;
-  box.innerHTML = logs.filter((l) => l.projectId === ctx.p && (!f || l.nodeId === f)).slice(-800).map((l) => `<span class="${l.kind}">${new Date(l.at).toLocaleTimeString()} [${esc(l.nodeId ? nodeName(l.nodeId) : 'system')}] ${l.kind}: ${esc(l.text)}</span>`).join('\n');
-  if (atBottom) box.scrollTop = box.scrollHeight;
+  const f = $('#logfilter').value; const q = ($('#logsearch').value || '').trim().toLowerCase();
+  const box = $('#log'); const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 20;
+  const all = logs.filter((l) => l.projectId === ctx.p);
+  const rows = all.filter((l) => (!f || l.nodeId === f) && (!q || l.text.toLowerCase().includes(q)));
+  box.innerHTML = rows.length ? rows.slice(-800).map(logRow).join('')
+    : `<p class="muted logempty">${all.length ? 'No log lines match your filter.' : 'No activity yet — run the team to see agent logs here.'}</p>`;
+  if (atBottom && $('#logauto').checked) box.scrollTop = box.scrollHeight;
 }
 $('#logfilter').onchange = renderLog;
+$('#logsearch').oninput = renderLog;
 $('#clearlog').onclick = act(async () => { if (!confirm('Clear the log of this project (also the saved log file)?')) return; for (let i = logs.length - 1; i >= 0; i--) if (logs[i].projectId === ctx.p) logs.splice(i, 1); await call('clearLogs'); renderLog(); });
 
 // ---------- usage & billing ----------
