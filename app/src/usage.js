@@ -247,7 +247,16 @@ function parseRateLimitWindow(o) {
   if (pct == null || Number.isNaN(pct)) return null;
   if (pct > 1) pct = pct / 100; // some CLIs report 0-100 instead of 0-1
   let resetsAt = o.resets_at || o.resetsAt || o.reset_at || o.resetAt || null;
-  if (typeof resetsAt === 'number') resetsAt = new Date(resetsAt * 1000).toISOString(); // CLI reports epoch seconds
+  if (typeof resetsAt === 'number') {
+    // Epoch seconds vs milliseconds: seconds-since-epoch is ~10 digits (<1e12) through the year 5138;
+    // some CLIs already report milliseconds, which would otherwise land centuries in the future.
+    resetsAt = new Date(resetsAt < 1e12 ? resetsAt * 1000 : resetsAt).toISOString();
+  }
+  // Unknown/unparseable or already-past reset times aren't useful as a countdown — omit rather than show "↻0m".
+  if (resetsAt) {
+    const t = new Date(resetsAt).getTime();
+    if (Number.isNaN(t) || t <= Date.now()) resetsAt = null;
+  }
   return { pct: Math.max(0, Math.min(1, pct)), resetsAt };
 }
 // Two shapes the CLI reports rate limits in: a "system"/"init" event's rate_limits field (older/simpler), and

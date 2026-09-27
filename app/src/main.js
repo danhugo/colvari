@@ -1007,17 +1007,25 @@ const api = {
     const installed = runtimes(s.getSettings())[node.runtime] ? runtimes(s.getSettings())[node.runtime].installed : undefined;
     return U.providerUsageStatus(rl, { installed, billingMode: node.billingMode });
   },
-  // Manual Refresh: the --help probe alone. If this node has never had any snapshot at all (no capabilities,
-  // no live init event ever seen), --help text is a poor substitute for the CLI's own real slash_commands/skills,
-  // so fall back to one live `claude -p --output-format stream-json --verbose` probe (capabilities.probeInitEvent)
-  // to seed a real snapshot — the same data a normal run's init/rate_limit_event would have given us for free.
+  // Manual Refresh: the --help probe alone. If this node has never had a real init event (no capabilities at
+  // all, or a capabilities snapshot that only ever came from --help/local scan), --help text is a poor substitute
+  // for the CLI's own real slash_commands/skills, so fall back to one live
+  // `claude -p --output-format stream-json --verbose` probe (capabilities.probeInitEvent) to seed a real snapshot
+  // — the same data a normal run's init/rate_limit_event would have given us for free. If a real init event was
+  // already captured (this session or a prior one), it's the CLI's own authoritative report — Refresh's --help
+  // probe must not clobber it with smaller/fallback data, so its slash_commands/skills/modes are kept as-is.
   discoverCapabilities: async (c, nodeId) => {
     const node = TS(c).getTeam().nodes.find((n) => n.id === nodeId); if (!node) throw new Error('no agent ' + nodeId);
     const rt = RT.getRuntime(node.runtime);
     const settings = ST(c).getSettings();
+    const prevCap = node.capabilities;
+    const hasPrevInit = !!(prevCap && prevCap.source === 'init-event');
     let capabilities = CAP.discoverCapabilities(rt, settings);
+    if (hasPrevInit) {
+      capabilities = { ...capabilities, source: prevCap.source, slashCommands: prevCap.slashCommands, skills: prevCap.skills, modes: prevCap.modes, categorized: prevCap.categorized };
+    }
     const patch = { capabilities, capabilitiesProbedAt: capabilities.probedAt };
-    if (CAP.needsInitialProbe(node)) {
+    if (!hasPrevInit) {
       try {
         const { init, rateLimit } = await CAP.probeInitEvent(rt.bin(settings), { cwd: settings.workdir, env: process.env });
         if (init) {

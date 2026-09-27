@@ -111,13 +111,17 @@ test('capabilities: init event data replaces the --help probe as-is, no union wi
 });
 
 test('usage: subscription rate limits parsed as % of window + reset time, not $', () => {
-  const rl = U.parseRateLimits({ rate_limits: { five_hour: { utilization: 0.95, resets_at: '2026-01-01T00:00:00Z' }, week: { used: 50, limit: 100 } } });
-  assert.equal(rl.fiveHour.pct, 0.95); assert.equal(rl.fiveHour.resetsAt, '2026-01-01T00:00:00Z');
+  const future = new Date(Date.now() + 3600e3).toISOString();
+  const rl = U.parseRateLimits({ rate_limits: { five_hour: { utilization: 0.95, resets_at: future }, week: { used: 50, limit: 100 } } });
+  assert.equal(rl.fiveHour.pct, 0.95); assert.equal(rl.fiveHour.resetsAt, future);
   assert.equal(rl.weekly.pct, 0.5);
   assert.equal(U.parseRateLimits({}), null);
   // 0-100 scale is normalized to 0-1
   const rl2 = U.parseRateLimits({ rateLimits: { fiveHour: { pct: 92 } } });
   assert.equal(rl2.fiveHour.pct, 0.92);
+  // Already-past reset times aren't a useful countdown — omitted rather than shown as "↻0m"/negative.
+  const rlPast = U.parseRateLimits({ rate_limits: { five_hour: { utilization: 0.5, resets_at: '2020-01-01T00:00:00Z' } } });
+  assert.equal(rlPast.fiveHour.resetsAt, null);
 });
 
 test('usage: parseRateLimits reads the CLI\'s real "rate_limit_event" stream event (rate_limit_info.unifiedWindows), not just system/init', () => {
