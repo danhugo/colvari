@@ -462,6 +462,12 @@ class Orchestrator extends EventEmitter {
       if (!ok) g.parkedForHuman = true;
       this.store.updateTask(task.id, g);
       this.store.commentTask(task.id, 'orchestrator', stoppedWhy ? `Agent stopped (${stoppedWhy}) after ${i} iteration(s); moved to review.` : `Agent exited (code ${code}) without setting status after ${i} iteration(s) (${reason}); moved automatically.`);
+    } else if (t && t.status === 'review' && !t.parkedForHuman && code !== 0 && this.running && !stoppedWhy) {
+      // The agent itself moved this to 'review' (clearing parkedForHuman) but the process then crashed
+      // (nonzero exit). A crashed run must never look like a clean hand-off eligible for silent
+      // auto-advance to done: park it for a human to inspect.
+      this.store.updateTask(task.id, { parkedForHuman: true });
+      this.store.commentTask(task.id, 'orchestrator', `Agent exited (code ${code}) after moving this task to review during iteration ${i}; parked for a human because the run crashed.`);
     }
     const t2 = this.store.getTask(task.id);
     if (t2 && t2.awaitingApproval) { this.log(node.id, 'system', `⏸ "${task.title}" waits for human approval`); this.notify('Approval needed', `${node.name}: ${task.title}`, { taskId: task.id }); }
