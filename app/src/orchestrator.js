@@ -291,9 +291,14 @@ class Orchestrator extends EventEmitter {
     const shared = [...this.cwds.entries()].some(([id, d]) => id !== node.id && d === cwd);
     this.cwds.set(node.id, cwd);
     if (settings.useWorktrees || shared) {
-      const w = WT.ensureWorktree(cwd, task.id);
-      if (w.warning) this.log(node.id, 'error', 'warning: ' + w.warning);
-      else { cwd = w.cwd; this.store.updateTask(task.id, { worktreePath: w.worktreePath, worktreeBranch: w.worktreeBranch }); }
+      // Conflict-resolution tasks are pre-assigned the original task's worktree/branch (never a
+      // fresh one) so resolving them re-merges the SAME branch instead of stranding it behind a new one.
+      if (task.isConflictResolution && task.worktreePath && fs.existsSync(task.worktreePath)) cwd = task.worktreePath;
+      else {
+        const w = WT.ensureWorktree(cwd, task.id);
+        if (w.warning) this.log(node.id, 'error', 'warning: ' + w.warning);
+        else { cwd = w.cwd; this.store.updateTask(task.id, { worktreePath: w.worktreePath, worktreeBranch: w.worktreeBranch }); }
+      }
     }
     const presets = settings.rolePresets || [];
     const unread = this.store.listMessages({ to: node.id }).filter((m) => !m.read).length;
