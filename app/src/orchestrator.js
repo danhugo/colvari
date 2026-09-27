@@ -495,7 +495,12 @@ class Orchestrator extends EventEmitter {
         const hasNewData = fromInit.slashCommands.length || fromInit.skills.length || fromInit.modes.length;
         if (hasNewData || CAP.needsReprobe(node, signature)) {
           const prev = node.capabilities || {};
-          const merged = { ...prev, ...fromInit, slashCommands: [...new Set([...(prev.slashCommands || []), ...fromInit.slashCommands])] };
+          const slashCommands = [...new Set([...(prev.slashCommands || []), ...fromInit.slashCommands])];
+          const skills = fromInit.skills.length ? fromInit.skills : (prev.skills || []);
+          const modes = [...new Set([...CAP.detectAppModes('', slashCommands), ...(prev.modes || []), ...fromInit.modes])];
+          const mcpServers = Object.keys((this.store.getSettings().mcpServers && typeof this.store.getSettings().mcpServers === 'object') ? this.store.getSettings().mcpServers : {});
+          const categorized = CAP.categorize({ modes, skills, slashCommands, mcpServers });
+          const merged = { ...prev, ...fromInit, slashCommands, skills, modes, categorized };
           this.store.updateNode(node.id, { capabilities: merged, capabilitiesProbedAt: merged.probedAt, capabilitiesSignature: signature });
         }
       } catch {}
