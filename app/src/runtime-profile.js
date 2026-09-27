@@ -1,7 +1,7 @@
 // RuntimeProfile: a persisted, declarative description of an agent CLI, generic enough to run any
 // CLI (helpycode, claude, codex, ...) without CLI-specific code paths in the runner. Introspector
 // derives a draft profile heuristically; the runner spawns processes purely from profile data.
-const MCP_METHODS = ['none', 'json-flag', 'toml-override'];
+const MCP_METHODS = ['none', 'json-flag', 'toml-override', 'file'];
 
 // argsTemplate tokens are plain strings; placeholders are substituted verbatim inside a token
 // (so "--model={model}" and "{prompt}" both work).
@@ -27,7 +27,9 @@ const toStrArray = (v) => (Array.isArray(v) ? v.map((x) => String(x)) : []);
 function normalizeMcp(mcp) {
   const m = isPlainObject(mcp) ? mcp : {};
   const method = MCP_METHODS.includes(m.method) ? m.method : 'none';
-  return { method, flag: method === 'json-flag' ? String(m.flag || '--mcp-config') : String(m.flag || '') };
+  if (method === 'json-flag') return { method, flag: String(m.flag || '--mcp-config') };
+  if (method === 'file') return { method, flag: String(m.flag || 'helpycode.json') }; // flag doubles as the config filename, written to cwd
+  return { method, flag: String(m.flag || '') };
 }
 
 function normalizeEventMapping(em) {

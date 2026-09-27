@@ -2,6 +2,22 @@
 // normalized log entries, and declares honest capabilities (true only for what was tested live on this machine).
 const { execFileSync } = require('child_process');
 const { buildClaudeArgs, normalizeNode, splitArgs } = require('./agent-config');
+const { normalizeRuntimeProfile } = require('./runtime-profile');
+const { buildProfileArgs, getPath, writeFileMcpConfig } = require('./profile-runner');
+
+// Hand-built profile for real helpycode (an opencode fork): the generic introspector's heuristics
+// don't parse its real --help (every command line is prefixed with the binary name in a shape the
+// parser doesn't expect — see docs/helpycode-smoke.md), so this is verified against a live run
+// instead (helpycode 0.3.5, elice/z-ai/glm-5.3-flash). MCP servers are wired via a project-local
+// config file (method: 'file'), not a CLI flag.
+const HELPYCODE_PROFILE = normalizeRuntimeProfile({
+  id: 'helpycode', label: 'HelpyCode', binary: 'helpycode',
+  argsTemplate: ['run', '--format', 'json', '--model', '{model}', '--variant', '{variant}', '{prompt}'],
+  effortValues: ['low', 'medium', 'high', 'max', 'minimal'],
+  effortFlag: '--variant', resumeFlag: '-s',
+  mcp: { method: 'file', flag: 'helpycode.json' },
+  eventMapping: { textPath: 'text', sessionIdPath: 'session_id', costPath: 'total_cost_usd', inputPath: 'usage.input_tokens', outputPath: 'usage.output_tokens', reasoningPath: 'usage.reasoning_tokens', cachePath: 'usage.cache_read_tokens' },
+});
 
 const RUNTIMES = {
   claude: {
@@ -27,6 +43,17 @@ const RUNTIMES = {
     id: 'opencode', label: 'OpenCode', bin: (s) => (s && s.opencodePath) || 'opencode',
     capabilities: { tokens: false, cost: false, mcp: false, resume: false }, // stub: not installed here, nothing tested
     buildArgs(node, prompt) { const n = normalizeNode(node); return ['run', ...(n.model ? ['-m', n.model] : []), prompt]; },
+  },
+  helpycode: {
+    id: 'helpycode', label: 'HelpyCode', bin: (s) => (s && s.helpycodePath) || 'helpycode',
+    capabilities: { tokens: true, cost: true, mcp: true, resume: true }, // board comment_task + update_task_status tested live (helpycode 0.3.5)
+    buildArgs(node, prompt, settings, mcp, opts = {}) {
+      const n = normalizeNode(node);
+      if (mcp && opts.cwd) writeFileMcpConfig(opts.cwd, HELPYCODE_PROFILE.mcp.flag, mcp);
+      const args = buildProfileArgs(HELPYCODE_PROFILE, { model: n.model, prompt, variant: n.effort, session: opts.resume });
+      args.push(...splitArgs(n.extraArgs));
+      return args;
+    },
   },
 };
 // board MCP server -> codex `-c mcp_servers.<name>.*` overrides (TOML values; JSON strings/arrays are valid TOML)
@@ -65,6 +92,26 @@ function parseCodexEvent(ev) {
   return out;
 }
 
+// helpycode `run --format json` line -> same shape as parseCodexEvent, via HELPYCODE_PROFILE.eventMapping.
+function parseHelpycodeEvent(ev) {
+  const out = { logs: [] };
+  const em = HELPYCODE_PROFILE.eventMapping;
+  const text = getPath(ev, em.textPath);
+  if (typeof text === 'string' && text) { out.logs.push(['text', text]); out.result = text; }
+  const sessionId = getPath(ev, em.sessionIdPath);
+  if (sessionId != null) { out.sessionId = String(sessionId); out.logs.push(['system', 'helpycode session ' + sessionId]); }
+  if (ev.type === 'result') {
+    const input = Number(getPath(ev, em.inputPath)) || 0;
+    const output = Number(getPath(ev, em.outputPath)) || 0;
+    const reasoning = Number(getPath(ev, em.reasoningPath)) || 0;
+    out.tokens = { inputTokens: input, outputTokens: output + reasoning };
+    out.cost = Number(getPath(ev, em.costPath)) || 0;
+    out.done = true;
+    out.logs.push(['result', `helpycode result: ${input} in / ${output + reasoning} out`]);
+  } else if (ev.type === 'error') { out.failed = true; out.logs.push(['error', ev.message || '']); }
+  return out;
+}
+
 const parseVersion = (s) => { const m = String(s || '').match(/\d+\.\d+(\.\d+)?/); return m ? m[0] : null; };
 // Detect each runtime binary + version. exec is injectable for tests.
 function detectRuntimes(settings = {}, env = process.env, exec = (b, a) => execFileSync(b, a, { env, encoding: 'utf8', timeout: 10000, stdio: ['ignore', 'pipe', 'pipe'] })) {
@@ -77,4 +124,4 @@ function detectRuntimes(settings = {}, env = process.env, exec = (b, a) => execF
   return r;
 }
 
-module.exports = { RUNTIMES, codexMcpArgs, RUNTIME_IDS, getRuntime, parseCodexEvent, parseVersion, detectRuntimes };
+module.exports = { RUNTIMES, codexMcpArgs, RUNTIME_IDS, getRuntime, parseCodexEvent, parseHelpycodeEvent, HELPYCODE_PROFILE, parseVersion, detectRuntimes };
