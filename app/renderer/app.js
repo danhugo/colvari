@@ -205,13 +205,13 @@ function renderHeader() {
   tt.title = `Measured tokens this session: ${t.inputTokens || 0} in / ${t.outputTokens || 0} out / ${t.cacheReadTokens || 0} cache read / ${t.cacheCreationTokens || 0} cache write`;
 }
 // ---------- top-bar limits meter (subscription 5h/weekly windows; no $ shown, just % + reset countdown) ----------
-const fmtCountdown = (ms) => { if (ms <= 0) return 'now'; const totalMin = Math.max(1, Math.ceil(ms / 60000)); const h = Math.floor(totalMin / 60), m = totalMin % 60; return h > 0 ? `${h}h ${m}m` : `${m}m`; };
-function resetIn(windowMs) {
-  const cutoff = Date.now() - windowMs;
-  const subs = RUNS.filter((r) => r.kind === 'agent' && r.billingSource === 'subscription' && new Date(r.startedAt || 0).getTime() >= cutoff);
-  if (!subs.length) return 0;
-  return Math.max(0, Math.min(...subs.map((r) => new Date(r.startedAt).getTime())) + windowMs - Date.now());
-}
+const fmtCountdown = (ms) => {
+  if (ms <= 0) return 'now';
+  const totalMin = Math.max(1, Math.ceil(ms / 60000));
+  if (totalMin >= 24 * 60) { const d = Math.floor(totalMin / (24 * 60)), h = Math.floor((totalMin % (24 * 60)) / 60); return `${d}d ${h}h`; }
+  const h = Math.floor(totalMin / 60), m = totalMin % 60; return h > 0 ? `${h}h ${m}m` : `${m}m`;
+};
+function resetIn(u) { return u && u.resetsAt ? Math.max(0, new Date(u.resetsAt).getTime() - Date.now()) : 0; }
 async function renderLimitMeter() {
   let st; try { st = await call('usageStatus'); } catch { st = null; }
   const m = $('#limitmeter');
@@ -232,7 +232,7 @@ async function renderLimitMeter() {
     const resetChip = ms > 0 ? `<small>↻${fmtCountdown(ms)}</small>` : '';
     return `<span class="lm-part lm-${cls}" title="${esc(label)}: ${pct}% used${resetTitle}"><b>${esc(label)}</b> ${pct}%<i class="lm-bar"><i class="lm-fill" style="width:${pct}%"></i></i>${resetChip}</span>`; };
   m.innerHTML = (st.pause ? '<span class="lm-flag lm-danger">paused</span>' : st.warn ? '<span class="lm-flag lm-warn">near limit</span>' : '') +
-    part('5h', st.fiveHour, resetIn(5 * 3600000)) + part('weekly', st.weekly, resetIn(7 * 24 * 3600000));
+    part('5h', st.fiveHour, resetIn(st.fiveHour)) + part('weekly', st.weekly, resetIn(st.weekly));
 }
 function showTab(name) { document.querySelector(`#tabs button[data-tab="${name}"]`).click(); }
 $('#run').onclick = async () => {
