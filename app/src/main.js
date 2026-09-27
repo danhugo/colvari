@@ -435,21 +435,24 @@ async function guiE2E() {
     await ex(`$('#tabs button[data-tab=team]').click(); await refresh(); renderGraph(); await w(300);`);
     const dotBefore = await ex(`return document.querySelector('g[data-id="${pm1.id}"] .capsdot')?.getAttribute('class')`);
     expect('existing-data: legacy node graph badge starts on the untested dot', dotBefore === 'capsdot caps-none', dotBefore);
+    // renderNodeForm() auto-triggers a probe for any never-probed node (see refreshCaps), so by the time we
+    // read the panel it's already discovering or done - "Not probed yet" never has a chance to render here.
     await ex(`sel.node = '${pm1.id}'; renderNodeForm(); await w(200);`);
     const before = await ex(`return $('#nf-caps-view').textContent`);
-    expect('existing-data: node form shows "Not probed yet" for a legacy node', /Not probed yet/.test(before), before.slice(0, 120));
-    // Probe runs: same "Refresh" action a user would click on the node form for any never-probed agent.
-    await ex(`document.querySelector('#nf-caps-refresh').click(); await w(400);`);
+    expect('existing-data: node form auto-probes a legacy node (no manual refresh needed)', !/Not probed yet/.test(before), before.slice(0, 120));
+    await ex(`await w(400);`);
     const after = await ex(`return $('#nf-caps-view').textContent`);
-    expect('existing-data: probe runs and clears "Not probed yet"', !/Not probed yet/.test(after), after.slice(0, 120));
+    expect('existing-data: probe completes and shows discovered capabilities', !/Not probed yet/.test(after) && !/Discovering/.test(after), after.slice(0, 120));
     await ex(`await refresh(); renderGraph(); await w(300);`);
     const dotAfter = await ex(`return document.querySelector('g[data-id="${pm1.id}"] .capsdot')?.getAttribute('class')`);
     expect('existing-data: graph badge flips off the untested dot once probed', dotAfter !== 'capsdot caps-none', dotAfter);
     // Limits meter: no usageLimits configured, but the CLI's own init event (stubbed here) reports a
     // subscription rate-limit % — the meter must still surface that, not stay hidden just because the
     // project never had a limits config saved.
-    const meterHiddenBefore = await ex(`return document.querySelector('#limitmeter').classList.contains('hidden')`);
-    expect('existing-data: limit meter is hidden with no limits config and no CLI-reported rate limit yet', meterHiddenBefore, meterHiddenBefore);
+    // Default billingMode 'auto' counts as a subscription user (isSubscriptionUser in renderLimitMeter), so
+    // the meter stays visible in a "pending" state rather than hidden, even with no limits config yet.
+    const meterPendingBefore = await ex(`return { hidden: $('#limitmeter').classList.contains('hidden'), pending: $('#limitmeter').textContent }`);
+    expect('existing-data: limit meter shows pending state (not hidden) with no limits config and no CLI-reported rate limit yet', meterPendingBefore.hidden === false && /–/.test(meterPendingBefore.pending), meterPendingBefore);
     o.subscriptionRateLimits = { [pm1.id]: { fiveHour: { pct: 0.42, resetsAt: new Date(Date.now() + 3600000).toISOString() } } };
     await ex(`await refresh(); await w(400);`);
     const meterQ = `{ hidden: $('#limitmeter').classList.contains('hidden'), pct: $('#limitmeter .lm-fill')?.style.width, text: $('#limitmeter').textContent }`;
@@ -460,10 +463,12 @@ async function guiE2E() {
     // Effort badge: never set on this node, so the node form must fall back to the 'low' default.
     const effortSel = await ex(`return $('#nf-effort-sel').value`);
     expect("existing-data: effort select defaults to 'low' for a node with no effort field", effortSel === 'low', effortSel);
-    const effortChips = await ex(`return [...document.querySelectorAll('#graph .chip-em text')].map((t) => t.textContent)`);
-    expect('existing-data: no E: chip on the graph for default-effort nodes', !effortChips.some((c) => c.startsWith('E:')), effortChips);
+    // Effort chips always render, even at the 'low' default (normalizeAgentConfig fills in n.effort='low' on
+    // add, so these are indistinguishable from an explicit choice - no chip-default styling to check here).
+    const effortChipInfo = await ex(`return [...document.querySelectorAll('#graph .chip-em')].map((g) => g.querySelector('text')?.textContent)`);
+    expect('existing-data: E:low chip renders on the graph for these nodes', effortChipInfo.filter((c) => c === 'E:low').length === 2, effortChipInfo);
     for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`await w(200);`); await shot(`existingdata-graph-${t}`); }
-    console.log('[gui-e2e] existingdata', JSON.stringify({ dotBefore, dotAfter, before: before.slice(0, 80), after: after.slice(0, 80), meterHiddenBefore, meter, effortSel, effortChips }));
+    console.log('[gui-e2e] existingdata', JSON.stringify({ dotBefore, dotAfter, before: before.slice(0, 80), after: after.slice(0, 80), meterPendingBefore, meter, effortSel, effortChipInfo }));
     require('electron').nativeTheme.themeSource = 'system';
   };
   // Wiki + Logs tabs: empty states, page list + rendered markdown typography, readable log rows (time/avatar/level), filter by agent + search, auto-scroll.
