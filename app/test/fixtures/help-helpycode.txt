@@ -1,0 +1,14 @@
+Usage: helpycode [options] [command]
+
+helpycode CLI - a fictional agent CLI used to prove the introspector is generic
+
+Commands:
+  run           Run a task non-interactively and print JSON events (--format json)
+  models        List available models
+  resume        Resume a previous session
+
+Options:
+  --format <fmt>    Output format (json, text)
+  --model <model>   Model to use
+  --effort <level>  Reasoning effort (low, medium, high)
+  --mcp-config <json>  Inline MCP server configuration
