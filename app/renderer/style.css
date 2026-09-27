@@ -100,6 +100,14 @@ header #goal { flex:1 1 260px; min-width:140px; max-width:420px; } header .space
 header .pill { font-variant-numeric:tabular-nums; } .pill.quiet { color:var(--muted); }
 .cap { display: inline-block; padding: 0 6px; border-radius: 8px; font-size: 11px; margin: 2px 0; }
 .cap.on { background: var(--success-soft); color: var(--success-text); } .cap.off { background: var(--danger-soft); color: var(--danger); }
+.cap-search { margin-bottom:6px; } .cap-search input { width:100%; box-sizing:border-box; }
+.cap-group { border:1px solid var(--border); border-radius:6px; margin-bottom:6px; background:var(--bg-raised); }
+.cap-group summary { cursor:pointer; padding:5px 8px; font-weight:600; font-size:12px; list-style:none; display:flex; gap:6px; align-items:baseline; }
+.cap-group summary::-webkit-details-marker { display:none; }
+.cap-group summary::before { content:'▸'; color:var(--muted); } .cap-group[open] summary::before { content:'▾'; }
+.cap-items { padding:2px 8px 6px 20px; display:flex; flex-direction:column; gap:2px; max-height:180px; overflow:auto; }
+.cap-row { display:flex; align-items:center; gap:6px; font-size:12px; }
+.cap-row code { font-size:11px; }
 
 #ov-graph-wrap { flex:1; min-height:260px; min-width:0; overflow:auto; cursor:default; background-color:var(--bg-surface); background-image:radial-gradient(circle, var(--border-strong) 1px, transparent 1.2px); background-size:22px 22px; }
 #ov-graph { display:block; }

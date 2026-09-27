@@ -72,23 +72,56 @@ const RT_PRESETS = [{ name: 'Planner', runtime: 'claude', model: 'opus' }, { nam
 const costCell = (usd, source, rt) => !canCost(rt) ? '<span class="costnote" title="this runtime does not report cost">—</span>' : source === 'subscription' ? `<span class="costnote" title="API-equivalent $${(usd || 0).toFixed(4)} (reported by Claude CLI)">${COST_NOTE.subscription}</span>` : `$${(usd || 0).toFixed(4)} <span class="costnote">API-equivalent</span>`;
 const billTag = (src, detail) => `<span class="bill bill-${esc(src || 'unknown')}" title="${esc(detail || '')}">${esc(src || 'unknown')}</span>`;
 
-// ---------- discovered capabilities (modes/slash commands/skills) ----------
+// ---------- discovered capabilities (modes/skills/commands/MCP): collapsible groups, search, per-agent toggles ----------
 const CAPS_LOADING = new Set();
+let capsSearch = '';
+// Groups shown in this fixed order: Modes first, then Skills, Commands, MCP.
+function capsGroups(n) {
+  const c = n.capabilities || {};
+  return [
+    { key: 'modes', label: 'Modes', items: c.modes || [] },
+    { key: 'skills', label: 'Skills', items: c.skills || [] },
+    { key: 'commands', label: 'Commands', items: [...new Set([...(c.slashCommands || []), ...(c.commands || [])])] },
+    { key: 'mcp', label: 'MCP', items: ['board', ...(n.allowedTools || []).filter((t) => t.startsWith('mcp__') && !t.startsWith('mcp__board')).map((t) => t.slice(5).split('__')[0])].filter((v, i, a) => a.indexOf(v) === i) },
+  ];
+}
 function capsView(n) {
   if (CAPS_LOADING.has(n.id)) return 'Discovering…';
   const c = n.capabilities;
   if (!c) return `Not probed yet. Click Refresh to ask the runtime (${esc(n.runtime || 'claude')}) what it supports.`;
   if (c.error || c.ok === false) return `Could not discover capabilities: ${esc(c.error || 'unknown error')}`;
-  const list = (label, items) => `<div><b>${label}</b> ${items && items.length ? items.map((x) => `<span class="pill">${esc(x)}</span>`).join(' ') : '<span class="muted">none found</span>'}</div>`;
-  return list('Modes', c.modes) + list('Slash commands', c.slashCommands) + list('Commands', c.commands) + list('Skills', c.skills) +
+  const disabled = n.disabledCaps || {};
+  const q = capsSearch.trim().toLowerCase();
+  const groups = capsGroups(n);
+  const total = groups.reduce((s, g) => s + g.items.length, 0);
+  const body = groups.map((g) => {
+    const offSet = new Set(disabled[g.key] || []);
+    const items = q ? g.items.filter((x) => x.toLowerCase().includes(q)) : g.items;
+    if (q && !items.length) return '';
+    const rows = items.length ? items.map((x) => `<label class="cap-row"><input type="checkbox" data-capgroup="${g.key}" value="${esc(x)}" ${offSet.has(x) ? '' : 'checked'}> <code>${esc(x)}</code></label>`).join('') :
+      '<div class="muted">none found</div>';
+    return `<details class="cap-group" ${g.key === 'modes' || q ? 'open' : ''}><summary>${g.label} <span class="muted">(${items.length}${q ? '/' + g.items.length : ''})</span></summary><div class="cap-items">${rows}</div></details>`;
+  }).join('');
+  return `<div class="cap-search"><input type="search" id="nf-caps-search" placeholder="Search ${total} capabilities…" value="${esc(capsSearch)}"></div>` +
+    (total ? body || '<div class="muted">No capabilities match your search.</div>' : '<div class="muted">none found</div>') +
     (n.capabilitiesProbedAt ? `<small class="muted">probed ${new Date(n.capabilitiesProbedAt).toLocaleString()}</small>` : '');
+}
+function wireCapsView(n) {
+  const search = $('#nf-caps-search');
+  if (search) search.oninput = () => { capsSearch = search.value; $('#nf-caps-view').innerHTML = capsView(n); wireCapsView(n); };
+  document.querySelectorAll('#nf-caps-view input[data-capgroup]').forEach((cb) => cb.onchange = async () => {
+    const g = cb.dataset.capgroup; const d = { ...(n.disabledCaps || {}) }; const set = new Set(d[g] || []);
+    if (cb.checked) set.delete(cb.value); else set.add(cb.value);
+    d[g] = [...set]; n.disabledCaps = d;
+    await call('updateNode', n.id, { disabledCaps: d });
+  });
 }
 async function refreshCaps(n) {
   CAPS_LOADING.add(n.id); $('#nf-caps-view').innerHTML = capsView(n);
   try { n.capabilities = await call('discoverCapabilities', n.id); n.capabilitiesProbedAt = Date.now(); }
   catch (e) { n.capabilities = { error: e.message || 'not supported by this runtime yet' }; }
   CAPS_LOADING.delete(n.id);
-  if (sel.node === n.id) $('#nf-caps-view').innerHTML = capsView(n);
+  if (sel.node === n.id) { $('#nf-caps-view').innerHTML = capsView(n); wireCapsView(n); }
 }
 
 // ---------- projects & teams sidebar ----------
@@ -170,12 +203,15 @@ async function renderLimitMeter() {
   if (!st || (!st.fiveHour.limit && !st.weekly.limit)) {
     if (!isSubscriptionUser) { m.classList.add('hidden'); m.innerHTML = ''; return; }
     m.classList.remove('hidden');
-    m.innerHTML = `<span class="lm-part lm-pending" title="Subscription 5h/weekly usage appears here once the CLI reports it (after a run) or a limit is set in Usage &amp; limits."><b>5h</b> <small>–</small></span>` +
-      `<span class="lm-part lm-pending"><b>weekly</b> <small>–</small></span>`;
+    const why = 'Subscription 5h/weekly usage appears here once the CLI reports it (after a run) or a limit is set in Usage &amp; limits.';
+    m.innerHTML = `<span class="lm-part lm-pending" title="${why}"><b>5h</b> <small>–</small></span>` +
+      `<span class="lm-part lm-pending" title="${why}"><b>weekly</b> <small>–</small></span>`;
     return;
   }
   m.classList.remove('hidden');
-  const part = (label, u, ms) => { if (!u.limit) return ''; const pct = Math.min(100, Math.round(u.pct * 100)); const cls = u.pause ? 'danger' : u.warn ? 'warn' : 'ok';
+  const part = (label, u, ms) => {
+    if (!u.limit) return `<span class="lm-part lm-pending" title="No ${esc(label)} limit set — set one in Usage &amp; limits to see a % meter here."><b>${esc(label)}</b> <small>–</small></span>`;
+    const pct = Math.min(100, Math.round(u.pct * 100)); const cls = u.pause ? 'danger' : u.warn ? 'warn' : 'ok';
     return `<span class="lm-part lm-${cls}" title="${esc(label)}: ${pct}% used · resets in ${fmtCountdown(ms)}"><b>${esc(label)}</b> ${pct}%<i class="lm-bar"><i class="lm-fill" style="width:${pct}%"></i></i><small>↻${fmtCountdown(ms)}</small></span>`; };
   m.innerHTML = (st.pause ? '<span class="lm-flag lm-danger">paused</span>' : st.warn ? '<span class="lm-flag lm-warn">near limit</span>' : '') +
     part('5h', st.fiveHour, resetIn(5 * 3600000)) + part('weekly', st.weekly, resetIn(7 * 24 * 3600000));
@@ -498,6 +534,7 @@ function renderNodeForm() {
   $('#nf-mode').onchange = showMode; showMode();
   $('#nf-perms').ontoggle = () => { sel.permsOpen = $('#nf-perms').open; };
   $('#nf-caps-refresh').onclick = () => refreshCaps(n);
+  wireCapsView(n);
   if (!n.capabilities && !CAPS_LOADING.has(n.id)) refreshCaps(n);
   const read = () => ({
     runtime: $('#nf-runtime').value, name: $('#nf-name').value, role: $('#nf-role').value.trim() || 'Dev', model: $('#nf-model').value.trim(), workdir: $('#nf-workdir').value.trim(), systemPrompt: $('#nf-prompt').value,
