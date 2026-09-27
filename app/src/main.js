@@ -37,9 +37,23 @@ async function autorun(file) {
   const w = (ms) => new Promise((r) => setTimeout(r, ms));
   await w(800);
   await win.webContents.executeJavaScript(`document.querySelector('#projectlist div[data-pid="${p.id}"]').click()`); await w(1200);
+  await win.webContents.executeJavaScript(`document.querySelector('#tabs button[data-tab=team]').click(); document.querySelector('#testteam').click()`);
+  for (let i = 0; i < 90; i++) { await w(2000); const t = await win.webContents.executeJavaScript(`document.querySelector('#pf-summary').textContent`); if (!/testing|untested/.test(t)) { console.log('[autorun] preflight:', t); break; } }
   await win.webContents.executeJavaScript(`(() => { const g = document.querySelector('#goal'); g.value = ${JSON.stringify(goal)}; document.querySelector('#run').click(); })()`);
   console.log('[autorun] started', p.name);
   orchFor(p.id).once('done', () => console.log('[autorun] done', p.name));
+}
+
+// App-wide UI prefs (theme: 'system' | 'light' | 'dark') persisted in <root>/prefs.json.
+const fs = require('fs');
+const prefsFile = () => path.join(pm.root, 'prefs.json');
+function getPrefs() { try { return { theme: 'system', ...JSON.parse(fs.readFileSync(prefsFile(), 'utf8')) }; } catch { return { theme: 'system' }; } }
+function setPrefs(patch) { const next = { ...getPrefs(), ...patch }; fs.mkdirSync(pm.root, { recursive: true }); fs.writeFileSync(prefsFile(), JSON.stringify(next, null, 2)); applyTheme(next.theme); return next; }
+// Window background matches design/tokens.css --bg-app so there's no flash before CSS loads.
+const BG = { light: '#f4f5f8', dark: '#0f1116' };
+function applyTheme(theme) {
+  nativeTheme.themeSource = ['light', 'dark'].includes(theme) ? theme : 'system';
+  if (win && !win.isDestroyed()) win.setBackgroundColor(BG[nativeTheme.shouldUseDarkColors ? 'dark' : 'light']);
 }
 
 function createWindow() {
@@ -338,6 +352,17 @@ async function guiE2E() {
     await firstrunInbox();
     await overviewShots();
     await chatShots();
+    // Main screens in light + dark (the renderer themes via prefers-color-scheme, driven by nativeTheme).
+    const { nativeTheme } = require('electron');
+    for (const theme of ['light', 'dark']) {
+      nativeTheme.themeSource = theme; await ex(`await w(300);`);
+      for (const tab of ['chat', 'team', 'board', 'inbox', 'overview']) { await ex(`$('#tabs button[data-tab=${tab}]').click(); await w(500);`); await shot(`main-${tab}-${theme}`); }
+      await ex(`$('#tabs button[data-tab=team]').click(); $('#reopenguide').click(); await w(400);`); await shot(`main-firstrun-${theme}`);
+      expect(`firstrun guide opens (${theme})`, await ex(`return !$('#guide').classList.contains('hidden')`));
+      await ex(`$('#guide').classList.add('hidden'); await w(200);`);
+      const bg = await ex(`return getComputedStyle(document.documentElement).getPropertyValue('--bg').trim()`); expect(`theme ${theme} applied`, (bg === '#15171c') === (theme === 'dark'), bg);
+    }
+    nativeTheme.themeSource = 'system';
     const tasks = store.listTasks();
     console.log('[gui-e2e]', JSON.stringify({ edges: store.getTeam().edges.length, tasks: tasks.map((t) => [t.title, t.status, t.iterations || 0, !!t.sessionId]), cost: orch.snapshot().totalCost }));
   } catch (e) { if (e !== null) { console.error('[gui-e2e] failed', e); failures.push('exception: ' + e.message); } }
@@ -352,17 +377,6 @@ const TS = (c) => { const ts = pm.get(c.p).teams; return pm.store(c.p, (ts.find(
 const withPF = (nodes, settings) => nodes.map((n) => ({ ...n, preflightStatus: PF.preflightStatus(n, settings) }));
 // Test one agent with its exact config and save the result on the node (in whichever team owns it).
 async function testAgent(c, nodeId) {
-    // Main screens in light + dark (the renderer themes via prefers-color-scheme, driven by nativeTheme).
-    const { nativeTheme } = require('electron');
-    for (const theme of ['light', 'dark']) {
-      nativeTheme.themeSource = theme; await ex(`await w(300);`);
-      for (const tab of ['chat', 'team', 'board', 'inbox', 'overview']) { await ex(`$('#tabs button[data-tab=${tab}]').click(); await w(500);`); await shot(`main-${tab}-${theme}`); }
-      await ex(`$('#tabs button[data-tab=team]').click(); $('#reopenguide').click(); await w(400);`); await shot(`main-firstrun-${theme}`);
-      expect(`firstrun guide opens (${theme})`, await ex(`return !$('#guide').classList.contains('hidden')`));
-      await ex(`$('#guide').classList.add('hidden'); await w(200);`);
-      expect(`theme ${theme} applied`, await ex(`return matchMedia('(prefers-color-scheme: dark)').matches`) === (theme === 'dark'));
-    }
-    nativeTheme.themeSource = 'system';
   const s = ST(c); const settings = s.getSettings();
   const team = pm.get(c.p).teams.find((t) => pm.store(c.p, t.id).getTeam().nodes.some((n) => n.id === nodeId));
   if (!team) throw new Error('no agent ' + nodeId);
@@ -407,7 +421,9 @@ const api = {
   taskDiscard: (c, id) => { const r = WT.worktreeDiscard(wtTask(c, id)); ST(c).updateTask(id, { worktreePath: null, worktreeBranch: null }); return r; },
   pickDir: async () => { const { dialog } = require('electron'); const r = await dialog.showOpenDialog(win, { properties: ['openDirectory', 'createDirectory'] }); return r.canceled ? null : r.filePaths[0]; },
   run: (c) => orchFor(c.p).start(), stop: (c) => orchFor(c.p).stop(),
+  getPrefs: () => getPrefs(), setPrefs: (_c, patch) => setPrefs(patch || {}),
 };
+nativeTheme.on('updated', () => { applyTheme(getPrefs().theme); send('theme', { dark: nativeTheme.shouldUseDarkColors }); });
 ipcMain.handle('api', async (_e, name, ctx, ...args) => {
   if (!api[name]) throw new Error('unknown api ' + name);
   return api[name](ctx || {}, ...args);
@@ -421,9 +437,7 @@ function pollInbox(first) {
     for (const it of items) if (!seenInbox.has(it.id)) {
       seenInbox.add(it.id); if (first) continue;
       const n = { title: it.kind === 'approval' ? 'Approval needed' : 'Agent asks you', body: it.question, taskId: it.taskId, inbox: true };
-  getPrefs: () => getPrefs(), setPrefs: (_c, patch) => setPrefs(patch || {}),
       send('notify', { ...n, projectId: p.id }); notify(n, p.id);
-nativeTheme.on('updated', () => { applyTheme(getPrefs().theme); send('theme', { dark: nativeTheme.shouldUseDarkColors }); });
     }
   }
 }

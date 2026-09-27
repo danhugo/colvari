@@ -113,3 +113,6 @@ Logic lives in `src/controls.js`, wired into the store, board tools, orchestrato
 - Dependencies are only enforced when someone sets `blockedBy`. A PM can still close its own goal early if it does not make it wait.
 - A human message to a running agent kills the current `claude -p` process and resumes the session (`--resume`). Work in progress in that turn can be lost. The CLI has no way to take input mid-turn in print mode.
 - Data is stored as plain JSON files, one project per directory.
+
+### Screenshots (light + dark)
+`npm run gui-e2e` writes `e2e-shots/main-{chat,team,board,inbox,overview,firstrun}-{light,dark}.png` for the main screens, forcing the theme via Electron `nativeTheme`.
