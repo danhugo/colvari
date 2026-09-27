@@ -519,7 +519,7 @@ class Orchestrator extends EventEmitter {
       for (const [k, t] of o.logs) if (String(t).trim()) this.log(node.id, k, t);
       if (run && o.sessionId) { run.sessionId = o.sessionId; if (run.usage) run.usage.sessionId = o.sessionId; }
       if (run && o.result !== undefined) run.result = o.result;
-      if (o.tokens) { a.inputTokens += o.tokens.inputTokens; a.outputTokens += o.tokens.outputTokens; if (run && run.usage) { run.usage.inputTokens = (run.usage.inputTokens || 0) + o.tokens.inputTokens; run.usage.outputTokens = (run.usage.outputTokens || 0) + o.tokens.outputTokens; } this.changed(); }
+      if (o.tokens) { if (run && run.usage) { run.usage.inputTokens = (run.usage.inputTokens || 0) + o.tokens.inputTokens; run.usage.outputTokens = (run.usage.outputTokens || 0) + o.tokens.outputTokens; this.changed(); } } // record() adds the run's totals to the agent counters at close; adding them here too would double-count
       return;
     }
     if (runtime === 'helpycode') {
@@ -527,7 +527,7 @@ class Orchestrator extends EventEmitter {
       for (const [k, t] of o.logs) if (String(t).trim()) this.log(node.id, k, t);
       if (run && o.sessionId) { run.sessionId = o.sessionId; if (run.usage) run.usage.sessionId = o.sessionId; }
       if (run && o.result !== undefined) run.result = o.result;
-      if (o.tokens) { a.inputTokens += o.tokens.inputTokens; a.outputTokens += o.tokens.outputTokens; if (run && run.usage) { run.usage.inputTokens = (run.usage.inputTokens || 0) + o.tokens.inputTokens; run.usage.outputTokens = (run.usage.outputTokens || 0) + o.tokens.outputTokens; run.usage.reportedCostUsd = (run.usage.reportedCostUsd || 0) + (o.cost || 0); } this.changed(); }
+      if (o.tokens) { if (run && run.usage) { run.usage.inputTokens = (run.usage.inputTokens || 0) + o.tokens.inputTokens; run.usage.outputTokens = (run.usage.outputTokens || 0) + o.tokens.outputTokens; run.usage.reportedCostUsd = (run.usage.reportedCostUsd || 0) + (o.cost || 0); this.changed(); } } // record() adds the run's totals to the agent counters at close; adding them here too would double-count
       return;
     }
     if (ev.type === 'assistant' && ev.message?.content) {

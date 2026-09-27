@@ -80,6 +80,8 @@ Scope is enforced on the server side (`src/board-tools.js`, `src/scope.js`):
 
 Other agent CLIs are wired up generically via a `RuntimeProfile` (`src/runtime-profile.js`), derived by `src/introspector.js` and driven by `src/profile-runner.js` — no CLI-specific code in the runner. See `docs/helpycode-smoke.md` for a real (non-Claude) CLI end-to-end smoke test against the board MCP server, including a gap found in the introspector against a real CLI's `--help` output.
 
+Live activity streams for every runtime: helpycode is a built-in adapter (`src/runtimes.js`) that parses helpycode's real `run --format json` event stream (`step_start`/`text`/`tool_use`/`step_finish`, payload under `part`, session id top-level as `sessionID`) into the same live text/tool/token logs Claude's stream-json produces — a running helpycode agent shows its text, tool calls and per-step token usage in the Logs tab instead of looking hung between start and finish. The parser relies on that stdout stream only; helpycode's own log files rotate quickly and are not a usable activity source.
+
 ## Roles, presets and per-agent permissions
 
 - Roles are free text. The role field suggests PM, Planner, Dev, Reviewer and QA, plus this project's role presets and roles already in use. Presets are managed in Settings or with "Save as role preset" and are stored in the project's `settings.json` as `rolePresets`. Each preset has a name, a default system prompt, default allowed and disallowed tools, and a permission mode. A new agent whose role matches a preset gets those defaults, and so does an existing agent whose role is changed to a preset's name (only its empty prompt, tool and permission fields are filled; **Apply preset** overwrites them).

@@ -16,7 +16,7 @@ const HELPYCODE_PROFILE = normalizeRuntimeProfile({
   effortValues: ['low', 'medium', 'high', 'max', 'minimal'],
   effortFlag: '--variant', resumeFlag: '-s',
   mcp: { method: 'file', flag: 'helpycode.json' },
-  eventMapping: { textPath: 'text', sessionIdPath: 'session_id', costPath: 'total_cost_usd', inputPath: 'usage.input_tokens', outputPath: 'usage.output_tokens', reasoningPath: 'usage.reasoning_tokens', cachePath: 'usage.cache_read_tokens' },
+  eventMapping: { textPath: 'part.text', sessionIdPath: 'sessionID', costPath: 'part.cost', inputPath: 'part.tokens.input', outputPath: 'part.tokens.output', reasoningPath: 'part.tokens.reasoning', cachePath: 'part.tokens.cache.read' },
 });
 
 const RUNTIMES = {
@@ -92,23 +92,41 @@ function parseCodexEvent(ev) {
   return out;
 }
 
-// helpycode `run --format json` line -> same shape as parseCodexEvent, via HELPYCODE_PROFILE.eventMapping.
+// helpycode `run --format json` line -> same shape as parseCodexEvent. Real event shapes (helpycode 0.3.5,
+// an opencode fork) carry the payload under `part` and the session id top-level as `sessionID`:
+// {type:'text', part:{type:'text',text}}, {type:'tool_use', part:{type:'tool', tool, state:{status:'pending'
+// |'running'|'completed'|'error', input, output, metadata:{exit}}}} (the part is re-emitted per state change,
+// but a fast tool may only ever surface as 'completed'), {type:'step_finish', part:{reason:'stop'|'tool-calls',
+// tokens:{input,output,reasoning,cache:{read}}, cost}}. Every step_finish is cumulative-for-that-step usage, so
+// the caller sums them per run. This stdout stream is the only live feed we use — helpycode's own log files
+// rotate quickly, so they are not a readable fallback for activity.
 function parseHelpycodeEvent(ev) {
   const out = { logs: [] };
   const em = HELPYCODE_PROFILE.eventMapping;
-  const text = getPath(ev, em.textPath);
-  if (typeof text === 'string' && text) { out.logs.push(['text', text]); out.result = text; }
   const sessionId = getPath(ev, em.sessionIdPath);
-  if (sessionId != null) { out.sessionId = String(sessionId); out.logs.push(['system', 'helpycode session ' + sessionId]); }
-  if (ev.type === 'result') {
+  if (sessionId != null) out.sessionId = String(sessionId);
+  const part = ev.part || {};
+  if (ev.type === 'text') {
+    const text = getPath(ev, em.textPath);
+    if (typeof text === 'string' && text) { out.logs.push(['text', text]); out.result = text; }
+  } else if (ev.type === 'tool_use' && part.type === 'tool') {
+    const st = part.state || {};
+    const name = part.tool || 'tool';
+    if (st.status === 'pending' || st.status === 'running') out.logs.push(['tool', `${name} ${JSON.stringify(st.input || {}).slice(0, 300)}`]);
+    else {
+      const exit = st.metadata ? st.metadata.exit : undefined;
+      const kind = st.status === 'error' || (Number.isFinite(exit) && exit !== 0) ? 'tool_error' : 'tool_result';
+      out.logs.push([kind, `${name}: ${String(st.output ?? st.error ?? '').slice(0, 400)}`]);
+    }
+  } else if (ev.type === 'step_finish') {
     const input = Number(getPath(ev, em.inputPath)) || 0;
     const output = Number(getPath(ev, em.outputPath)) || 0;
     const reasoning = Number(getPath(ev, em.reasoningPath)) || 0;
-    out.tokens = { inputTokens: input, outputTokens: output + reasoning };
+    out.tokens = { inputTokens: input, outputTokens: output + reasoning, cachedInputTokens: Number(getPath(ev, em.cachePath)) || 0 };
     out.cost = Number(getPath(ev, em.costPath)) || 0;
-    out.done = true;
-    out.logs.push(['result', `helpycode result: ${input} in / ${output + reasoning} out`]);
-  } else if (ev.type === 'error') { out.failed = true; out.logs.push(['error', ev.message || '']); }
+    out.done = part.reason === 'stop';
+    out.logs.push([out.done ? 'result' : 'system', `helpycode step: ${input} in / ${output + reasoning} out`]);
+  } else if (ev.type === 'error') { out.failed = true; out.logs.push(['error', ev.message || 'helpycode error']); }
   return out;
 }
 
