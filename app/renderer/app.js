@@ -570,6 +570,8 @@ function renderGraph() {
       el('rect', { width: 88, height: 15, rx: 7 }, cbg); el('text', { x: 44, y: 11, 'font-size': 9, 'text-anchor': 'middle' }, cbg).textContent = 'compacted';
       el('title', {}, cbg).textContent = ns.lastCompact ? `Compacted ${fmtTok(ns.lastCompact.preTokens)}→${fmtTok(ns.lastCompact.postTokens)}` : 'Compacted';
     }
+    // wake badge is gated by wakeRun itself, not `live`: nodeLive trusts the possibly stale nstat status
+    const wk = wakeRun(n.id); if (wk) drawWakeBadge(g, wk, () => openWakeTask(wk.taskId));
     el('title', {}, g).textContent = `${n.name} (${n.role}) — ${live}`;
     if (typeof ns.contextPct === 'number' && live === 'working') {
       const pct = Math.max(0, Math.min(100, ns.contextPct * 100));
@@ -824,6 +826,31 @@ function runningIds() {
   return w.length || !r ? w : [...new Set(S.tasks.filter((t) => t.status === 'in_progress' && t.assignee).map((t) => t.assignee))];
 }
 const presence = (id) => (S.orch.idle ? S.orch.idle.includes(id) : !runningIds().includes(id)) ? 'idle' : 'busy';
+// Wake-run: an agent running without an in_progress task because a message woke it. One selector so
+// Board, Team and Overview can't disagree. Reads the live-run trigger fields the backend sets
+// ({trigger:'message', fromNodeId, excerpt, taskId, count}); null when the run isn't a wake, the
+// agent isn't actually running, or it picked up a task (the task badge wins).
+function wakeRun(id) {
+  const a = S.orch.agents[id] || {};
+  const r = a.run && typeof a.run === 'object' ? a.run : a;
+  const w = a.wake && typeof a.wake === 'object' ? { ...r, ...a.wake } : (r.trigger === 'message' ? r : null);
+  if (!w) return null;
+  if (a.status !== 'working' && presence(id) !== 'busy') return null;
+  if (S.tasks.some((t) => t.status === 'in_progress' && t.assignee === id)) return null;
+  return { from: nodeName(w.fromNodeId || w.from || ''), excerpt: String(w.excerpt || ''), taskId: w.taskId || w.relatedTaskId || null, queued: Math.max(0, (w.count || 1) - 1) };
+}
+const wakeLabel = (id) => { const w = wakeRun(id); return w ? `Working — woken by message from ${w.from}: "${w.excerpt}"${w.queued ? ` (+${w.queued} queued)` : ''}` : ''; };
+// Shared badge drawing for the Team and Overview node SVGs: a strip just below the node card
+// (inside the card there is no free row — the chip row and ctx bar own the bottom edge).
+function drawWakeBadge(g, w, onclick) {
+  const full = `Working — woken by message from ${w.from}: "${w.excerpt}"${w.queued ? ` (+${w.queued} queued)` : ''}`;
+  const bg = el('g', { class: 'wakerunbadge' + (w.taskId ? ' linked' : ''), transform: `translate(4,${H + 3})` }, g);
+  el('rect', { width: W - 8, height: 13, rx: 6 }, bg);
+  el('text', { x: (W - 8) / 2, y: 9.5, 'text-anchor': 'middle' }, bg).textContent = clipText(full, 30);
+  el('title', {}, bg).textContent = full;
+  if (w.taskId && onclick) bg.onclick = onclick;
+}
+const openWakeTask = (taskId) => { sel.task = taskId; showTab('board'); renderBoard(); };
 // A task stuck in_progress whose assignee has no live agent process: the orchestrator will reset/re-dispatch it,
 // but until then it needs to be visible so a stalled run isn't mistaken for one still working.
 function orphanedTasks() { const r = runningIds(); return S.tasks.filter((t) => t.status === 'in_progress' && t.assignee && !r.includes(t.assignee)); }
@@ -832,7 +859,12 @@ function renderIdle() {
   document.querySelectorAll('.idlebanner').forEach((b) => { b.classList.toggle('hidden', !show); if (!show) return;
     b.innerHTML = `<span class="pres idle"><i></i></span><b>${idle.length} agent${idle.length > 1 ? 's' : ''} idle</b><span class="muted">${esc(idle.slice(0, 4).map((n) => n.name).join(', '))}${idle.length > 4 ? '…' : ''}</span><span class="spacer"></span><button class="primary" data-assignidle="${idle[0].id}">Assign work</button>`; });
   document.querySelectorAll('[data-assignidle]').forEach((b) => b.onclick = () => { showTab('board'); $('#nt-assignee').value = b.dataset.assignidle; $('#nt-title').focus(); });
-  $('#presence').innerHTML = S.allNodes.map((n) => { const p = presence(n.id); return `<span class="pchip ${p}" title="${esc(n.role)}"><span class="pres ${p}"><i></i></span>${esc(n.name)} <span class="muted">${p}</span></span>`; }).join('');
+  $('#presence').innerHTML = S.allNodes.map((n) => { const p = presence(n.id); const wk = wakeLabel(n.id); return `<span class="pchip ${p}${wk ? ' wake' : ''}" title="${esc(wk || n.role)}"><span class="pres ${p}"><i></i></span>${esc(n.name)} <span class="muted">${wk ? esc(clipText(wk, 52)) : p}</span></span>`; }).join('');
+  const wakes = S.allNodes.map((n) => ({ n, w: wakeRun(n.id) })).filter((x) => x.w);
+  const wb = $('#wakebar');
+  if (wb) { wb.classList.toggle('hidden', !wakes.length);
+    wb.innerHTML = wakes.map(({ n, w }) => `<div class="wakebar"><span class="pres busy"><i></i></span><b>${esc(n.name)}</b><span>Working — woken by message from ${esc(w.from)}: "${esc(w.excerpt)}"${w.queued ? ` <span class="muted">(+${w.queued} queued)</span>` : ''}</span><span class="spacer"></span>${w.taskId ? `<button class="linklike" data-waketask="${w.taskId}">${esc(taskTitle(w.taskId))} →</button>` : ''}</div>`).join('');
+    wb.querySelectorAll('[data-waketask]').forEach((b) => b.onclick = () => openWakeTask(b.dataset.waketask)); }
 }
 
 // ---------- board ----------
@@ -857,7 +889,7 @@ function renderBoard() {
   const ag = S.orch.agents[t.assignee] || {}; const live = ag.status === 'working' && ag.taskId === t.id; const bl = openBlockers(t); const deps = new Set(t.blockedBy || []);
   d.innerHTML = `<h3>${priorityBadge(t)} ${esc(t.title)}</h3><p class="muted">${t.id} · by ${esc(t.createdBy === 'human' ? 'human' : nodeName(t.createdBy))}</p>
     ${t.awaitingApproval ? `<div class="approvebox"><b>Waiting for your approval.</b> The agent marked this task done.<textarea id="td-note" rows="2" placeholder="Note (optional; required context when requesting changes)"></textarea><p><button id="td-approve" class="primary">Approve → done</button> <button id="td-reject">Request changes → todo</button></p></div>` : ''}
-    ${live || (t.assignee && ag.status === 'working') ? `<div class="livebox"><div class="toolbar"><b>${live ? 'Live' : esc(nodeName(t.assignee)) + ' is working on another task'}</b>${live ? `<span class="muted">iteration ${ag.iteration || 1}${ag.pendingHuman ? ' · message queued' : ''}</span><span class="spacer"></span><button id="td-stopagent">Stop agent</button>` : ''}</div>${live ? '<pre id="td-live"></pre>' : ''}</div>` : ''}
+    ${live || (t.assignee && ag.status === 'working') ? `<div class="livebox"><div class="toolbar"><b>${live ? 'Live' : esc(wakeLabel(t.assignee) || nodeName(t.assignee) + ' is working on another task')}</b>${live ? `<span class="muted">iteration ${ag.iteration || 1}${ag.pendingHuman ? ' · message queued' : ''}</span><span class="spacer"></span><button id="td-stopagent">Stop agent</button>` : ''}</div>${live ? '<pre id="td-live"></pre>' : ''}</div>` : ''}
     ${t.assignee ? `<label>Message ${esc(nodeName(t.assignee))} <span class="muted">(${live ? 'interrupts the run and resumes the same session with your message' : 'stored in the agent inbox for its next run'})</span></label><div class="toolbar"><input id="td-msg" placeholder="Answer or instruction for the agent" style="flex:1"><button id="td-send">Send</button></div>` : ''}
     <label>Priority</label><select id="td-priority">${PRIORITIES.map((p) => `<option ${p === priorityOf(t) ? 'selected' : ''}>${p}</option>`).join('')}</select>
     <label>Status</label><select id="td-status">${STATUSES.map((s) => `<option ${s === t.status ? 'selected' : ''}>${s}</option>`).join('')}</select>
@@ -1175,6 +1207,7 @@ function renderOverview() {
     el('text', { x: 47, y: 21, class: 'nname' }, g).textContent = clipText(n.name, 16);
     el('text', { x: 47, y: 36, class: 'nrole' }, g).textContent = isStuck ? '⚠ stuck' : `${clipText(n.role, 14)}${live === 'working' ? ' · working' : ''}`;
     el('text', { x: 47, y: 50, 'font-size': 10, opacity: 0.8, class: 'ov-vendor' }, g).textContent = clipText(`${VENDOR[n.runtime || 'claude'] || n.runtime} · ${n.model || 'default'}`, 26);
+    if (live === 'working') { const wk = wakeRun(n.id); if (wk) drawWakeBadge(g, wk, () => openWakeTask(wk.taskId)); }
     const sg = el('g', { class: 'status s-' + live, transform: `translate(${W - 14},14)` }, g); el('circle', { r: 5 }, sg); el('title', {}, sg).textContent = live;
     el('title', {}, g).textContent = `${n.name} (${n.role}) — ${isStuck ? 'stuck' : live}`;
   }
