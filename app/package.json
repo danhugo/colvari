@@ -18,7 +18,8 @@
     "gui-e2e:wikilogs": "mkdir -p e2e-shots && AGENTS_SQUAD_PROJECT=$(mktemp -d) AGENTS_SQUAD_GUI_E2E=$PWD/e2e-shots AGENTS_SQUAD_GUI_E2E_ONLY=wikilogs electron .",
     "gui-e2e:polish": "mkdir -p e2e-shots && AGENTS_SQUAD_PROJECT=$(mktemp -d) AGENTS_SQUAD_GUI_E2E=$PWD/e2e-shots AGENTS_SQUAD_GUI_E2E_ONLY=polish electron .",
     "gui-e2e:conflict": "mkdir -p e2e-shots && AGENTS_SQUAD_PROJECT=$(mktemp -d) AGENTS_SQUAD_GUI_E2E=$PWD/e2e-shots AGENTS_SQUAD_GUI_E2E_ONLY=conflict electron .",
-    "gui-e2e:mainlogswiki": "mkdir -p e2e-shots && AGENTS_SQUAD_PROJECT=$(mktemp -d) AGENTS_SQUAD_GUI_E2E=$PWD/e2e-shots AGENTS_SQUAD_GUI_E2E_ONLY=mainlogswiki electron ."
+    "gui-e2e:mainlogswiki": "mkdir -p e2e-shots && AGENTS_SQUAD_PROJECT=$(mktemp -d) AGENTS_SQUAD_GUI_E2E=$PWD/e2e-shots AGENTS_SQUAD_GUI_E2E_ONLY=mainlogswiki electron .",
+    "gui-e2e:critique": "mkdir -p e2e-shots && AGENTS_SQUAD_PROJECT=$(mktemp -d) AGENTS_SQUAD_GUI_E2E=$PWD/e2e-shots AGENTS_SQUAD_GUI_E2E_ONLY=critique electron ."
   },
   "license": "MIT",
   "dependencies": {
