@@ -373,6 +373,8 @@ async function guiE2E() {
   // search work at scale, and a fresh team still shows the empty states.
   const mainLogsWikiShots = async () => {
     await waitFor(`return !!document.querySelector('#tpl-select option')`); await ex(`await refresh();`); const cur = await ex(`return { p: ctx.p, t: S.teamId }`);
+    // Belt-and-suspenders: dismiss the onboarding card so it can't cover the log/wiki pane in the shots below.
+    await ex(`if (!$('#guide').classList.contains('hidden') && $('#g-close')) $('#g-close').click(); await w(200);`);
     const gp = cur.p || pid(); const ps = pm.store(gp, cur.t);
     const roles = ['PM', 'Dev', 'Dev', 'Dev', 'Reviewer', 'Critic'];
     for (let i = ps.getTeam().nodes.length; i < 20; i++) ps.addNode({ name: `LWAgent ${i + 1}`, role: roles[i % roles.length], x: 40 + (i % 5) * 200, y: 40 + Math.floor(i / 5) * 120 });
@@ -653,7 +655,7 @@ async function guiE2E() {
       for (const tab of ['chat', 'team', 'board', 'inbox', 'overview', 'wiki', 'obs']) { await ex(`$('#tabs button[data-tab=${tab}]').click(); await w(500);`); await shot(`main-${tab === 'obs' ? 'logs' : tab}-${theme}`); }
       await ex(`$('#tabs button[data-tab=team]').click(); $('#reopenguide').click(); await w(400);`); await shot(`main-firstrun-${theme}`);
       expect(`firstrun guide opens (${theme})`, await ex(`return !$('#guide').classList.contains('hidden')`));
-      await ex(`$('#guide').classList.add('hidden'); await w(200);`);
+      await ex(`$('#g-close').click(); await w(200);`); // real dismiss (resets forced/hidden state), not just a CSS class -- otherwise the next renderGuide() re-opens it full-size over later shots
       // Idle detection on the real team: the PM's Dev report is working -> banner names the rest; Dev's node shows the busy arc.
       const ip = (global.__idleP ||= pm.create('Idle demo')); const istore = pm.store(ip.id); const iorch = orchFor(ip.id);
       if (!istore.getTeam().nodes.length) { const [p, d, r] = [['PM', 'PM'], ['Dev', 'Dev'], ['Reviewer', 'Reviewer']].map(([name, role], i) => istore.addNode({ name, role, x: 80 + i * 220, y: 120 })); istore.addEdge(p.id, d.id); istore.addEdge(p.id, r.id); }
