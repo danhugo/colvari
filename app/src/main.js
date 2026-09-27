@@ -289,12 +289,41 @@ async function guiE2E() {
     expect('parallel: dependent starts after blocker ends', D[0] >= A[1], { A, D });
     s.saveSettings({ claudePath: prev.claudePath, maxConcurrency: prev.maxConcurrency });
   };
+  // Mixed vendors: a claude + codex team (fake binaries); shots show per-agent runtime/model, codex cost as tokens-only (never $0 billed).
+  const mixedShots = async () => {
+    const p = pid(); const s = pm.store(p); const dir = require('os').tmpdir();
+    const sh = (n, body) => { const f = path.join(dir, n); fs.writeFileSync(f, '#!/bin/sh\nsleep 12\n' + body); fs.chmodSync(f, 0o755); return f; };
+    const claude = sh('squad-mix-claude.sh', `echo '{"type":"result","subtype":"success","session_id":"s","total_cost_usd":0.12,"num_turns":1,"usage":{"input_tokens":1200,"output_tokens":300}}'\n`);
+    const codex = sh('squad-mix-codex.sh', `echo '{"type":"thread.started","thread_id":"T1"}'\necho '{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}'\necho '{"type":"turn.completed","usage":{"input_tokens":14351,"cached_input_tokens":9984,"output_tokens":42}}'\n`);
+    const prev = s.getSettings(); s.saveSettings({ claudePath: claude, codexPath: codex, maxConcurrency: 8 });
+    const c = s.addNode({ name: 'MixClaude', role: 'Dev', runtime: 'claude', model: 'claude-sonnet-5' });
+    const x = s.addNode({ name: 'MixCodex', role: 'Dev', runtime: 'codex', model: 'gpt-5.6-terra' });
+    [c, x].forEach((n) => s.createTask({ title: 'Mixed ' + n.name, assignee: n.id }));
+    const o = orchFor(p); const done = new Promise((r) => o.once('done', r)); o.start();
+    await waitFor(`await refresh(); return /2 in parallel/.test($('#runstate').textContent)`, 10000);
+    const snap = o.snapshot();
+    expect('mixed: per-agent runtime/model in snapshot', snap.agents[c.id].runtime === 'claude' && snap.agents[x.id].runtime === 'codex' && snap.agents[x.id].model === 'gpt-5.6-terra', snap.agents);
+    for (const t of ['light', 'dark']) {
+      require('electron').nativeTheme.themeSource = t;
+      await ex(`$('#tabs button[data-tab=overview]').click(); await refresh(); await w(300);`); await shot(`28-mixed-overview-live-${t}`);
+      await ex(`$('#tabs button[data-tab=team]').click(); await w(400);`); await shot(`29-mixed-team-${t}`);
+    }
+    await done;
+    for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`$('#tabs button[data-tab=overview]').click(); await refresh(); await w(300);`); await shot(`30-mixed-overview-done-${t}`); }
+    require('electron').nativeTheme.themeSource = 'system';
+    const ov = await ex(`return $('#view') ? $('#view').textContent : document.body.textContent`);
+    const fin = o.snapshot();
+    expect('mixed: codex runs never add to billed cost', fin.agents[x.id].cost === 0 && Math.abs(fin.billedCost + fin.subCost - 0.12) < 1e-9, fin);
+    expect('mixed: codex shows tokens, no $ cost', /n\/a|tokens/i.test(ov), ov.slice(0, 400));
+    s.saveSettings({ claudePath: prev.claudePath, codexPath: prev.codexPath, maxConcurrency: prev.maxConcurrency });
+  };
   try {
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'graph') { await graphShots(); for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`$('#tabs button[data-tab=team]').click(); await w(500);`); await shot(`graph-${t}`); } require('electron').nativeTheme.themeSource = 'system'; throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'chat') { await chatShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'firstrun') { await firstrunInbox(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'overview') { await overviewShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'parallel') { await parallelShots(); throw null; }
+    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'mixed') { await mixedShots(); throw null; }
     // project/team management through the UI: create a project from the Startup template, then a Solo team, then switch back.
     // Wait until the template select is filled (the first refresh loads the templates) before choosing one.
     await ex(`$('#tabs button[data-tab=team]').click(); await w(300);`); // Chat is the default tab; the flow below clicks the graph

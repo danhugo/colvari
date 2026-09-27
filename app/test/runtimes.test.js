@@ -6,7 +6,9 @@ test('claude adapter is the unchanged buildClaudeArgs and default runtime', () =
   assert.strictEqual(RT.getRuntime('claude').buildArgs, buildClaudeArgs);
   assert.strictEqual(RT.getRuntime(undefined).id, 'claude');
   assert.strictEqual(normalizeNode({}).runtime, 'claude');
-  assert.strictEqual(normalizeNode({ runtime: 'bogus' }).runtime, 'claude');
+  assert.strictEqual(normalizeNode({ runtime: 'bogus' }).runtime, 'bogus');
+  assert.throws(() => RT.getRuntime('bogus'), /unknown runtime "bogus"/);
+  assert.throws(() => RT.getRuntime('Codex'), /unknown runtime/);
   assert.strictEqual(RT.RUNTIMES.claude.bin({ claudePath: '/x/claude' }), '/x/claude');
 });
 test('codex args: exec --json, model, bypass, resume', () => {

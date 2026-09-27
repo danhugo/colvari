@@ -40,7 +40,8 @@ function codexMcpArgs(mcp) {
   return out;
 }
 const RUNTIME_IDS = Object.keys(RUNTIMES);
-const getRuntime = (id) => RUNTIMES[id] || RUNTIMES.claude;
+// empty -> claude (the default); unknown/typo'd id throws (no silent fallback)
+const getRuntime = (id) => { if (!id) return RUNTIMES.claude; if (!RUNTIMES[id]) throw new Error(`unknown runtime "${id}" (expected ${RUNTIME_IDS.join('/')})`); return RUNTIMES[id]; };
 
 // codex exec --json line -> { logs: [[kind, text]], sessionId?, result?, tokens?, done?, failed? }
 function parseCodexEvent(ev) {
