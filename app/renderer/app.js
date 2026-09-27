@@ -551,15 +551,18 @@ function md(src) {
     .replace(/\n{2,}/g, '<br><br>'))).join('');
 }
 function renderWiki() {
-  const titles = Object.keys(S.wiki).sort();
-  $('#wikilist').innerHTML = `<p><button id="wk-new">+ New page</button></p>` + (titles.length
-    ? titles.map((t) => `<div class="${t === sel.page ? 'sel' : ''}" data-t="${esc(t)}">${esc(t)}<br><small class="muted">${esc(S.wiki[t].author)}</small></div>`).join('')
-    : '<p class="muted wk-empty-body">No pages yet.</p>');
-  document.querySelectorAll('#wikilist div[data-t]').forEach((d) => d.onclick = () => { sel.page = d.dataset.t; wikiEdit = false; loadPage(); renderWiki(); });
-  $('#wk-new').onclick = () => { sel.page = null; wikiEdit = true; $('#wk-title').value = ''; $('#wk-content').value = ''; showWiki(); };
+  const q = ($('#wk-search').value || '').trim().toLowerCase();
+  const titles = Object.keys(S.wiki).sort().filter((t) => !q || t.toLowerCase().includes(q) || (S.wiki[t].content || '').toLowerCase().includes(q));
+  const all = Object.keys(S.wiki).length;
+  $('#wikipages').innerHTML = titles.length
+    ? titles.map((t) => `<div class="${t === sel.page ? 'sel' : ''}" data-t="${esc(t)}"><b>${esc(t)}</b><br><small class="muted">by ${esc(S.wiki[t].author)}</small></div>`).join('')
+    : all ? '<p class="muted wk-empty-body">No pages match your search.</p>' : '<p class="muted wk-empty-body">No pages yet. Click + New page to write your first one — e.g. a runbook, a glossary, or notes for the team.</p>';
+  document.querySelectorAll('#wikipages div[data-t]').forEach((d) => d.onclick = () => { sel.page = d.dataset.t; wikiEdit = false; loadPage(); renderWiki(); });
   if (sel.page && S.wiki[sel.page] && !wikiEdit) loadPage();
-  else if (!sel.page) $('#wk-view').innerHTML = titles.length ? '<p class="muted wk-empty-body">Pick a page on the left, or start a new one.</p>' : '<p class="muted wk-empty-body">No wiki pages yet. Click + New page to write the first one.</p>';
+  else if (!sel.page) $('#wk-view').innerHTML = all ? '<p class="muted wk-empty-body">Pick a page on the left, or start a new one.</p>' : '<p class="muted wk-empty-body">No wiki pages yet. Click + New page on the left to write the first one — a runbook, a glossary, or anything the team should share.</p>';
 }
+$('#wk-new').onclick = () => { sel.page = null; wikiEdit = true; $('#wk-title').value = ''; $('#wk-content').value = ''; showWiki(); renderWiki(); };
+$('#wk-search').oninput = renderWiki;
 function loadPage() { const p = S.wiki[sel.page]; if (!p) return; $('#wk-title').value = p.title; $('#wk-content').value = p.content; showWiki(); }
 function showWiki() { $('#wk-content').classList.toggle('hidden', !wikiEdit); $('#wk-view').classList.toggle('hidden', wikiEdit); $('#wk-view').innerHTML = md($('#wk-content').value); }
 $('#wk-edit').onclick = () => { wikiEdit = !wikiEdit; showWiki(); };
@@ -568,17 +571,20 @@ $('#wk-del').onclick = async () => { if (sel.page && confirm('Delete page?')) { 
 
 // ---------- observability ----------
 function renderObs() {
-  const rows = S.allNodes.map((n) => { const a = S.orch.agents[n.id] || {};
-    return `<tr><td>${esc(n.name)} ${vbadge(n)}</td><td>${n.role}</td><td class="st-${a.status || 'idle'}">${a.status || 'idle'}${a.iteration > 1 ? ` (iter ${a.iteration})` : ''}</td><td>${esc(n.mode || 'single')}</td><td>${a.taskId ? esc((S.tasks.find((t) => t.id === a.taskId) || {}).title || a.taskId) : ''}</td><td class="num">${a.runs || 0}</td><td>${esc(a.model || n.model || '')}</td><td class="num">${a.inputTokens || 0}</td><td class="num">${a.outputTokens || 0}</td><td class="num">${a.cacheReadTokens || 0}</td><td class="num">${a.cacheCreationTokens || 0}</td><td>${a.billingSource ? billTag(a.billingSource) : `<span class="muted">${esc(n.billingMode || 'auto')}</span>`}</td><td>${costCell(a.cost, a.billingSource, n.runtime)}${a.budgetStop ? `<br><span class="warn">${esc(a.budgetStop)}</span>` : ''}</td><td class="actions">${a.status === 'working' ? `<button data-stopagent="${n.id}">Stop</button>` : ''}<button data-msgagent="${n.id}">Message</button></td></tr>`; }).join('');
-  const T = S.orch.tokens || {};
-  $('#agenttable').innerHTML = `<tr><th>Agent</th><th>Role</th><th>Status</th><th>Mode</th><th>Task</th><th title="Agent iterations started this session (initial run, loop/goal iterations, human-message resumes). Goal checks and preflights are not counted; see Usage for all claude processes.">Agent runs</th><th>Model</th><th>In tok</th><th>Out tok</th><th>Cache read</th><th>Cache write</th><th>Billing</th><th>Reported cost</th><th></th></tr>${rows}<tr><th colspan="7">Total (this session)</th><th class="num">${T.inputTokens || 0}</th><th class="num">${T.outputTokens || 0}</th><th class="num">${T.cacheReadTokens || 0}</th><th class="num">${T.cacheCreationTokens || 0}</th><th></th><th>$${(S.orch.totalCost || 0).toFixed(4)} <span class="costnote">API-equivalent (reported by Claude CLI)</span></th><th></th></tr>`;
-  document.querySelectorAll('[data-stopagent]').forEach((b) => b.onclick = act(async () => { await call('stopAgent', b.dataset.stopagent); refresh(); }));
-  document.querySelectorAll('[data-msgagent]').forEach((b) => b.onclick = act(async () => { const v = await ask(`Message to ${nodeName(b.dataset.msgagent)} (a running agent is interrupted and resumed with it)`); if (v) { await call('sendToAgent', b.dataset.msgagent, v); refresh(); } }));
+  const cur = $('#logfilter').value;
+  const counts = {}; let total = 0;
+  for (const l of logs) if (l.projectId === ctx.p) { counts[l.nodeId] = (counts[l.nodeId] || 0) + 1; total++; }
+  const rows = S.allNodes.map((n) => { const a = S.orch.agents[n.id] || {}; const w = who(n.id);
+    const task = a.taskId ? esc((S.tasks.find((t) => t.id === a.taskId) || {}).title || a.taskId) : '';
+    return `<div class="logagent-row ${cur === n.id ? 'sel' : ''}" data-id="${n.id}"><span class="avatar sm ${a.status === 'working' ? 'working' : ''}" style="background:${w.color}" title="${esc(w.name)}">${esc(w.ini)}</span><span class="lameta"><b>${esc(n.name)}</b> ${vbadge(n)}<br><small class="muted st-${a.status || 'idle'}">${a.status || 'idle'}${task ? ` · ${task}` : ''}</small></span><span class="lacount" title="log lines">${counts[n.id] || 0}</span><span class="lactions">${a.status === 'working' ? `<button data-stopagent="${n.id}" title="Stop">⏹</button>` : ''}<button data-msgagent="${n.id}" title="Message">✉</button></span></div>`; }).join('');
+  $('#logagents').innerHTML = `<div class="logagent-row ${!cur ? 'sel' : ''}" data-id=""><span class="avatar sm" style="background:#3a3f4b">∀</span><span class="lameta"><b>All agents</b><br><small class="muted">every session</small></span><span class="lacount" title="log lines">${total}</span></div>` +
+    (rows || '<p class="muted logempty">No agents yet — add one in Team.</p>');
+  document.querySelectorAll('#logagents .logagent-row[data-id]').forEach((d) => d.onclick = (e) => { if (e.target.closest('.lactions')) return; $('#logfilter').value = d.dataset.id; renderLog(); renderObs(); });
+  document.querySelectorAll('[data-stopagent]').forEach((b) => b.onclick = act(async (e) => { e.stopPropagation(); await call('stopAgent', b.dataset.stopagent); refresh(); }));
+  document.querySelectorAll('[data-msgagent]').forEach((b) => b.onclick = act(async (e) => { e.stopPropagation(); const v = await ask(`Message to ${nodeName(b.dataset.msgagent)} (a running agent is interrupted and resumed with it)`); if (v) { await call('sendToAgent', b.dataset.msgagent, v); refresh(); } }));
   const bs = S.orch.budgetStop; const st = S.settings;
   $('#budgetbar').innerHTML = (st.budgetUsd || st.budgetTokens ? `Run budget: ${st.budgetUsd ? `$${(S.orch.runCost || 0).toFixed(4)} / $${st.budgetUsd}` : ''}${st.budgetUsd && st.budgetTokens ? ' · ' : ''}${st.budgetTokens ? `${fmtTok(S.orch.runTokens)} / ${fmtTok(st.budgetTokens)} tok` : ''}` : '') + (bs ? ` <span class="warn">Stopped: ${esc(bs)}</span>` : '');
-  $('#msglist').innerHTML = S.messages.length ? S.messages.slice(-50).reverse().map((m) => `<div class="comment"><b>${esc(nodeName(m.from))} → ${esc(nodeName(m.to))}</b> <small class="muted">${new Date(m.at).toLocaleTimeString()}${m.read ? '' : ' · unread'}</small><br>${esc(m.text)}</div>`).join('') : '<p class="muted">No agent messages yet.</p>';
-  const f = $('#logfilter'); const cur = f.value;
-  f.innerHTML = '<option value="">All agents</option>' + S.allNodes.map((n) => `<option value="${n.id}">${esc(n.name)}</option>`).join(''); f.value = cur;
+  const f = $('#logfilter'); f.innerHTML = '<option value="">All agents</option>' + S.allNodes.map((n) => `<option value="${n.id}">${esc(n.name)}</option>`).join(''); f.value = cur;
 }
 const LOG_LEVEL = { error: 'error', stderr: 'error', tool_error: 'error', system: 'info', tool: 'tool', tool_result: 'tool', result: 'ok', raw: 'muted' };
 function logRow(l) {
