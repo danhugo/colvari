@@ -1,0 +1,26 @@
+Usage: claude [options] [command]
+
+Claude Code - starts an interactive session by default, use -p/--print for non-interactive output
+
+Options:
+  -p, --print                 Print response and exit (non-interactive mode)
+  --output-format <format>    Output format for print mode (json, text)
+  --permission-mode <mode>    Permission mode: default, plan, acceptEdits, bypassPermissions
+  --resume <session_id>       Resume a previous session
+
+Commands:
+  chat          Start an interactive chat session
+  config        Manage configuration
+  mcp           Manage MCP server connections
+  init          Create a CLAUDE.md file for this project
+
+Slash commands available in this project:
+  /compact             Compact the conversation
+  /review              Run a code review
+  /security-review     Run a security review
+  /loop                Run a prompt on a recurring interval (goal/loop style automation)
+  /workflow             Run a saved multi-agent workflow script
+
+Skills:
+  superpowers:brainstorming
+  superpowers:test-driven-development
