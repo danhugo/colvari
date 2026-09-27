@@ -71,6 +71,11 @@ class Orchestrator extends EventEmitter {
     this.agents = {}; // nodeId -> {status, cost, inputTokens, outputTokens, runs, taskId}
     this.totalCost = 0;
     this.runs = 0;
+    // Seed from each node's persisted rate-limit snapshot (usage.js parseRateLimits, written by applyEvent's
+    // init/rate_limit_event handling below) so a restarted app shows the CLI's last-known 5h/weekly usage
+    // immediately, instead of waiting for a fresh run to repopulate this in-memory map.
+    this.subscriptionRateLimits = {};
+    try { for (const n of store.getTeam().nodes) if (n.rateLimits) this.subscriptionRateLimits[n.id] = n.rateLimits; } catch {}
   }
   agent(id) { return (this.agents[id] ||= { runCost: 0, runTokens: 0, pendingHuman: [], stopRequested: false, budgetStop: null, status: 'idle', iteration: 0, cost: 0, inputTokens: 0, outputTokens: 0, cacheTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, runs: 0, taskId: null, task: null, model: '', runtime: '', billingSource: '' }); }
   // modelStats: per-model aggregate across this project's persisted runs + tasks (see usage.js modelStats for the field shape).
@@ -467,13 +472,19 @@ class Orchestrator extends EventEmitter {
       // The claude CLI's real, live 5h/weekly usage % — a separate stream event (rate_limit_info.unifiedWindows),
       // not part of the system/init event below. This is the actual source for the top bar's "5h"/"weekly" meter.
       const rl = U.parseRateLimits(ev);
-      if (rl) { (this.subscriptionRateLimits ||= {})[node.id] = rl; this.checkUsageLimits(node.id); this.changed(); }
+      if (rl) {
+        (this.subscriptionRateLimits ||= {})[node.id] = rl; this.checkUsageLimits(node.id); this.changed();
+        try { this.store.updateNode(node.id, { rateLimits: rl, rateLimitsAt: new Date().toISOString() }); } catch {}
+      }
     } else if (ev.type === 'system' && ev.subtype === 'init') {
       const mcpStatus = (ev.mcp_servers || []).map((s) => `${s.name}:${s.status}`).join(',');
       if (run && ev.session_id) run.sessionId = ev.session_id;
       if (run && run.usage) U.applyEvent(run.usage, ev);
       const rl = U.parseRateLimits(ev);
-      if (rl) { (this.subscriptionRateLimits ||= {})[node.id] = rl; this.checkUsageLimits(node.id); }
+      if (rl) {
+        (this.subscriptionRateLimits ||= {})[node.id] = rl; this.checkUsageLimits(node.id);
+        try { this.store.updateNode(node.id, { rateLimits: rl, rateLimitsAt: new Date().toISOString() }); } catch {}
+      }
       // Automatic capability discovery: every run's init event is a free, live "probe" (richer than --help),
       // so cache it per node and re-merge whenever the model/provider changed or the TTL lapsed since the last
       // one (capabilities.needsReprobe) — no extra CLI invocation needed. Manual Refresh (main.js IPC) still

@@ -2,7 +2,7 @@
 // supports on this machine right now — slash commands, skills, modes — so the UI never has to guess or drift
 // from what the installed CLI version really offers. Results are cached on the node (capabilities /
 // capabilitiesProbedAt) by the caller and refreshed on demand.
-const { execFileSync } = require('child_process');
+const { execFileSync, spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const { RUN_MODES } = require('./agent-modes');
@@ -19,12 +19,13 @@ function parseHelpText(text) {
 // what the underlying CLI reports, so discovery should never show "Modes: none found" for them. Additionally,
 // scan for well-known goal/loop/workflow-style CLI features so the same modes are recognized when the CLI itself
 // (Claude Code's own /loop skill, workflow tooling, Codex "goal mode") advertises them in --help text.
-function detectAppModes(helpText = '') {
+function detectAppModes(helpText = '', slashCommands = []) {
   const s = String(helpText || '').toLowerCase();
+  const cmds = (slashCommands || []).map((c) => String(c).toLowerCase());
   const found = new Set(RUN_MODES);
-  if (/\bworkflow(s)?\b/.test(s)) found.add('workflow');
-  if (/\bgoal\b/.test(s)) found.add('goal');
-  if (/\bloop\b/.test(s)) found.add('loop');
+  if (/\bworkflow(s)?\b/.test(s) || cmds.includes('/workflow')) found.add('workflow');
+  if (/\bgoal\b/.test(s) || cmds.includes('/goal')) found.add('goal');
+  if (/\bloop\b/.test(s) || cmds.includes('/loop')) found.add('loop');
   return [...found];
 }
 
@@ -145,9 +146,35 @@ function discoverCapabilities(rt, settings = {}, { exec, initEvent, cwd, home } 
   // The app's own goal/loop/workflow run modes (plus any CLI/plugin-native ones mentioned in --help) are always
   // shown in the categorized view, independent of the flat `modes` field above (which stays permission-mode only,
   // for back-compat) — this is what fixes "Modes: none found" for projects whose CLI never reported permission_modes.
-  const appModes = [...new Set([...detectAppModes(help.helpText), ...base.modes])];
+  const appModes = [...new Set([...detectAppModes(help.helpText, base.slashCommands), ...base.modes])];
   base.categorized = categorize({ modes: appModes, skills: base.skills, slashCommands: base.slashCommands, mcpServers });
   return base;
+}
+
+// Refresh with no prior snapshot at all has nothing to merge over the --help probe, so it falls back to one
+// cheap live probe of the CLI itself (`claude -p --output-format stream-json --verbose`): a trivial prompt just
+// to capture a real system/init event (slash_commands, skills) and, if the CLI reports it before exiting, a
+// rate_limit_event (rate_limit_info.unifiedWindows). Never throws; a spawn/parse failure just yields nulls.
+function probeInitEvent(bin, { cwd, env, timeoutMs = 30000, spawnFn = spawn } = {}) {
+  return new Promise((resolve) => {
+    let init = null, rateLimit = null, buf = '', done = false;
+    const finish = () => { if (done) return; done = true; clearTimeout(timer); try { child.kill('SIGTERM'); } catch {} resolve({ init, rateLimit }); };
+    let child;
+    try { child = spawnFn(bin, ['-p', 'ok', '--output-format', 'stream-json', '--verbose', '--max-turns', '1'], { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] }); }
+    catch { return resolve({ init: null, rateLimit: null }); }
+    const timer = setTimeout(finish, timeoutMs);
+    child.stdout.on('data', (d) => {
+      buf += d; let i;
+      while ((i = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1); if (!line) continue;
+        let ev; try { ev = JSON.parse(line); } catch { continue; }
+        if (ev.type === 'system' && ev.subtype === 'init') init = ev;
+        else if (ev.type === 'rate_limit_event') rateLimit = ev;
+        if (init && rateLimit) return finish();
+      }
+    });
+    child.on('error', finish); child.on('close', finish);
+  });
 }
 
 const TTL_MS = 24 * 60 * 60 * 1000; // re-probe at least once a day even with no signature change
@@ -171,4 +198,4 @@ function needsReprobe(node = {}, signature, { ttlMs = TTL_MS, now = Date.now() }
 // only matters once a node already has a first probe on record.
 const needsInitialProbe = (node = {}) => !node.capabilities;
 
-module.exports = { parseHelpText, probeHelp, fromInitEvent, discoverCapabilities, capabilitySignature, needsReprobe, needsInitialProbe, detectAppModes, scanLocalPlugins, scanClaudeDir, installedPluginRoots, categorize, TTL_MS };
+module.exports = { parseHelpText, probeHelp, fromInitEvent, discoverCapabilities, capabilitySignature, needsReprobe, needsInitialProbe, detectAppModes, scanLocalPlugins, scanClaudeDir, installedPluginRoots, categorize, probeInitEvent, TTL_MS };

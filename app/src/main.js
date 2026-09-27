@@ -1005,15 +1005,32 @@ const api = {
   // own CLI's init event — with an explicit reason when there is nothing to report yet.
   providerUsage: (c, nodeId) => {
     const s = ST(c); const node = TS(c).getTeam().nodes.find((n) => n.id === nodeId); if (!node) throw new Error('no agent ' + nodeId);
-    const rl = (orchFor(c.p).subscriptionRateLimits || {})[nodeId] || null;
+    const rl = (orchFor(c.p).subscriptionRateLimits || {})[nodeId] || node.rateLimits || null;
     const installed = runtimes(s.getSettings())[node.runtime] ? runtimes(s.getSettings())[node.runtime].installed : undefined;
     return U.providerUsageStatus(rl, { installed, billingMode: node.billingMode });
   },
-  discoverCapabilities: (c, nodeId) => {
+  // Manual Refresh: the --help probe alone. If this node has never had any snapshot at all (no capabilities,
+  // no live init event ever seen), --help text is a poor substitute for the CLI's own real slash_commands/skills,
+  // so fall back to one live `claude -p --output-format stream-json --verbose` probe (capabilities.probeInitEvent)
+  // to seed a real snapshot — the same data a normal run's init/rate_limit_event would have given us for free.
+  discoverCapabilities: async (c, nodeId) => {
     const node = TS(c).getTeam().nodes.find((n) => n.id === nodeId); if (!node) throw new Error('no agent ' + nodeId);
     const rt = RT.getRuntime(node.runtime);
-    const capabilities = CAP.discoverCapabilities(rt, ST(c).getSettings());
-    TS(c).updateNode(nodeId, { capabilities, capabilitiesProbedAt: capabilities.probedAt });
+    const settings = ST(c).getSettings();
+    let capabilities = CAP.discoverCapabilities(rt, settings);
+    const patch = { capabilities, capabilitiesProbedAt: capabilities.probedAt };
+    if (CAP.needsInitialProbe(node)) {
+      try {
+        const { init, rateLimit } = await CAP.probeInitEvent(rt.bin(settings), { cwd: settings.workdir, env: process.env });
+        if (init) {
+          capabilities = CAP.discoverCapabilities(rt, settings, { initEvent: init });
+          patch.capabilities = capabilities; patch.capabilitiesProbedAt = capabilities.probedAt;
+        }
+        const rl = rateLimit ? U.parseRateLimits(rateLimit) : null;
+        if (rl) { patch.rateLimits = rl; patch.rateLimitsAt = new Date().toISOString(); orchFor(c.p).subscriptionRateLimits[nodeId] = rl; }
+      } catch {}
+    }
+    TS(c).updateNode(nodeId, patch);
     return capabilities;
   },
   testAgent, testTeam,
