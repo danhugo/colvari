@@ -788,8 +788,8 @@ async function guiE2E() {
     await ex(`$('#tabs button[data-tab=settings]').click(); await refresh(); await w(300); $('#rt-path').value = 'helpycode'; $('#rt-detect').click(); await w(4000);`);
     const draft = await ex(`return { label: $('#rd-label') && $('#rd-label').value, models: $('#rd-models') && $('#rd-models').value, stub: !!document.querySelector('#rt-draft .costnote') }`);
     expect('helpycode: Detect populates a real (non-stub) draft', draft.label === 'helpycode' && !draft.stub, draft);
-    // helpycode's `models` subcommand output isn't parsed into names by the introspector yet, so the reviewer
-    // fills in the model list by hand from `helpycode models` output, same as any other free-text CLI model id.
+    // The introspector now parses `models` output into names, but the reviewer still confirms/edits the
+    // list by hand from `helpycode models` output, same as any other free-text CLI model id.
     await ex(`$('#rd-models').value = 'elice/z-ai/glm-5.3-flash, elice/z-ai/glm-5.3'; $('#rd-defmodel').value = 'elice/z-ai/glm-5.3-flash'; $('#rd-save').click(); await w(300);`);
     const rtId = await ex(`return (JSON.parse(localStorage.getItem('customRuntimes')) || []).find((r) => r.bin === 'helpycode')?.id`);
     await ex(`$('#tabs button[data-tab=team]').click(); await refresh(); selectNode('${n.id}'); await w(300); $('#nf-runtime').value = '${rtId}'; $('#nf-runtime').dispatchEvent(new Event('change')); await w(200);`);
@@ -1045,12 +1045,13 @@ const wtTask = (c, id) => { const t = ST(c).listTasks().find((x) => x.id === id)
 // with dotted paths) -> renderer's draft-profile schema (label/bin/version/models/defaultModel/effort/
 // variants/resume/eventMapping{kind:label}), agreed with Uma per t_833956fa. Conversion lives here so
 // neither side has to know the other's shape.
-function toDraftProfile(bin, profile) {
+function toDraftProfile(bin, profile, derived = {}) {
   const hasModels = Array.isArray(profile.modelsCommand) && profile.modelsCommand.length > 0;
   const em = profile.eventMapping || {};
+  const models = (derived.models || []).length ? derived.models : (hasModels ? [] : ['default']);
   return {
     label: profile.label || bin, bin: profile.binary || bin, version: null,
-    models: hasModels ? [] : ['default'], defaultModel: hasModels ? '' : 'default',
+    models, defaultModel: models[0] || '',
     effort: profile.effortValues || [], variants: [],
     resume: !!profile.resumeFlag,
     eventMapping: {
@@ -1058,10 +1059,13 @@ function toDraftProfile(bin, profile) {
       input: em.inputPath || 'input_tokens', output: em.outputPath || 'output_tokens',
       reasoning: em.reasoningPath || 'reasoning_tokens', cache: em.cachePath || 'cache_read_tokens',
     },
+    // per-field provenance ({source, confidence}) from the introspector: the UI shows where every
+    // value came from (help/models/probe/agent); 'agent' sources are low-confidence and opt-in.
+    sources: derived.sources || {},
   };
 }
 const api = {
-  introspectRuntime: (_c, bin) => toDraftProfile(bin, runIntrospectRuntime(bin)),
+  introspectRuntime: (_c, bin) => { const r = runIntrospectRuntime(bin); return toDraftProfile(bin, r.profile, r); },
   listProjects: () => ({ projects: pm.list().map((p) => ({ ...p, running: !!(orchs.get(p.id) || {}).running })), templates: Object.fromEntries(Object.entries(TEMPLATES).map(([k, v]) => [k, v.label])) }),
   createProject: (_c, name, tpl) => pm.create(name, tpl), renameProject: (_c, pid, name) => pm.rename(pid, name),
   deleteProject: (_c, pid) => { if ((orchs.get(pid) || {}).running) throw new Error('stop the project first'); orchs.delete(pid); return pm.remove(pid); },

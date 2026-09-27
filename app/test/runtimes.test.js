@@ -34,6 +34,10 @@ test('detectRuntimes marks missing binaries not installed', () => {
   const d = RT.detectRuntimes({}, {}, exec);
   assert.deepStrictEqual([d.claude.installed, d.codex.installed, d.opencode.installed], [true, true, false]);
   assert.strictEqual(d.codex.version, '0.144.6'); assert.strictEqual(d.opencode.error, 'not installed');
+  // helpycode now reports what the (fake) CLI itself shows: installed, but help-only derivation
+  // honestly claims no capabilities
+  assert.strictEqual(d.helpycode.installed, true);
+  assert.deepStrictEqual(d.helpycode.capabilities, { tokens: false, cost: false, mcp: false, resume: false });
 });
 test('detectRuntimes on this machine', () => {
   const d = RT.detectRuntimes({}, { ...process.env, PATH: process.env.PATH + ':' + require('os').homedir() + '/.local/bin' });
@@ -51,30 +55,93 @@ test('codex gets board MCP via -c overrides and honors model', () => {
   assert.equal(a[a.length - 1], 'hi');
 });
 
-test('helpycode args: run --format json, model, variant, resume, writes mcp config file to cwd', () => {
-  const fs = require('fs'); const os = require('os'); const path = require('path');
-  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'hc-test-'));
-  const mcp = { mcpServers: { board: { command: '/bin/node', args: ['srv.js', '--node', 'n1'], env: { ELECTRON_RUN_AS_NODE: '1' } } } };
-  const a = RT.getRuntime('helpycode').buildArgs({ model: 'elice/z-ai/glm-5.3-flash', effort: 'high' }, 'hi', {}, mcp, { resume: 'S1', cwd });
+// Fake exec serving real captured helpycode --help output plus documented event shapes, so the
+// profile-driven helpycode adapter is exercised without a live binary. Each test uses a distinct
+// bin path: deriveRuntimeProfile caches per binary+version.
+const path = require('node:path');
+const fs = require('node:fs');
+const realHelpycodeTop = fs.readFileSync(path.join(__dirname, 'fixtures/help-helpycode-real-top.txt'), 'utf8');
+const realHelpycodeRun = fs.readFileSync(path.join(__dirname, 'fixtures/help-helpycode-real-run.txt'), 'utf8');
+const probeLines = fs.readFileSync(path.join(__dirname, 'fixtures/probe-helpycode-real.jsonl'), 'utf8');
+const agentProfileJson = JSON.stringify({
+  argsTemplate: ['run', '--format', 'json', '--model', '{model}', '--variant', '{variant}', '{prompt}'],
+  resumeFlag: '-s', effortFlag: '--variant', effortValues: ['low', 'medium', 'high', 'max', 'minimal'],
+  mcp: { method: 'file', flag: 'helpycode.json' },
+  eventMapping: { textPath: 'text', sessionIdPath: 'session_id', costPath: 'total_cost_usd', inputPath: 'usage.input_tokens', outputPath: 'usage.output_tokens', reasoningPath: 'usage.reasoning_tokens', cachePath: 'usage.cache_read_tokens' },
+});
+function fakeHelpyExec(bin, args) {
+  if (args[0] === '--version') return 'helpycode 0.3.5\n';
+  if (args[0] === 'run' && args.includes('--help')) return realHelpycodeRun;
+  if (args.includes('--help')) return realHelpycodeTop;
+  if (args[0] === 'models') return 'elice/z-ai/glm-5.3-flash\nelice/z-ai/glm-5.3\n';
+  if (args.join(' ').includes('argsTemplate')) return agentProfileJson; // ask-agent profile request
+  if (args[0] === 'run') return probeLines; // probe run
+  throw new Error('unexpected exec ' + JSON.stringify(args));
+}
+
+test('helpycode is profile-driven: args derive from the introspector (no hand-built profile)', () => {
+  const rt = RT.getRuntime('helpycode');
+  const a = rt.buildArgs({ model: 'elice/z-ai/glm-5.3-flash', effort: 'high' }, 'hi', { helpycodePath: '/fake/hc-args' }, {}, { resume: 'S1', exec: fakeHelpyExec });
   assert.deepStrictEqual(a, ['run', '-s', 'S1', '--format', 'json', '--model', 'elice/z-ai/glm-5.3-flash', '--variant', 'high', 'hi']);
-  const cfg = JSON.parse(fs.readFileSync(path.join(cwd, 'helpycode.json'), 'utf8'));
+});
+test('helpycode args: no cwd means no mcp file written, still builds args', () => {
+  const a = RT.getRuntime('helpycode').buildArgs({ model: 'm1' }, 'hi', { helpycodePath: '/fake/hc-nocwd' }, { mcpServers: { board: {} } }, { exec: fakeHelpyExec });
+  assert.ok(a.includes('--model') && a.includes('m1') && a[a.length - 1] === 'hi');
+});
+test('helpycode mcp: derived mcp is file-method via the ask-agent layer; config written to cwd', () => {
+  const fs2 = require('fs'); const os = require('os');
+  const cwd = fs2.mkdtempSync(path.join(os.tmpdir(), 'hc-test-'));
+  const mcp = { mcpServers: { board: { command: '/bin/node', args: ['srv.js', '--node', 'n1'], env: { ELECTRON_RUN_AS_NODE: '1' } } } };
+  const rt = RT.getRuntime('helpycode');
+  const a = rt.buildArgs({ model: 'm1' }, 'hi', { helpycodePath: '/fake/hc-mcp' }, mcp, { cwd, exec: fakeHelpyExec, askAgent: true });
+  assert.ok(a.includes('--model') && a.includes('m1') && a[a.length - 1] === 'hi');
+  const cfg = JSON.parse(fs2.readFileSync(path.join(cwd, 'helpycode.json'), 'utf8'));
   assert.deepStrictEqual(cfg.mcp.board.command, ['/bin/node', 'srv.js', '--node', 'n1']);
   assert.strictEqual(cfg.mcp.board.enabled, true);
   assert.deepStrictEqual(cfg.mcp.board.environment, { ELECTRON_RUN_AS_NODE: '1' });
-  fs.rmSync(cwd, { recursive: true, force: true });
+  fs2.rmSync(cwd, { recursive: true, force: true });
 });
-test('helpycode args: no cwd means no mcp file written, still builds args', () => {
-  const a = RT.getRuntime('helpycode').buildArgs({ model: 'm1' }, 'hi', {}, { mcpServers: { board: {} } }, {});
-  assert.ok(a.includes('--model') && a.includes('m1') && a[a.length - 1] === 'hi');
-});
-test('helpycode event parsing (fake-agent-cli / documented real event shapes)', () => {
-  assert.strictEqual(RT.parseHelpycodeEvent({ type: 'session', session_id: 'S1' }).sessionId, 'S1');
-  const m = RT.parseHelpycodeEvent({ type: 'message', text: 'pong' });
+test('helpycode parseEvent is generic profile-driven parsing (older documented event shapes)', () => {
+  const { normalizeRuntimeProfile } = require('../src/runtime-profile');
+  const profile = normalizeRuntimeProfile({ id: 'helpycode', label: 'HelpyCode', binary: 'helpycode', eventMapping: { textPath: 'text', sessionIdPath: 'session_id', costPath: 'total_cost_usd', inputPath: 'usage.input_tokens', outputPath: 'usage.output_tokens', reasoningPath: 'usage.reasoning_tokens', cachePath: 'usage.cache_read_tokens' } });
+  assert.strictEqual(RT.parseProfileEvent({ type: 'session', session_id: 'S1' }, profile).sessionId, 'S1');
+  const m = RT.parseProfileEvent({ type: 'message', text: 'pong' }, profile);
   assert.strictEqual(m.result, 'pong'); assert.deepStrictEqual(m.logs, [['text', 'pong']]);
-  const r = RT.parseHelpycodeEvent({ type: 'result', usage: { input_tokens: 12, output_tokens: 6, reasoning_tokens: 2 }, total_cost_usd: 0.0003 });
+  const r = RT.parseProfileEvent({ type: 'result', usage: { input_tokens: 12, output_tokens: 6, reasoning_tokens: 2 }, total_cost_usd: 0.0003 }, profile);
   assert.deepStrictEqual(r.tokens, { inputTokens: 12, outputTokens: 8 });
   assert.strictEqual(r.cost, 0.0003); assert.ok(r.done);
+  assert.ok(RT.parseProfileEvent({ type: 'error', message: 'boom' }, profile).failed);
 });
-test('capabilities: helpycode claims tokens/cost/mcp/resume (verified live, helpycode 0.3.5)', () => {
-  assert.deepStrictEqual(RT.RUNTIMES.helpycode.capabilities, { tokens: true, cost: true, mcp: true, resume: true });
+test('helpycode parseEvent on the CURRENT stream shape: totals fire on usage-bearing step_finish', () => {
+  // derived from the real fixtures end-to-end (help -> probe -> mapping), no hand-built mapping
+  const rt = RT.getRuntime('helpycode');
+  const profile = RT.deriveRuntimeProfile('/fake/hc-live-events', { exec: fakeHelpyExec, label: 'HelpyCode' });
+  const lines = probeLines.trim().split('\n').map((l) => JSON.parse(l));
+  const stepFinish = rt.parseEvent(lines[2], { helpycodePath: '/fake/hc-live-events' }, { exec: fakeHelpyExec });
+  assert.deepStrictEqual(stepFinish.tokens, { inputTokens: 10, outputTokens: 29 }); // 3 output + 26 reasoning
+  assert.strictEqual(stepFinish.cost, 0.0003);
+  assert.strictEqual(stepFinish.sessionId, 'ses_f1c951611ffePHhIOfr10tisqA');
+  assert.ok(stepFinish.done);
+  const text = rt.parseEvent(lines[1], { helpycodePath: '/fake/hc-live-events' }, { exec: fakeHelpyExec });
+  assert.strictEqual(text.result, 'pong');
+});
+test('capabilities derive from the profile, honestly: help-only sees resume only', () => {
+  // help-only derivation (no probe/model call) knows the resume flag but nothing about the event stream
+  assert.deepStrictEqual(RT.getRuntime('helpycode').capabilities({ helpycodePath: '/fake/hc-caps' }, fakeHelpyExec), { tokens: false, cost: false, mcp: false, resume: true });
+  // with a probe + ask-agent-derived profile, every claim is backed by a profile field
+  const full = RT.deriveRuntimeProfile('/fake/hc-caps-full', { exec: fakeHelpyExec, label: 'HelpyCode', askAgent: true });
+  assert.deepStrictEqual(RT.capabilitiesFromProfile(full), { tokens: true, cost: true, mcp: true, resume: true });
+});
+test('derived profiles are cached per binary and re-derived when the CLI version changes', () => {
+  let version = 'helpycode 0.3.5\n'; let helpCalls = 0;
+  const countingExec = (bin, args) => { if (args[0] === '--version') return version; if (args.includes('--help')) { helpCalls++; return realHelpycodeTop; } return ''; };
+  const p1 = RT.deriveRuntimeProfile('/fake/hc-cache', { exec: countingExec, probe: false });
+  const callsAfterFirst = helpCalls;
+  const p2 = RT.deriveRuntimeProfile('/fake/hc-cache', { exec: countingExec, probe: false });
+  assert.strictEqual(p2, p1); // same version -> cache hit, no re-derivation
+  assert.strictEqual(helpCalls, callsAfterFirst);
+  version = 'helpycode 0.4.0\n'; // upgrade -> the cached profile goes stale
+  const p3 = RT.deriveRuntimeProfile('/fake/hc-cache', { exec: countingExec, probe: false });
+  assert.notStrictEqual(p3, p1);
+  assert.ok(helpCalls > callsAfterFirst, 'expected re-derivation after version change');
 });

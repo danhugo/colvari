@@ -1,7 +1,23 @@
-// Generic CLI introspector: runs `<cli> --help` (+ subcommand help, `models`, one JSON probe run) and
-// derives a draft RuntimeProfile heuristically. No CLI-specific code paths — every CLI (helpycode,
-// claude, codex, ...) goes through the same parsing.
+// Generic CLI introspector: derives a RuntimeProfile from any agent CLI in layers, cheapest and most
+// trustworthy first — (1) tolerant --help parsing (prompt/model/output/json flags), (2) `models`
+// discovery, (3) one sandboxed probe run, (4) an opt-in fallback that asks the CLI's own agent to
+// emit its profile as JSON (strictly validated — never trusted as-is). No CLI-specific code paths:
+// every CLI (helpycode, claude, codex, ...) goes through the same layers. Returns the profile plus a
+// per-field {source, confidence} map so callers (and the UI) can show where every value came from;
+// fields filled by the ask-agent layer are low-confidence and never applied silently (opt-in).
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 const { normalizeRuntimeProfile } = require('./runtime-profile');
+
+// Per-layer provenance. help/models/probe are deterministic observations of the CLI itself (high
+// confidence); agent output is model-generated (low confidence, opt-in only).
+const SRC = {
+  help: { source: 'help', confidence: 'high' },
+  models: { source: 'models', confidence: 'high' },
+  probe: { source: 'probe', confidence: 'high' },
+  agent: { source: 'agent', confidence: 'low' },
+};
 
 // "  run           Run a task and print JSON events" -> { name: 'run', desc: '...' }
 // Some CLIs (e.g. helpycode/yargs) prefix every command with the binary name instead of indenting
@@ -49,14 +65,15 @@ function pickRunCommand(commands) {
 // Also matches CLIs that call the flag "--variant" and describe it with an "e.g., a, b, c" list
 // wrapped across multiple help lines (e.g. real helpycode's "--variant ... (provider-specific
 // reasoning effort, e.g., high, max, minimal)"); flatten whitespace first so wrapping can't hide it.
+// An "e.g." list is explicitly NON-exhaustive, so it yields the flag but no values: a partial
+// vocabulary would make the runner reject effort levels the CLI actually accepts (its default
+// "low", for one). The ask-agent layer or a user edit completes the list.
 function findEffort(text) {
   const flat = String(text || '').replace(/\s+/g, ' ');
   const m = flat.match(/(--effort|--variant|--reasoning-effort)\b[^()]*\(([^)]*)\)/i);
   if (!m) return { flag: '', values: [] };
-  let inner = m[2];
-  const eg = inner.match(/e\.g\.,?\s*(.*)$/i);
-  if (eg) inner = eg[1];
-  return { flag: m[1], values: inner.split(',').map((s) => s.trim()).filter(Boolean) };
+  if (/e\.g\.,?/i.test(m[2])) return { flag: m[1], values: [] };
+  return { flag: m[1], values: m[2].split(',').map((s) => s.trim()).filter(Boolean) };
 }
 
 function findResume(text, commands) {
@@ -99,9 +116,9 @@ function flatten(obj, prefix = '', out = {}) {
 }
 
 const KEY_SYNONYMS = {
-  inputPath: /^(input_tokens|inputTokens|prompt_tokens)$/i,
-  outputPath: /^(output_tokens|outputTokens|completion_tokens)$/i,
-  reasoningPath: /^(reasoning_tokens|reasoning_output_tokens|reasoningTokens)$/i,
+  inputPath: /^(input_tokens|inputTokens|prompt_tokens|input)$/i,
+  outputPath: /^(output_tokens|outputTokens|completion_tokens|output)$/i,
+  reasoningPath: /^(reasoning_tokens|reasoning_output_tokens|reasoningTokens|reasoning)$/i,
   cachePath: /^(cache_read_tokens|cached_input_tokens|cache_read_input_tokens|cacheReadTokens)$/i,
   costPath: /^(total_cost_usd|cost_usd|cost|totalCostUsd)$/i,
   sessionIdPath: /^(session_id|thread_id|sessionId|threadId)$/i,
@@ -133,21 +150,158 @@ function parseJsonLines(out) {
   return events;
 }
 
-// Default exec: some CLIs (e.g. real helpycode, a yargs app) print --help to stderr even though they
-// exit 0, so stdout alone can come back empty; merge both streams and never throw.
-function defaultExec(bin, args) {
-  const { spawnSync } = require('child_process');
-  const r = spawnSync(bin, args, { encoding: 'utf8', timeout: 10000 });
-  return String((r.stdout || '') + (r.stderr || ''));
+// `models` output -> model names, tolerantly. Accepts a bare JSON array, an object wrapping one
+// ({models:[...]} / {data:[...]}), NDJSON rows, or a plain list; entries may be strings or objects
+// with a name/id/model key. Unparseable junk is skipped, never thrown.
+function parseModelsOutput(out) {
+  const text = String(out || '').trim();
+  if (!text) return [];
+  const nameOf = (v) => (typeof v === 'string' ? v : (v && typeof v === 'object' ? String(v.name || v.id || v.model || '') : ''));
+  try {
+    const j = JSON.parse(text);
+    const arr = Array.isArray(j) ? j : (j && typeof j === 'object' && Array.isArray(j.models || j.data) ? (j.models || j.data) : null);
+    if (arr) return [...new Set(arr.map(nameOf).filter(Boolean))];
+  } catch { /* not one big JSON value */ }
+  const names = [];
+  for (const line of text.split('\n')) {
+    const t = line.trim();
+    if (!t) continue;
+    try { const n = nameOf(JSON.parse(t)); if (n) { names.push(n); continue; } } catch { /* plain line */ }
+    const m = t.match(/^[-*\s|]*([A-Za-z0-9][A-Za-z0-9._/:${}@-]*)(?:\s|$)/); // first column of a line (plain list or table row)
+    // model ids carry a digit or a separator; bare lowercase words are banners/noise
+    if (m && !/^[A-Z0-9._/:${}@-]+$/.test(m[1]) && /(\d|[./:-])/.test(m[1])) names.push(m[1]);
+  }
+  return [...new Set(names)];
+}
+
+// ---------- sandboxed execution (every probe/help/version call goes through here) ----------
+
+// Only well-known, non-secret env vars reach introspected CLIs: never leak API keys or tokens from
+// the user's environment into an unknown binary.
+const ENV_ALLOWLIST = ['PATH', 'HOME', 'TMPDIR', 'TEMP', 'TMP', 'LANG', 'LC_ALL', 'TERM', 'OS', 'SYSTEMROOT', 'COMSPEC', 'PATHEXT', 'USERPROFILE'];
+function sandboxEnv(env = process.env) {
+  const out = {};
+  for (const k of ENV_ALLOWLIST) if (env[k] != null) out[k] = env[k];
+  return out;
+}
+let sandboxDir = null;
+function getSandboxDir() {
+  if (!sandboxDir) sandboxDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-squad-introspect-'));
+  return sandboxDir;
+}
+
+// Introspection never sends approval-bypass flags to an unknown binary, even if its own help or the
+// ask-agent fallback suggested them.
+const BANNED_ARG = /(^--?(y|yes)$)|dangerous|bypass|auto.?approve/i;
+function assertSafeArgs(args) {
+  for (const a of args) {
+    if (BANNED_ARG.test(a)) throw new Error(`introspection refuses to run arg "${a}" (auto-approve/bypass flags are never sent to an unknown CLI)`);
+  }
+  return args;
+}
+
+// Exec factory bound to an env. With no env, uses the filtered sandbox env (safe default for
+// --help/--version/models of an unknown binary). Callers may bind the real run env for the
+// probe/ask layers of an authenticated CLI — the same env it gets on every real run anyway.
+function makeExec(env) {
+  return (bin, args) => {
+    const { spawnSync } = require('child_process');
+    const r = spawnSync(bin, args, { encoding: 'utf8', timeout: 15000, cwd: getSandboxDir(), env: env || sandboxEnv() });
+    return String((r.stdout || '') + (r.stderr || ''));
+  };
+}
+const defaultExec = makeExec();
+
+// ---------- layer 4: ask the agent for its own profile (opt-in, strictly validated) ----------
+
+const AGENT_PROFILE_PROMPT = [
+  'Print ONLY a single JSON object (no prose, no markdown fences) describing how to run yourself non-interactively from a script:',
+  '{"argsTemplate": ["..."], "resumeFlag": "", "effortFlag": "", "effortValues": [],',
+  ' "mcp": {"method": "none|json-flag|toml-override|file", "flag": ""},',
+  ' "eventMapping": {"textPath": "", "sessionIdPath": "", "costPath": "", "inputPath": "", "outputPath": "", "reasoningPath": "", "cachePath": ""}}.',
+  'argsTemplate is the argv after the binary, with the placeholders {model}, {variant} and {prompt} where those belong;',
+  'eventMapping entries are dotted paths into each JSON event you print on stdout (empty string = field unsupported).',
+].join(' ');
+
+// Pull the first balanced-looking JSON object out of possibly chatty output.
+function extractJson(out) {
+  const m = String(out || '').match(/\{[\s\S]*\}/);
+  if (!m) return null;
+  try { return JSON.parse(m[0]); } catch { return null; }
+}
+
+const SAFE_TOKEN = /[;&|`<>\n\r]/; // args are spawned without a shell; metacharacters are still rejected
+const SAFE_FLAG = /^--?[\w][\w=-]*$/; // one or two leading dashes, then flag characters
+const SAFE_FILENAME = /^[\w][\w.-]*$/;
+const EVENT_MAPPING_KEYS = Object.keys(KEY_SYNONYMS);
+
+// Validate a model-emitted profile against the RuntimeProfile schema. The binary allowlist is the
+// binary being introspected (forced, never taken from the model); unknown fields are dropped; shell
+// metacharacters in argsTemplate and non-flag/unsafe mcp flags are rejected. Throws on unusable input.
+function validateAgentProfile(raw, bin) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('agent profile: not a JSON object');
+  const argsTemplate = (Array.isArray(raw.argsTemplate) ? raw.argsTemplate : []).map((t) => String(t));
+  if (argsTemplate.some((t) => SAFE_TOKEN.test(t))) throw new Error('agent profile: shell metacharacter in argsTemplate');
+  if (!argsTemplate.some((t) => /\{prompt\}/.test(t))) throw new Error('agent profile: argsTemplate must contain a {prompt} placeholder');
+  const mcpRaw = raw.mcp && typeof raw.mcp === 'object' ? raw.mcp : {};
+  const mcpMethod = String(mcpRaw.method || 'none');
+  const mcpFlag = String(mcpRaw.flag || '');
+  if (mcpFlag && !(mcpMethod === 'file' ? SAFE_FILENAME : SAFE_FLAG).test(mcpFlag)) throw new Error(`agent profile: unsafe mcp flag "${mcpFlag}"`);
+  const effortFlag = String(raw.effortFlag || '');
+  if (effortFlag && !SAFE_FLAG.test(effortFlag)) throw new Error(`agent profile: unsafe effort flag "${effortFlag}"`);
+  const resumeFlag = String(raw.resumeFlag || '');
+  if (resumeFlag && SAFE_TOKEN.test(resumeFlag)) throw new Error(`agent profile: unsafe resume flag "${resumeFlag}"`);
+  const emRaw = raw.eventMapping && typeof raw.eventMapping === 'object' ? raw.eventMapping : {};
+  const eventMapping = {};
+  for (const k of EVENT_MAPPING_KEYS) {
+    const v = String(emRaw[k] || '');
+    if (v && !/^[\w.]+$/.test(v)) throw new Error(`agent profile: unsafe eventMapping path "${v}"`);
+    eventMapping[k] = v;
+  }
+  return normalizeRuntimeProfile({
+    id: bin, label: bin, binary: bin, // binary allowlist: the profile can only ever describe this binary
+    argsTemplate,
+    effortFlag,
+    effortValues: (Array.isArray(raw.effortValues) ? raw.effortValues : []).map((v) => String(v)),
+    resumeFlag,
+    mcp: { method: mcpMethod, flag: mcpFlag },
+    eventMapping,
+  });
+}
+
+// Fill gaps left by layers 1-3; derived (observed) fields are never overwritten by model output.
+// effortValues is the exception: help only advertises examples ("e.g., high, max, minimal"), so the
+// agent's answer is UNIONED in — an incomplete vocabulary would make buildProfileArgs reject valid
+// effort levels the CLI actually accepts.
+function mergeAgentFields(profile, agentProfile, sources) {
+  for (const k of ['argsTemplate', 'effortFlag', 'resumeFlag']) {
+    const empty = Array.isArray(profile[k])
+      ? profile[k].length === 0 || (k === 'argsTemplate' && profile[k].length === 1 && profile[k][0] === '{prompt}')
+      : !profile[k];
+    const fill = Array.isArray(agentProfile[k]) ? agentProfile[k].length > 0 : !!agentProfile[k];
+    if (empty && fill) { profile[k] = agentProfile[k]; sources[k] = SRC.agent; }
+  }
+  if (agentProfile.effortValues.length) {
+    const merged = [...new Set([...profile.effortValues, ...agentProfile.effortValues])];
+    if (merged.length > profile.effortValues.length) { profile.effortValues = merged; sources.effortValues = SRC.agent; }
+  }
+  if ((profile.mcp.method === 'none') && agentProfile.mcp.method !== 'none') { profile.mcp = agentProfile.mcp; sources.mcp = SRC.agent; }
+  for (const k of EVENT_MAPPING_KEYS) {
+    if (!profile.eventMapping[k] && agentProfile.eventMapping[k]) { profile.eventMapping[k] = agentProfile.eventMapping[k]; sources.eventMapping = SRC.agent; }
+  }
+  return profile;
 }
 
 // exec(bin, args) -> stdout string; must not throw for --help calls that exit non-zero (caller should catch).
 // exec is optional; when omitted (or when the second arg is an opts object instead of a function),
 // falls back to defaultExec above.
 function introspectRuntime(bin, execOrOpts, maybeOpts) {
-  const exec = typeof execOrOpts === 'function' ? execOrOpts : defaultExec;
   const opts = (typeof execOrOpts === 'function' ? maybeOpts : execOrOpts) || {};
+  const exec = typeof execOrOpts === 'function' ? execOrOpts : (opts.env ? makeExec(opts.env) : defaultExec);
   const safeExec = (args) => { try { return String(exec(bin, args) || ''); } catch (e) { return String((e && e.stdout) || ''); } };
+  const sources = {};
+
+  // Layer 1: tolerant --help parsing (top level + the run subcommand).
   const help = safeExec(['--help']);
   const commands = parseCommands(help);
   const runCommand = pickRunCommand(commands);
@@ -167,7 +321,19 @@ function introspectRuntime(bin, execOrOpts, maybeOpts) {
   if (modelFlag) argsTemplate.push(modelFlag, '{model}');
   if (effortFlag) argsTemplate.push(effortFlag, '{variant}');
   argsTemplate.push('{prompt}');
+  if (argsTemplate.length > 1) sources.argsTemplate = SRC.help;
+  if (effortFlag) { sources.effortFlag = SRC.help; sources.effortValues = SRC.help; }
+  if (resumeFlag) sources.resumeFlag = SRC.help;
+  if (mcp.method !== 'none') sources.mcp = SRC.help;
 
+  // Layer 2: models discovery.
+  let models = [];
+  if (hasModelsCmd && opts.models !== false) {
+    models = parseModelsOutput(safeExec(['models']));
+    if (models.length) sources.models = SRC.models;
+  }
+
+  // Layer 3: one probe run to learn the event stream shape.
   let eventMapping = { textPath: '', sessionIdPath: '', costPath: '', inputPath: '', outputPath: '', reasoningPath: '', cachePath: '' };
   if (opts.probe !== false && formatFlag) {
     const filled = argsTemplate.map((t) => t.replace('{model}', '\0').replace('{variant}', '\0').replace('{prompt}', opts.probePrompt || 'say pong'));
@@ -176,15 +342,37 @@ function introspectRuntime(bin, execOrOpts, maybeOpts) {
       if (filled[i] === '\0') { probeArgs.pop(); continue; } // drop the flag that took this unset placeholder
       probeArgs.push(filled[i]);
     }
-    const probeOut = safeExec(probeArgs);
-    eventMapping = deriveEventMapping(parseJsonLines(probeOut));
+    const probeOut = safeExec(assertSafeArgs(probeArgs));
+    const derived = deriveEventMapping(parseJsonLines(probeOut));
+    if (Object.values(derived).some(Boolean)) { eventMapping = derived; sources.eventMapping = SRC.probe; }
   }
 
-  return normalizeRuntimeProfile({
+  const profile = normalizeRuntimeProfile({
     id: opts.id || bin, label: opts.label || bin, binary: bin,
     argsTemplate, modelsCommand: hasModelsCmd ? ['models'] : [],
     effortValues, effortFlag, resumeFlag, mcp, eventMapping,
   });
+  if (hasModelsCmd) sources.modelsCommand = SRC.help;
+
+  // Layer 4 (opt-in, costs a real-model call): ask the agent to describe itself. Only fills what the
+  // observed layers could not derive; every value it supplies stays low-confidence and flagged, so
+  // callers/UI can show it and never apply it silently.
+  if (opts.askAgent) {
+    try {
+      const agentProfile = validateAgentProfile(extractJson(safeExec(assertSafeArgs(askAgentArgs(profile, opts)))) , bin);
+      mergeAgentFields(profile, agentProfile, sources);
+    } catch { /* the agent could not describe itself; keep the observed layers only */ }
+  }
+
+  return { profile, sources, models };
 }
 
-module.exports = { parseCommands, pickRunCommand, findEffort, findResume, findModelFlag, findFormatFlag, findMcp, flatten, deriveEventMapping, parseJsonLines, introspectRuntime };
+// Ask-agent argv: the run command plus the profile request as the prompt (never any approval flags).
+function askAgentArgs(profile, opts = {}) {
+  const args = [];
+  if (profile.argsTemplate.length && !/^\{prompt\}$/.test(profile.argsTemplate[0])) args.push(profile.argsTemplate[0]);
+  args.push(opts.askPrompt || AGENT_PROFILE_PROMPT);
+  return args;
+}
+
+module.exports = { SRC, parseCommands, pickRunCommand, findEffort, findResume, findModelFlag, findFormatFlag, findMcp, flatten, deriveEventMapping, parseJsonLines, parseModelsOutput, extractJson, validateAgentProfile, mergeAgentFields, assertSafeArgs, sandboxEnv, makeExec, askAgentArgs, AGENT_PROFILE_PROMPT, introspectRuntime, defaultExec };

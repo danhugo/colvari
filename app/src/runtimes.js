@@ -1,23 +1,68 @@
-// Runtime adapters: which agent CLI runs a node. Each adapter builds args, parses one stdout JSON line into
-// normalized log entries, and declares honest capabilities (true only for what was tested live on this machine).
+// Runtime adapters: which agent CLI runs a node. Claude keeps its tuned buildArgs; every other CLI
+// runs through the generic profile path: the introspector derives a RuntimeProfile from the binary
+// itself (no hand-built per-CLI profiles, no CLI-specific parsing), and this module spawns/parses
+// purely from that profile data.
 const { execFileSync } = require('child_process');
 const { buildClaudeArgs, normalizeNode, splitArgs } = require('./agent-config');
-const { normalizeRuntimeProfile } = require('./runtime-profile');
 const { buildProfileArgs, getPath, writeFileMcpConfig } = require('./profile-runner');
+const { introspectRuntime, defaultExec, makeExec } = require('./introspector');
 
-// Hand-built profile for real helpycode (an opencode fork): the generic introspector's heuristics
-// don't parse its real --help (every command line is prefixed with the binary name in a shape the
-// parser doesn't expect — see docs/helpycode-smoke.md), so this is verified against a live run
-// instead (helpycode 0.3.5, elice/z-ai/glm-5.3-flash). MCP servers are wired via a project-local
-// config file (method: 'file'), not a CLI flag.
-const HELPYCODE_PROFILE = normalizeRuntimeProfile({
-  id: 'helpycode', label: 'HelpyCode', binary: 'helpycode',
-  argsTemplate: ['run', '--format', 'json', '--model', '{model}', '--variant', '{variant}', '{prompt}'],
-  effortValues: ['low', 'medium', 'high', 'max', 'minimal'],
-  effortFlag: '--variant', resumeFlag: '-s',
-  mcp: { method: 'file', flag: 'helpycode.json' },
-  eventMapping: { textPath: 'text', sessionIdPath: 'session_id', costPath: 'total_cost_usd', inputPath: 'usage.input_tokens', outputPath: 'usage.output_tokens', reasoningPath: 'usage.reasoning_tokens', cachePath: 'usage.cache_read_tokens' },
-});
+// Derived-profile cache, stamped with the CLI's --version: a binary is introspected once per
+// version and reused until it changes (re-derived automatically after an upgrade). Two entries per
+// binary: the full one (probe included — needs one real run) for actual runs, and a cheap help-only
+// one (key "|help") for capability detection, which must not cost a model call.
+const derivedProfiles = new Map(); // cacheKey -> { version, profile }
+function deriveRuntimeProfile(bin, { exec, label, probe = true, askAgent = false, env } = {}) {
+  const key = probe ? bin : `${bin}|help`;
+  const run = exec || (env ? makeExec(env) : defaultExec);
+  let version = '';
+  try { version = String(run(bin, ['--version']) || '').trim(); } catch { /* binary missing; still try to derive */ }
+  const hit = derivedProfiles.get(key);
+  if (hit && hit.version === version) return hit.profile;
+  const id = String(bin).split(/[\\/]/).pop().replace(/\.(exe|sh)$/i, '').toLowerCase().replace(/[^a-z0-9_.-]/g, '_');
+  const { profile } = introspectRuntime(bin, run, { id, label: label || id, probe, askAgent });
+  derivedProfiles.set(key, { version, profile });
+  return profile;
+}
+
+// Capabilities claimed straight from the derived profile — honest by construction: true only for
+// what the profile actually carries (usage paths, cost path, mcp method, resume flag).
+function capabilitiesFromProfile(profile) {
+  const em = profile.eventMapping || {};
+  return {
+    tokens: !!(em.inputPath && em.outputPath),
+    cost: !!em.costPath,
+    mcp: profile.mcp.method !== 'none',
+    resume: !!profile.resumeFlag,
+  };
+}
+
+// Generic adapter for an introspected CLI: args and event parsing come purely from the derived
+// RuntimeProfile. The old hand-built helpycode profile was deleted — helpycode is just the first
+// user of this factory. exec/askAgent injectable via opts for tests (askAgent opts into the
+// expensive ask-the-agent introspection layer; never on by default).
+function profileRuntime(id, label, binFromSettings) {
+  const profileFor = (settings, opts = {}) => deriveRuntimeProfile(binFromSettings(settings || {}), { label, exec: opts.exec, probe: opts.probe !== false, askAgent: !!opts.askAgent, env: opts.env });
+  return {
+    id, label, bin: binFromSettings,
+    // help-only derivation: cheap, no probe/model call (used by detectRuntimes)
+    capabilities(settings, exec) {
+      try { return capabilitiesFromProfile(deriveRuntimeProfile(binFromSettings(settings || {}), { label, exec, probe: false })); }
+      catch { return { tokens: false, cost: false, mcp: false, resume: false }; }
+    },
+    buildArgs(node, prompt, settings, mcp, opts = {}) {
+      const n = normalizeNode(node);
+      const profile = profileFor(settings, opts);
+      if (mcp && profile.mcp.method === 'file' && opts.cwd) writeFileMcpConfig(opts.cwd, profile.mcp.flag, mcp);
+      const args = buildProfileArgs(profile, { model: n.model, prompt, variant: n.effort, session: opts.resume });
+      args.push(...splitArgs(n.extraArgs));
+      return args;
+    },
+    // Generic JSON-event parsing driven by the profile's eventMapping; wired into the orchestrator
+    // via rt.parseEvent (no per-CLI branch there).
+    parseEvent(ev, settings, opts = {}) { return parseProfileEvent(ev, profileFor(settings, opts)); },
+  };
+}
 
 const RUNTIMES = {
   claude: {
@@ -38,23 +83,14 @@ const RUNTIMES = {
       args.push(prompt);
       return args;
     },
+    parseEvent: (ev) => parseCodexEvent(ev),
   },
   opencode: {
     id: 'opencode', label: 'OpenCode', bin: (s) => (s && s.opencodePath) || 'opencode',
     capabilities: { tokens: false, cost: false, mcp: false, resume: false }, // stub: not installed here, nothing tested
     buildArgs(node, prompt) { const n = normalizeNode(node); return ['run', ...(n.model ? ['-m', n.model] : []), prompt]; },
   },
-  helpycode: {
-    id: 'helpycode', label: 'HelpyCode', bin: (s) => (s && s.helpycodePath) || 'helpycode',
-    capabilities: { tokens: true, cost: true, mcp: true, resume: true }, // board comment_task + update_task_status tested live (helpycode 0.3.5)
-    buildArgs(node, prompt, settings, mcp, opts = {}) {
-      const n = normalizeNode(node);
-      if (mcp && opts.cwd) writeFileMcpConfig(opts.cwd, HELPYCODE_PROFILE.mcp.flag, mcp);
-      const args = buildProfileArgs(HELPYCODE_PROFILE, { model: n.model, prompt, variant: n.effort, session: opts.resume });
-      args.push(...splitArgs(n.extraArgs));
-      return args;
-    },
-  },
+  helpycode: profileRuntime('helpycode', 'HelpyCode', (s) => (s && s.helpycodePath) || 'helpycode'),
 };
 // board MCP server -> codex `-c mcp_servers.<name>.*` overrides (TOML values; JSON strings/arrays are valid TOML)
 function codexMcpArgs(mcp) {
@@ -92,23 +128,28 @@ function parseCodexEvent(ev) {
   return out;
 }
 
-// helpycode `run --format json` line -> same shape as parseCodexEvent, via HELPYCODE_PROFILE.eventMapping.
-function parseHelpycodeEvent(ev) {
+// Generic JSON-event line -> same shape as parseCodexEvent, driven only by the profile's
+// eventMapping. Run totals are claimed when a usage-bearing event is seen: either an explicit
+// `result`-typed event (claude/helpycode convention) or any event whose mapped input/output/cost
+// paths carry numbers (e.g. helpycode's current `step_finish` events). `done` only on such events.
+function parseProfileEvent(ev, profile) {
   const out = { logs: [] };
-  const em = HELPYCODE_PROFILE.eventMapping;
+  const em = profile.eventMapping || {};
   const text = getPath(ev, em.textPath);
   if (typeof text === 'string' && text) { out.logs.push(['text', text]); out.result = text; }
   const sessionId = getPath(ev, em.sessionIdPath);
-  if (sessionId != null) { out.sessionId = String(sessionId); out.logs.push(['system', 'helpycode session ' + sessionId]); }
-  if (ev.type === 'result') {
-    const input = Number(getPath(ev, em.inputPath)) || 0;
-    const output = Number(getPath(ev, em.outputPath)) || 0;
+  if (sessionId != null) { out.sessionId = String(sessionId); out.logs.push(['system', `${profile.label} session ${sessionId}`]); }
+  if (ev.type === 'error') { out.failed = true; out.logs.push(['error', String(ev.message || 'error')]); }
+  const input = Number(getPath(ev, em.inputPath)) || 0;
+  const output = Number(getPath(ev, em.outputPath)) || 0;
+  const cost = getPath(ev, em.costPath);
+  if (ev.type === 'result' || input || output || typeof cost === 'number') {
     const reasoning = Number(getPath(ev, em.reasoningPath)) || 0;
     out.tokens = { inputTokens: input, outputTokens: output + reasoning };
-    out.cost = Number(getPath(ev, em.costPath)) || 0;
+    out.cost = Number(cost) || 0;
     out.done = true;
-    out.logs.push(['result', `helpycode result: ${input} in / ${output + reasoning} out`]);
-  } else if (ev.type === 'error') { out.failed = true; out.logs.push(['error', ev.message || '']); }
+    out.logs.push(['result', `${profile.label} result: ${input} in / ${output + reasoning} out`]);
+  }
   return out;
 }
 
@@ -118,10 +159,18 @@ function detectRuntimes(settings = {}, env = process.env, exec = (b, a) => execF
   const r = {};
   for (const id of RUNTIME_IDS) {
     const rt = RUNTIMES[id];
-    try { const v = exec(rt.bin(settings), ['--version']); r[id] = { installed: true, version: parseVersion(v) || String(v).trim(), label: rt.label, capabilities: rt.capabilities }; }
-    catch (e) { r[id] = { installed: false, version: null, label: rt.label, capabilities: rt.capabilities, error: e.code === 'ENOENT' ? 'not installed' : e.message }; }
+    try {
+      const v = exec(rt.bin(settings), ['--version']);
+      let caps;
+      try { caps = typeof rt.capabilities === 'function' ? rt.capabilities(settings, exec) : rt.capabilities; }
+      catch { caps = { tokens: false, cost: false, mcp: false, resume: false }; }
+      r[id] = { installed: true, version: parseVersion(v) || String(v).trim(), label: rt.label, capabilities: caps };
+    } catch (e) {
+      const caps = { tokens: false, cost: false, mcp: false, resume: false };
+      r[id] = { installed: false, version: null, label: rt.label, capabilities: caps, error: e.code === 'ENOENT' ? 'not installed' : e.message };
+    }
   }
   return r;
 }
 
-module.exports = { RUNTIMES, codexMcpArgs, RUNTIME_IDS, getRuntime, parseCodexEvent, parseHelpycodeEvent, HELPYCODE_PROFILE, parseVersion, detectRuntimes };
+module.exports = { RUNTIMES, codexMcpArgs, RUNTIME_IDS, getRuntime, parseCodexEvent, parseProfileEvent, parseVersion, detectRuntimes, deriveRuntimeProfile, capabilitiesFromProfile, profileRuntime };
