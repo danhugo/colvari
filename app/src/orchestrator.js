@@ -104,7 +104,7 @@ class Orchestrator extends EventEmitter {
     this._wakeTimer = setInterval(() => this.sweepWakes(), WAKE.SWEEP_MS);
     if (this._wakeTimer.unref) this._wakeTimer.unref();
   }
-  agent(id) { return (this.agents[id] ||= { runCost: 0, runTokens: 0, pendingHuman: [], stopRequested: false, budgetStop: null, status: 'idle', iteration: 0, cost: 0, inputTokens: 0, outputTokens: 0, cacheTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, runs: 0, taskId: null, task: null, model: '', runtime: '', billingSource: '', contextTokens: null, contextWindow: 0, contextPct: null, lastContextMessageId: null }); }
+  agent(id) { return (this.agents[id] ||= { runCost: 0, runTokens: 0, pendingHuman: [], stopRequested: false, budgetStop: null, status: 'idle', iteration: 0, cost: 0, inputTokens: 0, outputTokens: 0, cacheTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, runs: 0, taskId: null, task: null, activity: null, model: '', runtime: '', billingSource: '', contextTokens: null, contextWindow: 0, contextPct: null, lastContextMessageId: null }); }
   // modelStats: per-model aggregate across this project's persisted runs + tasks (see usage.js modelStats for the field shape).
   modelStats() { let rs = []; try { rs = this.store.listRuns(); } catch {} let ts = []; try { ts = this.store.listTasks(); } catch {} return U.modelStats(rs, ts); }
   // nodeTeams: {nodeId: {teamId, teamName}} across all teams in the project, for tagging log/timeline entries.
@@ -254,6 +254,9 @@ class Orchestrator extends EventEmitter {
   async wakeRun(node, msgs, team, settings) {
     const a = this.agent(node.id);
     a.status = 'working'; a.lastError = null; a.taskId = null; a.task = null; a.iteration = 0; a.stopRequested = false;
+    // Live-run reason/activity, shown by Board/Team/Overview via snapshot: what woke the agent, from
+    // whom, and the first unread message as the excerpt. Cleared when the run ends.
+    a.activity = { trigger: 'message', messageId: msgs[0].id, fromNodeId: msgs[0].from, excerpt: msgs[0].text.slice(0, 200), taskId: (msgs.find((m) => m.taskId) || {}).taskId || null, startedAt: Date.now() };
     a.runs++; this.runs++;
     this.procs.set(node.id, { kill() {} }); // reserve the slot synchronously
     this.changed();
@@ -274,7 +277,7 @@ class Orchestrator extends EventEmitter {
     catch (e) { this.log(node.id, 'error', 'bad agent settings: ' + e.message); }
     const r = await this.spawnRun(node, args, cwd, env, settings, { ...meta, resumedFrom: args && resume ? resume : null });
     this.procs.delete(node.id); this.cwds.delete(node.id);
-    a.status = 'idle'; a.iteration = 0;
+    a.status = 'idle'; a.iteration = 0; a.activity = null;
     this.log(node.id, 'system', `■ ${node.name} finished the wake run (exit ${r.code})`);
     this.changed();
     if (this.running) setImmediate(() => this.tick());

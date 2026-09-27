@@ -101,6 +101,34 @@ test('wake: per-pair cap stops a ping-pong loop', async () => {
   assert.ok(s.listMessages({ to: a.id }).some((m) => !m.read && m.text === 'pong forever'));
 });
 
+test('wake: the live run records activity {trigger, messageId, fromNodeId, excerpt, taskId, startedAt}, cleared on end', async () => {
+  const d = tmp('squad-wake-');
+  const fake = fakeClaude(d, `sleep 0.3\n` + RESULT);
+  const s = new Store(path.join(d, 'p')); s.saveSettings({ claudePath: fake });
+  const a = s.addNode({ name: 'A', role: 'Dev' }); const b = s.addNode({ name: 'B', role: 'Dev' });
+  s.addEdge(a.id, b.id);
+  const o = new Orchestrator(s);
+  assert.equal(o.agent(b.id).activity, null);
+  const t0 = s.createTask({ title: 'related', assignee: b.id });
+  const ta = makeTools(s, a.id);
+  ta.send_message({ to: 'B', text: 'check the wake activity fields', taskId: t0.id });
+
+  await waitFor(() => o.agent(b.id).status === 'working');
+  const act = o.agent(b.id).activity;
+  assert.equal(act.trigger, 'message');
+  assert.equal(act.fromNodeId, a.id);
+  assert.equal(act.excerpt, 'check the wake activity fields');
+  assert.equal(act.taskId, t0.id);
+  assert.ok(act.messageId, 'messageId set');
+  assert.ok(Number.isFinite(act.startedAt) && Date.now() - act.startedAt < 5000, 'startedAt is fresh');
+  // Flows through the state snapshot that feeds Board/Team/Overview.
+  assert.equal(o.snapshot().agents[b.id].activity.trigger, 'message');
+
+  await waitFor(() => o.agent(b.id).status === 'idle');
+  assert.equal(o.agent(b.id).activity, null);
+  assert.equal(o.snapshot().agents[b.id].activity, null);
+});
+
 test('wake: prompt carries identity, board-only instruction and sender names', () => {
   const team = { nodes: [{ id: 'n1', name: 'Rhea', role: 'Reviewer' }, { id: 'n2', name: 'Devon', role: 'Dev' }] };
   const p = wakePrompt(team, team.nodes[0], [{ from: 'n2', text: 'check t_1' }]);
