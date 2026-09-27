@@ -1,5 +1,4 @@
-:root { --bg:#f6f7f9; --fg:#1d2330; --muted:#6b7385; --card:#fff; --line:#d9dde5; --acc:#3b6fe0; --ok:#1d9a5b; --warn:#c7831a; }
-@media (prefers-color-scheme: dark) { :root { --bg:#15171c; --fg:#e4e7ee; --muted:#8b93a6; --card:#1e2128; --line:#333845; --acc:#6d95f0; } }
+:root { --bg:var(--bg-app); --fg:var(--fg-primary); --muted:var(--fg-muted); --card:var(--bg-surface); --line:var(--border); --acc:var(--accent); --ok:var(--success); --warn:var(--warning-strong); --panel:var(--bg-raised); }
 * { box-sizing:border-box; } body { margin:0; font:13px -apple-system,system-ui,sans-serif; background:var(--bg); color:var(--fg); height:100vh; display:flex; flex-direction:column; }
 header { display:flex; align-items:center; gap:8px; padding:8px 12px; border-bottom:1px solid var(--line); background:var(--card); }
 nav button { border:none; background:none; padding:6px 10px; } nav button.active { color:var(--acc); border-bottom:2px solid var(--acc); }
@@ -105,3 +104,85 @@ header .pill { font-variant-numeric:tabular-nums; } .pill.quiet { color:var(--mu
 #chat-mentions div.sel, #chat-mentions div:hover { background:#2f3542; } #chat-mentions .avatar { flex-basis:22px; height:22px; font-size:10px; }
 #chat-thread { width:360px; border-left:1px solid #2a2e37; overflow:auto; display:flex; flex-direction:column; } #chat-thread .chat-head button { background:none; border:none; color:#aaa; }
 .cempty { margin:auto; text-align:center; padding:40px; color:#8a92a5; } .cempty b { color:#dde1ea; font-size:16px; display:block; margin-bottom:6px; }
+
+/* ===== Design-token layer (design/prototype.html + critique.md) ===== */
+body { font-family:var(--font-sans); font-size:var(--text-sm); line-height:var(--lh-body); -webkit-font-smoothing:antialiased; }
+header { background:var(--bg-surface); box-shadow:var(--shadow-sm); padding:var(--space-2) var(--space-4); }
+nav button { color:var(--fg-secondary); border-radius:var(--radius-sm); transition:color var(--dur-fast) var(--ease-out), background var(--dur-fast); }
+nav button:hover { background:var(--bg-hover); color:var(--fg-primary); } nav button.active { color:var(--accent-text); border-radius:var(--radius-sm) var(--radius-sm) 0 0; }
+button, input, select, textarea { border-radius:var(--radius-sm); transition:border-color var(--dur-fast), background var(--dur-fast), box-shadow var(--dur-fast); }
+button:hover { background:var(--bg-hover); } button.primary:hover { background:color-mix(in srgb, var(--accent) 88%, black); }
+button:focus-visible, input:focus, select:focus, textarea:focus { outline:none; border-color:var(--accent); box-shadow:var(--ring); }
+.pill { border-radius:var(--radius-full); } .pill.on { background:var(--success-soft); color:var(--success-text); border-color:transparent; }
+.panel, .col, .stat, #graph, #ov-graph, #ov-timeline { border-radius:var(--radius-md); box-shadow:var(--shadow-sm); }
+#sidebar { background:var(--bg-sidebar); padding:var(--space-3) var(--space-2); }
+#sidebar h4 { font-size:var(--text-xs); letter-spacing:.06em; font-weight:var(--fw-semibold); padding:0 var(--space-2); }
+#projectlist div, #teamlist div { border-radius:var(--radius-sm); transition:background var(--dur-fast); } #projectlist div:hover, #teamlist div:hover { background:var(--bg-hover); }
+#projectlist div.sel, #teamlist div.sel { background:var(--bg-active); color:var(--accent-text); }
+.dot { width:8px; height:8px; box-shadow:0 0 0 0 color-mix(in srgb, var(--success) 60%, transparent); animation:pulse 1.6s var(--ease-out) infinite; }
+@keyframes pulse { 70% { box-shadow:0 0 0 6px transparent; } 100% { box-shadow:0 0 0 0 transparent; } }
+.col { background:var(--bg-sidebar); border-color:transparent; } .col h3 { font-size:var(--text-xs); letter-spacing:.06em; }
+.card { background:var(--bg-surface); border-radius:var(--radius-md); padding:var(--space-2) var(--space-3); box-shadow:var(--shadow-sm); transition:transform var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast), border-color var(--dur-fast); }
+.card:hover { transform:translateY(-1px); box-shadow:var(--shadow-md); border-color:var(--border-strong); } .card.sel { border-color:var(--accent); box-shadow:var(--ring); }
+.col:not(:has(.card))::after { content:'Nothing here yet'; display:block; color:var(--fg-muted); font-size:var(--text-xs); text-align:center; padding:var(--space-6) 0; border:1px dashed var(--border-strong); border-radius:var(--radius-md); }
+.tag { border-radius:var(--radius-full); } .tag.blocked { color:var(--warning-text); background:var(--warning-soft); border-color:transparent; }
+.tag.live { background:var(--success-soft); color:var(--success-text); border-color:transparent; }
+.badge { background:var(--danger); border-radius:var(--radius-full); font-weight:var(--fw-semibold); }
+.toast { background:var(--bg-raised); border-color:var(--border); border-left-color:var(--accent); border-radius:var(--radius-md); box-shadow:var(--shadow-lg); animation:rise var(--dur-base) var(--ease-spring); }
+@keyframes rise { from { opacity:0; transform:translateY(8px); } }
+/* Human Inbox */
+.inbox-side { border-color:var(--warning); background:var(--warning-soft); color:var(--warning-text); font-weight:var(--fw-semibold); border-radius:var(--radius-sm); }
+.inboxitem { border:1px solid var(--border); border-left:3px solid var(--warning); background:var(--bg-surface); border-radius:var(--radius-md); padding:var(--space-3); box-shadow:var(--shadow-sm); }
+/* First-run guide */
+#guide { background:var(--bg-raised); border:1px solid var(--border); border-radius:var(--radius-lg); box-shadow:var(--shadow-lg); padding:var(--space-4) var(--space-5); animation:rise var(--dur-slow) var(--ease-out); }
+#guide .gstep { border-top-color:var(--border); } #guide .gdone::before { color:var(--success-text); }
+/* Chat — follows the theme via tokens */
+.chat { background:var(--bg-app); color:var(--fg-primary); } .chat .muted { color:var(--fg-muted); }
+.chat-head { border-bottom-color:var(--border); background:var(--bg-surface); padding:var(--space-2) var(--space-4); }
+#chat-room { padding:var(--space-2) 0; } .cgroup { padding:var(--space-1) var(--space-4); transition:background var(--dur-fast); } .cgroup:hover { background:var(--bg-hover); }
+.cbody { max-width:78ch; } .avatar { border-radius:var(--radius-md); flex-basis:32px; height:32px; }
+.avatar.working::after { background:var(--success); border-color:var(--bg-app); animation:pulse 1.6s var(--ease-out) infinite; }
+.role { background:var(--bg-hover); color:var(--fg-secondary); border-radius:var(--radius-xs); } .cname time { color:var(--fg-muted); }
+.bubble { line-height:var(--lh-body); margin:1px 0; } .bubble.thought { color:var(--fg-secondary); } .bubble.action, .bubble.handoff { color:var(--accent-text); } .bubble.error { color:var(--danger); }
+.tlink { color:var(--accent-text); }
+.cchip summary { background:var(--bg-code); border-color:var(--border); color:var(--warning-text); border-radius:var(--radius-full); font-family:var(--font-mono); transition:border-color var(--dur-fast); } .cchip summary:hover { border-color:var(--border-strong); }
+.cchip pre { background:var(--bg-code); color:var(--fg-primary); font-family:var(--font-mono); border:1px solid var(--border); }
+.bubble.question { border:1px solid var(--border); border-left:3px solid var(--warning); background:var(--warning-soft); border-radius:var(--radius-md); padding:var(--space-2) var(--space-3); }
+.bubble.question textarea { background:var(--bg-surface); color:var(--fg-primary); border-color:var(--border-strong); }
+#chat-typing { color:var(--success-text); }
+.composer { border-top-color:var(--border); background:var(--bg-surface); padding:var(--space-2) var(--space-4) var(--space-3); }
+.composer textarea { background:var(--bg-app); color:var(--fg-primary); border-color:var(--border-strong); border-radius:var(--radius-md); }
+#chat-preview.task { color:var(--accent-text); } #chat-preview.message { color:var(--success-text); } #chat-preview.goal { color:var(--warning-text); } #chat-preview.error { color:var(--danger); }
+#chat-mentions { background:var(--bg-raised); border-color:var(--border); box-shadow:var(--shadow-md); } #chat-mentions div.sel, #chat-mentions div:hover { background:var(--bg-hover); }
+#chat-thread { border-left-color:var(--border); background:var(--bg-surface); } #chat-thread .chat-head button { color:var(--fg-muted); }
+.cempty { color:var(--fg-muted); } .cempty b { color:var(--fg-primary); }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation:none !important; transition:none !important; } }
+/* ===== Chat: prototype port (critique must-fix 2-5) ===== */
+/* Flat, dense messages: plain text under the name, no bubbles/rails. */
+#chat-room { padding:var(--space-1) 0; } .cgroup { gap:var(--space-2); padding:3px var(--space-4); margin-top:4px; } .cgroup:hover { background:var(--bg-hover); }
+.cbody { max-width:72ch; } .cname { font-weight:var(--fw-semibold); line-height:1.3; } .cname time { font-size:var(--text-xs); }
+.bubble { margin:0; padding:0; background:none; border:0; line-height:1.4; } .bubble + .bubble, .cchip + .bubble { margin-top:1px; }
+.cchip { margin:1px 0; } .cchip summary { padding:0 8px; font-size:var(--text-xs); } .cchip + br { display:none; }
+.avatar { flex:0 0 28px; height:28px; font-size:11px; border-radius:var(--radius-sm); margin-top:2px; }
+.role { font-size:10px; padding:0 5px; }
+/* Human marker: hollow ring with a solid core, no "You" text pill. */
+.avatar.human { background:transparent !important; border:2px solid var(--human); border-radius:50%; }
+.avatar.human::before { content:''; width:10px; height:10px; border-radius:50%; background:var(--human); }
+.cgroup.self .cname { color:var(--fg-primary); }
+/* Presence by shape: working = spinning ring, needs-you = "!" badge. */
+.avatar.working::after { content:''; position:absolute; inset:-4px; width:auto; height:auto; border-radius:calc(var(--radius-sm) + 4px); background:none; border:2px solid transparent; border-top-color:var(--success); border-right-color:var(--success); animation:spin 1s linear infinite; box-shadow:none; }
+.avatar.ask::before { content:'!'; position:absolute; top:-5px; right:-5px; width:14px; height:14px; border-radius:50%; background:var(--warning); color:#000; font:700 10px/14px var(--font-sans); text-align:center; border:2px solid var(--bg-app); }
+@keyframes spin { to { transform:rotate(360deg); } }
+.typing { display:inline-flex; align-items:center; gap:5px; } .typing .spin { width:10px; height:10px; border-radius:50%; border:2px solid var(--success); border-right-color:transparent; animation:spin 1s linear infinite; }
+/* Sticky "Your turn" bar above the composer. */
+#chat-yourturn { position:sticky; bottom:0; margin:0 var(--space-4) var(--space-2); border:1px solid var(--warning); border-left:4px solid var(--warning); background:var(--warning-soft); border-radius:var(--radius-md); padding:var(--space-2) var(--space-3); box-shadow:var(--shadow-md); }
+.yt-head { display:flex; gap:var(--space-2); align-items:center; color:var(--warning-text); margin-bottom:4px; }
+.yt-badge { width:16px; height:16px; border-radius:50%; background:var(--warning); color:#000; font-weight:700; font-size:11px; display:inline-flex; align-items:center; justify-content:center; }
+.yt-item { display:flex; gap:var(--space-2); align-items:center; padding:3px 0; } .yt-item + .yt-item { border-top:1px solid color-mix(in srgb, var(--warning) 30%, transparent); }
+.yt-item .spacer { flex:1; } .yt-item button { padding:2px 10px; } .yt-ans { width:180px; padding:3px 8px; }
+/* Top nav: primary tabs as segmented control; secondary tabs quiet; pills de-emphasised. */
+#tabs { gap:2px; background:var(--bg-hover); padding:2px; border-radius:var(--radius-sm); }
+nav button { padding:3px 10px; font-size:var(--text-sm); } nav button.active { background:var(--bg-surface); border-bottom:none; border-radius:var(--radius-xs); box-shadow:var(--shadow-sm); color:var(--fg-primary); }
+nav button.sec { color:var(--fg-muted); padding:3px 7px; } .navsep { width:1px; background:var(--border-strong); margin:3px 4px; }
+header .pill { border:none; background:none; color:var(--fg-muted); font-size:var(--text-xs); padding:2px 4px; } header #runstate { background:var(--bg-hover); color:var(--fg-secondary); padding:2px 8px; } header #runstate.on { background:var(--success-soft); color:var(--success-text); }
+.tlink { font-size:10.5px; opacity:.8; } .bubble { font-size:var(--text-sm); }

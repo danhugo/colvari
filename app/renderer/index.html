@@ -1,12 +1,12 @@
 <!doctype html>
 <html><head><meta charset="utf-8"><title>Agents Squad</title>
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'">
-<link rel="stylesheet" href="style.css"></head>
+<link rel="stylesheet" href="tokens.css"><link rel="stylesheet" href="style.css"></head>
 <body>
 <header>
   <strong>Agents Squad</strong>
   <nav id="tabs">
-    <button data-tab="chat" class="active">Chat</button><button data-tab="team">Team</button><button data-tab="board">Board</button><button data-tab="wiki">Wiki</button><button data-tab="obs">Observability</button><button data-tab="usage">Usage</button><button data-tab="settings">Settings</button><button data-tab="overview">Overview</button><button data-tab="inbox">Inbox <span class="badge" id="inbox-tab-badge"></span></button>
+    <button data-tab="chat" class="active">Chat</button><button data-tab="team">Team</button><button data-tab="board">Board</button><button data-tab="overview">Overview</button><span class="navsep"></span><button data-tab="wiki" class="sec" title="Wiki">Wiki</button><button data-tab="obs" class="sec" title="Observability (logs)">Logs</button><button data-tab="usage" class="sec" title="Usage">Usage</button><button data-tab="settings" class="sec" title="Settings">⚙</button><button data-tab="inbox">Inbox <span class="badge" id="inbox-tab-badge"></span></button>
   </nav>
   <span class="spacer"></span>
   <span id="runstate" class="pill">idle</span>
@@ -33,6 +33,7 @@
       <div class="chat-head"><b># company</b> <span class="muted">everything your team says and does</span><span class="spacer"></span><span id="chat-typing"></span></div>
       <div id="chat-room"></div>
       <div id="chat-mentions" class="hidden"></div>
+      <div id="chat-yourturn" class="hidden"></div>
       <div class="composer"><div id="chat-preview" class="muted"></div><div class="row"><textarea id="chat-input" rows="2" placeholder="Message #company — @Name task · @Name? question · plain text starts a goal"></textarea><button id="chat-send" class="primary">Send</button></div></div>
     </div><aside id="chat-thread" class="hidden"></aside></div>
   </section>
