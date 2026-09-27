@@ -53,7 +53,15 @@ function profileRuntime(id, label, binFromSettings) {
     buildArgs(node, prompt, settings, mcp, opts = {}) {
       const n = normalizeNode(node);
       const profile = profileFor(settings, opts);
-      if (mcp && profile.mcp.method === 'file' && opts.cwd) writeFileMcpConfig(opts.cwd, profile.mcp.flag, mcp);
+      if (mcp && profile.mcp.method === 'file' && opts.cwd) {
+        // One config file per node/run, passed via <BIN>_CONFIG (opencode-style). Writing it into a shared
+        // cwd made concurrent agents overwrite each other's board identity ("task not visible").
+        const os = require('os'), path = require('path'), fs = require('fs');
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-squad-mcp-'));
+        writeFileMcpConfig(dir, profile.mcp.flag, mcp);
+        if (opts.env) opts.env[String(binFromSettings(settings || {})).split('/').pop().toUpperCase().replace(/[^A-Z0-9]/g, '_') + '_CONFIG'] = path.join(dir, profile.mcp.flag);
+        else writeFileMcpConfig(opts.cwd, profile.mcp.flag, mcp);
+      }
       // Same effective-mode rule as buildClaudeArgs: unset falls through to bypassPermissions.
       // Without the derived bypass flag, non-interactive profile-runtime runs auto-reject permission
       // asks (e.g. helpycode's external_directory) and the agent cannot reach the paths it needs.
