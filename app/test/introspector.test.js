@@ -181,9 +181,9 @@ test('parity: derived helpycode profile vs the deleted hand-built HELPYCODE_PROF
   //    non-exhaustive list is not claimed as a vocabulary; the ask-agent layer (or a user edit)
   //    completes it, since a partial list would make the runner reject the CLI's default "low".
   assert.deepStrictEqual(derived.effortValues, []);
-  // 2) mcp: real helpycode advertises no MCP config flag (it reads a project-local helpycode.json),
-  //    so help parsing honestly derives 'none'. The ask-agent layer recovers {file, helpycode.json}.
-  assert.deepStrictEqual(derived.mcp, { method: 'none', flag: '' });
+  // 2) mcp: helpycode has no MCP config flag but lists its own `helpycode mcp` subcommand, so help
+  //    parsing derives file-based config ({file, helpycode.json}, passed per run via HELPYCODE_CONFIG).
+  assert.deepStrictEqual(derived.mcp, { method: 'file', flag: 'helpycode.json' });
   // 3) eventMapping: the CLI's current probe stream carries fields under part.* ("step_finish"
   //    events with part.tokens.*), while the hand-built mapping targeted the older documented
   //    shape — the introspector re-derives it from the actual stream instead of going stale.
@@ -218,11 +218,11 @@ test('ask-agent layer (opt-in) fills only gaps and marks fields low-confidence "
   assert.deepStrictEqual([...profile.effortValues].sort(), ['high', 'low', 'max', 'medium', 'minimal']);
   assert.deepStrictEqual(profile.mcp, { method: 'file', flag: 'helpycode.json' });
   assert.deepStrictEqual(sources.effortValues, { source: 'agent', confidence: 'low' });
-  assert.deepStrictEqual(sources.mcp, { source: 'agent', confidence: 'low' });
+  assert.strictEqual(sources.mcp.source, 'help'); // help already derives it — agent ignored
   assert.strictEqual(sources.argsTemplate.source, 'help'); // help already had it — agent ignored
-  // opt-in: without askAgent the same CLI keeps the help-derived mcp 'none'
+  // without askAgent the same CLI still gets MCP from help (the `mcp` subcommand)
   const { profile: quiet } = IN.introspectRuntime('helpycode', exec, { id: 'helpycode', probe: false });
-  assert.deepStrictEqual(quiet.mcp, { method: 'none', flag: '' });
+  assert.deepStrictEqual(quiet.mcp, { method: 'file', flag: 'helpycode.json' });
 });
 
 test('validateAgentProfile rejects hallucinated/hostile JSON (Cato: never trust model output)', () => {
