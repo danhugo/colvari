@@ -52,6 +52,18 @@ test('discovery: a live init event is used as-is, not unioned with --help/local 
   assert.equal(c.source, 'init-event');
 });
 
+test('discovery: init event reporting /goal and /loop slash commands categorizes both as modes, not 0', () => {
+  const rt = { id: 'claude', bin: () => 'claude' };
+  const c = CAP.discoverCapabilities(rt, {}, {
+    exec: () => '', // no --help text at all: modes must come from the init event's slash_commands, not a helpText scan
+    initEvent: { slash_commands: ['goal', 'loop'], skills: [] },
+    ...FS_OPTS,
+  });
+  assert.deepEqual(c.modes, []); // no permission_modes reported by this init event
+  const modeNames = c.categorized.filter((e) => e.category === 'mode').map((e) => e.name).sort();
+  assert.deepEqual(modeNames, ['goal', 'loop']); // detected from slash_commands despite empty modes/helpText
+});
+
 test('discovery: an uninstalled runtime binary reports ok:false with no crash', () => {
   const rt = { id: 'ghost', bin: () => 'ghost-cli' };
   const c = CAP.discoverCapabilities(rt, {}, { exec: () => { const e = new Error('spawn ENOENT'); e.code = 'ENOENT'; throw e; }, ...FS_OPTS });
