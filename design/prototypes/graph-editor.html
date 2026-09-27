@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<title>Agents Squad — Team graph editor (prototype)</title>
+<link rel="stylesheet" href="../tokens.css">
+<link rel="stylesheet" href="../tokens/graph.css">
+<style>
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;font:var(--text-md)/var(--lh-body) var(--font-sans);color:var(--fg-primary);background:var(--bg-app)}
+.top{height:44px;display:flex;align-items:center;gap:var(--space-3);padding:0 var(--space-4);border-bottom:1px solid var(--border);background:var(--bg-sidebar)}
+.logo{font-weight:var(--fw-bold)}
+.tabs{display:flex;gap:2px;background:var(--bg-hover);padding:2px;border-radius:var(--radius-sm)}
+.tabs span{padding:3px 10px;border-radius:var(--radius-xs);font-size:var(--text-sm);color:var(--fg-secondary)}
+.tabs .on{background:var(--bg-surface);color:var(--fg-primary);box-shadow:var(--shadow-sm)}
+.sp{flex:1}
+.btn{height:28px;padding:0 10px;border-radius:var(--radius-sm);border:1px solid var(--border-strong);background:var(--bg-surface);color:var(--fg-primary);font:inherit;font-size:var(--text-sm);cursor:pointer}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--fg-on-accent)}
+.main{display:flex;height:calc(100% - 44px)}
+.canvas{position:relative;flex:1;overflow:hidden;background:var(--graph-bg);background-image:radial-gradient(var(--graph-dot) 1px,transparent 1px);background-size:var(--graph-dot-gap) var(--graph-dot-gap);cursor:grab}
+.canvas.panning{cursor:grabbing}
+#world{position:absolute;left:0;top:0;transform-origin:0 0}
+svg#edges{position:absolute;left:0;top:0;overflow:visible;pointer-events:none}
+.group{position:absolute;border:1px dashed var(--group-border);background:var(--group-bg);border-radius:var(--group-radius)}
+.group h4{margin:0;position:absolute;top:-11px;left:12px;padding:0 8px;font-size:var(--text-xs);font-weight:var(--fw-semibold);letter-spacing:.04em;text-transform:uppercase;color:var(--accent-text);background:var(--graph-bg);border-radius:var(--radius-full)}
+.node{position:absolute;width:var(--node-w);background:var(--node-bg);border:1px solid var(--node-border);border-radius:var(--node-radius);box-shadow:var(--node-shadow);padding:10px 12px;cursor:move;user-select:none;transition:box-shadow var(--dur-fast) var(--ease-out)}
+.node.sel{border-color:var(--node-selected);box-shadow:var(--node-shadow),var(--ring)}
+.nh{display:flex;gap:10px;align-items:center}
+.av{position:relative;width:32px;height:32px;flex:none;border-radius:50%;display:grid;place-items:center;color:#fff;font-weight:var(--fw-semibold);font-size:var(--text-sm)}
+.av.hex{clip-path:polygon(25% 5%,75% 5%,100% 50%,75% 95%,25% 95%,0 50%);border-radius:0}
+.av.dia{border-radius:8px;transform:rotate(45deg)} .av.dia b{transform:rotate(-45deg)}
+.ring{position:absolute;inset:-4px;border-radius:50%;pointer-events:none}
+.st-working .ring{background:conic-gradient(var(--accent) 0 35%,transparent 35%);-webkit-mask:radial-gradient(circle,transparent 17px,#000 18px);animation:spin 1.2s linear infinite}
+.st-needs .ring{border:2px solid var(--warning)}
+.st-idle .ring{border:2px solid var(--border-strong)}
+.st-error .ring{border:2px solid var(--danger)}
+.avw{position:relative}
+.badge{position:absolute;right:-4px;top:-4px;width:14px;height:14px;border-radius:50%;font-size:10px;font-weight:700;display:grid;place-items:center;color:#000;background:var(--warning)}
+.st-error .badge{background:var(--danger);color:#fff}
+@keyframes spin{to{transform:rotate(1turn)}}
+@media (prefers-reduced-motion:reduce){.st-working .ring{animation:none}}
+.nm{font-weight:var(--fw-semibold);line-height:1.2}
+.rl{font-size:var(--text-xs);color:var(--fg-muted)}
+.chips{display:flex;gap:4px;margin-top:8px;flex-wrap:wrap}
+.chip{font:var(--text-xs)/18px var(--font-mono);padding:0 6px;border-radius:var(--radius-xs);background:var(--chip-bg);color:var(--chip-fg);border:1px solid var(--border)}
+.state{margin-left:auto;font-size:var(--text-xs);color:var(--fg-muted);align-self:flex-start}
+.st-working .state{color:var(--accent-text)} .st-needs .state{color:var(--warning-text)} .st-error .state{color:var(--danger)}
+.h{position:absolute;width:var(--handle-size);height:var(--handle-size);border-radius:50%;background:var(--handle-bg);border:1.5px solid var(--accent);opacity:0;transition:opacity var(--dur-fast);cursor:crosshair}
+.node:hover .h,.node.sel .h,.connecting .h{opacity:1}
+.h.t{top:-5px;left:calc(50% - 5px)} .h.b{bottom:-5px;left:calc(50% - 5px)} .h.l{left:-5px;top:calc(50% - 5px)} .h.r{right:-5px;top:calc(50% - 5px)}
+.h:hover{background:var(--accent);transform:scale(1.3)}
+.pill{position:absolute;transform:translate(-50%,-50%);font-size:var(--edge-label-fs);font-weight:var(--fw-medium);padding:1px 8px;border-radius:var(--radius-full);background:var(--edge-label-bg);border:1px solid currentColor;white-space:nowrap;pointer-events:auto;cursor:pointer}
+.ctrl{position:absolute;left:16px;bottom:16px;display:flex;flex-direction:column;background:var(--bg-surface);border:1px solid var(--border);border-radius:var(--radius-sm);box-shadow:var(--shadow-md);overflow:hidden}
+.ctrl button{width:32px;height:32px;border:0;background:none;color:var(--fg-primary);font-size:16px;cursor:pointer}
+.ctrl button:hover{background:var(--bg-hover)} .ctrl .z{font-size:10px;text-align:center;color:var(--fg-muted);padding:2px 0;border-block:1px solid var(--border)}
+.mini{position:absolute;right:16px;bottom:16px;width:var(--minimap-w);height:var(--minimap-h);background:var(--bg-surface);border:1px solid var(--border);border-radius:var(--radius-sm);box-shadow:var(--shadow-md)}
+.toolbar{position:absolute;left:16px;top:16px;display:flex;gap:6px}
+.pop,.menu{position:absolute;background:var(--bg-raised);border:1px solid var(--border-strong);border-radius:var(--radius-md);box-shadow:var(--shadow-lg);padding:4px;font-size:var(--text-sm);z-index:10;min-width:180px;display:none}
+.pop.show,.menu.show{display:block}
+.pop h5{margin:4px 8px 6px;font-size:var(--text-xs);color:var(--fg-muted);font-weight:var(--fw-medium)}
+.it{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:var(--radius-xs);cursor:pointer}
+.it:hover{background:var(--bg-hover)} .it kbd{margin-left:auto;color:var(--fg-muted);font:var(--text-xs) var(--font-mono)}
+.it .sw{width:10px;height:3px;border-radius:2px}
+.it.danger{color:var(--danger)} .sep{height:1px;background:var(--border);margin:4px}
+.insp{width:var(--inspector-w);border-left:1px solid var(--border);background:var(--bg-surface);padding:var(--space-4);overflow:auto;font-size:var(--text-sm)}
+.insp h3{margin:0 0 2px;font-size:var(--text-lg)} .insp .sub{color:var(--fg-muted);margin-bottom:var(--space-4)}
+.f{margin-bottom:var(--space-3)} .f label{display:block;font-size:var(--text-xs);color:var(--fg-muted);margin-bottom:4px;font-weight:var(--fw-medium)}
+.f input,.f select,.f textarea{width:100%;height:30px;padding:0 8px;border-radius:var(--radius-sm);border:1px solid var(--border-strong);background:var(--bg-app);color:var(--fg-primary);font:inherit}
+.f textarea{height:64px;padding:6px 8px;resize:none}
+.row{display:flex;gap:8px} .row>*{flex:1}
+.conn{display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid var(--border)}
+</style>
+</head>
+<body>
+<div class="top">
+  <span class="logo">◆ Agents Squad</span>
+  <div class="tabs"><span>Chat</span><span>Board</span><span class="on">Graph</span><span>Wiki</span><span>Inbox</span></div>
+  <span class="sp"></span>
+  <button class="btn" onclick="toggleTheme()">◐ Theme</button>
+  <button class="btn primary">▶ Run</button>
+</div>
+<div class="main">
+  <div class="canvas" id="canvas">
+    <div id="world"><svg id="edges"></svg></div>
+    <div class="toolbar"><button class="btn">＋ Agent</button><button class="btn">▭ Team frame</button><button class="btn" onclick="tidy()">⇲ Tidy</button></div>
+    <div class="ctrl"><button onclick="zoom(1.15)">＋</button><div class="z" id="zl">100%</div><button onclick="zoom(1/1.15)">－</button><button onclick="fit()" title="Fit">⤢</button></div>
+    <svg class="mini" id="mini"></svg>
+    <div class="pop" id="pop"><h5>Connect as…</h5></div>
+    <div class="menu" id="menu">
+      <div class="it">✎ Rename<kbd>F2</kbd></div><div class="it">⧉ Duplicate<kbd>⌘D</kbd></div>
+      <div class="it">↗ Open chat</div><div class="it">▭ Move to team…</div><div class="sep"></div>
+      <div class="it danger">✕ Delete<kbd>⌫</kbd></div>
+    </div>
+  </div>
+  <aside class="insp" id="insp"></aside>
+</div>
+<script>
+const EDGE={manages:'Manages',reviews:'Reviews',messages:'Messages',assigns:'Assigns tasks'};
+const N=[
+ {id:'ceo',n:'Atlas',r:'PM / Lead',c:1,g:'hex',rt:'claude',m:'opus-5.5',s:'working',x:420,y:40},
+ {id:'mira',n:'Mira',r:'Design Lead',c:2,g:'hex',rt:'claude',m:'opus-5.5',s:'idle',x:160,y:220},
+ {id:'leo',n:'Leo',r:'UX Researcher',c:3,g:'circle',rt:'claude',m:'sonnet-5',s:'working',x:40,y:400},
+ {id:'nova',n:'Nova',r:'Visual Designer',c:5,g:'circle',rt:'claude',m:'opus-5.5',s:'needs',x:290,y:400},
+ {id:'vex',n:'Vex',r:'Design Critic',c:6,g:'dia',rt:'codex',m:'gpt-5',s:'idle',x:170,y:560},
+ {id:'kai',n:'Kai',r:'Eng Lead',c:4,g:'hex',rt:'claude',m:'opus-5.5',s:'idle',x:700,y:220},
+ {id:'rin',n:'Rin',r:'Frontend Eng',c:8,g:'circle',rt:'claude',m:'sonnet-5',s:'error',x:700,y:400},
+];
+const E=[['ceo','mira','manages'],['ceo','kai','manages'],['mira','leo','manages'],['mira','nova','manages'],['nova','vex','reviews'],['vex','nova','reviews'],['leo','nova','messages'],['kai','rin','manages'],['nova','rin','assigns']];
+const G=[{n:'UI Research',ids:['mira','leo','nova','vex']},{n:'Engineering',ids:['kai','rin']}];
+const W=216,H=86;let sel='nova',scale=1,tx=40,ty=40;
+const world=document.getElementById('world'),svg=document.getElementById('edges');
+const byId=id=>N.find(n=>n.id==id);
+function render(){
+ world.querySelectorAll('.node,.group,.pill').forEach(e=>e.remove());
+ G.forEach(g=>{const ns=g.ids.map(byId);const x0=Math.min(...ns.map(n=>n.x))-24,y0=Math.min(...ns.map(n=>n.y))-28,x1=Math.max(...ns.map(n=>n.x))+W+24,y1=Math.max(...ns.map(n=>n.y))+H+24;
+  const d=document.createElement('div');d.className='group';Object.assign(d.style,{left:x0+'px',top:y0+'px',width:x1-x0+'px',height:y1-y0+'px'});d.innerHTML=`<h4>${g.n} · ${ns.length}</h4>`;world.prepend(d)});
+ N.forEach(n=>{const d=document.createElement('div');d.className=`node st-${n.s}`+(n.id==sel?' sel':'');d.style.left=n.x+'px';d.style.top=n.y+'px';d.dataset.id=n.id;
+  const lbl={working:'working',needs:'needs you',idle:'idle',error:'error'}[n.s];
+  d.innerHTML=`<div class="nh"><div class="avw"><div class="av ${n.g=='hex'?'hex':n.g=='dia'?'dia':''}" style="background:var(--agent-${n.c})"><b>${n.n[0]}</b></div><div class="ring"></div>${n.s=='needs'?'<div class="badge">!</div>':n.s=='error'?'<div class="badge">×</div>':''}</div>
+  <div><div class="nm">${n.n}</div><div class="rl">${n.r}</div></div><span class="state">${lbl}</span></div>
+  <div class="chips"><span class="chip">${n.rt}</span><span class="chip">${n.m}</span></div>
+  ${['t','r','b','l'].map(s=>`<div class="h ${s}" data-side="${s}"></div>`).join('')}`;world.appendChild(d)});
+ drawEdges();mini();inspector();
+}
+function port(n,s){return{t:[n.x+W/2,n.y],b:[n.x+W/2,n.y+H],l:[n.x,n.y+H/2],r:[n.x+W,n.y+H/2]}[s]}
+function sides(a,b){const dx=b.x-a.x,dy=b.y-a.y;return Math.abs(dy)>60?(dy>0?['b','t']:['t','b']):(dx>0?['r','l']:['l','r'])}
+function ortho(p,q,s,off){const R=10;let pts;
+ if(s=='b'||s=='t'){const my=(p[1]+q[1])/2+off;pts=[[p[0]+off,p[1]],[p[0]+off,my],[q[0]+off,my],[q[0]+off,q[1]]]}
+ else{const mx=(p[0]+q[0])/2+off;pts=[[p[0],p[1]+off],[mx,p[1]+off],[mx,q[1]+off],[q[0],q[1]+off]]}
+ let d=`M${pts[0]}`;for(let i=1;i<pts.length-1;i++){const [a,b,c]=[pts[i-1],pts[i],pts[i+1]];
+  const r=Math.min(R,Math.hypot(b[0]-a[0],b[1]-a[1])/2,Math.hypot(c[0]-b[0],c[1]-b[1])/2);
+  const u=(v,w)=>{const L=Math.hypot(w[0]-v[0],w[1]-v[1])||1;return[(w[0]-v[0])/L,(w[1]-v[1])/L]};
+  const u1=u(b,a),u2=u(b,c);d+=` L${b[0]+u1[0]*r},${b[1]+u1[1]*r} Q${b} ${b[0]+u2[0]*r},${b[1]+u2[1]*r}`}
+ d+=` L${pts[3]}`;return{d,mid:[(pts[1][0]+pts[2][0])/2,(pts[1][1]+pts[2][1])/2]}}
+function drawEdges(){let h=`<defs>${Object.keys(EDGE).map(k=>`<marker id="ar-${k}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9z" fill="var(--edge-${k})"/></marker>`).join('')}</defs>`;
+ const seen={};
+ E.forEach(([a,b,t])=>{const A=byId(a),B=byId(b);const key=[a,b].sort().join();const k=seen[key]=(seen[key]||0)+1;
+  const off=(k-1)*28-(E.filter(e=>[e[0],e[1]].sort().join()==key).length-1)*14;
+  const [sa,sb]=sides(A,B);const o=ortho(port(A,sa),port(B,sb),sa,off);
+  h+=`<path d="${o.d}" fill="none" stroke="var(--edge-${t})" stroke-width="1.5" marker-end="url(#ar-${t})" ${t=='messages'?'stroke-dasharray="4 4"':''}/>`;
+  const p=document.createElement('div');p.className='pill';p.style.left=o.mid[0]+'px';p.style.top=o.mid[1]+'px';p.style.color=`var(--edge-${t})`;p.textContent=EDGE[t];world.appendChild(p)});
+ svg.innerHTML=h}
+function mini(){const m=document.getElementById('mini');const s=.16;
+ m.innerHTML=N.map(n=>`<rect x="${10+n.x*s}" y="${8+n.y*s}" width="${W*s}" height="${H*s}" rx="2" fill="var(--agent-${n.c})" opacity=".85"/>`).join('')+
+ `<rect x="${10-tx/scale*s}" y="${8-ty/scale*s}" width="${(canvas.clientWidth/scale)*s}" height="${(canvas.clientHeight/scale)*s}" fill="none" stroke="var(--accent)" stroke-width="1.5" rx="3"/>`}
+function inspector(){const n=byId(sel);const out=E.filter(e=>e[0]==sel||e[1]==sel);
+ document.getElementById('insp').innerHTML=`<div class="nh st-${n.s}" style="margin-bottom:8px"><div class="avw"><div class="av" style="background:var(--agent-${n.c})"><b>${n.n[0]}</b></div><div class="ring"></div></div><div><h3>${n.n}</h3></div></div>
+ <div class="sub">${n.r} · <span style="color:var(--agent-${n.c}-text)">agent-${n.c}</span></div>
+ <div class="f"><label>Name</label><input value="${n.n}"></div><div class="f"><label>Role</label><input value="${n.r}"></div>
+ <div class="row"><div class="f"><label>Runtime</label><select><option>${n.rt}</option><option>codex</option></select></div><div class="f"><label>Model</label><select><option>${n.m}</option></select></div></div>
+ <div class="f"><label>Instructions</label><textarea>Create design tokens and prototypes…</textarea></div>
+ <div class="f"><label>Connections · ${out.length}</label>${out.map(([a,b,t])=>`<div class="conn"><span class="chip" style="color:var(--edge-${t})">${EDGE[t]}</span>${a==sel?'→ '+byId(b).n:'← '+byId(a).n}</div>`).join('')}</div>`}
+const canvas=document.getElementById('canvas');
+function apply(){world.style.transform=`translate(${tx}px,${ty}px) scale(${scale})`;document.getElementById('zl').textContent=Math.round(scale*100)+'%';canvas.style.backgroundPosition=`${tx}px ${ty}px`;canvas.style.backgroundSize=`${20*scale}px ${20*scale}px`;mini()}
+function zoom(f){scale=Math.min(2,Math.max(.4,scale*f));apply()}
+function fit(){scale=1;tx=40;ty=40;apply()}
+function tidy(){render()}
+function toggleTheme(){const r=document.documentElement;r.dataset.theme=r.dataset.theme=='dark'?'light':'dark'}
+let drag=null,pan=null,conn=null,tmp=null;
+canvas.addEventListener('mousedown',e=>{hide();const h=e.target.closest('.h'),nd=e.target.closest('.node');
+ if(h){conn={from:nd.dataset.id,side:h.dataset.side};canvas.classList.add('connecting');e.stopPropagation();return}
+ if(nd){sel=nd.dataset.id;const n=byId(sel);drag={n,dx:e.clientX/scale-n.x,dy:e.clientY/scale-n.y};render();return}
+ if(e.target==canvas||e.target==world){pan={x:e.clientX-tx,y:e.clientY-ty};canvas.classList.add('panning')}});
+window.addEventListener('mousemove',e=>{if(drag){drag.n.x=Math.round((e.clientX/scale-drag.dx)/10)*10;drag.n.y=Math.round((e.clientY/scale-drag.dy)/10)*10;render()}
+ if(pan){tx=e.clientX-pan.x;ty=e.clientY-pan.y;apply()}
+ if(conn){const r=canvas.getBoundingClientRect(),p=port(byId(conn.from),conn.side);const q=[(e.clientX-r.left-tx)/scale,(e.clientY-r.top-ty)/scale];
+  tmp&&tmp.remove();tmp=document.createElementNS('http://www.w3.org/2000/svg','path');tmp.setAttribute('d',ortho(p,q,conn.side,0).d);tmp.setAttribute('stroke','var(--accent)');tmp.setAttribute('fill','none');tmp.setAttribute('stroke-dasharray','5 4');tmp.setAttribute('stroke-width','1.5');svg.appendChild(tmp)}});
+window.addEventListener('mouseup',e=>{drag=null;if(pan){pan=null;canvas.classList.remove('panning')}
+ if(conn){canvas.classList.remove('connecting');const t=document.elementFromPoint(e.clientX,e.clientY)?.closest('.node');
+  if(t&&t.dataset.id!=conn.from)showPop(e,conn.from,t.dataset.id);else tmp&&tmp.remove();conn=null}});
+function showPop(e,a,b){const pop=document.getElementById('pop'),r=canvas.getBoundingClientRect();
+ pop.innerHTML='<h5>Connect '+byId(a).n+' → '+byId(b).n+' as…</h5>'+Object.entries(EDGE).map(([k,v])=>`<div class="it" data-k="${k}"><span class="sw" style="background:var(--edge-${k})"></span>${v}</div>`).join('');
+ pop.style.left=e.clientX-r.left+8+'px';pop.style.top=e.clientY-r.top+8+'px';pop.classList.add('show');
+ pop.onclick=ev=>{const k=ev.target.closest('.it')?.dataset.k;if(k){E.push([a,b,k]);hide();render()}}}
+canvas.addEventListener('contextmenu',e=>{e.preventDefault();const nd=e.target.closest('.node');if(!nd)return;sel=nd.dataset.id;render();const m=document.getElementById('menu'),r=canvas.getBoundingClientRect();m.style.left=e.clientX-r.left+'px';m.style.top=e.clientY-r.top+'px';m.classList.add('show')});
+canvas.addEventListener('wheel',e=>{e.preventDefault();if(e.ctrlKey||e.metaKey)zoom(e.deltaY<0?1.08:1/1.08);else{tx-=e.deltaX;ty-=e.deltaY;apply()}},{passive:false});
+function hide(){document.querySelectorAll('.pop,.menu').forEach(x=>x.classList.remove('show'));tmp&&tmp.remove()}
+const q=new URLSearchParams(location.search);if(q.get('theme'))document.documentElement.dataset.theme=q.get('theme');
+render();apply();
+if(q.get('demo')){const m=document.getElementById('menu');m.style.left='560px';m.style.top='470px';m.classList.add('show');
+ showPop({clientX:canvas.getBoundingClientRect().left+620,clientY:canvas.getBoundingClientRect().top+140},'leo','kai');}
+</script>
+</body>
+</html>

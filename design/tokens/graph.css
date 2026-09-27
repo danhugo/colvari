@@ -1,0 +1,20 @@
+/* Graph editor tokens — extends design/tokens.css (import that first). */
+:root {
+  --graph-bg: #f7f8fb; --graph-dot: #d5d9e3; --graph-dot-gap: 20px;
+  --node-w: 216px; --node-radius: var(--radius-md); --node-bg: var(--bg-surface);
+  --node-border: var(--border-strong); --node-shadow: var(--shadow-md);
+  --node-selected: var(--accent); --handle-size: 10px; --handle-bg: var(--bg-surface);
+  --edge-width: 1.5px; --edge-radius: 10px; --edge-fanout: 14px;
+  --edge-manages: #4f5bff; --edge-reviews: #c2185b; --edge-messages: #0a6b61; --edge-assigns: #9a4d00;
+  --edge-label-bg: var(--bg-surface); --edge-label-fs: var(--text-xs);
+  --group-bg: color-mix(in srgb, var(--accent) 4%, transparent);
+  --group-border: color-mix(in srgb, var(--accent) 28%, transparent); --group-radius: var(--radius-lg);
+  --chip-bg: var(--bg-code); --chip-fg: var(--fg-secondary);
+  --minimap-w: 180px; --minimap-h: 120px;
+  --inspector-w: 300px;
+}
+[data-theme="dark"] {
+  --graph-bg: #0c0e13; --graph-dot: #20242e;
+  --edge-manages: #7c85ff; --edge-reviews: #ff7fa8; --edge-messages: #3dd6c3; --edge-assigns: #ffa94d;
+  --group-bg: color-mix(in srgb, var(--accent) 6%, transparent);
+}
