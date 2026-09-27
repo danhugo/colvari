@@ -68,6 +68,8 @@ table { border-collapse:collapse; background:var(--card); } td, th { border:1px 
 .panel label.inline { display:flex; gap:6px; align-items:center; margin-top:6px; } .panel label.inline input { width:auto; }
 .cards { display:flex; gap:8px; flex-wrap:wrap; } .stat { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:8px 12px; min-width:150px; }
 .stat b { display:block; font-size:18px; } .stat small { color:var(--muted); } .scroll { flex:1; overflow:auto; min-height:0; }
+.meter { height:6px; border-radius:4px; background:var(--line); margin-top:4px; overflow:hidden; }
+.meter-fill { height:100%; background:var(--accent); } .meter-fill.warn { background:var(--warning); } .meter-fill.danger { background:var(--danger); }
 #us-runs td.num { text-align:right; font-variant-numeric:tabular-nums; } .bill { padding:1px 6px; border-radius:8px; border:1px solid var(--line); font-size:11px; }
 .bill-subscription { color:var(--ok); border-color:var(--ok); } .bill-api { color:var(--warn); border-color:var(--warn); } .bill-proxy, .bill-bedrock, .bill-vertex { color:var(--acc); border-color:var(--acc); }
 .costnote { color:var(--muted); font-size:11px; } .warn { color:var(--warn); } #us-summary table { margin:6px 0; }
