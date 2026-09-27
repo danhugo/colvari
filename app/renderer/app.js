@@ -168,6 +168,7 @@ function renderGraph() {
     el('rect', { width: W, height: H, rx: 8 }, g);
     const nameEl = el('text', { x: 10, y: 24, 'font-weight': 600 }, g); nameEl.textContent = clipText(n.name, 20); el('title', {}, g).textContent = `${n.name} (${n.role})`;
     el('text', { x: 10, y: 42, 'font-size': 11, opacity: 0.7 }, g).textContent = clipText(`${n.role}${st === 'working' ? ' · working' : ''}`, 24);
+    const pg = el('g', { class: 'pres ' + presence(n.id), transform: `translate(${W - 14},${H - 14})` }, g); el('circle', { r: 5 }, pg); el('title', {}, pg).textContent = presence(n.id);
     // Preflight badge sits on the node's top border (a tag), so it never covers the name.
     const pf = pfState(n); const bw = 8 + PF_LABEL[pf].length * 6;
     const badge = el('g', { class: 'pfbadge pf-' + pf, transform: `translate(${W - bw - 8},-8)` }, g);
@@ -298,11 +299,23 @@ function renderNodeForm() {
   $('#nf-role').oninput = () => { $('#nf-applypreset').disabled = !presets.some((p) => p.name.toLowerCase() === $('#nf-role').value.trim().toLowerCase()); };
 }
 
+// ---------- idle / busy ----------
+// Busy = an agent run in progress. Uses S.orch.idle (node ids) when the API provides it, else derives from agent status.
+const presence = (id) => (S.orch.idle ? S.orch.idle.includes(id) : (S.orch.agents[id] || {}).status !== 'working') ? 'idle' : 'busy';
+function renderIdle() {
+  const idle = S.allNodes.filter((n) => presence(n.id) === 'idle'); const show = S.allNodes.length && idle.length;
+  document.querySelectorAll('.idlebanner').forEach((b) => { b.classList.toggle('hidden', !show); if (!show) return;
+    b.innerHTML = `<span class="pres idle"><i></i></span><b>${idle.length} agent${idle.length > 1 ? 's' : ''} idle</b><span class="muted">${esc(idle.slice(0, 4).map((n) => n.name).join(', '))}${idle.length > 4 ? '…' : ''}</span><span class="spacer"></span><button class="primary" data-assignidle="${idle[0].id}">Assign work</button>`; });
+  document.querySelectorAll('[data-assignidle]').forEach((b) => b.onclick = () => { showTab('board'); $('#nt-assignee').value = b.dataset.assignidle; $('#nt-title').focus(); });
+  $('#presence').innerHTML = S.allNodes.map((n) => { const p = presence(n.id); return `<span class="pchip ${p}" title="${esc(n.role)}"><span class="pres ${p}"><i></i></span>${esc(n.name)} <span class="muted">${p}</span></span>`; }).join('');
+}
+
 // ---------- board ----------
 function renderBoard() {
   const sa = $('#nt-assignee'); const cur = sa.value;
   sa.innerHTML = S.allNodes.map((n) => `<option value="${n.id}">${esc(n.name)} (${n.role})</option>`).join('') || '<option value="">(add agents first)</option>';
   if (cur) sa.value = cur;
+  renderIdle();
   $('#columns').innerHTML = STATUSES.map((st) => `<div class="col"><h3>${st.replaceAll('_', ' ')} (${S.tasks.filter((t) => t.status === st).length})</h3>${
     S.tasks.filter((t) => t.status === st).map((t) => { const bl = openBlockers(t); const w = (S.orch.agents[t.assignee] || {}); const live = w.status === 'working' && w.taskId === t.id;
       return `<div class="card ${sel.task === t.id ? 'sel' : ''}${t.awaitingApproval ? ' approval' : ''}" data-id="${t.id}"><b>${esc(t.title)}</b>${live ? '<span class="tag live">live</span>' : ''}${bl.length ? `<span class="tag blocked" title="waits for: ${esc(bl.map(taskTitle).join(', '))}">blocked (${bl.length})</span>` : ''}${t.awaitingApproval ? '<span class="tag approval">needs approval</span>' : ''}<small>${esc(nodeName(t.assignee))} · ${t.comments.length} comments</small></div>`; }).join('')}</div>`).join('');

@@ -39,11 +39,13 @@
   </section>
   <section id="tab-team" class="tab">
     <div class="toolbar"><button id="addnode">+ Agent</button><button id="connect">Connect (A → B)</button><select id="edgetype" title="Type of new edges"><option>assign</option><option>message</option><option>review</option></select><button id="delsel">Delete selected</button><button id="testteam">Test team</button><span id="pf-summary" class="pill"></span><span id="hint" class="muted">Drag nodes to move. Click an edge to select it.</span></div>
+    <div class="idlebanner hidden" data-where="team"></div>
     <div class="split"><svg id="graph"></svg><aside id="nodeform" class="panel"></aside></div>
   </section>
   <section id="tab-board" class="tab">
     <div class="toolbar"><input id="nt-title" placeholder="New task / goal title"><select id="nt-assignee"></select><button id="nt-add" class="primary">Create task</button></div>
     <textarea id="nt-desc" placeholder="Description (optional)" rows="2"></textarea>
+    <div class="idlebanner hidden" data-where="board"></div><div id="presence" class="presence"></div>
     <div class="split"><div id="columns"></div><aside id="taskdetail" class="panel"></aside></div>
   </section>
   <section id="tab-wiki" class="tab">

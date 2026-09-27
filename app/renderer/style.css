@@ -186,3 +186,10 @@ nav button { padding:3px 10px; font-size:var(--text-sm); } nav button.active { b
 nav button.sec { color:var(--fg-muted); padding:3px 7px; } .navsep { width:1px; background:var(--border-strong); margin:3px 4px; }
 header .pill { border:none; background:none; color:var(--fg-muted); font-size:var(--text-xs); padding:2px 4px; } header #runstate { background:var(--bg-hover); color:var(--fg-secondary); padding:2px 8px; } header #runstate.on { background:var(--success-soft); color:var(--success-text); }
 .tlink { font-size:10.5px; opacity:.8; } .bubble { font-size:var(--text-sm); }
+
+/* Idle/busy by shape: idle = hollow ring, busy = spinning arc. */
+.pres { display:inline-flex; width:12px; height:12px; flex:none; } .pres i { flex:1; border-radius:50%; border:2px solid var(--fg-muted); }
+.pres.busy i { border-color:var(--success); border-right-color:transparent; animation:spin 1s linear infinite; }
+#graph .pres circle { fill:none; stroke-width:2; stroke:var(--fg-muted); } #graph .pres.busy circle { transform-box:fill-box; transform-origin:center; stroke:var(--success); stroke-dasharray:22 10; animation:spin 1s linear infinite; }
+.idlebanner { display:flex; align-items:center; gap:8px; padding:6px 10px; margin:0 0 8px; border:1px solid var(--border); border-left:3px solid var(--warning); border-radius:var(--radius-sm); background:var(--bg-raised); }
+.presence { display:flex; flex-wrap:wrap; gap:6px; margin:0 0 8px; } .pchip { display:inline-flex; align-items:center; gap:5px; padding:2px 8px; border:1px solid var(--border); border-radius:var(--radius-full); font-size:12px; }
