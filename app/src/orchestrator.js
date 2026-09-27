@@ -207,7 +207,7 @@ class Orchestrator extends EventEmitter {
       const startedMs = Date.now();
       const usage = U.newRun({ projectId: this.store.meta() ? this.store.meta().id : null, nodeId: node.id, agent: node.name, ...meta });
       if (usage.resumedFrom) usage.baseline = this.sessionBaseline(usage.resumedFrom);
-      const rt = RT.getRuntime(meta.runtime);
+      let rt; try { rt = RT.getRuntime(meta.runtime); } catch (e) { this.log(node.id, 'error', e.message + ' (run failed, no fallback)'); rt = { id: String(meta.runtime), label: String(meta.runtime), bin: () => '' }; args = null; }
       const child = args ? spawn(rt.bin(settings), args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] })
         : Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter(), kill() {} });
       if (!args) setImmediate(() => child.emit('close', 1));
@@ -363,7 +363,7 @@ class Orchestrator extends EventEmitter {
     let cfg;
     try { cfg = normalizeNode(applyPreset(node, presets)); } catch (e) { return { ok: false, checks: [{ id: 'config', label: 'agent settings', ok: false, detail: e.message }], error: 'agent settings: ' + e.message, at: new Date().toISOString() }; }
     if (cfg.runtime && cfg.runtime !== 'claude') { // other runtimes: binary + version check only
-      const d = RT.detectRuntimes(settings, this.env(cfg))[cfg.runtime];
+      const d = RT.detectRuntimes(settings, this.env(cfg))[cfg.runtime] || { installed: false, version: null, error: 'unknown runtime' };
       const r = { ok: d.installed, runtime: cfg.runtime, checks: [{ id: 'binary', label: cfg.runtime + ' binary', ok: d.installed, detail: d.installed ? cfg.runtime + ' ' + d.version : d.error }], error: d.installed ? null : cfg.runtime + ' ' + d.error, at: new Date().toISOString(), configHash: PF.configHash(node, settings) };
       this.log(node.id, r.ok ? 'result' : 'error', `⚑ preflight ${node.name} [${cfg.runtime}] ${r.ok ? 'PASS' : 'FAIL'}: ${r.checks[0].detail}`);
       this.changed(); return r;

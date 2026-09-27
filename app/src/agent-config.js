@@ -54,7 +54,7 @@ function splitArgs(s) {
 function normalizeNode(n = {}, base = NODE_DEFAULTS) {
   const r = {};
   for (const k of NODE_FIELDS) r[k] = n[k] !== undefined ? n[k] : (Array.isArray(base[k]) ? [...base[k]] : typeof base[k] === 'object' ? { ...base[k] } : base[k]);
-  r.runtime = ['claude', 'codex', 'opencode'].includes(r.runtime) ? r.runtime : 'claude';
+  r.runtime = r.runtime ? String(r.runtime) : 'claude'; // unknown ids are kept so the run errors instead of silently using claude
   r.name = String(r.name || 'Agent'); r.role = String(r.role || '').trim() || 'Dev';
   if (r.permissionMode && !PERMISSION_MODES.includes(r.permissionMode)) throw new Error('bad permission mode ' + r.permissionMode);
   r.allowedTools = toList(r.allowedTools); r.disallowedTools = toList(r.disallowedTools); r.addDirs = toList(r.addDirs);
