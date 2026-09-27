@@ -77,7 +77,7 @@ class Orchestrator extends EventEmitter {
     this.subscriptionRateLimits = {};
     try { for (const n of store.getTeam().nodes) if (n.rateLimits) this.subscriptionRateLimits[n.id] = n.rateLimits; } catch {}
   }
-  agent(id) { return (this.agents[id] ||= { runCost: 0, runTokens: 0, pendingHuman: [], stopRequested: false, budgetStop: null, status: 'idle', iteration: 0, cost: 0, inputTokens: 0, outputTokens: 0, cacheTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, runs: 0, taskId: null, task: null, model: '', runtime: '', billingSource: '' }); }
+  agent(id) { return (this.agents[id] ||= { runCost: 0, runTokens: 0, pendingHuman: [], stopRequested: false, budgetStop: null, status: 'idle', iteration: 0, cost: 0, inputTokens: 0, outputTokens: 0, cacheTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, runs: 0, taskId: null, task: null, model: '', runtime: '', billingSource: '', contextTokens: null, contextWindow: 0, contextPct: null, lastContextMessageId: null }); }
   // modelStats: per-model aggregate across this project's persisted runs + tasks (see usage.js modelStats for the field shape).
   modelStats() { let rs = []; try { rs = this.store.listRuns(); } catch {} let ts = []; try { ts = this.store.listTasks(); } catch {} return U.modelStats(rs, ts); }
   // nodeTeams: {nodeId: {teamId, teamName}} across all teams in the project, for tagging log/timeline entries.
@@ -404,6 +404,11 @@ class Orchestrator extends EventEmitter {
     const bill = U.applyBillingEnv(cfg, this.env(cfg)); const env = bill.env;
     for (const w of bill.warnings) this.log(node.id, 'error', w);
     const meta = { taskId: task.id, task: task.title, billingMode: cfg.billingMode || 'auto', runtime: cfg.runtime || 'claude' };
+    // Verified empirically (claude 2.1.283): CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=<fraction 0-1> makes the CLI
+    // auto-compact on its own once context passes that fraction of the window (confirmed via a live
+    // compact_boundary event). So this is set at spawn instead of the app sending /compact itself.
+    const autoCompactPct = Number(settings.autoCompactPct ?? 40);
+    if (meta.runtime === 'claude' && autoCompactPct > 0) env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE = String(Math.min(1, autoCompactPct / 100));
     a.runtime = meta.runtime; a.model = cfg.model || '';
     let resume = task.sessionId || (m.continueSession ? this.lastSession(node.id) : null);
     this.log(node.id, 'system', `▶ ${node.name} starts "${task.title}" in ${cwd} [mode=${m.mode}${resume ? ', resume ' + resume : ''}]`);
@@ -509,9 +514,27 @@ class Orchestrator extends EventEmitter {
       return;
     }
     if (ev.type === 'assistant' && ev.message?.content) {
+      // Stream-json can repeat the same message id across deltas; only the first sighting is a new turn.
+      const ctx = U.contextFromAssistant(ev);
+      if (ctx && ctx.messageId !== a.lastContextMessageId) {
+        a.lastContextMessageId = ctx.messageId;
+        a.contextWindow = U.contextWindowFor(ctx.model || a.model);
+        a.contextTokens = ctx.contextTokens;
+        a.contextPct = a.contextWindow ? ctx.contextTokens / a.contextWindow : null;
+        this.changed();
+      }
       for (const c of ev.message.content) {
         if (c.type === 'text' && c.text.trim()) this.log(node.id, 'text', c.text);
         else if (c.type === 'tool_use') this.log(node.id, 'tool', `${c.name} ${JSON.stringify(c.input).slice(0, 300)}`);
+      }
+    } else if (ev.type === 'system' && ev.subtype === 'compact_boundary') {
+      const cb = U.parseCompactBoundary(ev);
+      if (cb) {
+        // Unknown again until the next assistant turn reports fresh usage: the pre-compact % no longer applies.
+        a.contextTokens = null; a.contextPct = null; a.lastContextMessageId = null;
+        this.log(node.id, 'compacted', `${cb.trigger === 'auto' ? 'auto-compacted' : 'compacted'} ${cb.preTokens}→${cb.postTokens} tokens`);
+        this.emit('compacted', { nodeId: node.id, ...cb });
+        this.changed();
       }
     } else if (ev.type === 'user' && ev.message?.content) {
       for (const c of ev.message.content) if (c.type === 'tool_result') {
