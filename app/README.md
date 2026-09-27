@@ -78,6 +78,8 @@ Scope is enforced on the server side (`src/board-tools.js`, `src/scope.js`):
 - Status changes: only for tasks assigned to the agent, created by it, or assigned to one of its outgoing neighbours.
 - Comments and `list_tasks`: only for tasks of the agent and its direct neighbours.
 
+Other agent CLIs are wired up generically via a `RuntimeProfile` (`src/runtime-profile.js`), derived by `src/introspector.js` and driven by `src/profile-runner.js` — no CLI-specific code in the runner. See `docs/helpycode-smoke.md` for a real (non-Claude) CLI end-to-end smoke test against the board MCP server, including a gap found in the introspector against a real CLI's `--help` output.
+
 ## Roles, presets and per-agent permissions
 
 - Roles are free text. The role field suggests PM, Planner, Dev, Reviewer and QA, plus this project's role presets and roles already in use. Presets are managed in Settings or with "Save as role preset" and are stored in the project's `settings.json` as `rolePresets`. Each preset has a name, a default system prompt, default allowed and disallowed tools, and a permission mode. A new agent whose role matches a preset gets those defaults, and so does an existing agent whose role is changed to a preset's name (only its empty prompt, tool and permission fields are filled; **Apply preset** overwrites them).
