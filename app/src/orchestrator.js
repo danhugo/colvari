@@ -407,7 +407,8 @@ class Orchestrator extends EventEmitter {
     // Verified empirically (claude 2.1.283): CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=<fraction 0-1> makes the CLI
     // auto-compact on its own once context passes that fraction of the window (confirmed via a live
     // compact_boundary event). So this is set at spawn instead of the app sending /compact itself.
-    const autoCompactPct = Number(settings.autoCompactPct ?? 40);
+    // Per-agent threshold wins over the project default so thinkers (PM/reviewer/critic) can compact later.
+    const autoCompactPct = Number(cfg.autoCompactPct || (settings.autoCompactPct ?? 40));
     if (meta.runtime === 'claude' && autoCompactPct > 0) env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE = String(Math.min(1, autoCompactPct / 100));
     a.runtime = meta.runtime; a.model = cfg.model || '';
     let resume = task.sessionId || (m.continueSession ? this.lastSession(node.id) : null);

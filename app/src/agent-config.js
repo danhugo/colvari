@@ -17,6 +17,7 @@ const NODE_DEFAULTS = {
   billingMode: 'auto', billingBaseUrl: '',
   requireApproval: false, budgetUsd: 0, budgetTokens: 0,
   effort: 'low', autoCompact: '', // autoCompact: '' = CLI default; 'auto', or a token window 100000-1000000
+  autoCompactPct: '', // auto-compact threshold (% of the window); '' = use the project default (settings.autoCompactPct)
   enabledCapabilities: [], // names from node.capabilities.categorized (mode/skill/command/mcp) this agent should use
   ...MODE_DEFAULTS,
 };
@@ -87,6 +88,9 @@ function normalizeNode(n = {}, base = NODE_DEFAULTS) {
     // Legacy autoCompact values <=100 were percentages; migrate them to the CLI default instead of clamping.
     r.autoCompact = (tokens && tokens > 100) ? String(Math.min(1000000, Math.max(100000, tokens))) : '';
   }
+  // '' / 0 / invalid -> '' (project default). 0 as "off" is handled at project level (settings.autoCompactPct = 0).
+  const pct = parseInt(r.autoCompactPct, 10);
+  r.autoCompactPct = pct >= 1 ? Math.min(100, pct) : '';
   Object.assign(r, normalizeMode(r), normalizeBilling(r));
   return r;
 }

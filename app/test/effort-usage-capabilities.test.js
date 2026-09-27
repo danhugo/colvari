@@ -27,6 +27,18 @@ test('legacy percentage autoCompact values (<=100) are migrated to CLI default, 
   assert.equal(normalizeNode({ autoCompact: 1 }).autoCompact, '');
 });
 
+test('autoCompactPct is a per-agent 1-100 threshold override; empty = project default', () => {
+  assert.equal(normalizeNode({}).autoCompactPct, '');
+  assert.equal(normalizeNode({ autoCompactPct: '' }).autoCompactPct, '');
+  assert.equal(normalizeNode({ autoCompactPct: 0 }).autoCompactPct, '');
+  assert.equal(normalizeNode({ autoCompactPct: 'bogus' }).autoCompactPct, '');
+  assert.equal(normalizeNode({ autoCompactPct: 70 }).autoCompactPct, 70);
+  assert.equal(normalizeNode({ autoCompactPct: '70' }).autoCompactPct, 70);
+  assert.equal(normalizeNode({ autoCompactPct: 1 }).autoCompactPct, 1);
+  assert.equal(normalizeNode({ autoCompactPct: 100 }).autoCompactPct, 100);
+  assert.equal(normalizeNode({ autoCompactPct: 250 }).autoCompactPct, 100);
+});
+
 test('migration: "--effort low" in extraArgs becomes effort=low and is stripped', () => {
   const n = normalizeNode({ extraArgs: '--effort low --verbose' });
   assert.equal(n.effort, 'low');
