@@ -449,6 +449,81 @@ async function guiE2E() {
     expect('polish: sidebar lists both teams', await ex(`return document.querySelectorAll('#teamlist [data-tid]').length >= 2`));
     require('electron').nativeTheme.themeSource = 'system'; await ex(`VP = { x: 20, y: 20, zoom: 1 }; applyVP();`); ps.setViewport({}); os.setViewport({});
   };
+  // Critique evidence (t_110eda30): 24 agents in one team (the scale design/critique-views.md must-fix #2
+  // demands) plus 3 small peer teams for cross-team edges, at 1440x900. Shots of Overview, Timeline, Logs,
+  // Wiki and the Graph editor in light+dark. Checks: node names stay >=11px on screen at fit-to-view, or a
+  // LOD collapsed-frame fallback is shown instead; edge stroke contrast is >=3:1 (WCAG 1.4.11); the minimap
+  // hides once the view already fits the graph; a second edge popover replaces (does not stack on) the
+  // first; and the Logs "new lines" pill, if shipped, stays hidden while already scrolled to the tail.
+  // Several of these depend on Uma's t_961b3b38 (still in progress) — checks are written now and pass/fail
+  // is reported per item rather than assumed, per the plan (t_7f8764c8).
+  const critiqueShots = async () => {
+    const prevSize = win.getSize(); win.setSize(1440, 900);
+    await waitFor(`return !!document.querySelector('#tpl-select option')`); await ex(`await refresh();`);
+    const cp = pm.create('Critique 24'); const cs = pm.store(cp.id);
+    const roles = ['PM', 'Dev', 'Dev', 'Dev', 'Reviewer', 'Critic'];
+    for (let i = cs.getTeam().nodes.length; i < 24; i++) cs.addNode({ name: `Cx${i + 1}`, role: roles[i % roles.length], x: 40 + (i % 6) * 220, y: 40 + Math.floor(i / 6) * 130 });
+    const mainId = pm.get(cp.id).teams[0].id; const main = cs.getTeam();
+    const peerTeams = ['Peers A', 'Peers B', 'Peers C'].map((n) => pm.createTeam(cp.id, n));
+    const peerStores = peerTeams.map((p) => pm.store(cp.id, p.id || p));
+    peerStores.forEach((s, i) => { s.addNode({ name: `Peer${i + 1}a`, role: 'Dev', x: 60, y: 60 }); s.addNode({ name: `Peer${i + 1}b`, role: 'Reviewer', x: 300, y: 60 }); });
+    peerStores.forEach((s) => cs.addEdge(main.nodes[0].id, s.getTeam().nodes[0].id, 'message')); // cross-team edges into each peer
+    cs.createTask({ title: 'Critique demo task', assignee: main.nodes[1].id });
+    cs.writeWiki('Critique Runbook', '# Critique Runbook\n\nHow this 24-agent fixture was built.\n\n- 24 agents in one team\n- 3 peer teams, cross-team edges\n', 'human');
+    cs.writeWiki('Critique Glossary', '## Terms\n\n- **LOD**: level of detail fallback when names would be unreadable\n', 'human');
+    const L = (ago, nodeId, kind, text) => `logs.push({ projectId: '${cp.id}', nodeId: '${nodeId}', kind: '${kind}', text: ${JSON.stringify(text)}, at: Date.now() - ${ago} });`;
+    // 'system' starts a timeline run lane, 'tool' adds a tick, so the 24-lane timeline actually has activity to show.
+    const seedLog = (n, i) => `${L(70000 - i * 500, n.id, 'system', `▶ ${n.name} starts "Critique demo task" in /x`)}${L(60000 - i * 500, n.id, 'tool', 'Read {"file_path":"notes.txt"}')}`;
+    await ex(`await switchTo({ p: '${cp.id}', t: '${mainId}' }); await w(400); ${main.nodes.map(seedLog).join('')} await refresh(); renderLog(); renderObs(); await w(200);`);
+    await ex(`$('#tabs button[data-tab=team]').click(); await refresh(); renderGraph(); fitView(); await w(500);`);
+    // 1) Names stay legible at fit-to-view for 24 agents, or a LOD collapsed-frame fallback stands in.
+    const nameCheck = await ex(`const ts = [...document.querySelectorAll('#graph .node .nname')];
+      const px = ts.length ? Math.min(...ts.map((t) => parseFloat(getComputedStyle(t).fontSize) * t.getScreenCTM().a)) : 0;
+      const frame = !!document.querySelector('.team-frame, .lod-frame, [data-lod-frame], [data-team-frame]');
+      return { px, frame, nodes: ts.length, zoom: VP.zoom };`);
+    expect('critique: names >=11px at fit-to-view (24 agents), or a LOD collapsed-frame fallback', nameCheck.px >= 11 || nameCheck.frame, nameCheck);
+    // 2) Edge stroke contrast against the canvas background, both themes (WCAG 1.4.11 non-text minimum 3:1).
+    const edgeContrast = async (theme) => { require('electron').nativeTheme.themeSource = theme; await ex(`await w(300);`);
+      return ex(`const p = document.querySelector('#graph .edge'); if (!p) return null;
+        const resolve = (c) => { const d = document.createElement('div'); d.style.color = c; document.body.appendChild(d); const v = getComputedStyle(d).color; d.remove(); return (v.match(/[\\d.]+/g) || [0, 0, 0]).map(Number); };
+        const lin = (c) => { c /= 255; return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); };
+        const lum = ([r, g, b]) => 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
+        const edge = resolve(getComputedStyle(p).stroke); const bg = resolve(getComputedStyle(document.documentElement).getPropertyValue('--bg').trim() || '#fff');
+        const [l1, l2] = [lum(edge), lum(bg)].sort((a, b) => b - a); return { ratio: (l1 + 0.05) / (l2 + 0.05), edge, bg };`); };
+    const cLight = await edgeContrast('light'); const cDark = await edgeContrast('dark');
+    expect('critique: graph edge contrast >=3:1 in light', !cLight || cLight.ratio >= 3, cLight);
+    expect('critique: graph edge contrast >=3:1 in dark', !cDark || cDark.ratio >= 3, cDark);
+    // 3) Minimap hides once the view already fits the whole graph (fitView() above matches the graph bbox).
+    const mmHidden = await ex(`const m = $('#minimap'); return !m || m.classList.contains('hidden') || getComputedStyle(m).display === 'none';`);
+    expect('critique: minimap hidden once fit-to-view already fits the graph', mmHidden, { mmHidden });
+    // 4) A second edge popover replaces the first instead of stacking a duplicate on top of it.
+    const [a, b, c, d] = main.nodes;
+    await ex(`window.alert = () => {}; edgePopover(200, 200, '${a.id}', '${b.id}'); await w(80); edgePopover(260, 260, '${c.id}', '${d.id}');`);
+    const popovers = await ex(`return { openCtxMenus: document.querySelectorAll('[id="ctxmenu"]:not(.hidden)').length, dupIds: document.querySelectorAll('[id="ctxmenu"]').length, head: ($('.mhead') || {}).textContent || '' };`);
+    expect('critique: a second edge popover replaces the first (no stacked popovers)', popovers.openCtxMenus === 1 && popovers.dupIds === 1 && popovers.head.includes(c.name) && popovers.head.includes(d.name), popovers);
+    await ex(`hideMenus();`);
+    // 5) Logs "new lines" pill (critique-views.md #8): feature-detected, since it's part of Uma's pending fixes.
+    await ex(`$('#tabs button[data-tab=obs]').click(); await refresh(); await w(400);`);
+    const pillSel = await ex(`return ['#log-newpill', '.newpill', '[data-newpill]', '#lognew'].find((s) => document.querySelector(s)) || null`);
+    if (pillSel) {
+      await ex(`$('#log').scrollTop = $('#log').scrollHeight; await w(200);`);
+      const hiddenAtTail = await ex(`const p = $('${pillSel}'); return !p || p.classList.contains('hidden') || getComputedStyle(p).display === 'none';`);
+      expect('critique: Logs new-lines pill hidden while already at the tail', hiddenAtTail, { pillSel });
+    } else console.log('[gui-e2e] critique: Logs new-lines pill not shipped yet (Uma t_961b3b38 pending), skipping check');
+    console.log('[gui-e2e] critique', JSON.stringify({ nameCheck, cLight, cDark, mmHidden, popovers, pillSel }));
+    // Shots: Overview, Timeline (cropped), Logs, Wiki, Graph editor -- light + dark.
+    for (const t of ['light', 'dark']) {
+      require('electron').nativeTheme.themeSource = t;
+      await ex(`$('#tabs button[data-tab=team]').click(); await refresh(); renderGraph(); fitView(); await w(500);`); await shot(`critique-graph-${t}`);
+      await ex(`$('#tabs button[data-tab=overview]').click(); await refresh(); await w(500);`); await shot(`critique-overview-${t}`);
+      const tb = await ex(`const b = $('#ov-timelinewrap').getBoundingClientRect(); return { x: Math.round(b.x), y: Math.round(b.y), width: Math.round(b.width), height: Math.round(b.height) };`);
+      fs.writeFileSync(path.join(out, `critique-timeline-${t}.png`), (await win.capturePage(tb)).toPNG());
+      await ex(`$('#tabs button[data-tab=obs]').click(); await refresh(); renderLog(); renderObs(); await w(400);`); await shot(`critique-logs-${t}`);
+      await ex(`$('#tabs button[data-tab=wiki]').click(); await refresh(); await w(400);`); await shot(`critique-wiki-${t}`);
+    }
+    require('electron').nativeTheme.themeSource = 'system';
+    win.setSize(prevSize[0], prevSize[1]);
+  };
   // Merge-conflict guard: a task with a real worktree branch that conflicts with base. Marking it
   // done must abort the auto-merge, park the task as merge_conflict (visible on the Board, not hidden), and
   // spawn a "Resolve merge conflict" follow-up.
@@ -491,6 +566,7 @@ async function guiE2E() {
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'mixed') { await mixedShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'polish') { await polishShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'mainlogswiki') { await mainLogsWikiShots(); throw null; }
+    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'critique') { await critiqueShots(); throw null; }
     // project/team management through the UI: create a project from the Startup template, then a Solo team, then switch back.
     // Wait until the template select is filled (the first refresh loads the templates) before choosing one.
     await ex(`$('#tabs button[data-tab=team]').click(); await w(300);`); // Chat is the default tab; the flow below clicks the graph
@@ -679,6 +755,7 @@ async function guiE2E() {
       const bg = await ex(`return getComputedStyle(document.documentElement).getPropertyValue('--bg').trim()`); expect(`theme ${theme} applied`, bg === BG[theme], { bg, dt: await ex(`return document.documentElement.dataset.theme + '|' + matchMedia('(prefers-color-scheme: dark)').matches + '|' + getComputedStyle(document.documentElement).getPropertyValue('--bg-app')`) });
     }
     if (!process.env.SKIP_WIKILOGS) await mainLogsWikiShots();
+    if (!process.env.SKIP_CRITIQUE) await critiqueShots();
     nativeTheme.themeSource = 'system';
     const tasks = store.listTasks();
     console.log('[gui-e2e]', JSON.stringify({ edges: store.getTeam().edges.length, tasks: tasks.map((t) => [t.title, t.status, t.iterations || 0, !!t.sessionId]), cost: orch.snapshot().totalCost }));
