@@ -205,6 +205,11 @@ button:focus-visible, input:focus, select:focus, textarea:focus { outline:none; 
 .tag.live { background:var(--success-soft); color:var(--success-text); border-color:transparent; }
 .tag.ready { background:var(--accent-soft, var(--success-soft)); color:var(--accent-text, var(--accent)); border-color:transparent; }
 .tag.noworker { background:var(--danger-soft); color:var(--danger); border-color:transparent; }
+.tag.prio { margin-left:0; margin-right:6px; font-weight:var(--fw-semibold); }
+.tag.prio-P0 { background:var(--danger-soft); color:var(--danger); border-color:transparent; }
+.tag.prio-P1 { background:var(--warning-soft); color:var(--warning-text); border-color:transparent; }
+.tag.prio-P2 { background:var(--accent-soft); color:var(--accent-text); border-color:transparent; }
+.tag.prio-P3 { background:var(--bg-sidebar); color:var(--fg-muted); border-color:var(--border-strong); }
 .badge { background:var(--danger); border-radius:var(--radius-full); font-weight:var(--fw-semibold); }
 .toast { background:var(--bg-raised); border-color:var(--border); border-left-color:var(--accent); border-radius:var(--radius-md); box-shadow:var(--shadow-lg); animation:rise var(--dur-base) var(--ease-spring); }
 @keyframes rise { from { opacity:0; transform:translateY(8px); } }
