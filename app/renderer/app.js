@@ -212,6 +212,14 @@ const fmtCountdown = (ms) => {
   const h = Math.floor(totalMin / 60), m = totalMin % 60; return h > 0 ? `${h}h ${m}m` : `${m}m`;
 };
 function resetIn(u) { return u && u.resetsAt ? Math.max(0, new Date(u.resetsAt).getTime() - Date.now()) : 0; }
+// Why the meter has no real 5h/weekly % yet — a per-node reason (not installed / non-subscription billing /
+// no usage reported) beats a generic "–" with the explanation hidden behind a hover title only.
+async function noLimitDataReason() {
+  const node = S.team.nodes[0];
+  if (!node) return 'no agent configured yet';
+  try { const pu = await call('providerUsage', node.id); if (pu && pu.reason) return pu.reason; } catch {}
+  return 'no usage reported yet by the CLI (run this agent once to get real usage)';
+}
 async function renderLimitMeter() {
   let st; try { st = await call('usageStatus'); } catch { st = null; }
   const m = $('#limitmeter');
@@ -219,9 +227,10 @@ async function renderLimitMeter() {
   if (!st || (!st.fiveHour.limit && !st.weekly.limit)) {
     if (!isSubscriptionUser) { m.classList.add('hidden'); m.innerHTML = ''; return; }
     m.classList.remove('hidden');
-    const why = 'Subscription 5h/weekly usage appears here once the CLI reports it (after a run) or a limit is set in Usage &amp; limits.';
-    m.innerHTML = `<span class="lm-part lm-pending" title="${why}"><b>5h</b> <small>–</small></span>` +
-      `<span class="lm-part lm-pending" title="${why}"><b>weekly</b> <small>–</small></span>`;
+    const reason = await noLimitDataReason();
+    const why = `Subscription 5h/weekly usage appears here once the CLI reports it (after a run) or a limit is set in Usage &amp; limits. (${esc(reason)})`;
+    m.innerHTML = `<span class="lm-part lm-pending" title="${why}"><b>5h</b> <small>– no limit data: ${esc(reason)}</small></span>` +
+      `<span class="lm-part lm-pending" title="${why}"><b>weekly</b> <small>– no limit data: ${esc(reason)}</small></span>`;
     return;
   }
   m.classList.remove('hidden');
@@ -838,8 +847,9 @@ async function renderDiscovery() {
   const snap = discoverySnapshot();
   let st; try { st = await call('usageStatus'); } catch { st = null; }
   const cnt = (n) => n > 0 ? String(n) : '—';
+  const reason = (!st || (!st.fiveHour.limit && !st.weekly.limit)) ? await noLimitDataReason() : null;
   const limPart = (label, u) => {
-    if (!u || !u.limit) return `<span class="lm-part lm-pending" title="No ${esc(label)} limit set or reported yet"><b>${esc(label)}</b> <small>–</small></span>`;
+    if (!u || !u.limit) return `<span class="lm-part lm-pending" title="No ${esc(label)} limit set or reported yet"><b>${esc(label)}</b> <small>${reason ? `– no limit data: ${esc(reason)}` : '– no limit set'}</small></span>`;
     const pct = Math.min(100, Math.round(u.pct * 100)); const cls = u.pause ? 'danger' : u.warn ? 'warn' : 'ok';
     const ms = u.resetsAt ? new Date(u.resetsAt).getTime() - Date.now() : 0;
     const resetTitle = ms > 0 ? ` · resets in ${fmtCountdown(ms)}` : '';

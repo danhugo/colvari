@@ -105,7 +105,7 @@ test('limits: subscriptionGuard treats missing/unavailable rate limits as 0% (no
 test('limits: usageStatus with no limits configured at all reports every window as disabled (unavailable), no warn/pause', () => {
   const runs = [{ kind: 'agent', billingSource: 'subscription', startedAt: new Date().toISOString() }];
   const s = U.usageStatus(runs, undefined);
-  for (const w of [s.fiveHour, s.weekly, s.tokens, s.cost]) assert.deepEqual(w, { used: w.used, limit: 0, pct: 0, warn: false, pause: false });
+  for (const w of [s.fiveHour, s.weekly, s.tokens, s.cost]) assert.deepEqual(w, { used: w.used, limit: 0, pct: 0, warn: false, pause: false, resetsAt: null });
   assert.equal(s.warn, false); assert.equal(s.pause, false);
 });
 
