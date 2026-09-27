@@ -12,6 +12,7 @@ const PROFILE_DEFAULTS = {
   effortValues: [], // supported effort level names, in the CLI's own vocabulary
   effortFlag: '', // e.g. '--effort' ; '' = unsupported
   resumeFlag: '', // e.g. '--resume' or 'resume' (bare token before session id); '' = unsupported
+  bypassFlag: '', // e.g. '--dangerously-skip-permissions' ; '' = unsupported. Applied at run time ONLY when the node's effective permission mode is bypassPermissions — never during introspection.
   mcp: { method: 'none', flag: '' }, // method: none | json-flag (flag takes JSON.stringify(mcpConfig)) | toml-override
   // eventMapping: dotted paths (relative to each parsed JSON event) used to pull fields out.
   // Missing paths are simply skipped for that event.
@@ -51,6 +52,7 @@ function normalizeRuntimeProfile(p = {}) {
   r.effortValues = toStrArray(p.effortValues);
   r.effortFlag = String(p.effortFlag || '');
   r.resumeFlag = String(p.resumeFlag || '');
+  r.bypassFlag = String(p.bypassFlag || '');
   r.mcp = normalizeMcp(p.mcp);
   r.eventMapping = normalizeEventMapping(p.eventMapping);
   return r;

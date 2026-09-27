@@ -25,11 +25,16 @@ test('parseCommands / pickRunCommand work on a fictional CLI (no CLI-specific co
   assert.strictEqual(IN.pickRunCommand(IN.parseCommands(codexHelp)), 'exec');
 });
 
-test('findEffort / findResume / findMcp heuristics', () => {
+test('findEffort / findResume / findMcp / findBypassFlag heuristics', () => {
   assert.deepStrictEqual(IN.findEffort(helpycodeHelp), { flag: '--effort', values: ['low', 'medium', 'high'] });
   assert.strictEqual(IN.findResume(helpycodeHelp, IN.parseCommands(helpycodeHelp)), 'resume');
   assert.strictEqual(IN.findResume(codexHelp, IN.parseCommands(codexHelp)), '');
   assert.deepStrictEqual(IN.findMcp(helpycodeHelp), { method: 'json-flag', flag: '--mcp-config' });
+  // only bypass-shaped flags are claimed, and only whole tokens
+  assert.strictEqual(IN.findBypassFlag('  --dangerously-skip-permissions  auto-approve permissions'), '--dangerously-skip-permissions');
+  assert.strictEqual(IN.findBypassFlag('  --dangerously-bypass-approvals-and-sandbox  (dangerous!)'), '--dangerously-bypass-approvals-and-sandbox');
+  assert.strictEqual(IN.findBypassFlag('  --permissions  set permissions'), ''); // not a bypass flag
+  assert.strictEqual(IN.findBypassFlag('no flags here'), '');
 });
 
 test('deriveEventMapping finds synonyms anywhere in nested probe events', () => {
@@ -128,6 +133,9 @@ test('introspectRuntime derives a working profile against real installed-helpyco
   // values are claimed (the runner must not reject the CLI's default "low")
   assert.deepStrictEqual(profile.effortValues, []);
   assert.strictEqual(profile.resumeFlag, '-s');
+  // t_2cd0112e: the CLI's own help advertises the bypass flag; claimed so runs can auto-approve
+  // permission asks (external_directory) when the effective permission mode is bypassPermissions
+  assert.strictEqual(profile.bypassFlag, '--dangerously-skip-permissions');
 });
 
 // Recorded from the real installed `helpycode models` (0.3.5): plain model-id lines, no JSON.
@@ -236,6 +244,8 @@ test('assertSafeArgs refuses auto-approve/bypass flags; sandboxEnv strips user s
   assert.throws(() => IN.assertSafeArgs(['run', '--yes', '{prompt}']), /auto-approve|refuses/);
   assert.throws(() => IN.assertSafeArgs(['--dangerously-bypass-approvals-and-sandbox']), /refuses/);
   assert.throws(() => IN.assertSafeArgs(['-y']), /refuses/);
+  assert.throws(() => IN.assertSafeArgs(['yes']), /refuses/);
+  assert.doesNotThrow(() => IN.assertSafeArgs(['run', IN.AGENT_PROFILE_PROMPT]), 'the ask-agent prompt is prose, not a bypass flag');
   assert.deepStrictEqual(IN.assertSafeArgs(['run', '--format', 'json', '{prompt}']), ['run', '--format', 'json', '{prompt}']);
   const env = IN.sandboxEnv({ PATH: '/bin', HOME: '/h', ANTHROPIC_API_KEY: 'sk-secret', MY_APP_TOKEN: 'x', LANG: 'C' });
   assert.deepStrictEqual(env, { PATH: '/bin', HOME: '/h', LANG: 'C' });

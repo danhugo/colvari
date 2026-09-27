@@ -42,10 +42,12 @@ function writeFileMcpConfig(cwd, filename, mcpConfig) {
 }
 
 // Build the full argv (after the binary) for one run.
-function buildProfileArgs(profile, { model, prompt, variant, session, mcpConfig } = {}) {
+function buildProfileArgs(profile, { model, prompt, variant, session, bypass, mcpConfig } = {}) {
   const p = normalizeRuntimeProfile(profile);
   if (variant && p.effortValues.length && !p.effortValues.includes(variant)) throw new Error(`unknown effort "${variant}" for ${p.label} (expected ${p.effortValues.join('/')})`);
   const args = fillArgsTemplate(p.argsTemplate, { model, prompt, variant, session });
+  // Only on an explicit opt-in (the node's effective permission mode): never during introspection.
+  if (bypass && p.bypassFlag) args.splice(1, 0, p.bypassFlag); // right after the run subcommand
   if (session && p.resumeFlag) {
     const resumeTokens = p.resumeFlag.startsWith('-') ? [p.resumeFlag, session] : [p.resumeFlag, session];
     args.splice(1, 0, ...resumeTokens); // right after the run subcommand (args[0])

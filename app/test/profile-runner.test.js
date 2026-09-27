@@ -8,6 +8,7 @@ const PROFILE = {
   effortValues: ['low', 'high'],
   effortFlag: '--effort',
   resumeFlag: '--resume',
+  bypassFlag: '--dangerously-skip-permissions',
   mcp: { method: 'json-flag', flag: '--mcp-config' },
   eventMapping: { textPath: 'text', sessionIdPath: 'session_id', costPath: 'total_cost_usd', inputPath: 'usage.input_tokens', outputPath: 'usage.output_tokens', reasoningPath: 'usage.reasoning_tokens', cachePath: 'usage.cache_read_tokens' },
 };
@@ -18,6 +19,8 @@ test('buildProfileArgs fills template, rejects unknown effort, injects resume + 
   assert.ok(args.includes('--model') && args.includes('m1'));
   assert.ok(args.includes('hi'));
   assert.ok(args.includes('--mcp-config'));
+  assert.ok(!args.includes('--dangerously-skip-permissions'), 'no bypass unless asked');
+  assert.deepStrictEqual(buildProfileArgs(PROFILE, { prompt: 'hi', bypass: true }).slice(0, 2), ['run', '--dangerously-skip-permissions']);
   assert.throws(() => buildProfileArgs(PROFILE, { variant: 'bogus', prompt: 'x' }), /unknown effort "bogus"/);
 });
 

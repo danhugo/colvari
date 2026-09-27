@@ -54,7 +54,11 @@ function profileRuntime(id, label, binFromSettings) {
       const n = normalizeNode(node);
       const profile = profileFor(settings, opts);
       if (mcp && profile.mcp.method === 'file' && opts.cwd) writeFileMcpConfig(opts.cwd, profile.mcp.flag, mcp);
-      const args = buildProfileArgs(profile, { model: n.model, prompt, variant: n.effort, session: opts.resume });
+      // Same effective-mode rule as buildClaudeArgs: unset falls through to bypassPermissions.
+      // Without the derived bypass flag, non-interactive profile-runtime runs auto-reject permission
+      // asks (e.g. helpycode's external_directory) and the agent cannot reach the paths it needs.
+      const bypass = (n.permissionMode || (settings || {}).permissionMode || 'bypassPermissions') === 'bypassPermissions';
+      const args = buildProfileArgs(profile, { model: n.model, prompt, variant: n.effort, session: opts.resume, bypass });
       args.push(...splitArgs(n.extraArgs));
       return args;
     },

@@ -81,8 +81,23 @@ function fakeHelpyExec(bin, args) {
 
 test('helpycode is profile-driven: args derive from the introspector (no hand-built profile)', () => {
   const rt = RT.getRuntime('helpycode');
+  // default (unset) permission mode falls through to bypassPermissions: the derived bypass flag
+  // must be there, or non-interactive runs auto-reject permission asks (external_directory)
   const a = rt.buildArgs({ model: 'elice/z-ai/glm-5.3-flash', effort: 'high' }, 'hi', { helpycodePath: '/fake/hc-args' }, {}, { resume: 'S1', exec: fakeHelpyExec });
-  assert.deepStrictEqual(a, ['run', '-s', 'S1', '--format', 'json', '--model', 'elice/z-ai/glm-5.3-flash', '--variant', 'high', 'hi']);
+  assert.deepStrictEqual(a, ['run', '-s', 'S1', '--dangerously-skip-permissions', '--format', 'json', '--model', 'elice/z-ai/glm-5.3-flash', '--variant', 'high', 'hi']);
+});
+test('helpycode bypass flag respects the permission mode: explicit non-bypass modes leave it off', () => {
+  const rt = RT.getRuntime('helpycode');
+  const S = { helpycodePath: '/fake/hc-nobypass' };
+  for (const mode of ['default', 'acceptEdits', 'plan']) {
+    const a = rt.buildArgs({ permissionMode: mode }, 'hi', S, {}, { exec: fakeHelpyExec });
+    assert.ok(!a.includes('--dangerously-skip-permissions'), mode + ' must not bypass');
+    const b = rt.buildArgs({ permissionMode: 'bypassPermissions' }, 'hi', S, {}, { exec: fakeHelpyExec });
+    assert.ok(b.includes('--dangerously-skip-permissions'));
+    // node setting wins over the project default
+    const c = rt.buildArgs({ permissionMode: 'default' }, 'hi', { permissionMode: 'bypassPermissions', helpycodePath: '/fake/hc-nobypass' }, {}, { exec: fakeHelpyExec });
+    assert.ok(!c.includes('--dangerously-skip-permissions'));
+  }
 });
 test('helpycode args: no cwd means no mcp file written, still builds args', () => {
   const a = RT.getRuntime('helpycode').buildArgs({ model: 'm1' }, 'hi', { helpycodePath: '/fake/hc-nocwd' }, { mcpServers: { board: {} } }, { exec: fakeHelpyExec });

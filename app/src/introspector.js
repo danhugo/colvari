@@ -105,6 +105,17 @@ function findMcp(text) {
   return { method: 'none', flag: '' };
 }
 
+// "--dangerously-skip-permissions   auto-approve permissions that are not explicitly denied" ->
+// '--dangerously-skip-permissions'. Only bypass-shaped flags are claimed, and only advertised by the
+// CLI's own help. The flag is never sent during introspection itself (assertSafeArgs); the runner
+// applies it at real-run time, only when the node's effective permission mode is bypassPermissions —
+// without it, non-interactive runs auto-reject permission asks (external_directory) and the agent
+// cannot reach the paths it needs (t_2cd0112e).
+function findBypassFlag(text) {
+  const m = String(text || '').match(/\s(--[\w-]*(?:skip-permissions|bypass|yolo|auto-approve)[\w-]*)\b/);
+  return m ? m[1] : '';
+}
+
 // Recursively flatten a JSON value into { 'a.b.c': value } for scalar leaves.
 function flatten(obj, prefix = '', out = {}) {
   if (obj != null && typeof obj === 'object' && !Array.isArray(obj)) {
@@ -195,11 +206,13 @@ function getSandboxDir() {
 }
 
 // Introspection never sends approval-bypass flags to an unknown binary, even if its own help or the
-// ask-agent fallback suggested them.
+// ask-agent fallback suggested them. The ban applies to flag-shaped tokens only: the ask-agent
+// prompt is prose that legitimately names the bypassFlag schema key.
 const BANNED_ARG = /(^--?(y|yes)$)|dangerous|bypass|auto.?approve/i;
+const BARE_YES = /^(y|yes)$/i;
 function assertSafeArgs(args) {
   for (const a of args) {
-    if (BANNED_ARG.test(a)) throw new Error(`introspection refuses to run arg "${a}" (auto-approve/bypass flags are never sent to an unknown CLI)`);
+    if ((a.startsWith('-') && BANNED_ARG.test(a)) || BARE_YES.test(a)) throw new Error(`introspection refuses to run arg "${a}" (auto-approve/bypass flags are never sent to an unknown CLI)`);
   }
   return args;
 }
@@ -221,7 +234,7 @@ const defaultExec = makeExec();
 const AGENT_PROFILE_PROMPT = [
   'Print ONLY a single JSON object (no prose, no markdown fences) describing how to run yourself non-interactively from a script:',
   '{"argsTemplate": ["..."], "resumeFlag": "", "effortFlag": "", "effortValues": [],',
-  ' "mcp": {"method": "none|json-flag|toml-override|file", "flag": ""},',
+  ' "mcp": {"method": "none|json-flag|toml-override|file", "flag": ""}, "bypassFlag": "",',
   ' "eventMapping": {"textPath": "", "sessionIdPath": "", "costPath": "", "inputPath": "", "outputPath": "", "reasoningPath": "", "cachePath": ""}}.',
   'argsTemplate is the argv after the binary, with the placeholders {model}, {variant} and {prompt} where those belong;',
   'eventMapping entries are dotted paths into each JSON event you print on stdout (empty string = field unsupported).',
@@ -255,6 +268,8 @@ function validateAgentProfile(raw, bin) {
   if (effortFlag && !SAFE_FLAG.test(effortFlag)) throw new Error(`agent profile: unsafe effort flag "${effortFlag}"`);
   const resumeFlag = String(raw.resumeFlag || '');
   if (resumeFlag && SAFE_TOKEN.test(resumeFlag)) throw new Error(`agent profile: unsafe resume flag "${resumeFlag}"`);
+  const bypassFlag = String(raw.bypassFlag || '');
+  if (bypassFlag && !SAFE_FLAG.test(bypassFlag)) throw new Error(`agent profile: unsafe bypass flag "${bypassFlag}"`);
   const emRaw = raw.eventMapping && typeof raw.eventMapping === 'object' ? raw.eventMapping : {};
   const eventMapping = {};
   for (const k of EVENT_MAPPING_KEYS) {
@@ -268,6 +283,7 @@ function validateAgentProfile(raw, bin) {
     effortFlag,
     effortValues: (Array.isArray(raw.effortValues) ? raw.effortValues : []).map((v) => String(v)),
     resumeFlag,
+    bypassFlag,
     mcp: { method: mcpMethod, flag: mcpFlag },
     eventMapping,
   });
@@ -278,7 +294,7 @@ function validateAgentProfile(raw, bin) {
 // agent's answer is UNIONED in — an incomplete vocabulary would make buildProfileArgs reject valid
 // effort levels the CLI actually accepts.
 function mergeAgentFields(profile, agentProfile, sources) {
-  for (const k of ['argsTemplate', 'effortFlag', 'resumeFlag']) {
+  for (const k of ['argsTemplate', 'effortFlag', 'resumeFlag', 'bypassFlag']) {
     const empty = Array.isArray(profile[k])
       ? profile[k].length === 0 || (k === 'argsTemplate' && profile[k].length === 1 && profile[k][0] === '{prompt}')
       : !profile[k];
@@ -317,6 +333,7 @@ function introspectRuntime(bin, execOrOpts, maybeOpts) {
   const modelFlag = findModelFlag(text);
   const { flag: formatFlag, value: formatValue } = findFormatFlag(text);
   const mcp = findMcp(text);
+  const bypassFlag = findBypassFlag(text);
   const hasModelsCmd = commands.some((c) => c.name === 'models');
 
   const argsTemplate = [];
@@ -329,6 +346,7 @@ function introspectRuntime(bin, execOrOpts, maybeOpts) {
   if (effortFlag) { sources.effortFlag = SRC.help; sources.effortValues = SRC.help; }
   if (resumeFlag) sources.resumeFlag = SRC.help;
   if (mcp.method !== 'none') sources.mcp = SRC.help;
+  if (bypassFlag) sources.bypassFlag = SRC.help;
 
   // Layer 2: models discovery.
   let models = [];
@@ -354,7 +372,7 @@ function introspectRuntime(bin, execOrOpts, maybeOpts) {
   const profile = normalizeRuntimeProfile({
     id: opts.id || bin, label: opts.label || bin, binary: bin,
     argsTemplate, modelsCommand: hasModelsCmd ? ['models'] : [],
-    effortValues, effortFlag, resumeFlag, mcp, eventMapping,
+    effortValues, effortFlag, resumeFlag, bypassFlag, mcp, eventMapping,
   });
   if (hasModelsCmd) sources.modelsCommand = SRC.help;
 
@@ -379,4 +397,4 @@ function askAgentArgs(profile, opts = {}) {
   return args;
 }
 
-module.exports = { SRC, parseCommands, pickRunCommand, findEffort, findResume, findModelFlag, findFormatFlag, findMcp, flatten, deriveEventMapping, parseJsonLines, parseModelsOutput, extractJson, validateAgentProfile, mergeAgentFields, assertSafeArgs, sandboxEnv, makeExec, askAgentArgs, AGENT_PROFILE_PROMPT, introspectRuntime, defaultExec };
+module.exports = { SRC, parseCommands, pickRunCommand, findEffort, findResume, findModelFlag, findFormatFlag, findMcp, findBypassFlag, flatten, deriveEventMapping, parseJsonLines, parseModelsOutput, extractJson, validateAgentProfile, mergeAgentFields, assertSafeArgs, sandboxEnv, makeExec, askAgentArgs, AGENT_PROFILE_PROMPT, introspectRuntime, defaultExec };
