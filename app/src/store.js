@@ -8,9 +8,10 @@ const C = require('./controls');
 const PRESET_FIELDS = ['systemPrompt', 'allowedTools', 'disallowedTools', 'permissionMode'];
 const pick = (o, ks) => Object.fromEntries(ks.map((k) => [k, o[k]]));
 const { normalizeNode, normalizePatch, normalizePreset, applyPreset, EDGE_TYPES, SUGGESTED_ROLES } = require('./agent-config');
+const WT = require('./worktree');
 
 const ROLES = SUGGESTED_ROLES; // suggestions only: roles are free text
-const STATUSES = ['todo', 'in_progress', 'review', 'done', 'waiting_for_human'];
+const STATUSES = ['todo', 'in_progress', 'review', 'done', 'waiting_for_human', 'merge_conflict'];
 
 function defaultProjectDir(name = 'default') {
   return path.join(os.homedir(), '.agents-squad', name);
@@ -154,10 +155,34 @@ class Store {
     return task;
   }
   updateTask(tid, patch) {
-    const t = this._updateTask(tid, patch);
+    let t = this._updateTask(tid, patch);
     // Every approval request also shows up in the human inbox.
     if (patch.awaitingApproval && !this.listInbox({ status: 'open' }).some((i) => i.kind === 'approval' && i.taskId === tid)) this.addInbox({ kind: 'approval', taskId: tid, nodeId: t.assignee, question: `Approve "${t.title}"?`, choices: ['approve'] });
+    // Never strand finished work in its worktree branch: auto-merge on done, or park as merge_conflict.
+    if (patch.status === 'done' && t.worktreePath && t.worktreeBranch) t = this._mergeOnDone(t);
     return t;
+  }
+  // Merge a done task's squad/<id> branch into base. On conflict, abort, mark the task 'merge_conflict'
+  // (not done) and create a follow-up conflict-resolution task for the same assignee.
+  _mergeOnDone(t) {
+    try {
+      WT.worktreeMerge(t);
+      this.commentTask(t.id, 'system', `auto-merged ${t.worktreeBranch} into base`);
+      return this.getTask(t.id);
+    } catch (e) {
+      this._updateTask(t.id, { status: 'merge_conflict' });
+      this.commentTask(t.id, 'system', `auto-merge blocked, task moved to merge_conflict: ${e.message}`);
+      const title = `Resolve merge conflict: ${t.title}`;
+      if (!this.listTasks().some((x) => x.parentId === t.id && x.title === title && x.status !== 'done')) {
+        this.createTask({ title, description: `Auto-merge of ${t.worktreeBranch} failed:\n${e.message}\n\nResolve the conflict (e.g. merge the branch manually, fix conflicts, commit), then re-mark the original task done.`, assignee: t.assignee, createdBy: 'system', parentId: t.id });
+      }
+      return this.getTask(t.id);
+    }
+  }
+  // Unmerged squad/<id> branches across every git repo referenced by a task's worktreePath.
+  listUnmergedBranches() {
+    const roots = new Set(this.listTasks().filter((t) => t.worktreePath).map((t) => path.resolve(t.worktreePath, '..', '..', '..')));
+    return [...roots].flatMap((root) => WT.unmergedSquadBranches(root));
   }
   _updateTask(tid, patch) {
     return this.update('board', { tasks: [] }, (b) => {
@@ -165,7 +190,7 @@ class Store {
       if (patch.status && !STATUSES.includes(patch.status)) throw new Error('bad status ' + patch.status);
       if (patch.blockedBy !== undefined) t.blockedBy = C.validateDeps(tid, patch.blockedBy, b.tasks);
       if (patch.status && patch.status !== 'review') t.awaitingApproval = false;
-      for (const k of ['title', 'description', 'assignee', 'status', 'sessionId', 'iterations', 'awaitingApproval', 'reopenCount']) if (patch[k] !== undefined) t[k] = patch[k];
+      for (const k of ['title', 'description', 'assignee', 'status', 'sessionId', 'iterations', 'awaitingApproval', 'reopenCount', 'worktreePath', 'worktreeBranch']) if (patch[k] !== undefined) t[k] = patch[k];
       t.updatedAt = new Date().toISOString();
       // Parent auto-complete: when the last open subtask is done, the parent moves to done.
       for (let c = t; c.status === 'done' && c.parentId;) {

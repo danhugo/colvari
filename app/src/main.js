@@ -568,6 +568,7 @@ const api = {
   taskDiff: (c, id) => WT.worktreeDiff(wtTask(c, id)),
   taskMerge: (c, id) => { const r = WT.worktreeMerge(wtTask(c, id)); ST(c).commentTask(id, 'human', `merged ${r.branch} into ${r.base}`); return r; },
   taskDiscard: (c, id) => { const r = WT.worktreeDiscard(wtTask(c, id)); ST(c).updateTask(id, { worktreePath: null, worktreeBranch: null }); return r; },
+  unmergedBranches: (c) => ST(c).listUnmergedBranches(),
   pickDir: async () => { const { dialog } = require('electron'); const r = await dialog.showOpenDialog(win, { properties: ['openDirectory', 'createDirectory'] }); return r.canceled ? null : r.filePaths[0]; },
   agentStates: (c) => orchFor(c.p).agentStates(),
   // Live per-node data for the graph: runtime, model, status (working|idle|needs-human).
