@@ -53,23 +53,36 @@ async function main() {
   console.log('real init event:', initEvent ? JSON.stringify({ skills: (initEvent.skills || []).length, slash_commands: (initEvent.slash_commands || []).length }) : null);
   console.log('real rate_limit_event:', JSON.stringify(rateLimitEvent));
 
-  // --- Discovery: initial probe vs. refresh probe, both merging the same real init event (no fixtures) ---
+  // --- Discovery: initial probe vs. two refresh probes, all merging the same real init event (no fixtures) ---
   const initial = CAP.discoverCapabilities(rt, {}, { cwd, initEvent });
-  const refresh = CAP.discoverCapabilities(rt, {}, { cwd, initEvent });
+  const refresh1 = CAP.discoverCapabilities(rt, {}, { cwd, initEvent });
+  const refresh2 = CAP.discoverCapabilities(rt, {}, { cwd, initEvent });
   console.log('initial:', JSON.stringify({ ok: initial.ok, skills: initial.skills.length, commands: initial.commands.length, slashCommands: initial.slashCommands.length, counts: countBy(initial.categorized) }, null, 2));
-  console.log('refresh:', JSON.stringify({ ok: refresh.ok, skills: refresh.skills.length, commands: refresh.commands.length, slashCommands: refresh.slashCommands.length, counts: countBy(refresh.categorized) }, null, 2));
+  console.log('refresh1:', JSON.stringify({ ok: refresh1.ok, skills: refresh1.skills.length, commands: refresh1.commands.length, slashCommands: refresh1.slashCommands.length, counts: countBy(refresh1.categorized) }, null, 2));
+  console.log('refresh2:', JSON.stringify({ ok: refresh2.ok, skills: refresh2.skills.length, commands: refresh2.commands.length, slashCommands: refresh2.slashCommands.length, counts: countBy(refresh2.categorized) }, null, 2));
 
   expect('discovery ok on the real machine', initial.ok === true, { error: initial.error });
-  const ic = countBy(initial.categorized), rc = countBy(refresh.categorized);
-  expect('initial == refresh counts per category', JSON.stringify(ic) === JSON.stringify(rc), { initial: ic, refresh: rc });
-  expect('Skills > 0', initial.skills.length > 0, initial.skills.length);
-  expect('Commands > 17', (ic.command || 0) > 17, ic.command || 0);
-  expect('Modes >= 1', (ic.mode || 0) >= 1, ic.mode || 0);
+  const ic = countBy(initial.categorized), rc1 = countBy(refresh1.categorized), rc2 = countBy(refresh2.categorized);
+  expect('initial == refresh1 == refresh2 counts per category', JSON.stringify(ic) === JSON.stringify(rc1) && JSON.stringify(rc1) === JSON.stringify(rc2), { initial: ic, refresh1: rc1, refresh2: rc2 });
+  const totalCommands = (ic.command || 0);
+  const totalSkills = initial.skills.length;
+  expect('Skills > 0', totalSkills > 0, totalSkills);
+  // Approximate: this machine's real plugin/skill/command registry shifts over time (skills, plugins,
+  // slash commands get added/removed), so pin to a loose band around the counts seen when this smoke was
+  // written (commands≈123, skills≈58) rather than an exact match.
+  expect('Commands ≈ 123 (same order of magnitude)', totalCommands >= 50 && totalCommands <= 250, totalCommands);
+  expect('Skills ≈ 58 (same order of magnitude)', totalSkills >= 20 && totalSkills <= 150, totalSkills);
+  expect('Modes > 0', (ic.mode || 0) > 0, ic.mode || 0);
+  const modeNames = initial.categorized.filter((c) => c.category === 'mode').map((c) => c.name);
+  console.log('mode names:', JSON.stringify(modeNames));
+  expect('Modes include goal and loop', modeNames.includes('goal') && modeNames.includes('loop'), modeNames);
 
   // --- Limits: production usage.js parser against the real rate_limit_event (no fixture) ---
   const rateLimits = U.parseRateLimits(rateLimitEvent || {});
   console.log('parseRateLimits(rateLimitEvent):', JSON.stringify(rateLimits));
   expect('limits non-null (real rate_limit_event parsed by usage.js)', rateLimits != null, rateLimits);
+  expect('5h pct is numeric', rateLimits && typeof rateLimits.fiveHour?.pct === 'number' && Number.isFinite(rateLimits.fiveHour.pct), rateLimits && rateLimits.fiveHour);
+  expect('weekly pct is numeric', rateLimits && typeof rateLimits.weekly?.pct === 'number' && Number.isFinite(rateLimits.weekly.pct), rateLimits && rateLimits.weekly);
 
   if (fails.length) { console.error('SMOKE FAILED:', fails); process.exit(1); }
   console.log('SMOKE OK');

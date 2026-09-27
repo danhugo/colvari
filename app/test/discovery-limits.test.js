@@ -104,3 +104,39 @@ test('limits: usageStatus with zero runs and configured limits is 0% used, not u
   assert.equal(s.warn, false); assert.equal(s.pause, false);
   assert.deepEqual(s.authTypes, []);
 });
+
+// --- Recorded real events: an actual `claude -p ... --output-format stream-json` system/init and
+// rate_limit_event line, captured once on a real machine (test/fixtures/real-init-event.json,
+// real-rate-limit-event.json) and frozen here so the parser is exercised against real CLI output shape,
+// not just hand-built fixtures.
+
+test('real event: recorded system/init event has the shape discoverCapabilities expects', () => {
+  const initEvent = JSON.parse(fixture('real-init-event.json'));
+  assert.equal(initEvent.type, 'system');
+  assert.equal(initEvent.subtype, 'init');
+  assert.ok(Array.isArray(initEvent.slash_commands) && initEvent.slash_commands.length > 0);
+  assert.ok(Array.isArray(initEvent.skills) && initEvent.skills.length > 0);
+
+  const rt = { id: 'claude', bin: () => 'claude' };
+  const c = CAP.discoverCapabilities(rt, {}, { exec: () => '', initEvent, ...FS_OPTS });
+  assert.equal(c.ok, true);
+  assert.equal(c.source, 'init-event');
+  assert.deepEqual(c.skills, initEvent.skills);
+  assert.equal(c.slashCommands.length, initEvent.slash_commands.length);
+});
+
+test('real event: recorded rate_limit_event parses to numeric 5h/weekly percentages', () => {
+  const rateLimitEvent = JSON.parse(fixture('real-rate-limit-event.json'));
+  assert.equal(rateLimitEvent.type, 'rate_limit_event');
+
+  const rl = U.parseRateLimits(rateLimitEvent);
+  assert.ok(rl, 'parses to a non-null result');
+  assert.equal(typeof rl.fiveHour.pct, 'number');
+  assert.ok(Number.isFinite(rl.fiveHour.pct));
+  assert.equal(typeof rl.weekly.pct, 'number');
+  assert.ok(Number.isFinite(rl.weekly.pct));
+  assert.equal(rl.fiveHour.pct, 0.38);
+  assert.equal(rl.weekly.pct, 0.22);
+  assert.ok(rl.fiveHour.resetsAt);
+  assert.ok(rl.weekly.resetsAt);
+});
