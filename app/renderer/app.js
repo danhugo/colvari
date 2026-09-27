@@ -782,7 +782,41 @@ function renderUsage() {
   <details><summary>By task</summary>${groupTable('By task', rs, (r) => r.taskId || '', taskName)}</details>`;
   $('#us-runs').innerHTML = `<tr><th>Time</th><th>Agent</th><th>Task</th><th>Kind</th><th>Model</th><th>In</th><th>Out</th><th>Cache read</th><th>Cache write</th><th>Duration</th><th>Turns</th><th>Billing source</th><th>Reported cost</th></tr>` +
     (rs.slice().reverse().slice(0, 500).map((r) => `<tr><td>${new Date(r.startedAt).toLocaleString()}</td><td>${esc(r.agent || agentName(r.nodeId))}</td><td>${esc(r.task || taskName(r.taskId))}</td><td>${esc(r.kind)}${r.iteration > 1 ? ' #' + r.iteration : ''}</td><td title="${esc((r.models || []).join(', '))}">${esc(r.model || '?')}</td><td class="num">${r.inputTokens}</td><td class="num">${r.outputTokens}</td><td class="num">${r.cacheReadTokens}</td><td class="num">${r.cacheCreationTokens}</td><td class="num">${((r.durationMs || 0) / 1000).toFixed(1)}s</td><td class="num">${r.numTurns}</td><td>${billTag(r.billingSource, r.billingDetail)}${r.billingMismatch ? ` <span class="warn" title="agent billing mode: ${esc(r.billingMode)}">≠ ${esc(r.billingMode)}</span>` : ''}</td><td>${costCell(r.reportedCostUsd, r.billingSource, r.runtime || (S.allNodes.find((n) => n.id === r.nodeId) || {}).runtime)}</td></tr>`).join('') || '<tr><td colspan="13" class="muted">No runs recorded yet.</td></tr>');
+  renderDiscovery();
   renderUsageLimits();
+}
+// ---------- discovery snapshot: aggregated modes/skills/commands + 5h/weekly across probed agents ----------
+// There is no single global "capabilities snapshot" IPC — each agent probes its own runtime independently
+// (discoverCapabilities per node) and usageStatus reports 5h/weekly from real runs + the CLI's own rate-limit
+// events. This unions those real, per-machine sources rather than inventing a snapshot shape nothing produces.
+function discoverySnapshot() {
+  const nodes = S.allNodes.filter((n) => n.capabilities && n.capabilities.ok !== false && !n.capabilities.error);
+  if (!nodes.length) return null;
+  const byCat = (cat) => [...new Set(nodes.flatMap((n) => (n.capabilities.categorized || []).filter((x) => x.category === cat).map((x) => x.name)))];
+  const probedAts = nodes.map((n) => n.capabilitiesProbedAt).filter(Boolean).map((d) => new Date(d).getTime()).filter((t) => !isNaN(t));
+  return { modes: byCat('mode'), skills: byCat('skill'), commands: byCat('command'), capturedAt: probedAts.length ? new Date(Math.max(...probedAts)) : null };
+}
+async function renderDiscovery() {
+  const box = $('#us-discovery'); if (!box) return;
+  const snap = discoverySnapshot();
+  let st; try { st = await call('usageStatus'); } catch { st = null; }
+  const limPart = (label, u) => {
+    if (!u || !u.limit) return `<span class="lm-part lm-pending" title="No ${esc(label)} limit set or reported yet"><b>${esc(label)}</b> <small>–</small></span>`;
+    const pct = Math.min(100, Math.round(u.pct * 100)); const cls = u.pause ? 'danger' : u.warn ? 'warn' : 'ok';
+    const ms = u.resetsAt ? new Date(u.resetsAt).getTime() - Date.now() : 0;
+    return `<span class="lm-part lm-${cls}" title="${esc(label)}: ${pct}% used · resets in ${fmtCountdown(ms)}"><b>${esc(label)}</b> ${pct}%<i class="lm-bar"><i class="lm-fill" style="width:${pct}%"></i></i><small>↻${fmtCountdown(ms)}</small></span>`;
+  };
+  const hasLimits = st && (st.fiveHour.limit || st.weekly.limit);
+  const asOf = snap && snap.capturedAt ? snap.capturedAt : hasLimits ? new Date() : null;
+  box.innerHTML = `<h3>Discovery</h3>` +
+    (!snap ? '<p class="muted">Not probed yet — click Refresh on an agent in the Team tab to discover its modes, skills and commands.</p>' :
+      `<div class="cards">
+        <div class="stat"><small>Skills</small><b>${snap.skills.length}</b></div>
+        <div class="stat"><small>Commands</small><b>${snap.commands.length}</b></div>
+        <div class="stat"><small>Modes</small><b>${snap.modes.length}</b><small>${snap.modes.map(esc).join(', ') || 'none found'}</small></div>
+      </div>`) +
+    `<div class="limitmeter" style="margin:8px 0 4px">${limPart('5h', st && st.fiveHour)}${limPart('weekly', st && st.weekly)}</div>` +
+    `<small class="muted">as of ${asOf ? esc(asOf.toLocaleString()) : '–'}</small>`;
 }
 // ---------- usage limits (5h/weekly for subscription, tokens/cost for API) ----------
 function usageLimitBar(label, u, fmt) {
