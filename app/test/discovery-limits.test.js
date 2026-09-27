@@ -189,7 +189,10 @@ test('real event: usageStatus prefers the CLI-reported rate-limit snapshot even 
   assert.equal(Math.round(merged.weekly.pct * 100), 22);
 });
 
-test('real event: recorded rate_limit_event parses to numeric 5h/weekly percentages', () => {
+test('real event: recorded rate_limit_event parses to numeric 5h/weekly percentages', (t) => {
+  // Freeze just before the fixture's recorded reset: the parser drops already-past resetsAt (runtime behavior),
+  // and this recorded event ages into the past as wall-clock moves — tests must not depend on today's date.
+  t.mock.timers.enable({ apis: ['Date'], now: 1790520600 * 1000 - 60_000 });
   const rateLimitEvent = JSON.parse(fixture('real-rate-limit-event.json'));
   assert.equal(rateLimitEvent.type, 'rate_limit_event');
 
@@ -224,7 +227,8 @@ test('real event: recorded system/init has 123 slash commands (incl goal/loop), 
   assert.ok(modeNames.includes('goal') && modeNames.includes('loop'));
 });
 
-test('real event: rate_limit_event exposes both five_hour and seven_day utilization + resetsAt', () => {
+test('real event: rate_limit_event exposes both five_hour and seven_day utilization + resetsAt', (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: 1790520600 * 1000 - 60_000 });
   const rateLimitEvent = JSON.parse(fixture('real-rate-limit-event.json'));
   const w = rateLimitEvent.rate_limit_info.unifiedWindows;
   assert.equal(typeof w.five_hour.utilization, 'number');

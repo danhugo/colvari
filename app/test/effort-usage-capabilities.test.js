@@ -157,7 +157,10 @@ test('usage: subscription rate limits parsed as % of window + reset time, not $'
   assert.equal(rlPast.fiveHour.resetsAt, null);
 });
 
-test('usage: parseRateLimits reads the CLI\'s real "rate_limit_event" stream event (rate_limit_info.unifiedWindows), not just system/init', () => {
+test('usage: parseRateLimits reads the CLI\'s real "rate_limit_event" stream event (rate_limit_info.unifiedWindows), not just system/init', (t) => {
+  // Freeze just before the recorded reset so the parser keeps resetsAt (it drops already-past times, and this
+  // hardcoded event ages past its reset as wall-clock time moves — tests must not depend on today's date).
+  t.mock.timers.enable({ apis: ['Date'], now: 1790520600 * 1000 - 60_000 });
   const ev = { type: 'rate_limit_event', rate_limit_info: { unifiedWindows: { five_hour: { utilization: 0.36, resetsAt: 1790520600 }, seven_day: { utilization: 0.22, resetsAt: 1790989200 } } } };
   const rl = U.parseRateLimits(ev);
   assert.equal(rl.fiveHour.pct, 0.36); assert.equal(rl.fiveHour.resetsAt, new Date(1790520600 * 1000).toISOString());
