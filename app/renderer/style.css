@@ -393,3 +393,11 @@ header .pill { border:none; background:none; color:var(--fg-muted); font-size:va
 .wk-backlinks li { cursor:pointer; color:var(--accent-text); }
 .wk-backlinks li:hover { text-decoration:underline; }
 .rtpresets { flex-wrap:wrap; gap:4px; align-items:center; } .rtpresets small { opacity:.7; font-family:var(--font-mono); }
+/* wake-run: agent running because a message woke it (no in_progress task) */
+.wakebar { border:1px solid var(--accent); background:var(--accent-soft); color:var(--accent-text); border-radius:6px; padding:4px 8px; margin-bottom:4px; display:flex; gap:8px; align-items:center; font-size:12px; }
+.wakebar .spacer { flex:1; }
+.pchip.wake { border-color:var(--accent); } .pchip.wake .muted { color:var(--accent-text); }
+#graph .wakerunbadge, #ov-graph .wakerunbadge { cursor:default; }
+#graph .wakerunbadge rect, #ov-graph .wakerunbadge rect { fill:var(--accent-soft); stroke:var(--accent); }
+#graph .wakerunbadge text, #ov-graph .wakerunbadge text { fill:var(--accent-text); font-size:9px; font-weight:var(--fw-semibold); }
+#graph .wakerunbadge.linked, #ov-graph .wakerunbadge.linked { cursor:pointer; }
