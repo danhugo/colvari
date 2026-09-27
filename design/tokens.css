@@ -20,6 +20,7 @@
   --fg-primary: #16181f; --fg-secondary: #4a4f5e; --fg-muted: #5f6576; --fg-on-accent: #ffffff;
   --border: #e1e4eb; --border-strong: #cdd2dd;
   --accent: #4f5bff; --accent-soft: #e8eaff; --accent-text: #3a44d6;
+  --edge: #8a90a0; /* ≥3:1 on bg-app/canvas, for graph edges (WCAG 1.4.11 non-text) */
   --success: #12a150; --success-soft: #dcf5e6; --warning: #d98a00; --warning-soft: #fff1d6; --danger: #e5484d; --danger-soft: #ffe3e3; --info: #0b8ad9;
   /* AA text-safe status colours (≥4.5:1 on bg + soft) */
   --success-text: #0f7a3d; --warning-text: #8f5b00; --warning-strong: #b35f00;
@@ -43,6 +44,7 @@
   --fg-primary: #eceef3; --fg-secondary: #b3b8c6; --fg-muted: #7b8193;
   --border: #252a35; --border-strong: #333a48;
   --accent: #7c85ff; --accent-soft: #232852; --accent-text: #a3a9ff;
+  --edge: #6b7285; /* ≥3:1 on dark bg-app/canvas */
   --success: #3ccf7e; --success-soft: #133322; --warning: #f5b544; --warning-soft: #3a2c10; --danger: #ff6b6f; --danger-soft: #3d1a1c;
   --success-text: #3ccf7e; --warning-text: #f5b544; --warning-strong: #f5b544;
   --shadow-sm: 0 1px 2px rgba(0,0,0,.4); --shadow-md: 0 2px 10px rgba(0,0,0,.45); --shadow-lg: 0 16px 40px rgba(0,0,0,.55);
