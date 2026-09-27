@@ -21,6 +21,7 @@ function orchFor(pid) {
     o.on('log', (l) => send('log', { ...l, projectId: pid }));
     o.on('state', (s) => send('state', { ...s, projectId: pid }));
     o.on('notify', (n) => { send('notify', { ...n, projectId: pid }); notify(n, pid); });
+    o.on('woken_by_message', (w) => send('woken_by_message', { ...w, projectId: pid }));
     orchs.set(pid, o);
   }
   return o;
