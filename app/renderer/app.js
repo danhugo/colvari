@@ -621,9 +621,16 @@ function renderLog() {
   const teamIds = sel.logTeam ? new Set(logTeamNodes().map((n) => n.id)) : null;
   const box = $('#log'); const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 20;
   const all = logs.filter((l) => l.projectId === ctx.p && (!teamIds || teamIds.has(l.nodeId)));
-  const rows = all.filter((l) => (!f || l.nodeId === f) && (!q || l.text.toLowerCase().includes(q)) && logLevels.has(l.level || 'info'));
+  const base = all.filter((l) => (!f || l.nodeId === f) && (!q || l.text.toLowerCase().includes(q)));
+  let rows = base.filter((l) => logLevels.has(l.level || 'info'));
+  let hiddenInfo = 0;
+  if (!rows.length && base.length) {
+    hiddenInfo = base.filter((l) => !logLevels.has(l.level || 'info')).length;
+    if (hiddenInfo) rows = base;
+  }
   const empty = teamIds && !all.length ? 'No messages for this team.' : (all.length ? 'No log lines match your filter.' : 'No activity yet — run the team to see agent logs here.');
-  box.innerHTML = rows.length ? rows.slice(-800).map(logRow).join('') : `<p class="muted logempty">${empty}</p>`;
+  box.innerHTML = rows.length ? (hiddenInfo ? `<p class="muted logempty">${hiddenInfo} info line(s) hidden by the level filter — showing all. <button id="log-showall" class="linklike">Show all</button></p>` : '') + rows.slice(-800).map(logRow).join('') : `<p class="muted logempty">${empty}</p>`;
+  const sa = document.getElementById('log-showall'); if (sa) sa.onclick = () => { logLevels.add('info'); logLevels.add('warn'); logLevels.add('error'); renderLogLevelChips(); renderLog(); };
   document.querySelectorAll('#log [data-tasklink]').forEach((d) => d.onclick = () => { sel.task = d.dataset.tasklink; $('#ov-task').value = ''; showTab('overview'); });
   if (atBottom && $('#logauto').checked) box.scrollTop = box.scrollHeight;
 }

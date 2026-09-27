@@ -320,13 +320,14 @@ header .pill { border:none; background:none; color:var(--fg-muted); font-size:va
 .vbadge i { font-style:normal; opacity:.75; } .vbadge.vb-codex { border-color:var(--success-text); } .vbadge.vb-opencode { border-color:var(--danger); }
 #minimap.hidden { display:none; }
 /* level filter: filled chip with a check when active, outline when off */
+.linklike { background:none; border:none; padding:0; color:var(--accent, #4a9eff); text-decoration:underline; cursor:pointer; font:inherit; }
 .lvchips { display:flex; gap:4px; align-items:center; }
 .lvchip { display:inline-flex; align-items:center; gap:3px; padding:2px 8px; border-radius:var(--radius-full); border:1px solid var(--border-strong); background:var(--bg-code); color:var(--fg-muted); font-size:10.5px; font-weight:var(--fw-medium); cursor:pointer; text-transform:uppercase; letter-spacing:.02em; }
 .lvchip .ck { display:none; }
 .lvchip.on { color:var(--fg-on-accent); border-color:transparent; }
 .lvchip.on .ck { display:inline; }
 .lvchip.lv-error { color:var(--term-red); } .lvchip.lv-tool { color:var(--term-yellow); } .lvchip.lv-info { color:var(--term-blue); } .lvchip.lv-ok { color:var(--term-green); } .lvchip.lv-muted, .lvchip.lv-text { color:var(--fg-muted); }
-.lvchip.on.lv-error { background:var(--term-red); } .lvchip.on.lv-tool { background:var(--term-yellow); } .lvchip.on.lv-info { background:var(--term-blue); } .lvchip.on.lv-ok { background:var(--term-green); } .lvchip.on.lv-muted, .lvchip.on.lv-text { background:var(--fg-muted); }
+.lvchip.on.lv-error { background:var(--term-red); color:var(--fg-on-accent); } .lvchip.on.lv-tool { background:var(--term-yellow); color:var(--fg-on-accent); } .lvchip.on.lv-info { background:var(--term-blue); color:var(--fg-on-accent); } .lvchip.on.lv-ok { background:var(--term-green); color:var(--fg-on-accent); } .lvchip.on.lv-muted, .lvchip.on.lv-text { background:var(--fg-muted); color:var(--fg-on-accent); }
 /* Logs task column: truncated title, id in the tooltip; deep-links into the Board task */
 .logtask { flex:0 0 auto; max-width:160px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:11px; color:var(--accent-text); cursor:pointer; padding:0 4px; border-radius:4px; }
 .logtask:hover { background:var(--bg-hover); text-decoration:underline; }
