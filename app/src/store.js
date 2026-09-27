@@ -165,7 +165,7 @@ class Store {
       if (patch.status && !STATUSES.includes(patch.status)) throw new Error('bad status ' + patch.status);
       if (patch.blockedBy !== undefined) t.blockedBy = C.validateDeps(tid, patch.blockedBy, b.tasks);
       if (patch.status && patch.status !== 'review') t.awaitingApproval = false;
-      for (const k of ['title', 'description', 'assignee', 'status', 'sessionId', 'iterations', 'awaitingApproval']) if (patch[k] !== undefined) t[k] = patch[k];
+      for (const k of ['title', 'description', 'assignee', 'status', 'sessionId', 'iterations', 'awaitingApproval', 'reopenCount']) if (patch[k] !== undefined) t[k] = patch[k];
       t.updatedAt = new Date().toISOString();
       // Parent auto-complete: when the last open subtask is done, the parent moves to done.
       for (let c = t; c.status === 'done' && c.parentId;) {
@@ -182,6 +182,8 @@ class Store {
     const t = this.getTask(tid); if (!t) throw new Error('no task ' + tid);
     if (note || !approve) this.commentTask(tid, 'human', (approve ? 'Approved' : 'Changes requested') + (note ? ': ' + note : ''));
     this.closeInbox((i) => i.kind === 'approval' && i.taskId === tid && i.status === 'open', approve ? 'approved' : 'changes requested');
+    // "reopened": sent back for changes at least once, so it can't count as first-pass-accepted in modelStats.
+    if (!approve) this._updateTask(tid, { reopenCount: (t.reopenCount || 0) + 1 });
     return this.updateTask(tid, { status: approve ? 'done' : 'todo', awaitingApproval: false });
   }
 

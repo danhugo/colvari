@@ -145,6 +145,35 @@ function summarize(runs, key) {
 }
 const total = (runs) => summarize(runs, () => 'all').all || { key: 'all', runs: 0, ...emptyTokens(), totalTokens: 0, numTurns: 0, durationMs: 0, reportedCostUsd: 0, subscriptionCostUsd: 0, billedCostUsd: 0 };
 
+// Per-model aggregate for snapshot.modelStats, shared by orchestrator/store and any consumer (UI, exports).
+// Shape (one entry per model name seen in run.model / run.models):
+//   { runs: number,            // agent runs (kind:'agent'; preflight/check runs excluded) whose primary model is this one
+//     costUsd: number,         // sum of run.reportedCostUsd for those runs
+//     tokens: number,          // sum of totalTokens(run) for those runs (input+output+cache read+cache creation)
+//     tasksDone: number,       // tasks that reached status 'done', attributed to the model of the task's last agent run
+//     firstPassAccepted: number, // of tasksDone, how many had never been sent back for changes (task.reopenCount falsy)
+//     reopened: number }       // count of "changes requested" events (task.reopenCount) attributed to that model
+// A task's outcome is attributed to the model of the most recent agent run recorded against its taskId;
+// tasks with no recorded run (e.g. never actually ran an agent) are skipped.
+function modelStats(runs = [], tasks = []) {
+  const out = {};
+  const bucket = (m) => (out[m] ||= { runs: 0, costUsd: 0, tokens: 0, tasksDone: 0, firstPassAccepted: 0, reopened: 0 });
+  const primaryModel = (r) => r.model || (r.models && r.models[0]) || 'unknown';
+  for (const r of runs) {
+    if (r.kind !== 'agent') continue;
+    const b = bucket(primaryModel(r));
+    b.runs++; b.costUsd += r.reportedCostUsd || 0; b.tokens += totalTokens(r);
+  }
+  const lastModelForTask = {};
+  for (const r of runs) if (r.kind === 'agent' && r.taskId) lastModelForTask[r.taskId] = primaryModel(r);
+  for (const t of tasks) {
+    const m = lastModelForTask[t.id]; if (!m) continue;
+    if (t.status === 'done') { const b = bucket(m); b.tasksDone++; if (!t.reopenCount) b.firstPassAccepted++; }
+    if (t.reopenCount) bucket(m).reopened += t.reopenCount;
+  }
+  return out;
+}
+
 const CSV_COLS = ['startedAt', 'endedAt', 'durationMs', 'projectId', 'kind', 'agent', 'nodeId', 'task', 'taskId', 'model', 'models', 'inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheCreationTokens', 'totalTokens', 'numTurns', 'billingMode', 'billingSource', 'billingDetail', 'apiKeySource', 'reportedCostUsd', 'costNote', 'exitCode', 'sessionId'];
 const csvCell = (v) => { const s = Array.isArray(v) ? v.join(' ') : String(v ?? ''); return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
 function toCSV(runs) {
@@ -152,4 +181,4 @@ function toCSV(runs) {
   return [CSV_COLS.join(','), ...rows].join('\n') + '\n';
 }
 
-module.exports = { resultSnapshot, tokensForRun, BILLING_MODES, BILLING_SOURCES, normalizeBilling, applyBillingEnv, detectBilling, costNote, tokensFromResult, totalTokens, newRun, applyEvent, finishRun, summarize, total, toCSV, CSV_COLS };
+module.exports = { resultSnapshot, tokensForRun, BILLING_MODES, BILLING_SOURCES, normalizeBilling, applyBillingEnv, detectBilling, costNote, tokensFromResult, totalTokens, newRun, applyEvent, finishRun, summarize, total, modelStats, toCSV, CSV_COLS };

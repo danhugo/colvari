@@ -141,3 +141,37 @@ console.log(JSON.stringify({ type: 'result', subtype: 'success', result: 'ok', s
   assert.ok(Math.abs(o.snapshot().agents[n.id].cost - 0.03) < 1e-9);
   assert.equal(new Orchestrator(s).sessionBaseline('S').perModel.m.cacheReadTokens, 300); // survives restart via stored runs
 });
+
+test('modelStats: per-model runs/cost/tokens + task outcomes attributed to a task\'s last agent run', () => {
+  const runs = [
+    { kind: 'agent', taskId: 't1', model: 'sonnet', inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheCreationTokens: 0, reportedCostUsd: 0.1 },
+    { kind: 'agent', taskId: 't1', model: 'sonnet', inputTokens: 20, outputTokens: 5, cacheReadTokens: 0, cacheCreationTokens: 0, reportedCostUsd: 0.2 },
+    { kind: 'agent', taskId: 't2', model: 'haiku', inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheCreationTokens: 0, reportedCostUsd: 0.01 },
+    { kind: 'preflight', taskId: null, model: 'sonnet', inputTokens: 999, outputTokens: 999, cacheReadTokens: 0, cacheCreationTokens: 0, reportedCostUsd: 999 },
+  ];
+  const tasks = [
+    { id: 't1', status: 'done', reopenCount: 1 }, // reopened once before being accepted -> not first-pass
+    { id: 't2', status: 'done' }, // first try -> first-pass accepted
+    { id: 't3', status: 'todo' }, // no runs recorded -> ignored
+  ];
+  const s = U.modelStats(runs, tasks);
+  assert.equal(s.sonnet.runs, 2); assert.ok(Math.abs(s.sonnet.costUsd - 0.3) < 1e-9); assert.equal(s.sonnet.tokens, 40);
+  assert.equal(s.sonnet.tasksDone, 1); assert.equal(s.sonnet.firstPassAccepted, 0); assert.equal(s.sonnet.reopened, 1);
+  assert.equal(s.haiku.runs, 1); assert.equal(s.haiku.tasksDone, 1); assert.equal(s.haiku.firstPassAccepted, 1); assert.equal(s.haiku.reopened, 0);
+  assert.equal(s.t3, undefined);
+});
+
+test('approveTask(false) bumps task.reopenCount, feeding modelStats.reopened', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-'));
+  const s = new Store(path.join(dir, 'p'));
+  const n = s.addNode(normalizeNode({ name: 'D', role: 'Dev' }));
+  const t = s.createTask({ title: 'x', assignee: n.id });
+  s.updateTask(t.id, { status: 'review', awaitingApproval: true });
+  s.approveTask(t.id, false, 'nope');
+  assert.equal(s.getTask(t.id).reopenCount, 1);
+  assert.equal(s.getTask(t.id).status, 'todo');
+  s.updateTask(t.id, { status: 'review', awaitingApproval: true });
+  s.approveTask(t.id, true);
+  assert.equal(s.getTask(t.id).reopenCount, 1);
+  assert.equal(s.getTask(t.id).status, 'done');
+});
