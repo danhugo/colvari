@@ -246,3 +246,6 @@ header .pill { border:none; background:none; color:var(--fg-muted); font-size:va
 /* graph LOD: keep names legible when zoomed out */
 #graph .nname { font-size:calc(13px * var(--nz, 1)); }
 #graph.lod-far .nrole, #graph.lod-far .chip, #graph.lod-far .qa, #graph.lod-far .elabel { display:none; }
+.vbadge { display:inline-flex; align-items:center; gap:4px; margin-left:6px; padding:0 6px; border-radius:8px; font:500 10.5px/16px var(--font-mono); background:var(--bg-code); border:1px solid var(--border); color:var(--fg-secondary); vertical-align:middle; white-space:nowrap; }
+.vbadge i { font-style:normal; opacity:.75; } .vbadge.vb-codex { border-color:var(--success-text); } .vbadge.vb-opencode { border-color:var(--danger); }
+.rtpresets { flex-wrap:wrap; gap:4px; align-items:center; } .rtpresets small { opacity:.7; font-family:var(--font-mono); }
