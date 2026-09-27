@@ -12,6 +12,8 @@ const codexHelp = fs.readFileSync(path.join(__dirname, 'fixtures/help-codex.txt'
 // "--effort"/"resume" — this is the shape that broke the original parser (docs/helpycode-smoke.md).
 const realHelpycodeTop = fs.readFileSync(path.join(__dirname, 'fixtures/help-helpycode-real-top.txt'), 'utf8');
 const realHelpycodeRun = fs.readFileSync(path.join(__dirname, 'fixtures/help-helpycode-real-run.txt'), 'utf8');
+// Recorded from the real installed `helpycode models` (0.3.5): plain model-id lines, no JSON.
+const realHelpycodeModels = fs.readFileSync(path.join(__dirname, 'fixtures/models-helpycode.txt'), 'utf8');
 // Captured live from the installed `helpycode run --format json` (helpycode 0.3.5, 2026-09-27):
 // fields nest under part.*, run totals arrive on `step_finish` events (part.tokens.*, part.cost).
 const realHelpycodeProbe = fs.readFileSync(path.join(__dirname, 'fixtures/probe-helpycode-real.jsonl'), 'utf8');
@@ -126,6 +128,21 @@ test('introspectRuntime derives a working profile against real installed-helpyco
   // values are claimed (the runner must not reject the CLI's default "low")
   assert.deepStrictEqual(profile.effortValues, []);
   assert.strictEqual(profile.resumeFlag, '-s');
+});
+
+// Recorded from the real installed `helpycode models` (0.3.5): plain model-id lines, no JSON.
+// The layered introspector runs the models subcommand and parses those bare ids into the draft.
+test('recorded `helpycode models` output: bare model-id lines are parsed into the model list', () => {
+  const { profile, models, sources } = IN.introspectRuntime('helpycode', (bin, args) => {
+    assert.strictEqual(bin, 'helpycode');
+    if (args[0] === 'run' && args.includes('--help')) return realHelpycodeRun;
+    if (args.includes('--help')) return realHelpycodeTop;
+    if (args[0] === 'models') return realHelpycodeModels;
+    throw new Error('unexpected exec ' + JSON.stringify(args));
+  }, { id: 'helpycode', label: 'HelpyCode', probe: false });
+  assert.deepStrictEqual(profile.modelsCommand, ['models']);
+  assert.deepStrictEqual(models, ['elice/qwen/qwen3.8-27b', 'elice/z-ai/glm-5.3-flash']);
+  assert.deepStrictEqual(sources.models, { source: 'models', confidence: 'high' });
 });
 
 // Cato's acceptance bar (t_94eef7a1): the derived helpycode profile must be byte-equal to the old
