@@ -89,6 +89,12 @@ renderer/           vanilla JS UI (SVG graph editor, board, wiki, observability,
 cli/e2e.js          headless end-to-end run
 ```
 
+## Graph editor
+
+Team tab: drag nodes to move them (positions persist), **Connect** then click source and target to add an edge of the chosen type. Edges may point into another team of the same project (cross-team edge; the target team sees it as incoming). Node positions are saved in bulk (auto-layout) and each team keeps its own viewport (pan/zoom).
+
+`npm run gui-e2e:graph` checks a 12-node team, connect by mouse, drag, cross-team edge and position/viewport persistence, and takes `21-graph-team`, `22-graph-connected`, `graph-light`, `graph-dark` shots. Zoom/fit, the node context menu and auto-layout are feature-detected (logged as "pending" until the UI ships them, then asserted, with `23-graph-layout` / `24-graph-menu` shots).
+
 ## Preflight test
 
 Each agent node has a **Test agent** button, and the Team toolbar has **Test team**. A test spawns `claude` with the agent's exact run config (model, permission mode, allowed/disallowed tools, env, billing mode, extra args, board MCP config) and `--max-turns 3`, using a prompt that must call the board `list_team` tool (with no model set, it tests the claude CLI default model, currently opus, so a test costs a few cents API-equivalent) and reply `OK`. It checks that the claude binary is found (and reports its version), that the model is valid, that auth works (reporting `apiKeySource`), that the board MCP server connected, that the tool call succeeded and that the agent replied OK. It also records latency, tokens and cost. The result is saved on the node (`preflight`) and shown as a PASS/FAIL/RETEST badge on the node, with the list of checks in the agent panel. The badge shows RETEST when a run-relevant setting has changed since the last test. Preflight runs are recorded in usage with `kind=preflight`. If any agent is untested, failed or stale, **Run** asks for confirmation first. The logic is in `src/preflight.js`.

@@ -192,7 +192,59 @@ async function guiE2E() {
     expect('chat: @mention autocomplete + preview + creates a task for the agent', mention.includes(b.name) && pv.includes('task for ' + b.name) && made && made.assignee === b.id, cm);
     expect('chat: inline answer to ask_human', cm.answered === 'dark', cm);
   };
+  // Graph editor (shots 21-24): 12-node team, connect by mouse, cross-team edge, positions/viewport persistence.
+  // Zoom/fit, context menu and auto-layout are feature-detected: checked once the UI ships them, logged as pending until then.
+  const graphShots = async () => {
+    await waitFor(`return !!document.querySelector('#tpl-select option')`); await ex(`await refresh();`); const cur = await ex(`return { p: ctx.p, t: S.teamId }`);
+    const gp = cur.p || pid(); const ps = pm.store(gp, cur.t);
+    const other = pm.createTeam(gp, 'Graph peers'); const os = pm.store(gp, other.id || other); const peer = os.addNode({ name: 'Peer', role: 'Dev', x: 60, y: 60 });
+    const base = ps.getTeam().nodes.length; for (let i = base; i < 12; i++) ps.addNode({ name: `G${i + 1}`, role: i ? 'Dev' : 'PM', x: 40 + (i % 4) * 200, y: 40 + Math.floor(i / 4) * 110 });
+    const nodes = ps.getTeam().nodes; const [a, b] = nodes;
+    const cross = ps.addEdge(a.id, peer.id, 'message');
+    await ex(`$('#tabs button[data-tab=team]').click(); await refresh(); renderGraph(); await w(400);`);
+    const g = { nodes: await ex(`return document.querySelectorAll('#graph .node').length`), crossIn: os.incomingCrossEdges().some((e) => e.id === cross.id && e.crossTeam) };
+    expect('graph: 10+ node team rendered', g.nodes >= 12, g); expect('graph: cross-team edge stored and visible to target team', g.crossIn, g);
+    await shot('21-graph-team');
+    // Connect by mouse: Connect mode, click source then target (real input events).
+    const at = (id) => ex(`const n = S.team.nodes.find((x) => x.id === '${id}'); const i = S.team.nodes.indexOf(n); const r = document.querySelectorAll('#graph .node')[i].getBoundingClientRect(); return [Math.round(r.x + r.width / 2), Math.round(r.y + r.height / 2)];`);
+    const tap = async ([x, y]) => { for (const type of ['mouseDown', 'mouseUp']) win.webContents.sendInputEvent({ type, x, y, button: 'left', clickCount: 1 }); await new Promise((r) => setTimeout(r, 300)); };
+    const target = nodes[5]; const before = ps.getTeam().edges.length;
+    await ex(`window.alert = () => {}; $('#edgetype').value = 'review'; $('#connect').click(); await w(200);`); await tap(await at(a.id)); await tap(await at(target.id)); await ex(`await w(600);`);
+    g.connected = ps.getTeam().edges.some((e) => e.from === a.id && e.to === target.id && e.type === 'review') && ps.getTeam().edges.length === before + 1;
+    expect('graph: connect source -> target by mouse creates an edge', g.connected, g);
+    await shot('22-graph-connected');
+    // Drag moves a node and persists its position.
+    const [x0, y0] = await at(b.id); win.webContents.sendInputEvent({ type: 'mouseDown', x: x0, y: y0, button: 'left', clickCount: 1 });
+    for (let k = 1; k <= 5; k++) win.webContents.sendInputEvent({ type: 'mouseMove', x: x0 + k * 12, y: y0 + k * 8, button: 'left' });
+    win.webContents.sendInputEvent({ type: 'mouseUp', x: x0 + 60, y: y0 + 40, button: 'left', clickCount: 1 }); await ex(`await w(600);`);
+    const moved = ps.getTeam().nodes.find((n) => n.id === b.id); g.dragged = moved.x !== b.x || moved.y !== b.y;
+    expect('graph: drag moves and persists a node', g.dragged, { from: [b.x, b.y], to: [moved.x, moved.y] });
+    // Backend used by auto-layout / zoom: bulk positions + per-team viewport round-trip.
+    ps.setPositions(Object.fromEntries(nodes.slice(0, 3).map((n, i) => [n.id, { x: 500 + i * 10, y: 300 }]))); ps.setViewport({ x: 10, y: 20, zoom: 1.5 });
+    g.positions = ps.getTeam().nodes.filter((n) => n.x >= 500 && n.x <= 520 && n.y === 300).length; g.viewport = ps.getViewport();
+    expect('graph: bulk positions + viewport persist', g.positions === 3 && g.viewport && g.viewport.zoom === 1.5, g); ps.setViewport({});
+    // Planned UI (feature-detected).
+    const has = (sels) => ex(`return ${JSON.stringify(sels)}.find((s) => document.querySelector(s)) || null`);
+    const zoomIn = await has(['#zoomin', '#graph-zoomin', '[data-graph=zoomin]']); const fit = await has(['#fit', '#graph-fit', '[data-graph=fit]']);
+    const layout = await has(['#autolayout', '#graph-layout', '[data-graph=layout]']);
+    if (zoomIn && fit) {
+      const tf = () => ex(`const v = document.querySelector('#graph > g.viewport, #graph > g[transform]'); return v ? v.getAttribute('transform') : $('#graph').getAttribute('viewBox')`);
+      const t0 = await tf(); await ex(`$('${zoomIn}').click(); await w(300);`); const t1 = await tf(); await ex(`$('${fit}').click(); await w(300);`); const t2 = await tf();
+      expect('graph: zoom in and fit change the view', t0 !== t1 && t1 !== t2, { t0, t1, t2 });
+    } else console.log('[gui-e2e] graph: zoom/fit UI pending');
+    if (layout) {
+      const p0 = JSON.stringify(ps.getTeam().nodes.map((n) => [n.x, n.y])); await ex(`window.confirm = () => true; $('${layout}').click(); await w(800);`);
+      const pos = ps.getTeam().nodes.map((n) => `${n.x},${n.y}`); g.layout = { changed: JSON.stringify(ps.getTeam().nodes.map((n) => [n.x, n.y])) !== p0, unique: new Set(pos).size === pos.length };
+      expect('graph: auto-layout repositions 12 nodes without overlap', g.layout.changed && g.layout.unique, g.layout); await shot('23-graph-layout');
+    } else console.log('[gui-e2e] graph: auto-layout UI pending');
+    const [cx, cy] = await at(target.id); win.webContents.sendInputEvent({ type: 'contextMenu', x: cx, y: cy, button: 'right' }); await ex(`await w(300);`);
+    const menu = await has(['.ctxmenu:not(.hidden)', '#graph-menu:not(.hidden)', '.contextmenu:not(.hidden)']);
+    if (menu) { g.menu = await ex(`return [...document.querySelectorAll('${menu} button, ${menu} li')].map((x) => x.textContent.trim())`); expect('graph: node context menu has actions', g.menu.length >= 2, g); await shot('24-graph-menu'); await ex(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })); document.body.click(); await w(200);`); }
+    else console.log('[gui-e2e] graph: context menu UI pending');
+    console.log('[gui-e2e] graph', JSON.stringify({ ...g, zoomIn, fit, layout, menu }));
+  };
   try {
+    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'graph') { await graphShots(); for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`$('#tabs button[data-tab=team]').click(); await w(500);`); await shot(`graph-${t}`); } require('electron').nativeTheme.themeSource = 'system'; throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'chat') { await chatShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'firstrun') { await firstrunInbox(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'overview') { await overviewShots(); throw null; }
@@ -352,6 +404,7 @@ async function guiE2E() {
     await firstrunInbox();
     await overviewShots();
     await chatShots();
+    await graphShots();
     // Main screens in light + dark (the renderer themes via prefers-color-scheme, driven by nativeTheme).
     const { nativeTheme } = require('electron');
     for (const theme of ['light', 'dark']) {
