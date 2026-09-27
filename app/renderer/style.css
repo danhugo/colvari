@@ -81,3 +81,6 @@ header .pill { font-variant-numeric:tabular-nums; } .pill.quiet { color:var(--mu
 .badge { display:inline-block; min-width:16px; padding:0 5px; border-radius:8px; background:#d64550; color:#fff; font-size:11px; text-align:center; } .badge:empty { display:none; }
 .inbox-side { cursor:pointer; padding:4px 6px; border:1px solid var(--muted); border-radius:6px; margin-bottom:6px; }
 .inboxitem { border:1px solid #b0469c; border-radius:6px; padding:8px; margin:0 0 8px; } .inboxitem textarea { width:100%; }
+#guide { position: fixed; right: 16px; bottom: 16px; width: 380px; max-height: 80vh; overflow: auto; background: var(--panel, #fff); border: 1px solid #8884; border-radius: 8px; padding: 12px 14px; box-shadow: 0 4px 20px #0003; z-index: 50; }
+#guide .gstep { border-top: 1px solid #8883; padding: 8px 0; } #guide .gstep.off { opacity: .45; pointer-events: none; }
+#guide h4 { margin: 0 0 4px; } #guide .gdone::before { content: '✓ '; color: green; } #guide textarea { width: 100%; box-sizing: border-box; }

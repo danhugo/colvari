@@ -62,7 +62,7 @@ async function refresh() {
   renderAll();
 }
 const nodeName = (id) => (S.allNodes.find((n) => n.id === id) || {}).name || (id ? id : 'unassigned');
-function renderAll() { renderSidebar(); renderGraph(); renderPreflightBar(); renderNodeForm(); renderBoard(); renderWiki(); renderObs(); renderSettings(); renderHeader(); renderUsage(); renderOverview(); renderInbox(); }
+function renderAll() { renderSidebar(); renderGraph(); renderPreflightBar(); renderNodeForm(); renderBoard(); renderWiki(); renderObs(); renderSettings(); renderHeader(); renderUsage(); renderOverview(); renderInbox(); renderGuide(); }
 const fmtTok = (n) => { n = n || 0; return n >= 1e6 ? (n / 1e6).toFixed(2) + 'M' : n >= 1e4 ? (n / 1e3).toFixed(1) + 'k' : String(n); };
 const COST_NOTE = { subscription: 'Covered by subscription — not billed per token', other: 'API-equivalent (reported by Claude CLI)' };
 const costCell = (usd, source) => source === 'subscription' ? `<span class="costnote" title="API-equivalent $${(usd || 0).toFixed(4)} (reported by Claude CLI)">${COST_NOTE.subscription}</span>` : `$${(usd || 0).toFixed(4)} <span class="costnote">API-equivalent</span>`;
@@ -552,3 +552,36 @@ squad.on('state', (st) => { if (st.projectId && st.projectId !== ctx.p) { clearT
 setInterval(() => { if (S.orch.running) refresh(); }, 2000); // pick up board changes made by agents
 refresh();
 $('#help').onclick = () => $('#helpdlg').showModal();
+
+// ---------- first-run guide: workdir + runtime -> starter team (+ Test team) -> first goal ----------
+const G = { dir: '', runtime: 'claude', hidden: localStorage.getItem('guideHidden') === '1', forced: false };
+function renderGuide() {
+  const g = $('#guide'); const ns = S.team.nodes; const started = S.tasks.length > 0;
+  if (G.hidden || (!G.forced && (ns.length && started))) return g.classList.add('hidden');
+  g.classList.remove('hidden');
+  const rts = S.config.runtimes || { claude: { installed: true, label: 'Claude Code', capabilities: {} } }; const rt = rts[G.runtime] || {};
+  const pass = ns.filter((n) => pfState(n) === 'pass').length; const busy = ns.some((n) => pfState(n) === 'testing');
+  const s1 = !!G.dir || ns.length > 0, s2 = ns.length > 0, s3 = started;
+  g.innerHTML = `<b>Get started</b> <span class="muted">${[s1, s2, s3].filter(Boolean).length}/3</span> <button id="g-close" style="float:right" title="Dismiss (reopen from ? help)">✕</button>
+  <div class="gstep"><h4 class="${s1 ? 'gdone' : ''}">1. Working directory + runtime</h4>
+    <button id="g-dir">${G.dir ? 'Change folder' : 'Choose folder'}</button> <span class="muted">${esc(G.dir || (ns.length ? 'set on agents' : 'project folder is used if skipped'))}</span><br>
+    <select id="g-rt">${Object.entries(rts).map(([id, r]) => `<option value="${id}" ${id === G.runtime ? 'selected' : ''} ${r.installed ? '' : 'disabled'}>${esc(r.label)}${r.installed ? '' : ' (not installed)'}</option>`).join('')}</select>
+    <span class="${rt.installed ? '' : 'muted'}">${rt.installed ? '✓ installed ' + esc(rt.version || '') : '✗ not found on PATH'}</span></div>
+  <div class="gstep ${s2 || rt.installed ? '' : 'off'}"><h4 class="${s2 && pass === ns.length ? 'gdone' : ''}">2. Starter team (PM → Dev → Reviewer)</h4>
+    ${s2 ? `<span>${busy ? 'Testing each agent…' : `Test team: ${pass}/${ns.length} responded`}</span> <button id="g-test" ${busy ? 'disabled' : ''}>Test team</button>
+      <ul>${ns.map((n) => `<li>${esc(n.name)}: ${PF_LABEL[pfState(n)]}</li>`).join('')}</ul>` : '<button id="g-team" class="primary">Create starter team + test</button>'}</div>
+  <div class="gstep ${s2 ? '' : 'off'}"><h4 class="${s3 ? 'gdone' : ''}">3. First goal</h4>
+    ${s3 ? '<span class="muted">Goal started — watch it in Observability.</span>' : '<textarea id="g-goal" rows="2" placeholder="e.g. Create hello.txt with hello world"></textarea><button id="g-start" class="primary">Start</button>'}</div>`;
+  $('#g-close').onclick = () => { G.hidden = true; G.forced = false; localStorage.setItem('guideHidden', '1'); renderGuide(); };
+  $('#g-dir').onclick = async () => { const d = await call('pickDir'); if (d) { G.dir = d; renderGuide(); } };
+  $('#g-rt').onchange = (e) => { G.runtime = e.target.value; renderGuide(); };
+  if ($('#g-test')) $('#g-test').onclick = () => testAgents(ns.map((n) => n.id));
+  if ($('#g-team')) $('#g-team').onclick = async () => {
+    $('#g-team').disabled = true; const ids = [];
+    for (const [i, role] of ['PM', 'Dev', 'Reviewer'].entries()) ids.push((await call('addNode', { name: role, role, x: 60 + i * 220, y: 80, runtime: G.runtime, ...(G.dir ? { workdir: G.dir } : {}) })).id);
+    await call('addEdge', ids[0], ids[1], 'assign'); await call('addEdge', ids[1], ids[2], 'review');
+    await refresh(); testAgents(ids);
+  };
+  if ($('#g-start')) $('#g-start').onclick = () => { const v = $('#g-goal').value.trim(); if (!v) return $('#g-goal').focus(); $('#goal').value = v; G.forced = false; $('#run').click(); };
+}
+$('#reopenguide').onclick = () => { G.hidden = false; G.forced = true; localStorage.removeItem('guideHidden'); renderGuide(); };
