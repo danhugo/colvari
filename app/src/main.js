@@ -631,6 +631,8 @@ const api = {
   createTask: (c, t) => ST(c).createTask(t), updateTask: (c, id, p) => ST(c).updateTask(id, p), deleteTask: (c, id) => ST(c).deleteTask(id),
   commentTask: (c, id, text) => ST(c).commentTask(id, 'human', text),
   writeWiki: (c, t, x) => ST(c).writeWiki(t, x, 'human'), deleteWiki: (c, t) => ST(c).deleteWiki(t),
+  listWikiSummaries: (c) => ST(c).listWikiSummaries(), searchWiki: (c, q) => ST(c).searchWiki(q),
+  listSessions: (c, nodeId) => ST(c).listSessions({ nodeId }), getSessionLog: (c, sessionId, opts) => ST(c).getSessionLog(sessionId, opts || {}),
   saveSettings: (c, s) => ST(c).saveSettings(s),
   listRuns: (c, f) => ST(c).listRuns(f || {}), clearRuns: (c) => ST(c).clearRuns(), usageCSV: (c, all) => U.toCSV(all ? pm.list().flatMap((p) => pm.store(p.id).listRuns()) : ST(c).listRuns()),
   usageByProject: () => pm.list().map((p) => ({ id: p.id, name: p.name, ...U.total(pm.store(p.id).listRuns()) })),

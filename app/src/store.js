@@ -5,6 +5,8 @@ const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
 const C = require('./controls');
+const U = require('./usage');
+const TL = require('./timeline');
 const PRESET_FIELDS = ['systemPrompt', 'allowedTools', 'disallowedTools', 'permissionMode'];
 const pick = (o, ks) => Object.fromEntries(ks.map((k) => [k, o[k]]));
 const { normalizeNode, normalizePatch, normalizePreset, applyPreset, EDGE_TYPES, SUGGESTED_ROLES } = require('./agent-config');
@@ -273,6 +275,30 @@ class Store {
     return this.update('wiki', { pages: {} }, (w) => { w.pages[title] = { title, content, author, updatedAt: new Date().toISOString() }; return w.pages[title]; });
   }
   deleteWiki(title) { this.update('wiki', { pages: {} }, (w) => { delete w.pages[title]; }); }
+  // Page list without body content, newest first: [{title, author, updatedAt}].
+  listWikiSummaries() {
+    return Object.values(this.listWiki())
+      .map((p) => ({ title: p.title, author: p.author || '', updatedAt: p.updatedAt || null }))
+      .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+  }
+  // Case-insensitive full-text search over title + content. Returns matches with a short snippet
+  // around the first hit, newest first.
+  searchWiki(query) {
+    const q = String(query || '').trim().toLowerCase();
+    if (!q) return [];
+    const out = [];
+    for (const p of Object.values(this.listWiki())) {
+      const content = p.content || '';
+      const hitTitle = p.title.toLowerCase().includes(q);
+      const idx = content.toLowerCase().indexOf(q);
+      if (!hitTitle && idx < 0) continue;
+      const at = idx >= 0 ? idx : 0;
+      const start = Math.max(0, at - 40);
+      const snippet = (start > 0 ? '…' : '') + content.slice(start, at + q.length + 40).trim() + (start + 80 < content.length ? '…' : '');
+      out.push({ title: p.title, author: p.author || '', updatedAt: p.updatedAt || null, snippet });
+    }
+    return out.sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+  }
 
   // ---- usage: one record per claude run (see usage.js), newest last, capped ----
   addRun(r) { this.update('runs', { runs: [] }, (d) => { d.runs.push(r); if (d.runs.length > 5000) d.runs.splice(0, d.runs.length - 5000); }); return r; }
@@ -291,6 +317,36 @@ class Store {
   }
   readLogs(limit = 2000) { try { return C.parseLogs(fs.readFileSync(path.join(this.dir, 'logs.jsonl'), 'utf8'), limit); } catch { return []; } }
   clearLogs() { try { fs.unlinkSync(path.join(this.dir, 'logs.jsonl')); } catch {} }
+
+  // ---- sessions: claude sessions grouped from persisted runs (see usage.js newRun) ----
+  // One entry per distinct sessionId, newest first: [{sessionId, nodeId, agent, taskId, task, startedAt, endedAt, model, models, runs, reportedCostUsd, totalTokens}].
+  listSessions(filter = {}) {
+    const rs = this.listRuns({ nodeId: filter.nodeId }).filter((r) => r.kind === 'agent' && r.sessionId);
+    const byId = new Map();
+    for (const r of rs) {
+      const s = byId.get(r.sessionId) || { sessionId: r.sessionId, nodeId: r.nodeId, agent: r.agent || '', taskId: r.taskId || null, task: r.task || '', startedAt: r.startedAt || null, endedAt: r.endedAt || null, models: [], runs: 0, reportedCostUsd: 0, totalTokens: 0 };
+      s.runs++; s.reportedCostUsd += r.reportedCostUsd || 0; s.totalTokens += U.totalTokens(r);
+      if (r.startedAt && (!s.startedAt || r.startedAt < s.startedAt)) s.startedAt = r.startedAt;
+      if (r.endedAt && (!s.endedAt || r.endedAt > s.endedAt)) s.endedAt = r.endedAt;
+      if (r.taskId) { s.taskId = r.taskId; s.task = r.task || s.task; } // last run's task wins
+      for (const m of r.model ? [r.model] : []) if (!s.models.includes(m)) s.models.push(m);
+      byId.set(r.sessionId, s);
+    }
+    return [...byId.values()].sort((a, b) => String(b.startedAt).localeCompare(String(a.startedAt)));
+  }
+  // Full conversation/log for one session, paginated oldest-first: {total, offset, limit, entries}.
+  // Bounded by the session's runs' [startedAt, endedAt] window on that node (only one run is active per node at a time).
+  getSessionLog(sessionId, { offset = 0, limit = 200 } = {}) {
+    const rs = this.listRuns().filter((r) => r.sessionId === sessionId);
+    if (!rs.length) return { total: 0, offset, limit, entries: [] };
+    const nodeId = rs[0].nodeId;
+    const startMs = Math.min(...rs.map((r) => (r.startedAt ? Date.parse(r.startedAt) : Infinity)));
+    const endsOpen = rs.some((r) => !r.endedAt);
+    const endMs = endsOpen ? Infinity : Math.max(...rs.map((r) => Date.parse(r.endedAt)));
+    const all = this.readLogs(Infinity).filter((l) => l.nodeId === nodeId && l.at >= startMs && l.at <= endMs);
+    const entries = TL.logEntries(all.slice(offset, offset + limit));
+    return { total: all.length, offset, limit, entries };
+  }
 
   // ---- settings ----
   getSettings() { return { claudePath: 'claude', maxConcurrency: 8, maxRuns: 30, permissionMode: 'bypassPermissions', rolePresets: [], budgetUsd: 0, budgetTokens: 0, requireApproval: false, useWorktrees: false, ...this.read('settings', {}) }; }

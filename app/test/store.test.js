@@ -39,6 +39,58 @@ test('wiki pages', () => {
   assert.equal(s.readWiki('Home'), null);
 });
 
+test('wiki: list summaries (no body) and full-text search', () => {
+  const s = tmp();
+  s.writeWiki('Runbook', 'How the team operates. See the deploy steps.', 'Pia');
+  s.writeWiki('Glossary', 'PM: plans the work. Dev: builds it.', 'Devon');
+  const list = s.listWikiSummaries();
+  assert.equal(list.length, 2);
+  assert.deepEqual(Object.keys(list[0]).sort(), ['author', 'title', 'updatedAt']);
+  const byTitle = s.searchWiki('runbook');
+  assert.equal(byTitle.length, 1); assert.equal(byTitle[0].title, 'Runbook');
+  const byBody = s.searchWiki('deploy steps');
+  assert.equal(byBody.length, 1); assert.equal(byBody[0].title, 'Runbook');
+  assert.match(byBody[0].snippet, /deploy steps/);
+  assert.equal(s.searchWiki('nonexistent').length, 0);
+  assert.deepEqual(s.searchWiki(''), []);
+});
+
+test('sessions: grouped from runs, paginated log scoped to the session window', () => {
+  const { newRun } = require('../src/usage');
+  const s = tmp();
+  const n = s.addNode({ name: 'Devon', role: 'Dev' });
+  const t = s.createTask({ title: 'Build it', assignee: n.id });
+  s.addRun(newRun({ nodeId: n.id, agent: n.name, taskId: t.id, task: t.title, sessionId: 'sess-1', model: 'claude-x', startedAt: '2026-01-01T00:00:00.000Z', endedAt: '2026-01-01T00:01:00.000Z', inputTokens: 10, outputTokens: 5, reportedCostUsd: 0.1 }));
+  s.addRun(newRun({ nodeId: n.id, agent: n.name, taskId: t.id, task: t.title, sessionId: 'sess-1', model: 'claude-x', startedAt: '2026-01-01T00:02:00.000Z', endedAt: '2026-01-01T00:03:00.000Z', inputTokens: 3, outputTokens: 2, reportedCostUsd: 0.05 }));
+  s.addRun(newRun({ nodeId: n.id, agent: n.name, taskId: t.id, task: t.title, sessionId: 'sess-2', model: 'claude-x', startedAt: '2026-01-01T00:10:00.000Z', endedAt: '2026-01-01T00:11:00.000Z', inputTokens: 1, outputTokens: 1, reportedCostUsd: 0.01 }));
+
+  const at = (iso) => new Date(iso).getTime();
+  const l = (at_, text) => s.appendLog({ nodeId: n.id, kind: 'text', text, at: at_ });
+  l(at('2026-01-01T00:00:10.000Z'), 'session1 line A');
+  l(at('2026-01-01T00:02:30.000Z'), 'session1 line B');
+  l(at('2026-01-01T00:10:30.000Z'), 'session2 line A');
+
+  const sessions = s.listSessions({ nodeId: n.id });
+  assert.equal(sessions.length, 2);
+  const sess1 = sessions.find((x) => x.sessionId === 'sess-1');
+  assert.equal(sess1.runs, 2);
+  assert.equal(Math.round((sess1.reportedCostUsd + Number.EPSILON) * 100) / 100, 0.15);
+  assert.equal(sess1.taskId, t.id);
+
+  const log1 = s.getSessionLog('sess-1', { offset: 0, limit: 1 });
+  assert.equal(log1.total, 2);
+  assert.equal(log1.entries.length, 1);
+  assert.equal(log1.entries[0].text, 'session1 line A');
+  const log1p2 = s.getSessionLog('sess-1', { offset: 1, limit: 1 });
+  assert.equal(log1p2.entries[0].text, 'session1 line B');
+
+  const log2 = s.getSessionLog('sess-2');
+  assert.equal(log2.total, 1);
+  assert.equal(log2.entries[0].text, 'session2 line A');
+
+  assert.deepEqual(s.getSessionLog('no-such-session'), { total: 0, offset: 0, limit: 200, entries: [] });
+});
+
 test('changing an agent role to a preset fills its empty prompt, tools and permission mode', () => {
   const { Store } = require('../src/store');
   const fs = require('fs'); const os = require('os'); const path = require('path');
