@@ -289,12 +289,35 @@ async function guiE2E() {
     expect('parallel: dependent starts after blocker ends', D[0] >= A[1], { A, D });
     s.saveSettings({ claudePath: prev.claudePath, maxConcurrency: prev.maxConcurrency });
   };
+  // Polish shots: graph at zoom 0.4 and 1.0 plus the sidebar, for both teams, light+dark. Node names must stay >= 11px on screen at 0.4.
+  const polishShots = async () => {
+    await waitFor(`return !!document.querySelector('#tpl-select option')`); await ex(`await refresh();`); const cur = await ex(`return { p: ctx.p, t: S.teamId }`);
+    const gp = cur.p || pid(); const ps = pm.store(gp, cur.t); const other = pm.createTeam(gp, 'Polish peers'); const os = pm.store(gp, other.id || other);
+    for (let i = ps.getTeam().nodes.length; i < 8; i++) ps.addNode({ name: `Agent ${i + 1}`, role: i ? 'Dev' : 'PM', x: 40 + (i % 4) * 220, y: 40 + Math.floor(i / 4) * 130 });
+    for (let i = 0; i < 4; i++) os.addNode({ name: `Peer ${i + 1}`, role: i ? 'Dev' : 'PM', x: 40 + i * 220, y: 60 });
+    const teams = [cur.t || ps.getTeam().id, other.id || other];
+    for (const [ti, tid] of teams.entries()) {
+      await ex(`switchTo({ p: '${gp}', t: '${tid}' }); await w(300); $('#tabs button[data-tab=team]').click(); await refresh(); renderGraph(); await w(500);`);
+      for (const z of [0.4, 1]) {
+        // On-screen font of the smallest visible node name: CSS font-size x the SVG screen scale.
+        const px = await ex(`const r = $('#graph').getBoundingClientRect(); VP = { x: 20, y: 20, zoom: ${z} }; applyVP(); await w(300);
+          const ts = [...document.querySelectorAll('#graph .node .nname, #graph .ghost .nname')].filter((t) => { const b = t.getBoundingClientRect(); return b.width && b.right > r.left && b.left < r.right && b.bottom > r.top && b.top < r.bottom; });
+          return ts.length ? Math.min(...ts.map((t) => parseFloat(getComputedStyle(t).fontSize) * t.getScreenCTM().a)) : 0`);
+        if (z === 0.4) expect(`polish: team ${ti + 1} node label >= 11px on screen at zoom 0.4`, px >= 11, { px });
+        for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`await w(400); VP = { x: 20, y: 20, zoom: ${z} }; applyVP();`); await shot(`28-polish-team${ti + 1}-zoom${z * 100}-${t}`); }
+      }
+      for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`await w(400);`); fs.writeFileSync(path.join(out, `29-polish-sidebar-team${ti + 1}-${t}.png`), (await win.capturePage(await ex(`const b = $('#sidebar').getBoundingClientRect(); return { x: Math.round(b.x), y: Math.round(b.y), width: Math.round(b.width), height: Math.round(b.height) }`))).toPNG()); }
+    }
+    expect('polish: sidebar lists both teams', await ex(`return document.querySelectorAll('#teamlist [data-tid]').length >= 2`));
+    require('electron').nativeTheme.themeSource = 'system'; await ex(`VP = { x: 20, y: 20, zoom: 1 }; applyVP();`); ps.setViewport({}); os.setViewport({});
+  };
   try {
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'graph') { await graphShots(); for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`$('#tabs button[data-tab=team]').click(); await w(500);`); await shot(`graph-${t}`); } require('electron').nativeTheme.themeSource = 'system'; throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'chat') { await chatShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'firstrun') { await firstrunInbox(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'overview') { await overviewShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'parallel') { await parallelShots(); throw null; }
+    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'polish') { await polishShots(); throw null; }
     // project/team management through the UI: create a project from the Startup template, then a Solo team, then switch back.
     // Wait until the template select is filled (the first refresh loads the templates) before choosing one.
     await ex(`$('#tabs button[data-tab=team]').click(); await w(300);`); // Chat is the default tab; the flow below clicks the graph
