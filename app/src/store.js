@@ -201,7 +201,7 @@ class Store {
   clearLogs() { try { fs.unlinkSync(path.join(this.dir, 'logs.jsonl')); } catch {} }
 
   // ---- settings ----
-  getSettings() { return { claudePath: 'claude', maxConcurrency: 2, maxRuns: 30, permissionMode: 'bypassPermissions', rolePresets: [], budgetUsd: 0, budgetTokens: 0, requireApproval: false, ...this.read('settings', {}) }; }
+  getSettings() { return { claudePath: 'claude', maxConcurrency: 2, maxRuns: 30, permissionMode: 'bypassPermissions', rolePresets: [], budgetUsd: 0, budgetTokens: 0, requireApproval: false, useWorktrees: false, ...this.read('settings', {}) }; }
   saveSettings(s) {
     const next = { ...this.getSettings(), ...s };
     if (s.rolePresets) {

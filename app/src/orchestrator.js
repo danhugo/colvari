@@ -10,6 +10,7 @@ const { normalizeMode, iterationPrompt, nextStep, judgeArgs, parseJudge, isLastL
 const U = require('./usage');
 const PF = require('./preflight');
 const C = require('./controls');
+const WT = require('./worktree');
 
 const MCP_SERVER = path.join(__dirname, 'mcp-server.js');
 
@@ -252,8 +253,13 @@ class Orchestrator extends EventEmitter {
     this.procs.set(node.id, { kill() {} }); // reserve the slot synchronously
     this.changed();
     const mcp = this.mcpConfig(node);
-    const cwd = node.workdir || this.store.dir;
+    let cwd = node.workdir || this.store.dir;
     fs.mkdirSync(cwd, { recursive: true });
+    if (settings.useWorktrees) {
+      const w = WT.ensureWorktree(cwd, task.id);
+      if (w.warning) this.log(node.id, 'error', 'warning: ' + w.warning);
+      else { cwd = w.cwd; this.store.updateTask(task.id, { worktreePath: w.worktreePath, worktreeBranch: w.worktreeBranch }); }
+    }
     const presets = settings.rolePresets || [];
     const unread = this.store.listMessages({ to: node.id }).filter((m) => !m.read).length;
     let cfg; let base = null; let baseDefer = null;
