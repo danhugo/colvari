@@ -46,4 +46,14 @@ function worktreeDiscard(t) {
   return { ok: true };
 }
 
-module.exports = { ensureWorktree, worktreeDiff, worktreeMerge, worktreeDiscard };
+// squad/<taskId> branches in `root` not yet merged (as an ancestor) into the repo's base branch.
+function unmergedSquadBranches(root) {
+  const base = baseOf(root);
+  let branches;
+  try { branches = git(root, ['branch', '--list', 'squad/*', '--format=%(refname:short)']).split('\n').filter(Boolean); } catch { return []; }
+  return branches
+    .filter((b) => { try { git(root, ['merge-base', '--is-ancestor', b, base]); return false; } catch { return true; } })
+    .map((branch) => ({ root, base, branch }));
+}
+
+module.exports = { ensureWorktree, worktreeDiff, worktreeMerge, worktreeDiscard, unmergedSquadBranches };
