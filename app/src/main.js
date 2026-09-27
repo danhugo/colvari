@@ -7,6 +7,7 @@ const WT = require('./worktree');
 const U = require('./usage');
 const PF = require('./preflight');
 const RT = require('./runtimes');
+const CAP = require('./capabilities');
 let runtimesCache = null; // detected once per app start (binary + version)
 const runtimes = (settings) => (runtimesCache ||= RT.detectRuntimes(settings, { ...process.env, PATH: [process.env.PATH, require('os').homedir() + '/.local/bin', '/opt/homebrew/bin', '/usr/local/bin'].join(':') }));
 
@@ -823,6 +824,14 @@ const api = {
   saveSettings: (c, s) => ST(c).saveSettings(s),
   listRuns: (c, f) => ST(c).listRuns(f || {}), clearRuns: (c) => ST(c).clearRuns(), usageCSV: (c, all) => U.toCSV(all ? pm.list().flatMap((p) => pm.store(p.id).listRuns()) : ST(c).listRuns()),
   usageByProject: () => pm.list().map((p) => ({ id: p.id, name: p.name, ...U.total(pm.store(p.id).listRuns()) })),
+  usageStatus: (c) => U.usageStatus(ST(c).listRuns(), ST(c).getSettings().usageLimits),
+  discoverCapabilities: (c, nodeId) => {
+    const node = TS(c).getTeam().nodes.find((n) => n.id === nodeId); if (!node) throw new Error('no agent ' + nodeId);
+    const rt = RT.getRuntime(node.runtime);
+    const capabilities = CAP.discoverCapabilities(rt, ST(c).getSettings());
+    TS(c).updateNode(nodeId, { capabilities, capabilitiesProbedAt: capabilities.probedAt });
+    return capabilities;
+  },
   testAgent, testTeam,
   stopAgent: (c, nodeId) => orchFor(c.p).stopAgent(nodeId), sendToAgent: (c, nodeId, text, taskId) => orchFor(c.p).sendToAgent(nodeId, text, taskId),
   listInbox: (c) => ST(c).listInbox({ status: 'open' }), answerInbox: (c, id, answer) => ST(c).answerInbox(id, answer),

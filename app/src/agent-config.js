@@ -7,6 +7,7 @@ const SUGGESTED_ROLES = ['PM', 'Planner', 'Dev', 'Reviewer', 'QA'];
 const PERMISSION_MODES = ['default', 'acceptEdits', 'bypassPermissions', 'plan'];
 const EDGE_TYPES = ['assign', 'message', 'review'];
 const BOARD_TOOLS = ['list_team', 'list_tasks', 'create_task', 'update_task_status', 'comment_task', 'send_message', 'read_messages', 'ask_human', 'read_wiki', 'write_wiki'];
+const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
 
 // Fields every node carries. '' / 0 / [] / {} mean "not set" (use the project default or the CLI default).
 const NODE_DEFAULTS = {
@@ -15,6 +16,7 @@ const NODE_DEFAULTS = {
   maxTurns: 0, appendSystemPrompt: '', addDirs: [], disabledBoardTools: [],
   billingMode: 'auto', billingBaseUrl: '',
   requireApproval: false, budgetUsd: 0, budgetTokens: 0,
+  effort: 'low', autoCompact: 0, // autoCompact: 0 = CLI default (disabled); else % context-used threshold (1-100)
   ...MODE_DEFAULTS,
 };
 const NODE_FIELDS = Object.keys(NODE_DEFAULTS);
@@ -51,6 +53,16 @@ function splitArgs(s) {
   return out;
 }
 
+// Strip a hand-added "--effort <level>" out of extraArgs, returning the level found (if any) and the rest.
+function migrateEffortArg(extraArgs) {
+  const tokens = splitArgs(extraArgs);
+  const i = tokens.indexOf('--effort');
+  if (i === -1) return { effort: null, extraArgs };
+  const effort = tokens[i + 1] || null;
+  const rest = [...tokens.slice(0, i), ...tokens.slice(i + 2)];
+  return { effort, extraArgs: rest.map((t) => (/\s/.test(t) ? `"${t.replace(/"/g, '\\"')}"` : t)).join(' ') };
+}
+
 function normalizeNode(n = {}, base = NODE_DEFAULTS) {
   const r = {};
   for (const k of NODE_FIELDS) r[k] = n[k] !== undefined ? n[k] : (Array.isArray(base[k]) ? [...base[k]] : typeof base[k] === 'object' ? { ...base[k] } : base[k]);
@@ -62,6 +74,12 @@ function normalizeNode(n = {}, base = NODE_DEFAULTS) {
   r.env = toEnv(r.env); r.maxTurns = Math.max(0, parseInt(r.maxTurns, 10) || 0);
   r.extraArgs = String(r.extraArgs || ''); splitArgs(r.extraArgs); // validate
   r.requireApproval = !!r.requireApproval; r.budgetUsd = Math.max(0, Number(r.budgetUsd) || 0); r.budgetTokens = Math.max(0, parseInt(r.budgetTokens, 10) || 0);
+  // Migration: extraArgs used to carry "--effort <level>" by hand; fold it into the effort field and drop it
+  // from extraArgs so it isn't duplicated on the CLI invocation.
+  const migrated = migrateEffortArg(r.extraArgs);
+  r.extraArgs = migrated.extraArgs;
+  r.effort = EFFORT_LEVELS.includes(n.effort) ? n.effort : (migrated.effort && EFFORT_LEVELS.includes(migrated.effort) ? migrated.effort : 'low');
+  r.autoCompact = Math.min(100, Math.max(0, parseInt(r.autoCompact, 10) || 0));
   Object.assign(r, normalizeMode(r), normalizeBilling(r));
   return r;
 }
@@ -101,6 +119,8 @@ function buildClaudeArgs(node, prompt, settings, mcpConfig, opts = {}) {
     '--permission-mode', n.permissionMode || settings.permissionMode || 'bypassPermissions'];
   if (opts.resume) args.push('--resume', String(opts.resume));
   if (n.model) args.push('--model', n.model);
+  args.push('--effort', n.effort);
+  if (n.autoCompact) args.push('--autocompact', String(n.autoCompact));
   if (n.allowedTools.length) {
     const tools = n.allowedTools.some((t) => t.startsWith('mcp__board')) ? n.allowedTools : [...n.allowedTools, 'mcp__board']; // keep the board usable
     args.push('--allowedTools', tools.join(','));
@@ -113,4 +133,4 @@ function buildClaudeArgs(node, prompt, settings, mcpConfig, opts = {}) {
   return args;
 }
 
-module.exports = { SUGGESTED_ROLES, PERMISSION_MODES, EDGE_TYPES, BOARD_TOOLS, NODE_DEFAULTS, NODE_FIELDS, toList, toEnv, envToText, splitArgs, normalizeNode, normalizePatch, normalizePreset, findPreset, applyPreset, roleSuggestions, buildClaudeArgs };
+module.exports = { SUGGESTED_ROLES, PERMISSION_MODES, EDGE_TYPES, BOARD_TOOLS, EFFORT_LEVELS, NODE_DEFAULTS, NODE_FIELDS, toList, toEnv, envToText, splitArgs, normalizeNode, normalizePatch, normalizePreset, findPreset, applyPreset, roleSuggestions, buildClaudeArgs, migrateEffortArg };
