@@ -226,13 +226,27 @@ function usageStatus(runs, limits, now = Date.now()) {
   return { authTypes, fiveHour, weekly, tokens, cost, warn, pause };
 }
 
+// A stored reading (in-memory map or persisted node.rateLimits) whose resetsAt has since passed describes a
+// window that already reset — its pct must not count (e.g. the >=90% reading that outlived its own reset and
+// paused dispatch even though the real usage was ~3%). Keeps still-live windows, drops stale ones; null when
+// nothing is left.
+function liveRateLimits(rl) {
+  if (!rl) return null;
+  const isLive = (w) => !!(w && !(w.resetsAt && new Date(w.resetsAt).getTime() <= Date.now()));
+  const fiveHour = isLive(rl.fiveHour) ? rl.fiveHour : null;
+  const weekly = isLive(rl.weekly) ? rl.weekly : null;
+  return (fiveHour || weekly) ? { fiveHour, weekly } : null;
+}
+
 // Fold each node's CLI-reported subscription rate-limit % (from rlAll — one parseRateLimits() result per node,
 // live in-memory or the last persisted node.rateLimits snapshot) over the run-derived usageStatus. The CLI's own
 // number is always the more trustworthy one when present: other clients sharing the same subscription window
 // aren't reflected in this project's local run count, so it wins outright rather than only when higher.
+// Stale readings (resetsAt already past) are ignored — the freshest still-live reading is what counts.
 function applyCliRateLimits(status, rlAll, warnPct) {
+  const live = (rlAll || []).map((rl) => liveRateLimits(rl)).filter(Boolean);
   const pick = (key) => {
-    const cli = rlAll.map((rl) => rl && rl[key]).filter(Boolean).sort((a, b) => b.pct - a.pct)[0];
+    const cli = live.map((rl) => rl[key]).filter(Boolean).sort((a, b) => b.pct - a.pct)[0];
     const runBased = status[key];
     if (!cli) return runBased;
     return { used: runBased.used, limit: runBased.limit || 1, pct: cli.pct, warn: cli.pct * 100 >= warnPct, pause: cli.pct >= 1, resetsAt: cli.resetsAt };
@@ -256,10 +270,13 @@ function parseRateLimitWindow(o) {
     // some CLIs already report milliseconds, which would otherwise land centuries in the future.
     resetsAt = new Date(resetsAt < 1e12 ? resetsAt * 1000 : resetsAt).toISOString();
   }
-  // Unknown/unparseable or already-past reset times aren't useful as a countdown — omit rather than show "↻0m".
+  // Unparseable reset times aren't useful as a countdown — omit rather than show "↻0m". A reset time already
+  // in the past means the window this reading describes has reset: the whole reading is stale and must not
+  // count (its pct described the old window), so drop it entirely instead of keeping an orphaned pct.
   if (resetsAt) {
     const t = new Date(resetsAt).getTime();
-    if (Number.isNaN(t) || t <= Date.now()) resetsAt = null;
+    if (Number.isNaN(t)) resetsAt = null;
+    else if (t <= Date.now()) return null;
   }
   return { pct: Math.max(0, Math.min(1, pct)), resetsAt };
 }
@@ -276,10 +293,12 @@ function parseRateLimits(ev = {}) {
 }
 // Guard against the configured subscription-usage threshold (default 90%), independent of the count-based
 // fiveHourLimit/weeklyLimit above: uses the CLI's own reported utilization + reset time, not a local request count.
+// Only still-live readings count: one whose resetsAt has already passed describes a window that reset.
 function subscriptionGuard(rateLimits, thresholdPct = GUARD_DEFAULT_PCT) {
+  const rl = liveRateLimits(rateLimits);
   const mk = (w) => ({ pct: w ? w.pct : 0, resetsAt: w ? w.resetsAt : null, pause: !!(w && w.pct * 100 >= thresholdPct) });
-  const fiveHour = mk(rateLimits && rateLimits.fiveHour);
-  const weekly = mk(rateLimits && rateLimits.weekly);
+  const fiveHour = mk(rl && rl.fiveHour);
+  const weekly = mk(rl && rl.weekly);
   return { fiveHour, weekly, pause: fiveHour.pause || weekly.pause, thresholdPct };
 }
 
@@ -323,5 +342,5 @@ function parseCompactBoundary(ev) {
 }
 
 module.exports = { resultSnapshot, tokensForRun, BILLING_MODES, BILLING_SOURCES, normalizeBilling, applyBillingEnv, detectBilling, costNote, tokensFromResult, totalTokens, newRun, applyEvent, finishRun, summarize, total, modelStats, toCSV, CSV_COLS,
-  LIMITS_DEFAULTS, normalizeLimits, authType, windowUsage, limitStatus, usageStatus, applyCliRateLimits, parseRateLimitWindow, parseRateLimits, subscriptionGuard, providerUsageStatus, GUARD_DEFAULT_PCT,
+  LIMITS_DEFAULTS, normalizeLimits, authType, windowUsage, limitStatus, usageStatus, applyCliRateLimits, parseRateLimitWindow, parseRateLimits, liveRateLimits, subscriptionGuard, providerUsageStatus, GUARD_DEFAULT_PCT,
   CONTEXT_WINDOW_DEFAULT, CONTEXT_WINDOW_1M, contextWindowFor, contextFromAssistant, parseCompactBoundary };
