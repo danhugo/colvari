@@ -181,4 +181,44 @@ function toCSV(runs) {
   return [CSV_COLS.join(','), ...rows].join('\n') + '\n';
 }
 
-module.exports = { resultSnapshot, tokensForRun, BILLING_MODES, BILLING_SOURCES, normalizeBilling, applyBillingEnv, detectBilling, costNote, tokensFromResult, totalTokens, newRun, applyEvent, finishRun, summarize, total, modelStats, toCSV, CSV_COLS };
+// Usage limits: subscription auth is rate-limited on rolling 5h / weekly windows (no cost, since it's covered by
+// the plan); API-key auth is limited by tokens/cost instead. Limits are configurable per project; 0 means disabled.
+const LIMITS_DEFAULTS = { fiveHourLimit: 0, weeklyLimit: 0, tokenLimit: 0, costLimit: 0, warnPct: 80 };
+function normalizeLimits(l = {}) {
+  const num = (v, d = 0) => Math.max(0, Number(v) || d);
+  const warnPct = Math.min(100, Math.max(1, Number(l.warnPct) || LIMITS_DEFAULTS.warnPct));
+  return { fiveHourLimit: num(l.fiveHourLimit), weeklyLimit: num(l.weeklyLimit), tokenLimit: num(l.tokenLimit), costLimit: num(l.costLimit), warnPct };
+}
+// 'subscription' runs are rate-limited by request windows; anything else (api/proxy/bedrock/vertex/unknown) is
+// billed, so it's limited by tokens/cost instead. No hard-coded runtime list: this only looks at how the run billed.
+const authType = (billingSource) => (billingSource === 'subscription' ? 'subscription' : 'api');
+const FIVE_HOURS_MS = 5 * 60 * 60 * 1000, WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+function windowUsage(runs, ms, now = Date.now()) {
+  const cutoff = now - ms;
+  return runs.filter((r) => r.kind === 'agent' && authType(r.billingSource) === 'subscription' && new Date(r.startedAt || 0).getTime() >= cutoff).length;
+}
+// Status against one limit: 0 disables it.
+function limitStatus(used, limit, warnPct) {
+  if (!limit) return { used, limit: 0, pct: 0, warn: false, pause: false };
+  const pct = used / limit;
+  return { used, limit, pct, warn: pct >= warnPct / 100, pause: pct >= 1 };
+}
+// Combined limits snapshot for a project's runs, split by auth type. Callers (orchestrator) use .warn/.pause
+// to decide whether to surface a warning or pause dispatch; exposed to the renderer over IPC as-is.
+function usageStatus(runs, limits, now = Date.now()) {
+  const l = normalizeLimits(limits);
+  const subRuns = runs.filter((r) => r.kind === 'agent' && authType(r.billingSource) === 'subscription');
+  const apiRuns = runs.filter((r) => r.kind === 'agent' && authType(r.billingSource) === 'api');
+  const fiveHour = limitStatus(windowUsage(runs, FIVE_HOURS_MS, now), l.fiveHourLimit, l.warnPct);
+  const weekly = limitStatus(windowUsage(runs, WEEK_MS, now), l.weeklyLimit, l.warnPct);
+  const tokens = limitStatus(apiRuns.reduce((a, r) => a + totalTokens(r), 0), l.tokenLimit, l.warnPct);
+  const cost = limitStatus(apiRuns.reduce((a, r) => a + (r.reportedCostUsd || 0), 0), l.costLimit, l.warnPct);
+  const hasSubscription = subRuns.length > 0, hasApi = apiRuns.length > 0;
+  const authTypes = [...new Set([...(hasSubscription ? ['subscription'] : []), ...(hasApi ? ['api'] : [])])];
+  const warn = fiveHour.warn || weekly.warn || tokens.warn || cost.warn;
+  const pause = fiveHour.pause || weekly.pause || tokens.pause || cost.pause;
+  return { authTypes, fiveHour, weekly, tokens, cost, warn, pause };
+}
+
+module.exports = { resultSnapshot, tokensForRun, BILLING_MODES, BILLING_SOURCES, normalizeBilling, applyBillingEnv, detectBilling, costNote, tokensFromResult, totalTokens, newRun, applyEvent, finishRun, summarize, total, modelStats, toCSV, CSV_COLS,
+  LIMITS_DEFAULTS, normalizeLimits, authType, windowUsage, limitStatus, usageStatus };

@@ -118,6 +118,19 @@ class Orchestrator extends EventEmitter {
     if (proj) { this.budgetStop = proj; this.log(null, 'error', 'Budget: ' + proj + '. Stopping all agents.'); this.notify('Budget reached', proj); return this.stop(); }
     const why = this.budgetReason(nodeId);
     if (why) { const a = this.agent(nodeId); a.budgetStop = why; this.log(nodeId, 'error', 'Budget: ' + why + '. Stopping this agent.'); this.notify('Agent budget reached', why, { nodeId }); if (a.status === 'working') this.stopAgent(nodeId, 'budget'); }
+    this.checkUsageLimits(nodeId);
+  }
+  // Subscription (5h/weekly) and API (tokens/cost) usage limits: warn once, then pause new dispatch when hit.
+  // Configured in settings.usageLimits; 0 disables a given limit. Does not stop an already-running agent.
+  checkUsageLimits(nodeId) {
+    const settings = this.store.getSettings();
+    const status = U.usageStatus(this.store.listRuns(), settings.usageLimits);
+    this.usageStatus = status;
+    if (status.pause && !this.usagePaused) { this.usagePaused = true; this.log(nodeId || null, 'error', 'Usage limit reached: pausing new dispatch.'); this.notify('Usage limit reached', 'Pausing new agent dispatch until the window resets.'); }
+    else if (!status.pause) this.usagePaused = false;
+    if (status.warn && !status.pause && !this.usageWarned) { this.usageWarned = true; this.log(nodeId || null, 'system', 'Usage warning: approaching configured limit.'); this.notify('Usage warning', 'Approaching a configured usage limit.'); }
+    else if (!status.warn) this.usageWarned = false;
+    return status;
   }
   // Stop one agent's current run (the rest keep going). Its task goes to review.
   stopAgent(nodeId, why = 'stopped by human') {
@@ -175,7 +188,7 @@ class Orchestrator extends EventEmitter {
     const team = this.store.getTeam();
     const all = this.store.listTasks();
     const todo = all.filter((t) => t.status === 'todo' && team.nodes.some((n) => n.id === t.assignee));
-    const ready = todo.filter((t) => !C.isBlocked(t, all) && !this.agent(t.assignee).budgetStop);
+    const ready = todo.filter((t) => !C.isBlocked(t, all) && !this.agent(t.assignee).budgetStop && !this.usagePaused);
     for (const task of ready) {
       if (s.maxConcurrency > 0 && this.procs.size >= s.maxConcurrency) break; // 0 = unlimited
       if (this.procs.has(task.assignee)) continue;
