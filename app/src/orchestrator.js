@@ -100,6 +100,8 @@ class Orchestrator extends EventEmitter {
     const l = { nodeId, kind, text, at: Date.now() };
     try { this.store.appendLog(l); } catch {}
     this.emit('log', l);
+    // Keep the latest error reason on the agent so the UI can show why it failed (and push it now, not at next run end).
+    if (kind === 'error' && nodeId) { this.agent(nodeId).lastError = { text: String(text).slice(0, 500), at: l.at }; this.changed(); }
   }
   notify(title, body, extra = {}) { this.emit('notify', { title, body, ...extra }); }
   budgetReason(nodeId) {
@@ -275,7 +277,7 @@ class Orchestrator extends EventEmitter {
   async runTask(node, task, team, settings) {
     this.runs++;
     this.store.updateTask(task.id, { status: 'in_progress' });
-    const a = this.agent(node.id); a.status = 'working'; a.taskId = task.id; a.runs++; a.iteration = 1;
+    const a = this.agent(node.id); a.status = 'working'; a.lastError = null; a.taskId = task.id; a.runs++; a.iteration = 1;
     this.procs.set(node.id, { kill() {} }); // reserve the slot synchronously
     this.changed();
     const mcp = this.mcpConfig(node);
