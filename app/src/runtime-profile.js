@@ -29,7 +29,7 @@ function normalizeMcp(mcp) {
   const m = isPlainObject(mcp) ? mcp : {};
   const method = MCP_METHODS.includes(m.method) ? m.method : 'none';
   if (method === 'json-flag') return { method, flag: String(m.flag || '--mcp-config') };
-  if (method === 'file') return { method, flag: String(m.flag || 'helpycode.json') }; // flag doubles as the config filename, written to cwd
+  if (method === 'file') return { method, flag: String(m.flag || 'helpycode.json') }; // flag doubles as the config filename, written to a per-run temp dir (see writePerRunMcpConfig)
   return { method, flag: String(m.flag || '') };
 }
 
