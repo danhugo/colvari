@@ -660,18 +660,26 @@ function renderSettings() {
 
 // ---------- overview ----------
 const projLogs = () => logs.filter((l) => l.projectId === ctx.p);
+// Nodes added without explicit positions default to the same (x,y); spread stacked duplicates out so every node stays visible.
+function spreadOverlaps(nodes) {
+  const seen = new Map(); return nodes.map((n) => {
+    const key = `${n.x},${n.y}`; const k = seen.get(key) || 0; seen.set(key, k + 1);
+    return k === 0 ? n : { ...n, x: n.x + k * (W + 24), y: n.y };
+  });
+}
 function renderOverview() {
   if (!$('#tab-overview.active')) return;
   const now = Date.now(); const L = projLogs(); const stuck = new Set(Overview.stuckAgents(S.orch.agents, L, now, S.settings.stuckMinutes || 5));
   const hot = Overview.edgeFlashes(L, S.team.edges, now);
-  const svg = $('#ov-graph'); svg.innerHTML = ''; const byId = Object.fromEntries(S.team.nodes.map((n) => [n.id, n]));
+  const ovNodes = spreadOverlaps(S.team.nodes);
+  const svg = $('#ov-graph'); svg.innerHTML = ''; const byId = Object.fromEntries(ovNodes.map((n) => [n.id, n]));
   const defs = el('defs', {}, svg);
   for (const t of ['assign', 'message', 'review']) { const m = el('marker', { id: 'ovarr-' + t, viewBox: '0 0 10 10', refX: 9, refY: 5, markerWidth: 7, markerHeight: 7, orient: 'auto-start-reverse' }, defs); el('path', { d: 'M0,1 L9,5 L0,9 z', class: 'arrow arrow-' + t }, m); }
   for (const e of S.team.edges) {
     const a = byId[e.from], b = byId[e.to]; if (!a || !b) continue; const type = e.type || 'assign'; const [x1, y1, x2, y2] = clip(a, b);
     el('path', { d: `M${x1},${y1} L${x2},${y2}`, class: `edge edge-${type}` + (hot.has(e.id) ? ' flash' : ''), 'marker-end': `url(#ovarr-${type})` }, svg);
   }
-  for (const n of S.team.nodes) {
+  for (const n of ovNodes) {
     const live = (S.orch.agents[n.id] || {}).status === 'working' ? 'working' : nodeLive(n); const isStuck = stuck.has(n.id); const c = agentColor(n.id);
     const g = el('g', { class: 'node' + (live === 'working' ? ' working st-working' : '') + (isStuck ? ' stuck' : ''), transform: `translate(${n.x},${n.y})`, 'data-id': n.id }, svg);
     el('rect', { class: 'card', width: W, height: H, rx: 12 }, g);
@@ -683,7 +691,7 @@ function renderOverview() {
     const sg = el('g', { class: 'status s-' + live, transform: `translate(${W - 14},14)` }, g); el('circle', { r: 5 }, sg); el('title', {}, sg).textContent = live;
     el('title', {}, g).textContent = `${n.name} (${n.role}) — ${isStuck ? 'stuck' : live}`;
   }
-  const gbox = graphBox(S.team.nodes), gpad = 40;
+  const gbox = graphBox(ovNodes), gpad = 40;
   svg.setAttribute('viewBox', `${gbox.x - gpad} ${gbox.y - gpad} ${gbox.w + gpad * 2} ${gbox.h + gpad * 2}`);
   svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
   $('#ov-stuck').innerHTML = [...stuck].map((id) => `<div class="stuckbar">⚠ <b>${esc(nodeName(id))}</b> has produced no output for ${S.settings.stuckMinutes || 5}+ min<span class="spacer"></span><button data-ovstop="${id}">Stop</button><button data-ovnudge="${id}">Nudge</button></div>`).join('');
@@ -710,7 +718,8 @@ function renderOverview() {
     tlbox.appendChild(tl); tlbox.scrollLeft = tlbox.scrollWidth;
   }
   // Readable task thread.
-  const ts = $('#ov-task'); const cur = ts.value || sel.task || (S.tasks[S.tasks.length - 1] || {}).id || '';
+  const ts = $('#ov-task'); const activeTask = S.tasks.find((t) => t.status === 'in_progress');
+  const cur = ts.value || sel.task || (activeTask || S.tasks[S.tasks.length - 1] || {}).id || '';
   ts.innerHTML = S.tasks.map((t) => `<option value="${t.id}">${esc(t.title)} (${t.status})</option>`).join(''); ts.value = cur;
   const t = S.tasks.find((x) => x.id === ts.value); const open = new Set([...document.querySelectorAll('#ov-thread details[open]')].map((d) => d.dataset.k));
   const head = $('#ov-threadhead');
