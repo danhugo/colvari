@@ -29,13 +29,32 @@ function orchFor(pid) {
 // never blocks app start or other nodes' probes. Best-effort: a probe failure just leaves the node unprobed for
 // next time (manual Refresh, or the next run's init event via orchestrator.js).
 function probeNodeLater(pid, node) {
-  if (!CAP.needsInitialProbe(node)) return;
+  if (!CAP.needsInitialProbe(node)) { healStaleModes(pid, node); return; }
   setImmediate(() => {
     try {
       const s = pm.store(pid, node.teamId || null);
       const rt = RT.getRuntime(node.runtime);
       const capabilities = CAP.discoverCapabilities(rt, s.getSettings());
       s.updateNode(node.id, { capabilities, capabilitiesProbedAt: capabilities.probedAt });
+    } catch {}
+  });
+}
+// An init-event snapshot captured before modes/categorized were derived from slashCommands (or with a Refresh
+// that copied a stale [] snapshot as-is — the bug this heals) can persist with real slash_commands like /goal,
+// /loop but modes: [] / an out-of-date categorized list. Recompute both from the snapshot's own slashCommands +
+// skills so the panel heals on the next app load without requiring a manual Refresh.
+function healStaleModes(pid, node) {
+  const cap = node.capabilities;
+  if (!cap || cap.source !== 'init-event' || !Array.isArray(cap.slashCommands)) return;
+  setImmediate(() => {
+    try {
+      const s = pm.store(pid, node.teamId || null);
+      const settings = s.getSettings();
+      const mcpServers = Object.keys((settings.mcpServers && typeof settings.mcpServers === 'object') ? settings.mcpServers : {});
+      const modes = [...new Set([...CAP.detectAppModes('', cap.slashCommands), ...(cap.modes || [])])];
+      const categorized = CAP.categorize({ modes, skills: cap.skills, slashCommands: cap.slashCommands, mcpServers });
+      if (modes.length === (cap.modes || []).length && categorized.length === (cap.categorized || []).length) return;
+      s.updateNode(node.id, { capabilities: { ...cap, modes, categorized } });
     } catch {}
   });
 }
@@ -1058,7 +1077,10 @@ const api = {
     const prevSlashCommands = (prevCap && Array.isArray(prevCap.slashCommands)) ? prevCap.slashCommands : [];
     let capabilities = CAP.discoverCapabilities(rt, settings, { prevSlashCommands });
     if (hasPrevInit) {
-      capabilities = { ...capabilities, source: prevCap.source, slashCommands: prevCap.slashCommands, skills: prevCap.skills, modes: prevCap.modes, categorized: prevCap.categorized };
+      const mcpServers = Object.keys((settings.mcpServers && typeof settings.mcpServers === 'object') ? settings.mcpServers : {});
+      const modes = [...new Set([...CAP.detectAppModes('', prevCap.slashCommands), ...(prevCap.modes || [])])];
+      const categorized = CAP.categorize({ modes, skills: prevCap.skills, slashCommands: prevCap.slashCommands, mcpServers });
+      capabilities = { ...capabilities, source: prevCap.source, slashCommands: prevCap.slashCommands, skills: prevCap.skills, modes, categorized };
     }
     const patch = { capabilities, capabilitiesProbedAt: capabilities.probedAt };
     if (!hasPrevInit) {
