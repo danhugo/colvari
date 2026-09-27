@@ -8,6 +8,7 @@ const U = require('./usage');
 const PF = require('./preflight');
 const RT = require('./runtimes');
 const CAP = require('./capabilities');
+const { introspectRuntime: runIntrospectRuntime } = require('./introspector');
 let runtimesCache = null; // detected once per app start (binary + version)
 const runtimes = (settings) => (runtimesCache ||= RT.detectRuntimes(settings, { ...process.env, PATH: [process.env.PATH, require('os').homedir() + '/.local/bin', '/opt/homebrew/bin', '/usr/local/bin'].join(':') }));
 
@@ -1015,7 +1016,27 @@ async function testTeam(c) {
   return out;
 }
 const wtTask = (c, id) => { const t = ST(c).listTasks().find((x) => x.id === id); if (!t || !t.worktreePath) throw new Error('task has no worktree'); return t; };
+// Backend RuntimeProfile (low-level: argsTemplate/effortValues/effortFlag/resumeFlag/mcp/eventMapping
+// with dotted paths) -> renderer's draft-profile schema (label/bin/version/models/defaultModel/effort/
+// variants/resume/eventMapping{kind:label}), agreed with Uma per t_833956fa. Conversion lives here so
+// neither side has to know the other's shape.
+function toDraftProfile(bin, profile) {
+  const hasModels = Array.isArray(profile.modelsCommand) && profile.modelsCommand.length > 0;
+  const em = profile.eventMapping || {};
+  return {
+    label: profile.label || bin, bin: profile.binary || bin, version: null,
+    models: hasModels ? [] : ['default'], defaultModel: hasModels ? '' : 'default',
+    effort: profile.effortValues || [], variants: [],
+    resume: !!profile.resumeFlag,
+    eventMapping: {
+      text: em.textPath || 'text', session: em.sessionIdPath || 'session_id', cost: em.costPath || 'cost',
+      input: em.inputPath || 'input_tokens', output: em.outputPath || 'output_tokens',
+      reasoning: em.reasoningPath || 'reasoning_tokens', cache: em.cachePath || 'cache_read_tokens',
+    },
+  };
+}
 const api = {
+  introspectRuntime: (bin) => toDraftProfile(bin, runIntrospectRuntime(bin)),
   listProjects: () => ({ projects: pm.list().map((p) => ({ ...p, running: !!(orchs.get(p.id) || {}).running })), templates: Object.fromEntries(Object.entries(TEMPLATES).map(([k, v]) => [k, v.label])) }),
   createProject: (_c, name, tpl) => pm.create(name, tpl), renameProject: (_c, pid, name) => pm.rename(pid, name),
   deleteProject: (_c, pid) => { if ((orchs.get(pid) || {}).running) throw new Error('stop the project first'); orchs.delete(pid); return pm.remove(pid); },
