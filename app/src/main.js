@@ -359,6 +359,14 @@ async function guiE2E() {
     const searched = await ex(`return { rows: document.querySelectorAll('#log .logrow').length, err: !!document.querySelector('#log .logrow.lv-error') }`);
     expect('logs: search narrows rows and error level is coloured', searched.rows === 1 && searched.err, searched);
     await ex(`$('#logsearch').value = ''; $('#logsearch').dispatchEvent(new Event('input')); await w(200);`);
+    const gp2 = cur.p || pid(); const other = pm.createTeam(gp2, 'Logs peers'); const otherId = other.id || other; const os = pm.store(gp2, otherId); const peer = os.addNode({ name: 'Peer', role: 'Dev', x: 60, y: 60 });
+    await ex(`logs.push({ projectId: ctx.p, nodeId: '${peer.id}', kind: 'text', text: 'Peer team activity.', at: Date.now() - 5000 }); await refresh(); renderObs(); renderLog(); await w(200);`);
+    const teamOpts = await ex(`return [...document.querySelectorAll('#logteam option')].map((o) => o.textContent)`);
+    expect('logs: team filter lists all teams', teamOpts.includes('All teams') && teamOpts.includes('Logs peers'), teamOpts);
+    await ex(`$('#logteam').value = '${otherId}'; $('#logteam').dispatchEvent(new Event('change')); await w(200);`);
+    const teamFiltered = await ex(`return { agents: document.querySelectorAll('#logagents .logagent-row[data-id]').length, opts: document.querySelectorAll('#logfilter option').length, rows: document.querySelectorAll('#log .logrow').length }`);
+    expect('logs: team filter narrows agent list and rows to that team', teamFiltered.agents === 2 && teamFiltered.opts === 2 && teamFiltered.rows === 1, teamFiltered);
+    await ex(`$('#logteam').value = ''; $('#logteam').dispatchEvent(new Event('change')); await w(200);`);
     for (const t of ['light', 'dark']) {
       require('electron').nativeTheme.themeSource = t;
       await ex(`$('#tabs button[data-tab=wiki]').click(); await w(300);`); await shot(`wiki-${t}`);
