@@ -283,7 +283,7 @@ async function guiE2E() {
     await ex(`document.querySelector('#projectlist [data-pid="${pid()}"]').click(); await w(600);`);
     await ex(`$('#addnode').click(); await w(400); $('#addnode').click(); await w(400);`);
     await ex(`$('#connect').click(); await w(200);`);
-    const nodes = await ex(`return [...document.querySelectorAll('#graph .node')].map(g => { const b = g.getBoundingClientRect(); return [b.x + 30, b.y + 20]; });`);
+    const nodes = await ex(`return [...document.querySelectorAll('#graph .node')].map((g, i, a) => { const b = g.getBoundingClientRect(); return [i < a.length - 1 ? b.x + 8 : b.x + b.width - 24, b.y + b.height / 2]; });`); // added nodes overlap (20px offset): click each one's visible part
     for (const [x, y] of nodes) { for (const type of ['mouseDown', 'mouseUp']) win.webContents.sendInputEvent({ type, x: Math.round(x), y: Math.round(y), button: 'left', clickCount: 1 }); await new Promise((r) => setTimeout(r, 600)); }
     await shot('1-team');
     // F2: free-form role + per-agent permissions on the Dev, saved as a project role preset; edge type panel.
@@ -421,7 +421,7 @@ async function guiE2E() {
     await firstrunInbox();
     await overviewShots();
     await chatShots();
-    await graphShots();
+    if (!process.env.SKIP_GRAPH) await graphShots();
     // Main screens in light + dark (the renderer themes via prefers-color-scheme, driven by nativeTheme).
     const { nativeTheme } = require('electron');
     for (const theme of ['light', 'dark']) {
@@ -430,13 +430,26 @@ async function guiE2E() {
       await ex(`$('#tabs button[data-tab=team]').click(); $('#reopenguide').click(); await w(400);`); await shot(`main-firstrun-${theme}`);
       expect(`firstrun guide opens (${theme})`, await ex(`return !$('#guide').classList.contains('hidden')`));
       await ex(`$('#guide').classList.add('hidden'); await w(200);`);
-      // Idle detection: 3 agents, 1 busy -> banner reads "2 agents idle".
-      const idleTxt = await ex(`$('#tabs button[data-tab=team]').click(); const keep = [S.allNodes, S.orch.agents, S.orch.idle];
-        S.allNodes = [{ id: 'i1', name: 'Ada' }, { id: 'i2', name: 'Bo' }, { id: 'i3', name: 'Cy' }]; S.orch.agents = { i1: { status: 'working' } }; S.orch.idle = ['i2', 'i3'];
-        renderIdle(); await w(300); const b = document.querySelector('.idlebanner[data-where=team]'); const t = b.classList.contains('hidden') ? '' : b.textContent; window.__idleKeep = keep; return t;`);
+      // Idle detection on the real team: the PM's Dev report is working -> banner names the rest; Dev's node shows the busy arc.
+      const ip = (global.__idleP ||= pm.create('Idle demo')); const istore = pm.store(ip.id); const iorch = orchFor(ip.id);
+      if (!istore.getTeam().nodes.length) { const [p, d, r] = [['PM', 'PM'], ['Dev', 'Dev'], ['Reviewer', 'Reviewer']].map(([name, role], i) => istore.addNode({ name, role, x: 80 + i * 220, y: 120 })); istore.addEdge(p.id, d.id); istore.addEdge(p.id, r.id); }
+      const team = istore.getTeam(); const pmN = team.nodes.find((n) => n.role === 'PM'); const reps = team.edges.filter((e) => e.from === pmN.id).map((e) => e.to);
+      const dev = team.nodes.find((n) => n.role === 'Dev'); const prevCtx = await ex(`const c = ctx; await switchTo({ p: '${ip.id}' }); await w(500); return c;`);
+      const idleNames = team.nodes.filter((n) => n.id !== dev.id).map((n) => n.name);
+      const idle = await ex(`$('#tabs button[data-tab=team]').click(); await w(300); const keep = [S.orch.agents, S.orch.idle];
+        S.orch.agents = { '${dev.id}': { status: 'working' } }; S.orch.idle = S.allNodes.filter((n) => n.id !== '${dev.id}').map((n) => n.id);
+        renderGraph(); renderIdle(); await w(300); const b = document.querySelector('.idlebanner[data-where=team]'); window.__idleKeep = keep;
+        return { txt: b.classList.contains('hidden') ? '' : b.textContent, busy: document.querySelectorAll('#graph .pres.busy').length, idleRings: document.querySelectorAll('#graph .pres.idle').length };`);
       await shot(`idle-banner-${theme}`);
-      expect(`idle banner shows 2 idle (${theme})`, /2 agents idle/.test(idleTxt) && !/Ada/.test(idleTxt), { idleTxt });
-      await ex(`[S.allNodes, S.orch.agents, S.orch.idle] = window.__idleKeep; renderIdle();`);
+      expect(`idle banner names real idle agents, not busy Dev (${theme})`, idle.txt.includes(`${idleNames.length} agent`) && idleNames.every((nm) => idle.txt.includes(nm)) && !idle.txt.includes(dev.name) && idle.busy === 1 && idle.idleRings === idleNames.length, { idle, idleNames, dev: dev.name });
+      await ex(`[S.orch.agents, S.orch.idle] = window.__idleKeep; await switchTo(${JSON.stringify(prevCtx)}); await w(300);`);
+      if (theme === 'dark') { // Live orchestrator nudge: PM with an open goal + idle reports gets a board message.
+        const goal = istore.createTask({ title: 'Idle nudge goal', assignee: pmN.id, createdBy: pmN.id }); iorch.nudgeIdle();
+        const msg = istore.listMessages().find((m) => m.from === 'system' && m.to === pmN.id && /idle:/.test(m.text));
+        console.log('[gui-e2e] idle nudge', JSON.stringify(msg || null));
+        expect('orchestrator nudgeIdle() posts the PM board message', !!msg && reps.every((id) => msg.text.includes(team.nodes.find((n) => n.id === id).name)), { msg });
+        istore.updateTask(goal.id, { status: 'done' });
+      }
       const bg = await ex(`return getComputedStyle(document.documentElement).getPropertyValue('--bg').trim()`); expect(`theme ${theme} applied`, bg === BG[theme], { bg, dt: await ex(`return document.documentElement.dataset.theme + '|' + matchMedia('(prefers-color-scheme: dark)').matches + '|' + getComputedStyle(document.documentElement).getPropertyValue('--bg-app')`) });
     }
     nativeTheme.themeSource = 'system';
