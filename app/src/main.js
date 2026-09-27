@@ -360,7 +360,7 @@ async function guiE2E() {
       await ex(`$('#tabs button[data-tab=team]').click(); $('#reopenguide').click(); await w(400);`); await shot(`main-firstrun-${theme}`);
       expect(`firstrun guide opens (${theme})`, await ex(`return !$('#guide').classList.contains('hidden')`));
       await ex(`$('#guide').classList.add('hidden'); await w(200);`);
-      const bg = await ex(`return getComputedStyle(document.documentElement).getPropertyValue('--bg').trim()`); expect(`theme ${theme} applied`, (bg === '#15171c') === (theme === 'dark'), bg);
+      const bg = await ex(`return getComputedStyle(document.documentElement).getPropertyValue('--bg').trim()`); expect(`theme ${theme} applied`, bg === BG[theme], { bg, dt: await ex(`return document.documentElement.dataset.theme + '|' + matchMedia('(prefers-color-scheme: dark)').matches + '|' + getComputedStyle(document.documentElement).getPropertyValue('--bg-app')`) });
     }
     nativeTheme.themeSource = 'system';
     const tasks = store.listTasks();
@@ -423,7 +423,7 @@ const api = {
   run: (c) => orchFor(c.p).start(), stop: (c) => orchFor(c.p).stop(),
   getPrefs: () => getPrefs(), setPrefs: (_c, patch) => setPrefs(patch || {}),
 };
-nativeTheme.on('updated', () => { applyTheme(getPrefs().theme); send('theme', { dark: nativeTheme.shouldUseDarkColors }); });
+nativeTheme.on('updated', () => { if (win && !win.isDestroyed()) win.setBackgroundColor(BG[nativeTheme.shouldUseDarkColors ? 'dark' : 'light']); send('theme', { dark: nativeTheme.shouldUseDarkColors }); });
 ipcMain.handle('api', async (_e, name, ctx, ...args) => {
   if (!api[name]) throw new Error('unknown api ' + name);
   return api[name](ctx || {}, ...args);

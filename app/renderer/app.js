@@ -659,4 +659,4 @@ function renderGuide() {
 $('#reopenguide').onclick = () => { G.hidden = false; G.forced = true; localStorage.removeItem('guideHidden'); renderGuide(); };
 
 // Theme: mirror the OS/nativeTheme scheme onto <html data-theme> so tokens flip reliably (media query alone didn't re-apply in Electron).
-{ const mq = matchMedia('(prefers-color-scheme: dark)'); const apply = () => document.documentElement.dataset.theme = mq.matches ? 'dark' : 'light'; apply(); mq.addEventListener('change', apply); }
+{ const mq = matchMedia('(prefers-color-scheme: dark)'); const apply = () => document.documentElement.dataset.theme = mq.matches ? 'dark' : 'light'; apply(); mq.addEventListener('change', apply); squad.on('theme', (t) => { document.documentElement.dataset.theme = t.dark ? 'dark' : 'light'; }); }
