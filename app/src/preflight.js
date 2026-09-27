@@ -10,7 +10,7 @@ const PREFLIGHT_PROMPT = 'Preflight check. Call the board MCP tool list_team exa
 const PREFLIGHT_MAX_TURNS = 3;
 const TOOL = 'mcp__board__list_team';
 // Node fields that change how a run behaves: a pass is only valid while these stay the same.
-const CONFIG_KEYS = ['model', 'permissionMode', 'allowedTools', 'disallowedTools', 'disabledBoardTools', 'env', 'extraArgs', 'appendSystemPrompt', 'addDirs', 'workdir', 'billingMode', 'billingBaseUrl'];
+const CONFIG_KEYS = ['runtime', 'model', 'permissionMode', 'allowedTools', 'disallowedTools', 'disabledBoardTools', 'env', 'extraArgs', 'appendSystemPrompt', 'addDirs', 'workdir', 'billingMode', 'billingBaseUrl'];
 
 function configHash(node, settings = {}) {
   const n = normalizeNode(node); const o = {};

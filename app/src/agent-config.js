@@ -10,7 +10,7 @@ const BOARD_TOOLS = ['list_team', 'list_tasks', 'create_task', 'update_task_stat
 
 // Fields every node carries. '' / 0 / [] / {} mean "not set" (use the project default or the CLI default).
 const NODE_DEFAULTS = {
-  name: 'Agent', role: 'Dev', systemPrompt: '', model: '', workdir: '',
+  name: 'Agent', role: 'Dev', runtime: 'claude', systemPrompt: '', model: '', workdir: '',
   permissionMode: '', allowedTools: [], disallowedTools: [], extraArgs: '', env: {},
   maxTurns: 0, appendSystemPrompt: '', addDirs: [], disabledBoardTools: [],
   billingMode: 'auto', billingBaseUrl: '',
@@ -54,6 +54,7 @@ function splitArgs(s) {
 function normalizeNode(n = {}, base = NODE_DEFAULTS) {
   const r = {};
   for (const k of NODE_FIELDS) r[k] = n[k] !== undefined ? n[k] : (Array.isArray(base[k]) ? [...base[k]] : typeof base[k] === 'object' ? { ...base[k] } : base[k]);
+  r.runtime = ['claude', 'codex', 'opencode'].includes(r.runtime) ? r.runtime : 'claude';
   r.name = String(r.name || 'Agent'); r.role = String(r.role || '').trim() || 'Dev';
   if (r.permissionMode && !PERMISSION_MODES.includes(r.permissionMode)) throw new Error('bad permission mode ' + r.permissionMode);
   r.allowedTools = toList(r.allowedTools); r.disallowedTools = toList(r.disallowedTools); r.addDirs = toList(r.addDirs);

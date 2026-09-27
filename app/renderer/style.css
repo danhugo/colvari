@@ -64,3 +64,5 @@ td.actions button { padding:2px 7px; font-size:12px; margin-right:4px; } #budget
 header { flex-wrap:nowrap; min-width:0; } header > strong, header .pill, header button, #tabs { white-space:nowrap; flex-shrink:0; } #tabs { display:flex; }
 header #goal { flex:1 1 260px; min-width:140px; max-width:420px; } header .spacer { flex:0 1 12px; }
 header .pill { font-variant-numeric:tabular-nums; } .pill.quiet { color:var(--muted); }
+.cap { display: inline-block; padding: 0 6px; border-radius: 8px; font-size: 11px; margin: 2px 0; }
+.cap.on { background: #1f4d2b; color: #9fe0b0; } .cap.off { background: #3a2a2a; color: #c99; }

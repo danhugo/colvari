@@ -11,6 +11,7 @@ const U = require('./usage');
 const PF = require('./preflight');
 const C = require('./controls');
 const WT = require('./worktree');
+const RT = require('./runtimes');
 
 const MCP_SERVER = path.join(__dirname, 'mcp-server.js');
 
@@ -191,7 +192,8 @@ class Orchestrator extends EventEmitter {
       const startedMs = Date.now();
       const usage = U.newRun({ projectId: this.store.meta() ? this.store.meta().id : null, nodeId: node.id, agent: node.name, ...meta });
       if (usage.resumedFrom) usage.baseline = this.sessionBaseline(usage.resumedFrom);
-      const child = args ? spawn(settings.claudePath, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] })
+      const rt = RT.getRuntime(meta.runtime);
+      const child = args ? spawn(rt.bin(settings), args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] })
         : Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter(), kill() {} });
       if (!args) setImmediate(() => child.emit('close', 1));
       this.procs.set(node.id, child);
@@ -199,12 +201,12 @@ class Orchestrator extends EventEmitter {
       let buf = '';
       child.stdout.on('data', (d) => {
         buf += d; let i;
-        while ((i = buf.indexOf('\n')) >= 0) { const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1); if (line) this.onEvent(node, line, run); }
+        while ((i = buf.indexOf('\n')) >= 0) { const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1); if (line) this.onEvent(node, line, run, rt.id); }
       });
       child.stderr.on('data', (d) => this.log(node.id, 'stderr', String(d).trim()));
       child.on('error', (e) => this.log(node.id, 'error', 'spawn failed: ' + e.message));
       child.on('close', (code) => {
-        if (buf.trim()) this.onEvent(node, buf.trim(), run);
+        if (buf.trim()) this.onEvent(node, buf.trim(), run, rt.id);
         delete usage.baseline;
         if (usage.sessionId && usage.cumulative) (this.sessionCum ||= new Map()).set(usage.sessionId, usage.cumulative);
         if (args) this.record(U.finishRun(usage, { code, env, billingMode: meta.billingMode, startedMs }));
@@ -275,7 +277,7 @@ class Orchestrator extends EventEmitter {
     if (m.mode === 'goal' && !m.goalCondition.trim()) { this.log(node.id, 'error', 'goal mode without a completion condition: running once'); m.mode = 'single'; }
     const bill = U.applyBillingEnv(cfg, this.env(cfg)); const env = bill.env;
     for (const w of bill.warnings) this.log(node.id, 'error', w);
-    const meta = { taskId: task.id, task: task.title, billingMode: cfg.billingMode || 'auto' };
+    const meta = { taskId: task.id, task: task.title, billingMode: cfg.billingMode || 'auto', runtime: cfg.runtime || 'claude' };
     let resume = task.sessionId || (m.continueSession ? this.lastSession(node.id) : null);
     this.log(node.id, 'system', `▶ ${node.name} starts "${task.title}" in ${cwd} [mode=${m.mode}${resume ? ', resume ' + resume : ''}]`);
     let code = 1; let judge = null; let i = 0; let reason = ''; let human = null;
@@ -286,7 +288,7 @@ class Orchestrator extends EventEmitter {
       if (base !== null) {
         const b = m.mode === 'loop' && !isLastLoop(m, i) ? baseDefer : base;
         const prompt = human ? humanPrompt(human, resume || wf ? null : b) : iterationPrompt(m, b, i, { reason: judge && judge.reason, task: wf ? (this.store.getTask(task.id) || task) : null });
-        try { args = buildClaudeArgs(runCfg, prompt, settings, mcp, { resume }); }
+        try { args = RT.getRuntime(cfg.runtime).buildArgs(runCfg, prompt, settings, mcp, { resume }); }
         catch (e) { this.log(node.id, 'error', 'bad agent settings: ' + e.message); }
       }
       if (i > 0) this.log(node.id, 'system', `↻ ${node.name} iteration ${i + 1} (${m.mode})`);
@@ -340,6 +342,12 @@ class Orchestrator extends EventEmitter {
     const presets = settings.rolePresets || [];
     let cfg;
     try { cfg = normalizeNode(applyPreset(node, presets)); } catch (e) { return { ok: false, checks: [{ id: 'config', label: 'agent settings', ok: false, detail: e.message }], error: 'agent settings: ' + e.message, at: new Date().toISOString() }; }
+    if (cfg.runtime && cfg.runtime !== 'claude') { // other runtimes: binary + version check only
+      const d = RT.detectRuntimes(settings, this.env(cfg))[cfg.runtime];
+      const r = { ok: d.installed, runtime: cfg.runtime, checks: [{ id: 'binary', label: cfg.runtime + ' binary', ok: d.installed, detail: d.installed ? cfg.runtime + ' ' + d.version : d.error }], error: d.installed ? null : cfg.runtime + ' ' + d.error, at: new Date().toISOString(), configHash: PF.configHash(node, settings) };
+      this.log(node.id, r.ok ? 'result' : 'error', `⚑ preflight ${node.name} [${cfg.runtime}] ${r.ok ? 'PASS' : 'FAIL'}: ${r.checks[0].detail}`);
+      this.changed(); return r;
+    }
     const cwd = node.workdir || this.store.dir;
     try { fs.mkdirSync(cwd, { recursive: true }); } catch {}
     const bill = U.applyBillingEnv(cfg, this.env(cfg));
@@ -359,9 +367,17 @@ class Orchestrator extends EventEmitter {
     return r;
   }
 
-  onEvent(node, line, run) {
+  onEvent(node, line, run, runtime = 'claude') {
     let ev; try { ev = JSON.parse(line); } catch { return this.log(node.id, 'raw', line); }
     const a = this.agent(node.id);
+    if (runtime === 'codex') {
+      const o = RT.parseCodexEvent(ev);
+      for (const [k, t] of o.logs) if (String(t).trim()) this.log(node.id, k, t);
+      if (run && o.sessionId) { run.sessionId = o.sessionId; if (run.usage) run.usage.sessionId = o.sessionId; }
+      if (run && o.result !== undefined) run.result = o.result;
+      if (o.tokens) { a.inputTokens += o.tokens.inputTokens; a.outputTokens += o.tokens.outputTokens; if (run && run.usage) { run.usage.inputTokens = (run.usage.inputTokens || 0) + o.tokens.inputTokens; run.usage.outputTokens = (run.usage.outputTokens || 0) + o.tokens.outputTokens; } this.changed(); }
+      return;
+    }
     if (ev.type === 'assistant' && ev.message?.content) {
       for (const c of ev.message.content) {
         if (c.type === 'text' && c.text.trim()) this.log(node.id, 'text', c.text);
