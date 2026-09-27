@@ -156,9 +156,11 @@ async function guiE2E() {
     const th = await ex(`return { open: !$('#chat-thread').classList.contains('hidden'), title: $('#chat-thread .chat-head').textContent, items: document.querySelectorAll('#chat-threadroom .bubble, #chat-threadroom .cchip').length }`);
     expect('chat: thread pane shows the task', th.open && th.title.includes('Chat demo') && th.items >= 3, th);
     await shot('18-chat-thread');
-    const typing = await ex(`S.orch.agents = { '${b.id}': { status: 'working', taskId: '${t.id}' } }; CH.key = ''; renderChat(); return $('#chat-typing').textContent`);
-    expect('chat: working indicator', typing.includes(b.name + ' is working'), { typing });
-    await shot('19-chat-working');
+    const seedWorking = `S.orch = { ...S.orch, running: true, runs: 1, agents: { '${b.id}': { status: 'working', taskId: '${t.id}' } } }; renderHeader(); CH.key = ''; renderChat();`;
+    await ex(`window._refresh = refresh; refresh = async () => {}; if (!$('#tab-chat.active')) $('#tabs button[data-tab=chat]').click(); ${seedWorking} await w(400);`);
+    const typing = await ex(`return { typing: $('#chat-typing').textContent, header: $('#runstate').textContent, dot: !!document.querySelector('#chat-room .avatar.working') }`);
+    expect('chat: working indicator (text, running header, green dot)', typing.typing.includes(b.name + ' is working') && typing.header.startsWith('running') && typing.dot, typing);
+    await shot('19-chat-working'); await ex(`refresh = window._refresh; await refresh();`);
     const origRun = api.run; api.run = () => ({ stubbed: true });
     await ex(`CH.thread = null; const i = $('#chat-input'); i.value = '@${b.name.slice(0, 2)}'; i.dispatchEvent(new Event('input')); await w(200);`);
     const mention = await ex(`return [...document.querySelectorAll('#chat-mentions div')].map((d) => d.dataset.name)`);
@@ -189,7 +191,7 @@ async function guiE2E() {
     const projInfo = { projects: mp.map((p) => p.name), guiTeams: gpTeams.map((t) => t.name), mainNodes: tn(0).nodes.map((n) => n.role), mainEdges: tn(0).edges.length, soloNodes: tn(1).nodes.length };
     console.log('[gui-e2e] projects', JSON.stringify(projInfo));
     expect('GUI project created', !!gp, projInfo);
-    expect('Startup template: 3 nodes (PM, Dev, Reviewer) and 2 edges', tn(0).nodes.length === 3 && tn(0).edges.length === 2, projInfo);
+    expect('Startup template: 4 nodes (PM, Dev, Reviewer, Critic) and 3 edges', tn(0).nodes.length === 4 && tn(0).edges.length === 3, projInfo);
     expect('Solo team created from template', gpTeams.length === 2 && tn(1).nodes.length === 1, projInfo);
     await ex(`document.querySelector('#projectlist [data-pid="${pid()}"]').click(); await w(600);`);
     await ex(`$('#addnode').click(); await w(400); $('#addnode').click(); await w(400);`);
@@ -252,7 +254,7 @@ async function guiE2E() {
     const devNode = store.getTeam().nodes[1];
     const ta = store.createTask({ title: 'F6 build', assignee: devNode.id }); const tb = store.createTask({ title: 'F6 ship', assignee: devNode.id });
     store.updateTask(ta.id, { status: 'review', awaitingApproval: true });
-    await ex(`document.dispatchEvent(new KeyboardEvent('keydown', { key: '2', ctrlKey: true, bubbles: true })); await w(300);`);
+    await ex(`document.dispatchEvent(new KeyboardEvent('keydown', { key: '3', ctrlKey: true, bubbles: true })); await w(300);`);
     const boardViaKey = await ex(`return document.querySelector('#tab-board').classList.contains('active')`);
     await ex(`$('#stop').click(); await w(600); document.querySelector('.card[data-id="${tb.id}"]').click(); await w(300);
       const cb = [...document.querySelectorAll('#td-deps input')].find((x) => x.value === '${ta.id}'); cb.checked = true; cb.dispatchEvent(new Event('change')); await w(800);
