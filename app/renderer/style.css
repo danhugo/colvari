@@ -99,7 +99,8 @@ header .pill { font-variant-numeric:tabular-nums; } .pill.quiet { color:var(--mu
 .cap { display: inline-block; padding: 0 6px; border-radius: 8px; font-size: 11px; margin: 2px 0; }
 .cap.on { background: var(--success-soft); color: var(--success-text); } .cap.off { background: var(--danger-soft); color: var(--danger); }
 
-#ov-graph { flex:1; min-height:260px; cursor:default; background-color:var(--bg-surface); background-image:radial-gradient(circle, var(--border-strong) 1px, transparent 1.2px); background-size:22px 22px; }
+#ov-graph-wrap { flex:1; min-height:260px; min-width:0; overflow:auto; cursor:default; background-color:var(--bg-surface); background-image:radial-gradient(circle, var(--border-strong) 1px, transparent 1.2px); background-size:22px 22px; }
+#ov-graph { display:block; }
 #ov-graph text { fill:var(--fg-primary); font-family:var(--font-sans); pointer-events:none; }
 #ov-graph .node .card { fill:var(--bg-raised); stroke:var(--border-strong); stroke-width:1; filter:drop-shadow(0 1px 2px rgba(16,20,40,.10)); }
 #ov-graph .node.working .card, #ov-graph .node.st-working .card { stroke:var(--success); stroke-width:2; animation:glow 1.4s ease-in-out infinite; }
@@ -179,7 +180,7 @@ button, input, select, textarea { border-radius:var(--radius-sm); transition:bor
 button:hover { background:var(--bg-hover); } button.primary:hover { background:color-mix(in srgb, var(--accent) 88%, black); }
 button:focus-visible, input:focus, select:focus, textarea:focus { outline:none; border-color:var(--accent); box-shadow:var(--ring); }
 .pill { border-radius:var(--radius-full); } .pill.on { background:var(--success-soft); color:var(--success-text); border-color:transparent; }
-.panel, .col, .stat, #graph, #ov-graph, #ov-timeline { border-radius:var(--radius-md); box-shadow:var(--shadow-sm); }
+.panel, .col, .stat, #graph, #ov-graph-wrap, #ov-timeline { border-radius:var(--radius-md); box-shadow:var(--shadow-sm); }
 #sidebar { background:var(--bg-sidebar); padding:var(--space-3) var(--space-2); }
 #sidebar h4 { font-size:var(--text-xs); letter-spacing:.06em; font-weight:var(--fw-semibold); padding:0 var(--space-2); }
 #projectlist div, #teamlist div { border-radius:var(--radius-sm); transition:background var(--dur-fast); } #projectlist div:hover, #teamlist div:hover { background:var(--bg-hover); }

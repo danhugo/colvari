@@ -713,9 +713,15 @@ function renderOverview() {
     const sg = el('g', { class: 'status s-' + live, transform: `translate(${W - 14},14)` }, g); el('circle', { r: 5 }, sg); el('title', {}, sg).textContent = live;
     el('title', {}, g).textContent = `${n.name} (${n.role}) — ${isStuck ? 'stuck' : live}`;
   }
-  const gbox = graphBox(ovNodes), gpad = 40;
-  svg.setAttribute('viewBox', `${gbox.x - gpad} ${gbox.y - gpad} ${gbox.w + gpad * 2} ${gbox.h + gpad * 2}`);
+  // Fit the graph to the available canvas without ever shrinking node text below its authored (readable) size:
+  // scale up to fill the wrap when the graph is small, but clamp at 1:1 and let the wrap scroll when it isn't.
+  const gbox = graphBox(ovNodes), gpad = 40, bw = gbox.w + gpad * 2, bh = gbox.h + gpad * 2;
+  const wrap = svg.parentElement, r = wrap.getBoundingClientRect();
+  const scale = Math.max(1, r.width && r.height ? Math.min(r.width / bw, r.height / bh) : 1);
+  const vbw = Math.max(bw, r.width ? r.width / scale : bw), vbh = Math.max(bh, r.height ? r.height / scale : bh);
+  svg.setAttribute('viewBox', `${gbox.x - gpad - (vbw - bw) / 2} ${gbox.y - gpad - (vbh - bh) / 2} ${vbw} ${vbh}`);
   svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+  svg.style.width = `${vbw * scale}px`; svg.style.height = `${vbh * scale}px`;
   $('#ov-stuck').innerHTML = [...stuck].map((id) => `<div class="stuckbar">⚠ <b>${esc(nodeName(id))}</b> has produced no output for ${S.settings.stuckMinutes || 5}+ min<span class="spacer"></span><button data-ovstop="${id}">Stop</button><button data-ovnudge="${id}">Nudge</button></div>`).join('');
   document.querySelectorAll('[data-ovstop]').forEach((b) => b.onclick = act(async () => { await call('stopAgent', b.dataset.ovstop); refresh(); }));
   document.querySelectorAll('[data-ovnudge]').forEach((b) => b.onclick = act(async () => { await call('sendToAgent', b.dataset.ovnudge, 'Status check: you have produced no output for a while. Reply with a short status (what you are doing, whether you are blocked), then continue or finish your task.'); refresh(); }));
