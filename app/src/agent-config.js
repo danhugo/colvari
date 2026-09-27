@@ -1,0 +1,115 @@
+// Per-agent configuration: node normalisation, role presets and claude CLI argument building.
+// Pure functions, shared by the store, orchestrator, projects and tests.
+
+const { MODE_DEFAULTS, normalizeMode } = require('./agent-modes');
+const { normalizeBilling } = require('./usage');
+const SUGGESTED_ROLES = ['PM', 'Planner', 'Dev', 'Reviewer', 'QA'];
+const PERMISSION_MODES = ['default', 'acceptEdits', 'bypassPermissions', 'plan'];
+const EDGE_TYPES = ['assign', 'message', 'review'];
+const BOARD_TOOLS = ['list_team', 'list_tasks', 'create_task', 'update_task_status', 'comment_task', 'send_message', 'read_messages', 'read_wiki', 'write_wiki'];
+
+// Fields every node carries. '' / 0 / [] / {} mean "not set" (use the project default or the CLI default).
+const NODE_DEFAULTS = {
+  name: 'Agent', role: 'Dev', systemPrompt: '', model: '', workdir: '',
+  permissionMode: '', allowedTools: [], disallowedTools: [], extraArgs: '', env: {},
+  maxTurns: 0, appendSystemPrompt: '', addDirs: [], disabledBoardTools: [],
+  billingMode: 'auto', billingBaseUrl: '',
+  requireApproval: false, budgetUsd: 0, budgetTokens: 0,
+  ...MODE_DEFAULTS,
+};
+const NODE_FIELDS = Object.keys(NODE_DEFAULTS);
+
+// "a, b\nc" or ["a","b"] -> ["a","b","c"]. Commas and newlines separate entries (tool specs like "Bash(git log:*)" contain spaces).
+function toList(v) {
+  if (Array.isArray(v)) return v.map((x) => String(x).trim()).filter(Boolean);
+  if (v == null || v === '') return [];
+  return String(v).split(/[,\n]/).map((x) => x.trim()).filter(Boolean);
+}
+// "K=V\nK2=V2" or {K:V} -> {K:V}
+function toEnv(v) {
+  if (!v) return {};
+  if (typeof v === 'object' && !Array.isArray(v)) return Object.fromEntries(Object.entries(v).filter(([k]) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(k)).map(([k, x]) => [k, String(x)]));
+  const out = {};
+  for (const line of String(v).split('\n')) {
+    const m = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$/); if (m) out[m[1]] = m[2].trim();
+  }
+  return out;
+}
+const envToText = (env) => Object.entries(env || {}).map(([k, v]) => `${k}=${v}`).join('\n');
+
+// Shell-like split: whitespace separates, single/double quotes group, backslash escapes.
+function splitArgs(s) {
+  const out = []; let cur = ''; let q = null; let has = false;
+  s = String(s || '');
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (q) { if (c === q) q = null; else if (c === '\\' && q === '"' && i + 1 < s.length) cur += s[++i]; else cur += c; continue; }
+    if (c === '"' || c === "'") { q = c; has = true; } else if (c === '\\' && i + 1 < s.length) { cur += s[++i]; has = true; } else if (/\s/.test(c)) { if (has || cur) out.push(cur); cur = ''; has = false; } else { cur += c; has = true; }
+  }
+  if (q) throw new Error('unbalanced quote in extra args');
+  if (has || cur) out.push(cur);
+  return out;
+}
+
+function normalizeNode(n = {}, base = NODE_DEFAULTS) {
+  const r = {};
+  for (const k of NODE_FIELDS) r[k] = n[k] !== undefined ? n[k] : (Array.isArray(base[k]) ? [...base[k]] : typeof base[k] === 'object' ? { ...base[k] } : base[k]);
+  r.name = String(r.name || 'Agent'); r.role = String(r.role || '').trim() || 'Dev';
+  if (r.permissionMode && !PERMISSION_MODES.includes(r.permissionMode)) throw new Error('bad permission mode ' + r.permissionMode);
+  r.allowedTools = toList(r.allowedTools); r.disallowedTools = toList(r.disallowedTools); r.addDirs = toList(r.addDirs);
+  r.disabledBoardTools = toList(r.disabledBoardTools).filter((t) => BOARD_TOOLS.includes(t));
+  r.env = toEnv(r.env); r.maxTurns = Math.max(0, parseInt(r.maxTurns, 10) || 0);
+  r.extraArgs = String(r.extraArgs || ''); splitArgs(r.extraArgs); // validate
+  r.requireApproval = !!r.requireApproval; r.budgetUsd = Math.max(0, Number(r.budgetUsd) || 0); r.budgetTokens = Math.max(0, parseInt(r.budgetTokens, 10) || 0);
+  Object.assign(r, normalizeMode(r), normalizeBilling(r));
+  return r;
+}
+// Only the fields present in patch, normalised (for updateNode).
+function normalizePatch(patch) {
+  const full = normalizeNode({ ...NODE_DEFAULTS, ...patch });
+  const r = {};
+  for (const k of Object.keys(patch)) r[k] = k in full ? full[k] : patch[k];
+  return r;
+}
+
+// Role presets live in project settings: [{ name, systemPrompt, allowedTools, disallowedTools, permissionMode }]
+function normalizePreset(p) {
+  if (!p || !String(p.name || '').trim()) throw new Error('preset name required');
+  const pm = p.permissionMode || '';
+  if (pm && !PERMISSION_MODES.includes(pm)) throw new Error('bad permission mode ' + pm);
+  return { name: String(p.name).trim(), systemPrompt: String(p.systemPrompt || ''), allowedTools: toList(p.allowedTools), disallowedTools: toList(p.disallowedTools), permissionMode: pm };
+}
+const findPreset = (presets, role) => (presets || []).find((p) => p.name.toLowerCase() === String(role || '').toLowerCase());
+// Fill empty node fields from the preset matching its role (explicit values win).
+function applyPreset(node, presets) {
+  const p = findPreset(presets, node.role); if (!p) return node;
+  const r = { ...node };
+  if (!r.systemPrompt) r.systemPrompt = p.systemPrompt;
+  if (!toList(r.allowedTools).length) r.allowedTools = [...p.allowedTools];
+  if (!toList(r.disallowedTools).length) r.disallowedTools = [...p.disallowedTools];
+  if (!r.permissionMode) r.permissionMode = p.permissionMode;
+  return r;
+}
+const roleSuggestions = (presets, nodes = []) => [...new Set([...SUGGESTED_ROLES, ...(presets || []).map((p) => p.name), ...nodes.map((n) => n.role).filter(Boolean)])];
+
+// claude CLI args for one run (everything after the binary). mcpConfig is an object.
+// opts.resume: session id to continue (--resume).
+function buildClaudeArgs(node, prompt, settings, mcpConfig, opts = {}) {
+  const n = normalizeNode(node);
+  const args = ['-p', prompt, '--output-format', 'stream-json', '--verbose', '--mcp-config', JSON.stringify(mcpConfig), '--strict-mcp-config',
+    '--permission-mode', n.permissionMode || settings.permissionMode || 'bypassPermissions'];
+  if (opts.resume) args.push('--resume', String(opts.resume));
+  if (n.model) args.push('--model', n.model);
+  if (n.allowedTools.length) {
+    const tools = n.allowedTools.some((t) => t.startsWith('mcp__board')) ? n.allowedTools : [...n.allowedTools, 'mcp__board']; // keep the board usable
+    args.push('--allowedTools', tools.join(','));
+  }
+  if (n.disallowedTools.length) args.push('--disallowedTools', n.disallowedTools.join(','));
+  if (n.maxTurns) args.push('--max-turns', String(n.maxTurns));
+  if (n.appendSystemPrompt) args.push('--append-system-prompt', n.appendSystemPrompt);
+  for (const d of n.addDirs) args.push('--add-dir', d);
+  args.push(...splitArgs(n.extraArgs));
+  return args;
+}
+
+module.exports = { SUGGESTED_ROLES, PERMISSION_MODES, EDGE_TYPES, BOARD_TOOLS, NODE_DEFAULTS, NODE_FIELDS, toList, toEnv, envToText, splitArgs, normalizeNode, normalizePatch, normalizePreset, findPreset, applyPreset, roleSuggestions, buildClaudeArgs };

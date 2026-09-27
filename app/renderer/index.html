@@ -1,0 +1,69 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Agents Squad</title>
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'">
+<link rel="stylesheet" href="style.css"></head>
+<body>
+<header>
+  <strong>Agents Squad</strong>
+  <nav id="tabs">
+    <button data-tab="team" class="active">Team</button><button data-tab="board">Board</button><button data-tab="wiki">Wiki</button><button data-tab="obs">Observability</button><button data-tab="usage">Usage</button><button data-tab="settings">Settings</button>
+  </nav>
+  <span class="spacer"></span>
+  <span id="runstate" class="pill">idle</span>
+  <span id="totaltokens" class="pill" title="Measured tokens this session (in / out / cache read / cache write)">0 tok</span>
+  <span id="totalcost" class="pill" title="API-equivalent (reported by Claude CLI). Not what you pay on a Pro/Max subscription.">API-eq $0.0000</span>
+  <input id="goal" placeholder="Goal for the team (e.g. Create hello.txt with hello world)"><button id="run" class="primary">Run</button><button id="stop">Stop</button><button id="help" title="Keyboard shortcuts (?)">?</button>
+</header>
+<div id="body">
+<aside id="sidebar">
+  <h4>Projects</h4>
+  <div id="projectlist"></div>
+  <div class="toolbar"><button id="newproject">+ Project</button><button id="renproject">Rename</button><button id="delproject">Delete</button></div>
+  <h4>Teams</h4>
+  <div id="teamlist"></div>
+  <div class="toolbar"><button id="newteam">+ Team</button><button id="renteam">Rename</button><button id="dupteam">Duplicate</button><button id="delteam">Delete</button></div>
+  <div class="toolbar"><button id="exportteam">Export JSON</button><button id="importteam">Import JSON</button><input id="importfile" type="file" accept=".json,application/json" class="hidden"></div>
+  <label class="muted">Template for new project/team</label>
+  <select id="tpl-select"></select>
+</aside>
+<main>
+  <section id="tab-team" class="tab active">
+    <div class="toolbar"><button id="addnode">+ Agent</button><button id="connect">Connect (A → B)</button><select id="edgetype" title="Type of new edges"><option>assign</option><option>message</option><option>review</option></select><button id="delsel">Delete selected</button><button id="testteam">Test team</button><span id="pf-summary" class="pill"></span><span id="hint" class="muted">Drag nodes to move. Click an edge to select it.</span></div>
+    <div class="split"><svg id="graph"></svg><aside id="nodeform" class="panel"></aside></div>
+  </section>
+  <section id="tab-board" class="tab">
+    <div class="toolbar"><input id="nt-title" placeholder="New task / goal title"><select id="nt-assignee"></select><button id="nt-add" class="primary">Create task</button></div>
+    <textarea id="nt-desc" placeholder="Description (optional)" rows="2"></textarea>
+    <div class="split"><div id="columns"></div><aside id="taskdetail" class="panel"></aside></div>
+  </section>
+  <section id="tab-wiki" class="tab">
+    <div class="split"><aside id="wikilist" class="panel narrow"></aside>
+    <div class="panel grow"><div class="toolbar"><input id="wk-title" placeholder="Page title"><button id="wk-save" class="primary">Save</button><button id="wk-edit">Edit / Preview</button><button id="wk-del">Delete</button></div>
+    <textarea id="wk-content" rows="24" class="hidden"></textarea><div id="wk-view" class="md"></div></div></div>
+  </section>
+  <section id="tab-obs" class="tab">
+    <div id="budgetbar" class="muted"></div>
+    <table id="agenttable"></table>
+    <div class="toolbar"><label>Filter <select id="logfilter"><option value="">All agents</option></select></label><button id="clearlog">Clear</button></div>
+    <pre id="log"></pre>
+    <h4>Agent messages</h4><div id="msglist"></div>
+  </section>
+  <section id="tab-usage" class="tab">
+    <div class="toolbar"><label>Agent <select id="us-agent"><option value="">All</option></select></label><label>Billing <select id="us-billing"><option value="">All</option><option>subscription</option><option>api</option><option>proxy</option><option>bedrock</option><option>vertex</option><option>unknown</option></select></label>
+      <button id="us-export" class="primary">Export CSV</button><button id="us-exportall">Export CSV (all projects)</button><button id="us-clear">Clear history</button><span class="muted">Tokens are measured from the claude stream-json output. Costs are only what the Claude CLI reports.</span></div>
+    <div id="us-summary"></div>
+    <div class="scroll"><table id="us-runs"></table></div>
+  </section>
+  <section id="tab-settings" class="tab"><div class="panel" id="settingsform"></div></section>
+</main>
+</div>
+<dialog id="askdlg"><form method="dialog"><p id="ask-title"></p><input id="ask-input" style="width:280px"><p><button value="cancel">Cancel</button> <button id="ask-ok" value="ok" class="primary">OK</button></p></form></dialog>
+<dialog id="helpdlg"><form method="dialog"><h3>Keyboard shortcuts</h3><table>
+  <tr><td>Ctrl/Cmd + 1…6</td><td>Team, Board, Wiki, Observability, Usage, Settings</td></tr>
+  <tr><td>Ctrl/Cmd + Enter</td><td>Run</td></tr><tr><td>Ctrl/Cmd + .</td><td>Stop all agents</td></tr>
+  <tr><td>/</td><td>Focus the goal box</td></tr><tr><td>n</td><td>New task (Board tab)</td></tr>
+  <tr><td>Esc</td><td>Clear selection / leave a field</td></tr><tr><td>?</td><td>This help</td></tr></table>
+  <p><button value="close" class="primary">Close</button></p></form></dialog>
+<div id="toasts"></div>
+<script src="app.js"></script>
+</body></html>

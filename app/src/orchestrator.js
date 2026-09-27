@@ -1,0 +1,386 @@
+// Scheduler: runs Claude Code agents for todo tasks until the board is drained or stop() is called.
+const { spawn } = require('child_process');
+const { EventEmitter } = require('events');
+const path = require('path');
+const fs = require('fs');
+const { outgoing, incoming, reviewees } = require('./scope');
+const { buildClaudeArgs, applyPreset, normalizeNode } = require('./agent-config');
+const { enabledTools } = require('./board-tools');
+const { normalizeMode, iterationPrompt, nextStep, judgeArgs, parseJudge, isLastLoop } = require('./agent-modes');
+const U = require('./usage');
+const PF = require('./preflight');
+const C = require('./controls');
+
+const MCP_SERVER = path.join(__dirname, 'mcp-server.js');
+
+function buildPrompt(team, node, task, extra = {}) {
+  node = { ...normalizeNode(applyPreset(node, extra.presets)), id: node.id };
+  const nm = (id) => { const n = team.nodes.find((x) => x.id === id); return n ? `${n.name} (${n.role}, id=${n.id})` : id; };
+  const outs = outgoing(team, node.id).map(nm);
+  const ins = incoming(team, node.id).map(nm);
+  const msgTo = outgoing(team, node.id, ['assign', 'message']).map(nm);
+  const revs = reviewees(team, node.id).map(nm);
+  const unread = extra.unread || 0;
+  const tools = enabledTools(node);
+  const roleHints = {
+    PM: 'You own the goal. Break it into concrete tasks and assign them to your teammates with create_task. Do not write code yourself if a Dev is available.',
+    Planner: 'Split work into small, concrete tasks and assign them to the right teammates.',
+    Dev: 'Implement the task in your working directory using your tools. Keep changes minimal.',
+    Reviewer: 'Review the work described in the task. Comment findings on the task.',
+    QA: 'Verify the work actually functions. Comment results on the task.',
+  };
+  return [
+    `You are "${node.name}", role ${node.role}, in an agent team called Agents Squad (your node id: ${node.id}).`,
+    node.systemPrompt ? `Instructions from your manager:\n${node.systemPrompt}` : '',
+    roleHints[node.role] || '',
+    `Teammates you can assign tasks to: ${outs.length ? outs.join(', ') : 'none (do the work yourself)'}.`,
+    `Teammates who can assign tasks to you: ${ins.length ? ins.join(', ') : 'none (the human)'}.`,
+    msgTo.length ? `Teammates you can message (send_message): ${msgTo.join(', ')}.` : '',
+    revs.length ? `You review the work of: ${revs.join(', ')}. You may move their tasks to review or done.` : '',
+    unread ? `You have ${unread} unread message(s): call read_messages.` : '',
+    '',
+    `Your current task (id=${task.id}): ${task.title}`,
+    task.description ? `Description:\n${task.description}` : '',
+    (task.blockedBy || []).length ? `This task depended on: ${task.blockedBy.join(', ')} (all done now; read their comments with list_tasks if useful).` : '',
+    task.comments.length ? `Comments so far:\n${task.comments.map((c) => `- ${c.author}: ${c.text}`).join('\n')}` : '',
+    '',
+    `Coordinate ONLY through the "board" MCP tools (${tools.join(', ')}).`,
+    tools.includes('update_task_status') && extra.deferDone ? `This task runs in loop mode (${extra.deferDone}). Do NOT call update_task_status with status="done" in this pass${tools.includes('comment_task') ? '; you may add a short comment on what you did' : ''}. The orchestrator repeats the task and you will be told when the final pass comes.` : '',
+    tools.includes('update_task_status') && !extra.deferDone ? `When you have finished your part, ${tools.includes('comment_task') ? 'add a short comment summarising what you did and ' : ''}call update_task_status with taskId=${task.id} and status="done".` : '',
+    'Be concise and finish in as few steps as possible.',
+  ].filter((l) => l !== '').join('\n');
+}
+
+// Prompt for a resumed run that delivers a human message (base is included when there is no session to resume).
+function humanPrompt(text, base = null) {
+  return [base, `Message from the human operator (answer or act on it, then continue your task):\n${text}`].filter(Boolean).join('\n\n');
+}
+
+class Orchestrator extends EventEmitter {
+  constructor(store) {
+    super();
+    this.store = store;
+    this.running = false;
+    this.procs = new Map(); // nodeId -> child
+    this.agents = {}; // nodeId -> {status, cost, inputTokens, outputTokens, runs, taskId}
+    this.totalCost = 0;
+    this.runs = 0;
+  }
+  agent(id) { return (this.agents[id] ||= { runCost: 0, runTokens: 0, pendingHuman: [], stopRequested: false, budgetStop: null, status: 'idle', iteration: 0, cost: 0, inputTokens: 0, outputTokens: 0, cacheTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, runs: 0, taskId: null, model: '', billingSource: '' }); }
+  snapshot() { return { running: this.running, totalCost: this.totalCost, billedCost: this.billedCost || 0, subCost: this.subCost || 0, runs: this.runs, runCost: this.runCost || 0, runTokens: this.runTokens || 0, budgetStop: this.budgetStop || null, agents: Object.fromEntries(Object.entries(this.agents).map(([k, a]) => [k, { ...a, pendingHuman: a.pendingHuman.length }])), tokens: this.tokens || { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 } }; }
+  // Account one finished run: agent counters, session totals, persisted history.
+  record(rec) {
+    const a = this.agent(rec.nodeId); const t = (this.tokens ||= { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 });
+    for (const k of ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheCreationTokens']) { a[k] += rec[k]; t[k] += rec[k]; }
+    a.cacheTokens = a.cacheReadTokens + a.cacheCreationTokens; a.cost += rec.reportedCostUsd; this.totalCost += rec.reportedCostUsd;
+    if (rec.billingSource === 'subscription') this.subCost = (this.subCost || 0) + rec.reportedCostUsd; else this.billedCost = (this.billedCost || 0) + rec.reportedCostUsd;
+    if (rec.kind === 'agent') { if (rec.model) a.model = rec.model; a.billingSource = rec.billingSource; }
+    try { this.store.addRun(rec); } catch (e) { this.log(rec.nodeId, 'error', 'could not save usage: ' + e.message); }
+    if (rec.kind !== 'preflight') {
+      const tok = rec.inputTokens + rec.outputTokens; a.runCost += rec.reportedCostUsd; a.runTokens += tok;
+      this.runCost = (this.runCost || 0) + rec.reportedCostUsd; this.runTokens = (this.runTokens || 0) + tok;
+      this.checkBudget(rec.nodeId);
+    }
+    this.emit('run', rec);
+  }
+  log(nodeId, kind, text) {
+    const l = { nodeId, kind, text, at: Date.now() };
+    try { this.store.appendLog(l); } catch {}
+    this.emit('log', l);
+  }
+  notify(title, body, extra = {}) { this.emit('notify', { title, body, ...extra }); }
+  budgetReason(nodeId) {
+    const node = this.store.getTeam().nodes.find((n) => n.id === nodeId) || {}; const a = this.agent(nodeId);
+    return C.budgetExceeded({ node, agent: { cost: a.runCost, inputTokens: a.runTokens }, settings: this.store.getSettings(), totals: { cost: this.runCost || 0, tokens: this.runTokens || 0 } });
+  }
+  // Budget caps (per agent and per project Run): stop the agent, or the whole Run for a project cap.
+  checkBudget(nodeId) {
+    if (!this.running) return;
+    const proj = C.projectBudgetExceeded(this.store.getSettings(), { cost: this.runCost || 0, tokens: this.runTokens || 0 });
+    if (proj) { this.budgetStop = proj; this.log(null, 'error', 'Budget: ' + proj + '. Stopping all agents.'); this.notify('Budget reached', proj); return this.stop(); }
+    const why = this.budgetReason(nodeId);
+    if (why) { const a = this.agent(nodeId); a.budgetStop = why; this.log(nodeId, 'error', 'Budget: ' + why + '. Stopping this agent.'); this.notify('Agent budget reached', why, { nodeId }); if (a.status === 'working') this.stopAgent(nodeId, 'budget'); }
+  }
+  // Stop one agent's current run (the rest keep going). Its task goes to review.
+  stopAgent(nodeId, why = 'stopped by human') {
+    const a = this.agent(nodeId); const p = this.procs.get(nodeId);
+    if (!p || a.status !== 'working') return false;
+    a.stopRequested = why; p.kill('SIGTERM');
+    this.log(nodeId, 'system', `■ stop requested (${why})`); this.changed();
+    return true;
+  }
+  // Human -> agent message. Stored in the agent's inbox; if the agent is running, the current run is
+  // interrupted and resumed in the same session with the message as the next prompt.
+  sendToAgent(nodeId, text, taskId = null) {
+    if (!String(text || '').trim()) throw new Error('text required');
+    const a = this.agent(nodeId);
+    const m = this.store.sendMessage({ from: 'human', to: nodeId, text: String(text).trim(), taskId: taskId || a.taskId || null });
+    const live = a.status === 'working' && this.procs.has(nodeId) && this.running;
+    if (live) { a.pendingHuman.push(m); this.log(nodeId, 'system', `✉ human message queued; interrupting to deliver: ${m.text.slice(0, 200)}`); this.procs.get(nodeId).kill('SIGTERM'); }
+    else this.log(nodeId, 'system', `✉ human message stored in inbox: ${m.text.slice(0, 200)}`);
+    this.changed();
+    return { ...m, delivered: live ? 'interrupt' : 'inbox' };
+  }
+  changed() { this.emit('state', this.snapshot()); }
+
+  start() {
+    if (this.running) return;
+    this.running = true; this.runs = 0; this.runCost = 0; this.runTokens = 0; this.budgetStop = null;
+    for (const a of Object.values(this.agents)) { a.runCost = 0; a.runTokens = 0; a.budgetStop = null; }
+    this.log(null, 'system', 'Orchestrator started');
+    this.changed();
+    this.tick();
+  }
+  stop() {
+    this.running = false;
+    for (const p of this.procs.values()) p.kill('SIGTERM');
+    this.log(null, 'system', 'Orchestrator stopped');
+    this.changed();
+    this.emit('done', this.snapshot());
+  }
+
+  tick() {
+    if (!this.running) return;
+    const s = this.store.getSettings();
+    const team = this.store.getTeam();
+    const all = this.store.listTasks();
+    const todo = all.filter((t) => t.status === 'todo' && team.nodes.some((n) => n.id === t.assignee));
+    const ready = todo.filter((t) => !C.isBlocked(t, all) && !this.agent(t.assignee).budgetStop);
+    for (const task of ready) {
+      if (this.procs.size >= s.maxConcurrency) break;
+      if (this.procs.has(task.assignee)) continue;
+      if (this.runs >= s.maxRuns) { this.log(null, 'system', `maxRuns (${s.maxRuns}) reached`); break; }
+      this.runTask(team.nodes.find((n) => n.id === task.assignee), task, team, s);
+    }
+    if (this.procs.size === 0) {
+      this.running = false;
+      const why = !todo.length ? 'No more todo tasks. Finished.' : !ready.length ? `Stopped: ${todo.length} todo task(s) are blocked by unfinished dependencies or over budget` : 'Stopped: run limit reached';
+      this.log(null, 'system', why);
+      const waiting = all.filter((t) => t.awaitingApproval).length;
+      this.notify('Run finished', why + (waiting ? ` ${waiting} task(s) wait for your approval.` : ''));
+      this.changed();
+      this.emit('done', this.snapshot());
+    }
+  }
+
+  // The agent's most recent session id (from the board), used by continueSession.
+  lastSession(nodeId) {
+    const ts = this.store.listTasks().filter((t) => t.assignee === nodeId && t.sessionId).sort((a, b) => String(a.updatedAt).localeCompare(String(b.updatedAt)));
+    return ts.length ? ts[ts.length - 1].sessionId : null;
+  }
+
+  env(cfg) {
+    const env = { ...process.env, ...(cfg.env || {}) }; delete env.ELECTRON_RUN_AS_NODE;
+    const home = require('os').homedir();
+    env.PATH = [env.PATH, `${home}/.local/bin`, `${home}/.claude/local`, '/opt/homebrew/bin', '/usr/local/bin'].filter(Boolean).join(':');
+    return env;
+  }
+
+  // Last cumulative usage snapshot of a session (resumed runs report session-cumulative modelUsage/cost).
+  sessionBaseline(sessionId) {
+    const m = this.sessionCum && this.sessionCum.get(sessionId); if (m) return m;
+    let rs = []; try { rs = this.store.listRuns(); } catch {}
+    for (let i = rs.length - 1; i >= 0; i--) if (rs[i].sessionId === sessionId && rs[i].cumulative) return rs[i].cumulative;
+    return null;
+  }
+
+  // One claude process. Resolves {code, sessionId, result}.
+  spawnRun(node, args, cwd, env, settings, meta = {}) {
+    return new Promise((resolve) => {
+      const startedMs = Date.now();
+      const usage = U.newRun({ projectId: this.store.meta() ? this.store.meta().id : null, nodeId: node.id, agent: node.name, ...meta });
+      if (usage.resumedFrom) usage.baseline = this.sessionBaseline(usage.resumedFrom);
+      const child = args ? spawn(settings.claudePath, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] })
+        : Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter(), kill() {} });
+      if (!args) setImmediate(() => child.emit('close', 1));
+      this.procs.set(node.id, child);
+      const run = { sessionId: null, result: '', usage };
+      let buf = '';
+      child.stdout.on('data', (d) => {
+        buf += d; let i;
+        while ((i = buf.indexOf('\n')) >= 0) { const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1); if (line) this.onEvent(node, line, run); }
+      });
+      child.stderr.on('data', (d) => this.log(node.id, 'stderr', String(d).trim()));
+      child.on('error', (e) => this.log(node.id, 'error', 'spawn failed: ' + e.message));
+      child.on('close', (code) => {
+        if (buf.trim()) this.onEvent(node, buf.trim(), run);
+        delete usage.baseline;
+        if (usage.sessionId && usage.cumulative) (this.sessionCum ||= new Map()).set(usage.sessionId, usage.cumulative);
+        if (args) this.record(U.finishRun(usage, { code, env, billingMode: meta.billingMode, startedMs }));
+        resolve({ code, ...run });
+      });
+    });
+  }
+
+  // Cheap completion check for goal mode (separate short claude run with --json-schema).
+  // An unreadable answer is retried once; if it is still unreadable the result is marked inconclusive
+  // (never fed back to the agent as "not met") and the raw checker output is logged for debugging.
+  async judge(node, m, task, lastResult, cwd, env, settings, meta = {}) {
+    let j = null;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      j = await this.judgeOnce(node, m, task, lastResult, cwd, env, settings, meta);
+      if (!j.unreadable) return j;
+      this.log(node.id, 'error', `goal check attempt ${attempt}: ${j.reason}; raw checker output: ${String(j.out || '').trim().slice(0, 1500) || '(empty)'}${j.stderr ? ' | stderr: ' + j.stderr.trim().slice(0, 300) : ''}`);
+      if (!this.running) break;
+    }
+    return { ...j, inconclusive: true, reason: `checker inconclusive (${j.reason})` };
+  }
+  judgeOnce(node, m, task, lastResult, cwd, env, settings, meta = {}) {
+    return new Promise((resolve) => {
+      let out = ''; let err = ''; const startedMs = Date.now();
+      const child = spawn(settings.claudePath, judgeArgs(m, task, lastResult), { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
+      this.procs.set(node.id, child);
+      child.stdout.on('data', (d) => { out += d; });
+      child.stderr.on('data', (d) => { err += d; });
+      child.on('error', (e) => this.log(node.id, 'error', 'checker spawn failed: ' + e.message));
+      child.on('close', () => {
+        const j = parseJudge(out);
+        const rec = U.newRun({ projectId: this.store.meta() ? this.store.meta().id : null, nodeId: node.id, agent: node.name, ...meta, kind: 'check' });
+        if (j.raw) U.applyEvent(rec, { ...j.raw, type: 'result' }); else rec.reportedCostUsd = j.cost;
+        if (!rec.model) rec.model = m.checkModel || '';
+        this.record(U.finishRun(rec, { code: j.raw ? 0 : 1, env, billingMode: meta.billingMode, startedMs }));
+        if (!j.unreadable) this.log(node.id, 'system', `goal check: ${j.met ? 'MET' : 'not met'} (${j.reason.slice(0, 200)}) cost=$${j.cost.toFixed(4)}`);
+        resolve(j.unreadable ? Object.assign(j, { out, stderr: err }) : j);
+      });
+    });
+  }
+
+  async runTask(node, task, team, settings) {
+    this.runs++;
+    this.store.updateTask(task.id, { status: 'in_progress' });
+    const a = this.agent(node.id); a.status = 'working'; a.taskId = task.id; a.runs++; a.iteration = 1;
+    this.procs.set(node.id, { kill() {} }); // reserve the slot synchronously
+    this.changed();
+    const mcp = this.mcpConfig(node);
+    const cwd = node.workdir || this.store.dir;
+    fs.mkdirSync(cwd, { recursive: true });
+    const presets = settings.rolePresets || [];
+    const unread = this.store.listMessages({ to: node.id }).filter((m) => !m.read).length;
+    let cfg; let base = null; let baseDefer = null;
+    try {
+      cfg = normalizeNode(applyPreset(node, presets)); base = buildPrompt(team, node, task, { presets, unread });
+      const lm = normalizeMode(cfg); // loop mode: every pass but the last is told not to mark the task done
+      baseDefer = lm.mode === 'loop' && lm.loopCount > 1 ? buildPrompt(team, node, task, { presets, unread, deferDone: `${lm.loopCount} passes` }) : base;
+    } catch (e) { cfg = { env: {}, mode: 'single' }; this.log(node.id, 'error', 'bad agent settings: ' + e.message); }
+    const m = normalizeMode(cfg);
+    // Workflow mode: only the task text follows the slash command ($ARGUMENTS); the team context goes in --append-system-prompt.
+    const wf = m.mode === 'workflow' && !!m.slashCommand && base !== null;
+    const runCfg = wf ? { ...cfg, appendSystemPrompt: [base, cfg.appendSystemPrompt].filter(Boolean).join('\n\n') } : cfg;
+    if (m.mode === 'goal' && !m.goalCondition.trim()) { this.log(node.id, 'error', 'goal mode without a completion condition: running once'); m.mode = 'single'; }
+    const bill = U.applyBillingEnv(cfg, this.env(cfg)); const env = bill.env;
+    for (const w of bill.warnings) this.log(node.id, 'error', w);
+    const meta = { taskId: task.id, task: task.title, billingMode: cfg.billingMode || 'auto' };
+    let resume = task.sessionId || (m.continueSession ? this.lastSession(node.id) : null);
+    this.log(node.id, 'system', `▶ ${node.name} starts "${task.title}" in ${cwd} [mode=${m.mode}${resume ? ', resume ' + resume : ''}]`);
+    let code = 1; let judge = null; let i = 0; let reason = ''; let human = null;
+    a.stopRequested = false; a.pendingHuman = [];
+    for (;;) {
+      a.iteration = i + 1; this.changed();
+      let args = null;
+      if (base !== null) {
+        const b = m.mode === 'loop' && !isLastLoop(m, i) ? baseDefer : base;
+        const prompt = human ? humanPrompt(human, resume || wf ? null : b) : iterationPrompt(m, b, i, { reason: judge && judge.reason, task: wf ? (this.store.getTask(task.id) || task) : null });
+        try { args = buildClaudeArgs(runCfg, prompt, settings, mcp, { resume }); }
+        catch (e) { this.log(node.id, 'error', 'bad agent settings: ' + e.message); }
+      }
+      if (i > 0) this.log(node.id, 'system', `↻ ${node.name} iteration ${i + 1} (${m.mode})`);
+      const r = await this.spawnRun(node, args, cwd, env, settings, { ...meta, iteration: i + 1, resumedFrom: args && resume ? resume : null });
+      code = r.code; i++; human = null;
+      if (r.sessionId) { resume = r.sessionId; this.store.updateTask(task.id, { sessionId: r.sessionId, iterations: i }); }
+      const msgs = a.pendingHuman.splice(0);
+      if (msgs.length && this.running && !a.stopRequested) {
+        try { this.store.markMessagesRead(msgs.map((x) => x.id)); } catch {}
+        if (this.runs >= settings.maxRuns) { reason = 'maxRuns reached'; break; }
+        human = msgs.map((x) => x.text).join('\n\n'); this.runs++; a.runs++;
+        this.log(node.id, 'system', `↻ ${node.name} resumes with the human message`);
+        const tt = this.store.getTask(task.id); if (tt && tt.status !== 'in_progress') this.store.updateTask(task.id, { status: 'in_progress' });
+        continue;
+      }
+      judge = null;
+      if (m.mode === 'goal' && code === 0 && this.running) judge = await this.judge(node, m, this.store.getTask(task.id) || task, r.result, cwd, env, settings, { ...meta, apiKeySource: r.usage ? r.usage.apiKeySource : null }); // json output has no init event: same env as the agent run
+      const t = this.store.getTask(task.id);
+      const step = nextStep(m, i, { code, stopped: !this.running || !!a.stopRequested, judge, taskStatus: t && t.status });
+      reason = step.why;
+      if (!step.again) break;
+      if (this.runs >= settings.maxRuns) { reason = 'maxRuns reached'; break; }
+      this.runs++; a.runs++;
+      if (t && t.status !== 'in_progress') this.store.updateTask(task.id, { status: 'in_progress' });
+    }
+    this.procs.delete(node.id);
+    const stoppedWhy = a.stopRequested; a.stopRequested = false;
+    a.status = 'idle'; a.taskId = null; a.iteration = 0;
+    const t = this.store.getTask(task.id);
+    const gate = (st) => C.gateStatus(st, node, this.store.getSettings());
+    if (m.mode === 'goal' && t && judge && !judge.met && t.status === 'done') {
+      this.store.updateTask(task.id, { status: 'review' });
+      this.store.commentTask(task.id, 'orchestrator', judge.inconclusive ? `Goal check was inconclusive after ${i} iteration(s): ${judge.reason}. Check the result yourself.` : `Goal condition not met after ${i} iteration(s) (${reason}): ${judge.reason}`);
+    } else if (t && t.status === 'in_progress') {
+      // Agent ended without updating status: success -> done, failure -> back to review for a human.
+      const ok = code === 0 && this.running && !stoppedWhy && !(m.mode === 'goal' && !(judge && judge.met));
+      this.store.updateTask(task.id, gate(ok ? 'done' : 'review'));
+      this.store.commentTask(task.id, 'orchestrator', stoppedWhy ? `Agent stopped (${stoppedWhy}) after ${i} iteration(s); moved to review.` : `Agent exited (code ${code}) without setting status after ${i} iteration(s) (${reason}); moved automatically.`);
+    }
+    const t2 = this.store.getTask(task.id);
+    if (t2 && t2.awaitingApproval) { this.log(node.id, 'system', `⏸ "${task.title}" waits for human approval`); this.notify('Approval needed', `${node.name}: ${task.title}`, { taskId: task.id }); }
+    this.log(node.id, 'system', `■ ${node.name} finished (exit ${code}, ${i} iteration(s), ${reason})`);
+    this.changed();
+    setImmediate(() => this.tick());
+  }
+
+  mcpConfig(node) { return { mcpServers: { board: { type: 'stdio', command: process.execPath, args: [MCP_SERVER, '--project', this.store.dir, '--node', node.id], env: { ELECTRON_RUN_AS_NODE: '1' } } } }; }
+
+  // Preflight test of one agent with its exact run config. Resolves the evaluated result (see preflight.js).
+  async preflight(node, settings = this.store.getSettings()) {
+    const presets = settings.rolePresets || [];
+    let cfg;
+    try { cfg = normalizeNode(applyPreset(node, presets)); } catch (e) { return { ok: false, checks: [{ id: 'config', label: 'agent settings', ok: false, detail: e.message }], error: 'agent settings: ' + e.message, at: new Date().toISOString() }; }
+    const cwd = node.workdir || this.store.dir;
+    try { fs.mkdirSync(cwd, { recursive: true }); } catch {}
+    const bill = U.applyBillingEnv(cfg, this.env(cfg));
+    const a = this.agent(node.id); a.preflight = 'testing'; this.changed();
+    this.log(node.id, 'system', `⚑ preflight ${node.name}: model=${cfg.model || 'default'} perms=${cfg.permissionMode || settings.permissionMode}`);
+    const usage = U.newRun({ projectId: this.store.meta() ? this.store.meta().id : null, nodeId: node.id, agent: node.name, kind: 'preflight', task: 'preflight', billingMode: cfg.billingMode || 'auto' });
+    const t0 = Date.now(); let r;
+    try {
+      r = await PF.runPreflight({ cfg, settings, mcp: this.mcpConfig(node), cwd, env: bill.env, onEvent: (ev) => U.applyEvent(usage, ev) });
+    } finally { a.preflight = null; }
+    const events = r.events || []; delete r.events;
+    if (events.length) this.record(U.finishRun(usage, { code: r.exitCode, env: bill.env, billingMode: cfg.billingMode, startedMs: t0 }));
+    for (const w of bill.warnings) this.log(node.id, 'error', w);
+    r.configHash = PF.configHash(node, settings);
+    this.log(node.id, r.ok ? 'result' : 'error', `⚑ preflight ${node.name} ${r.ok ? 'PASS' : 'FAIL'}${r.ok ? '' : ': ' + r.error} (${r.latencyMs || 0}ms, apiKeySource=${r.apiKeySource ?? '?'}, ${(r.tokens && r.tokens.inputTokens) || 0} in / ${(r.tokens && r.tokens.outputTokens) || 0} out)`);
+    this.changed();
+    return r;
+  }
+
+  onEvent(node, line, run) {
+    let ev; try { ev = JSON.parse(line); } catch { return this.log(node.id, 'raw', line); }
+    const a = this.agent(node.id);
+    if (ev.type === 'assistant' && ev.message?.content) {
+      for (const c of ev.message.content) {
+        if (c.type === 'text' && c.text.trim()) this.log(node.id, 'text', c.text);
+        else if (c.type === 'tool_use') this.log(node.id, 'tool', `${c.name} ${JSON.stringify(c.input).slice(0, 300)}`);
+      }
+    } else if (ev.type === 'user' && ev.message?.content) {
+      for (const c of ev.message.content) if (c.type === 'tool_result') {
+        const txt = Array.isArray(c.content) ? c.content.map((x) => x.text || '').join('') : String(c.content ?? '');
+        this.log(node.id, c.is_error ? 'tool_error' : 'tool_result', txt.slice(0, 400));
+      }
+    } else if (ev.type === 'result') {
+      if (run) { run.result = typeof ev.result === 'string' ? ev.result : ''; if (ev.session_id) run.sessionId = ev.session_id; }
+      const cost = Number(ev.total_cost_usd) || 0;
+      if (run && run.usage) U.applyEvent(run.usage, ev);
+      else { const t = U.tokensFromResult(ev); a.inputTokens += t.inputTokens; a.outputTokens += t.outputTokens; a.cost += cost; this.totalCost += cost; }
+      if (ev.is_error && ev.result) this.log(node.id, 'error', String(ev.result).slice(0, 500));
+      const own = run && run.usage ? run.usage : null;
+      this.log(node.id, ev.is_error ? 'error' : 'result', `${ev.subtype} cost=$${(own ? own.reportedCostUsd : cost).toFixed(4)} turns=${ev.num_turns}${own && own.resumedFrom ? ` (this run only; session total $${cost.toFixed(4)})` : ''}`);
+      this.changed();
+    } else if (ev.type === 'system' && ev.subtype === 'init') {
+      const mcpStatus = (ev.mcp_servers || []).map((s) => `${s.name}:${s.status}`).join(',');
+      if (run && ev.session_id) run.sessionId = ev.session_id;
+      if (run && run.usage) U.applyEvent(run.usage, ev);
+      this.log(node.id, 'system', `session ${ev.session_id} model=${ev.model} apiKeySource=${ev.apiKeySource ?? '?'} mcp=${mcpStatus}`);
+    }
+  }
+}
+module.exports = { Orchestrator, buildPrompt, humanPrompt };
