@@ -255,9 +255,11 @@ class Orchestrator extends EventEmitter {
     const reviewReady = this.autoAdvanceReviews(team).map(({ task, node }) => ({ task: this.store.getTask(task.id), node }));
     const all = this.store.listTasks();
     const todo = all.filter((t) => t.status === 'todo' && team.nodes.some((n) => n.id === t.assignee));
-    const readyTodo = todo.filter((t) => !C.isBlocked(t, all) && !this.agent(t.assignee).budgetStop && !this.usagePaused)
-      .map((t) => ({ task: t, node: team.nodes.find((n) => n.id === t.assignee) }));
-    const readyReview = reviewReady.filter(({ task, node }) => !C.isBlocked(task, all) && !this.agent(node.id).budgetStop && !this.usagePaused);
+    // The subscription usage pause is about the Claude subscription: agents on other runtimes keep working.
+    const paused = (node) => this.usagePaused && (!node || (node.runtime || 'claude') === 'claude');
+    const readyTodo = todo.map((t) => ({ task: t, node: team.nodes.find((n) => n.id === t.assignee) }))
+      .filter(({ task, node }) => !C.isBlocked(task, all) && !this.agent(task.assignee).budgetStop && !paused(node));
+    const readyReview = reviewReady.filter(({ task, node }) => !C.isBlocked(task, all) && !this.agent(node.id).budgetStop && !paused(node));
     // Highest priority first (P0..P3); stable sort, so same-priority tasks keep arrival order.
     const ready = [...readyTodo, ...readyReview].sort((a, b) => C.priorityRank(a.task) - C.priorityRank(b.task));
     for (const { task, node } of ready) {
