@@ -232,3 +232,6 @@ header .pill { border:none; background:none; color:var(--fg-muted); font-size:va
 #nodeform { width:320px; padding:var(--space-4); } #nodeform h3 { margin:0 0 var(--space-2); font-size:var(--text-lg); display:flex; align-items:center; gap:var(--space-2); }
 #nodeform label { font-size:var(--text-xs); text-transform:uppercase; letter-spacing:.04em; font-weight:var(--fw-semibold); margin-top:var(--space-3); }
 #nodeform input, #nodeform select, #nodeform textarea { background:var(--bg-app); border-color:var(--border); } #nodeform input:focus, #nodeform select:focus, #nodeform textarea:focus { border-color:var(--accent); box-shadow:var(--ring); outline:none; }
+#guide.mini { width:auto; padding:var(--space-1) var(--space-2); display:flex; gap:var(--space-1); align-items:center; border-radius:999px; }
+#guide.mini button { border:0; background:transparent; }
+#graph .cross-layer .edgehit, #graph .cross-layer .edge { pointer-events:stroke; }

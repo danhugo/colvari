@@ -166,6 +166,8 @@ function graphBox(nodes) {
   const xs = nodes.map((n) => n.x), ys = nodes.map((n) => n.y); const x = Math.min(...xs), y = Math.min(...ys);
   return { x, y, w: Math.max(...xs) + W - x, h: Math.max(...ys) + H - y };
 }
+let vpCount = 0;
+function fitIfClipped() { const r = $('#graph').getBoundingClientRect(); const b = graphBox(allGraphNodes()); if (r.width && (b.x * VP.zoom + VP.x < 0 || b.y * VP.zoom + VP.y < 0 || (b.x + b.w) * VP.zoom + VP.x > r.width || (b.y + b.h) * VP.zoom + VP.y > r.height)) fitView(); }
 function fitView() {
   const r = $('#graph').getBoundingClientRect(); const b = graphBox(allGraphNodes()); const pad = 48;
   const z = Math.min(1.5, Math.max(0.25, Math.min((r.width - pad * 2) / b.w, (r.height - pad * 2) / b.h)));
@@ -194,10 +196,10 @@ function edgeGeom(a, b, off) { // cubic curve between node borders, shifted side
 const overlaps = (r, q) => r.x < q.x + q.w && q.x < r.x + r.w && r.y < q.y + q.h && q.y < r.y + r.h;
 function renderGraph() {
   const svg = $('#graph'); svg.innerHTML = '';
-  if (vpTeam !== ctx.t) { vpTeam = ctx.t; VP = { x: 20, y: 20, zoom: 1 }; call('getViewport').then((v) => { if (v && v.zoom) { VP = v; applyVP(); } else if (S.team.nodes.length) fitView(); }).catch(() => {}); }
+  if (vpTeam !== ctx.t) { vpTeam = ctx.t; vpCount = 0; VP = { x: 20, y: 20, zoom: 1 }; call('getViewport').then((v) => { if (v && v.zoom) { VP = v; applyVP(); fitIfClipped(); } else if (S.team.nodes.length) fitView(); }).catch(() => {}); }
   const defs = el('defs', {}, svg);
   for (const t of ['assign', 'message', 'review', 'sel']) { const m = el('marker', { id: 'arr-' + t, viewBox: '0 0 10 10', refX: 9, refY: 5, markerWidth: 7, markerHeight: 7, orient: 'auto-start-reverse' }, defs); el('path', { d: 'M0,1 L9,5 L0,9 z', class: 'arrow arrow-' + t }, m); }
-  const vp = el('g', { class: 'viewport' }, svg); const eL = el('g', { class: 'edges' }, vp), lL = el('g', { class: 'labels' }, vp), nL = el('g', { class: 'nodes' }, vp);
+  const vp = el('g', { class: 'viewport' }, svg); const eL = el('g', { class: 'edges' }, vp), nL = el('g', { class: 'nodes' }, vp), xL = el('g', { class: 'edges cross-layer' }, vp), lL = el('g', { class: 'labels' }, vp); // cross-team edges draw above nodes so the dashed line into the ghost stays visible
   const nodes = allGraphNodes(); const byId = Object.fromEntries(nodes.map((n) => [n.id, n]));
   const edges = [...S.team.edges, ...(S.cross || []).filter((e) => !S.team.edges.some((x) => x.id === e.id))];
   const pairN = {}, pairI = {}; const pk = (e) => [e.from, e.to].sort().join('|'); edges.forEach((e) => { pairN[pk(e)] = (pairN[pk(e)] || 0) + 1; });
@@ -208,8 +210,8 @@ function renderGraph() {
     const sign = e.from < e.to ? 1 : -1; const off = (i - (cnt - 1) / 2) * 22 * sign;
     const type = e.type || 'assign'; const cross = !!(e.crossTeam || a.ghost || b.ghost); const g = edgeGeom(a, b, off);
     const isSel = sel.edge === e.id;
-    const hit = el('path', { d: g.d, class: 'edgehit' }, eL);
-    el('path', { d: g.d, class: `edge edge-${type}` + (cross ? ' cross' : '') + (isSel ? ' sel' : ''), 'marker-end': `url(#arr-${isSel ? 'sel' : type})`, 'data-id': e.id }, eL);
+    const L = cross ? xL : eL; const hit = el('path', { d: g.d, class: 'edgehit' }, L);
+    el('path', { d: g.d, class: `edge edge-${type}` + (cross ? ' cross' : '') + (isSel ? ' sel' : ''), 'marker-end': `url(#arr-${isSel ? 'sel' : type})`, 'data-id': e.id }, L);
     // label pill at the curve midpoint, nudged along the normal until it clears nodes and other pills
     const label = type + (cross ? ' · cross-team' : ''); const pw = 10 + label.length * 5.8, ph = 16;
     let [px, py] = g.mid; for (let s = 0, r = { x: px - pw / 2, y: py - ph / 2, w: pw, h: ph }; s < 12 && [...blocks, ...pills].some((q) => overlaps(r, q)); s++) { const d = (s % 2 ? -1 : 1) * Math.ceil((s + 1) / 2) * 12; px = g.mid[0] + g.n[0] * d; py = g.mid[1] + g.n[1] * d; r = { x: px - pw / 2, y: py - ph / 2, w: pw, h: ph }; }
@@ -248,6 +250,8 @@ function renderGraph() {
     g.onmousedown = (ev) => { if (ev.button === 0) startDrag(ev, n, g); else if (ev.button === 2) { ev.stopPropagation(); selectNode(n.id); nodeMenu(ev, n); } };
     g.oncontextmenu = (ev) => { ev.preventDefault(); ev.stopPropagation(); if ($('#ctxmenu').classList.contains('hidden')) { selectNode(n.id); nodeMenu(ev, n); } };
   }
+  // New nodes landing outside the view (e.g. added in bulk) -> refit so nothing is cut off.
+  if (nodes.length > vpCount && svg.getBoundingClientRect().width) { fitIfClipped(); vpCount = nodes.length; } // only once visible (hidden tab has 0 width)
   applyVP();
   svg.onmousedown = (ev) => { if (ev.button === 0) startPan(ev); };
   svg.oncontextmenu = (ev) => { ev.preventDefault(); canvasMenu(ev); };
@@ -454,7 +458,7 @@ function renderNodeForm() {
 // Busy = an agent run in progress. Uses S.orch.idle (node ids) when the API provides it, else derives from agent status.
 const presence = (id) => (S.orch.idle ? S.orch.idle.includes(id) : (S.orch.agents[id] || {}).status !== 'working') ? 'idle' : 'busy';
 function renderIdle() {
-  const idle = S.allNodes.filter((n) => presence(n.id) === 'idle'); const show = S.allNodes.length && idle.length;
+  const idle = S.team.nodes.filter((n) => presence(n.id) === 'idle'); const show = S.team.nodes.length && idle.length;
   document.querySelectorAll('.idlebanner').forEach((b) => { b.classList.toggle('hidden', !show); if (!show) return;
     b.innerHTML = `<span class="pres idle"><i></i></span><b>${idle.length} agent${idle.length > 1 ? 's' : ''} idle</b><span class="muted">${esc(idle.slice(0, 4).map((n) => n.name).join(', '))}${idle.length > 4 ? '…' : ''}</span><span class="spacer"></span><button class="primary" data-assignidle="${idle[0].id}">Assign work</button>`; });
   document.querySelectorAll('[data-assignidle]').forEach((b) => b.onclick = () => { showTab('board'); $('#nt-assignee').value = b.dataset.assignidle; $('#nt-title').focus(); });
@@ -794,7 +798,8 @@ const G = { dir: '', runtime: 'claude', hidden: localStorage.getItem('guideHidde
 function renderGuide() {
   const g = $('#guide'); const ns = S.team.nodes; const started = S.tasks.length > 0;
   if (G.hidden || (!G.forced && (ns.length && started))) return g.classList.add('hidden');
-  g.classList.remove('hidden');
+  g.classList.remove('hidden'); g.classList.toggle('mini', !G.forced && !G.open && ns.length > 0);
+  if (g.classList.contains('mini')) { g.innerHTML = `<button id="g-open" title="Open the Get started guide">Get started <span class="muted">${[true, true, started].filter(Boolean).length}/3</span></button><button id="g-close" title="Dismiss">✕</button>`; $('#g-open').onclick = () => { G.open = true; renderGuide(); }; $('#g-close').onclick = () => { G.hidden = true; localStorage.setItem('guideHidden', '1'); renderGuide(); }; return; }
   const rts = S.config.runtimes || { claude: { installed: true, label: 'Claude Code', capabilities: {} } }; const rt = rts[G.runtime] || {};
   const pass = ns.filter((n) => pfState(n) === 'pass').length; const busy = ns.some((n) => pfState(n) === 'testing');
   const s1 = !!G.dir || ns.length > 0, s2 = ns.length > 0, s3 = started;
@@ -808,7 +813,7 @@ function renderGuide() {
       <ul>${ns.map((n) => `<li>${esc(n.name)}: ${PF_LABEL[pfState(n)]}</li>`).join('')}</ul>` : '<button id="g-team" class="primary">Create starter team + test</button>'}</div>
   <div class="gstep ${s2 ? '' : 'off'}"><h4 class="${s3 ? 'gdone' : ''}">3. First goal</h4>
     ${s3 ? '<span class="muted">Goal started — watch it in Observability.</span>' : '<textarea id="g-goal" rows="2" placeholder="e.g. Create hello.txt with hello world"></textarea><button id="g-start" class="primary">Start</button>'}</div>`;
-  $('#g-close').onclick = () => { G.hidden = true; G.forced = false; localStorage.setItem('guideHidden', '1'); renderGuide(); };
+  $('#g-close').onclick = () => { G.open = false; if (ns.length && !G.forced) return renderGuide(); G.hidden = true; G.forced = false; localStorage.setItem('guideHidden', '1'); renderGuide(); };
   $('#g-dir').onclick = async () => { const d = await call('pickDir'); if (d) { G.dir = d; renderGuide(); } };
   $('#g-rt').onchange = (e) => { G.runtime = e.target.value; renderGuide(); };
   if ($('#g-test')) $('#g-test').onclick = () => testAgents(ns.map((n) => n.id));
