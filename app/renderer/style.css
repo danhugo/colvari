@@ -66,3 +66,14 @@ header #goal { flex:1 1 260px; min-width:140px; max-width:420px; } header .space
 header .pill { font-variant-numeric:tabular-nums; } .pill.quiet { color:var(--muted); }
 .cap { display: inline-block; padding: 0 6px; border-radius: 8px; font-size: 11px; margin: 2px 0; }
 .cap.on { background: #1f4d2b; color: #9fe0b0; } .cap.off { background: #3a2a2a; color: #c99; }
+
+#ov-graph { flex:1; background:var(--card); border:1px solid var(--line); border-radius:8px; min-height:220px; } #ov-graph text { fill:var(--fg); }
+#ov-graph .node rect { fill:var(--bg); stroke:var(--line); stroke-width:1.5; } #ov-graph .edge { stroke:var(--muted); stroke-width:2; }
+#ov-graph .node.working rect { stroke:var(--ok); stroke-width:3; animation:glow 1.4s ease-in-out infinite; } #ov-graph .node.stuck rect { stroke:var(--warn); stroke-width:3; animation:none; }
+#ov-graph .edge.flash { stroke:var(--acc); stroke-width:4; animation:flash 1s ease-in-out infinite; }
+@keyframes glow { 50% { filter:drop-shadow(0 0 8px var(--ok)); } } @keyframes flash { 50% { opacity:.4; } }
+#ov-timeline { height:190px; overflow:auto; background:var(--card); border:1px solid var(--line); border-radius:8px; } #ov-timeline text { fill:var(--fg); font-size:11px; }
+#ov-timeline .run { fill:var(--ok); opacity:.35; } #ov-timeline .run.live { opacity:.6; } #ov-timeline .tick { stroke:#c58b00; } #ov-timeline .mark { fill:var(--acc); } #ov-timeline .lane.stuck { fill:rgba(199,131,26,.15); }
+#ov-stuck:empty { display:none; } .stuckbar { border:1px solid var(--warn); color:var(--warn); border-radius:6px; padding:4px 8px; margin-bottom:4px; display:flex; gap:8px; align-items:center; }
+#ov-thread .chip { display:block; font:11px ui-monospace,monospace; background:var(--bg); border:1px solid var(--line); border-radius:10px; padding:1px 8px; margin:3px 0; }
+#ov-thread details pre { white-space:pre-wrap; word-break:break-word; font-size:11px; margin:2px 0 6px; } #ov-thread .msg { border-left-color:var(--acc); }
