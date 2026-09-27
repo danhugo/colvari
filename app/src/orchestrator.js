@@ -177,6 +177,7 @@ class Orchestrator extends EventEmitter {
     if (this.running) return;
     this.running = true; this.runs = 0; this.runCost = 0; this.runTokens = 0; this.budgetStop = null;
     for (const a of Object.values(this.agents)) { a.runCost = 0; a.runTokens = 0; a.budgetStop = null; }
+    this.reconcileOrphanedTasks();
     this.log(null, 'system', 'Orchestrator started');
     this.changed();
     this.tick();
@@ -187,6 +188,24 @@ class Orchestrator extends EventEmitter {
     this.log(null, 'system', 'Orchestrator stopped');
     this.changed();
     this.emit('done', this.snapshot());
+  }
+
+  // Reset any in_progress task whose assignee has no live session/process back to todo so it gets
+  // re-dispatched. Covers agent exit/crash/idle leaving a task stranded in_progress.
+  reconcileOrphanedTasks() {
+    const all = this.store.listTasks();
+    let changed = false;
+    for (const t of all) {
+      if (t.status !== 'in_progress') continue;
+      const a = this.agents[t.assignee];
+      const live = a && a.taskId === t.id && this.procs.has(t.assignee);
+      if (live) continue;
+      this.store.updateTask(t.id, { status: 'todo' });
+      this.store.commentTask(t.id, 'orchestrator', 'No live session for this task (its agent has no running process); reset to todo for re-dispatch.');
+      this.log(t.assignee, 'system', `↺ "${t.title}" had no live session; reset to todo`);
+      changed = true;
+    }
+    return changed;
   }
 
   agentStates() { return IDLE.agentStates(this.store.getTeam(), this.store.listTasks(), this.agents); }
@@ -216,6 +235,9 @@ class Orchestrator extends EventEmitter {
     }
     try { this.nudgeIdle(); } catch (e) { this.log(null, 'error', 'idle nudge: ' + e.message); }
     if (this.procs.size === 0) {
+      // Before declaring a stop, sweep for in_progress tasks whose agent has no live session (e.g. its
+      // process exited/crashed without updating status) and re-dispatch them instead of blocking forever.
+      if (this.reconcileOrphanedTasks()) { setImmediate(() => this.tick()); return; }
       this.running = false;
       const why = !todo.length ? 'No more todo tasks. Finished.' : !ready.length ? `Stopped: ${todo.length} todo task(s) are blocked by unfinished dependencies or over budget` : 'Stopped: run limit reached';
       this.log(null, 'system', why);
