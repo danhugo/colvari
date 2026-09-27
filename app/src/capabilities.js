@@ -190,4 +190,14 @@ function needsReprobe(node = {}, signature, { ttlMs = TTL_MS, now = Date.now() }
 // only matters once a node already has a first probe on record.
 const needsInitialProbe = (node = {}) => !node.capabilities;
 
-module.exports = { parseHelpText, probeHelp, fromInitEvent, discoverCapabilities, capabilitySignature, needsReprobe, needsInitialProbe, detectAppModes, scanLocalPlugins, scanClaudeDir, installedPluginRoots, categorize, probeInitEvent, TTL_MS };
+// A manual Refresh only ever does a --help-only probe (discoverCapabilities without an initEvent), which is
+// strictly narrower than a live init event's real slash_commands/skills (e.g. 123 commands / 58 skills vs a
+// handful of --help-parsed ones). Never let that narrower probe overwrite an already-richer snapshot just
+// because this particular refresh didn't see everything the CLI reported before.
+function mergeCapabilities(prev, next) {
+  if (!prev || !Array.isArray(prev.categorized)) return next;
+  if (!next || !Array.isArray(next.categorized)) return prev;
+  return next.categorized.length >= prev.categorized.length ? next : prev;
+}
+
+module.exports = { parseHelpText, probeHelp, fromInitEvent, discoverCapabilities, capabilitySignature, needsReprobe, needsInitialProbe, mergeCapabilities, detectAppModes, scanLocalPlugins, scanClaudeDir, installedPluginRoots, categorize, probeInitEvent, TTL_MS };

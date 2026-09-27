@@ -202,7 +202,7 @@ function renderHeader() {
   tt.title = `Measured tokens this session: ${t.inputTokens || 0} in / ${t.outputTokens || 0} out / ${t.cacheReadTokens || 0} cache read / ${t.cacheCreationTokens || 0} cache write`;
 }
 // ---------- top-bar limits meter (subscription 5h/weekly windows; no $ shown, just % + reset countdown) ----------
-const fmtCountdown = (ms) => { if (ms <= 0) return 'now'; const h = Math.floor(ms / 3600000), m = Math.floor((ms % 3600000) / 60000); return h > 0 ? `${h}h ${m}m` : `${m}m`; };
+const fmtCountdown = (ms) => { if (ms <= 0) return 'now'; const totalMin = Math.max(1, Math.ceil(ms / 60000)); const h = Math.floor(totalMin / 60), m = totalMin % 60; return h > 0 ? `${h}h ${m}m` : `${m}m`; };
 function resetIn(windowMs) {
   const cutoff = Date.now() - windowMs;
   const subs = RUNS.filter((r) => r.kind === 'agent' && r.billingSource === 'subscription' && new Date(r.startedAt || 0).getTime() >= cutoff);
