@@ -260,20 +260,28 @@ async function guiE2E() {
     require('electron').nativeTheme.themeSource = 'system';
     console.log('[gui-e2e] graph', JSON.stringify({ ...g, zoomIn, fit, layout, menu }));
   };
-  // Parallel runs: 3 independent Dev tasks across 2 teams run at once (fake claude, ~4s each); a dependent waits for its blocker.
+  // Parallel runs: 3 independent Dev tasks across 2 teams run at once (fake claude, 20s each: a board refresh can take ~6s while runs are live, so this is not a race); a dependent waits for its blocker.
   const parallelShots = async () => {
     const p = pid(); const t1 = pm.get(p).teams[0].id; const t2 = pm.createTeam(p, 'Parallel B').id; const s = pm.store(p);
     const fake = path.join(require('os').tmpdir(), 'squad-par-claude.sh');
-    fs.writeFileSync(fake, `#!/bin/sh\nsleep 4\necho '{"type":"result","subtype":"success","session_id":"s","total_cost_usd":0,"num_turns":1,"usage":{"input_tokens":1,"output_tokens":1}}'\n`); fs.chmodSync(fake, 0o755);
+    fs.writeFileSync(fake, `#!/bin/sh\nsleep 20\necho '{"type":"result","subtype":"success","session_id":"s","total_cost_usd":0,"num_turns":1,"usage":{"input_tokens":1,"output_tokens":1}}'\n`); fs.chmodSync(fake, 0o755);
     const prev = s.getSettings(); s.saveSettings({ claudePath: fake, maxConcurrency: 8 });
     const [a, b] = ['ParA', 'ParB'].map((n) => pm.store(p, t1).addNode({ name: n, role: 'Dev' })); const c = pm.store(p, t2).addNode({ name: 'ParC', role: 'Dev' });
     const ts = [a, b, c].map((n) => s.createTask({ title: 'Parallel ' + n.name, assignee: n.id }));
     const dep = s.createTask({ title: 'Depends on ParA', assignee: c.id, blockedBy: [ts[0].id] });
     const o = orchFor(p); const done = new Promise((r) => o.once('done', r)); o.start();
-    await new Promise((r) => setTimeout(r, 1500));
+    await ex(`$('#tabs button[data-tab=board]').click(); await refresh();`);
+    const live = await waitFor(`await refresh(); return /3 in parallel/.test($('#runstate').textContent) && [...document.querySelectorAll('.card')].some((c) => /Depends on ParA/.test(c.textContent) && /Blocked by Parallel ParA/.test((c.querySelector('.tag.blocked') || {}).textContent || ''))`, 18000);
+    const hdr = await ex(`return $('#runstate').textContent`);
+    expect('parallel: header shows "3 in parallel" and dependent shows Blocked by Parallel ParA', live, hdr);
     expect('parallel: 3 agents working at once across 2 teams', ts.every((t) => s.getTask(t.id).status === 'in_progress') && s.getTask(dep.id).status === 'todo', ts.map((t) => s.getTask(t.id).status));
-    await ex(`$('#tabs button[data-tab=board]').click(); await refresh(); await w(600);`); await shot('26-parallel-board');
-    await ex(`$('#tabs button[data-tab=overview]').click(); await w(600);`); await shot('27-parallel-overview');
+    for (const t of ['light', 'dark']) {
+      require('electron').nativeTheme.themeSource = t;
+      await ex(`$('#tabs button[data-tab=board]').click(); await refresh(); await w(300);`); await shot(`26-parallel-board-${t}`);
+      await ex(`$('#tabs button[data-tab=overview]').click(); await w(300);`); await shot(`27-parallel-overview-${t}`);
+    }
+    require('electron').nativeTheme.themeSource = 'system';
+    expect('parallel: still 3 in parallel after shots', /3 in parallel/.test(await ex(`await refresh(); return $('#runstate').textContent`)));
     await done;
     const win = (tid) => { const r = s.listRuns().find((x) => x.taskId === tid && x.kind === 'agent'); return r ? [Date.parse(r.startedAt), Date.parse(r.endedAt)] : [0, 0]; };
     const [A, B, C] = ts.map((t) => win(t.id)); const D = win(dep.id); const ov = (x, y) => x[0] < y[1] && y[0] < x[1];
