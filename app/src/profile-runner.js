@@ -3,6 +3,7 @@
 // usage.js-shaped run record. Supports resume, effort ("variant"), and board MCP injection.
 const { spawn } = require('child_process');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { normalizeRuntimeProfile, fillArgsTemplate } = require('./runtime-profile');
 const { newRun } = require('./usage');
@@ -41,6 +42,22 @@ function writeFileMcpConfig(cwd, filename, mcpConfig) {
   fs.writeFileSync(path.join(cwd, filename), JSON.stringify({ $schema: 'https://opencode.ai/config.json', mcp }, null, 2));
 }
 
+// <BIN>_CONFIG env var (opencode-style, e.g. HELPYCODE_CONFIG) that points the CLI at a config file.
+function binConfigEnvKey(bin) {
+  return String(bin).split('/').pop().toUpperCase().replace(/[^A-Z0-9]/g, '_') + '_CONFIG';
+}
+
+// Board MCP config for ONE run: written to a fresh temp dir — never the shared cwd, where concurrent
+// dispatches overwrite each other's --node binding and sessions lazily bind to the wrong node — and
+// passed to the CLI via <BIN>_CONFIG in env (mutated in place when provided).
+function writePerRunMcpConfig(bin, filename, mcpConfig, env) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-squad-mcp-'));
+  writeFileMcpConfig(dir, filename, mcpConfig);
+  const cfgPath = path.join(dir, filename);
+  if (env) env[binConfigEnvKey(bin)] = cfgPath;
+  return cfgPath;
+}
+
 // Build the full argv (after the binary) for one run.
 function buildProfileArgs(profile, { model, prompt, variant, session, bypass, mcpConfig } = {}) {
   const p = normalizeRuntimeProfile(profile);
@@ -74,13 +91,14 @@ function applyProfileEvent(run, ev, mapping) {
 // spawnFn is injectable for tests; defaults to child_process.spawn.
 function runProfile(profile, opts = {}, spawnFn = spawn) {
   const p = normalizeRuntimeProfile(profile);
-  if (opts.mcpConfig && p.mcp.method === 'file' && opts.cwd) writeFileMcpConfig(opts.cwd, p.mcp.flag, opts.mcpConfig);
+  const childEnv = { ...(opts.env || process.env) }; // private copy: never mutate process.env
+  if (opts.mcpConfig && p.mcp.method === 'file') writePerRunMcpConfig(p.binary, p.mcp.flag, opts.mcpConfig, childEnv);
   const args = buildProfileArgs(p, opts);
   const run = { ...newRun({ model: opts.model || '' }), reasoningTokens: 0 };
   const startedMs = Date.now();
   return new Promise((resolve, reject) => {
     let child;
-    try { child = spawnFn(p.binary, args, { cwd: opts.cwd, env: opts.env || process.env, stdio: ['ignore', 'pipe', 'pipe'] }); }
+    try { child = spawnFn(p.binary, args, { cwd: opts.cwd, env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] }); }
     catch (e) { reject(e); return; }
     let buf = ''; let stderr = '';
     child.stdout.on('data', (d) => {
@@ -104,4 +122,4 @@ function runProfile(profile, opts = {}, spawnFn = spawn) {
   });
 }
 
-module.exports = { buildProfileArgs, applyProfileEvent, runProfile, mcpArgs, writeFileMcpConfig, getPath };
+module.exports = { buildProfileArgs, applyProfileEvent, runProfile, mcpArgs, writeFileMcpConfig, writePerRunMcpConfig, binConfigEnvKey, getPath };

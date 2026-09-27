@@ -99,22 +99,43 @@ test('helpycode bypass flag respects the permission mode: explicit non-bypass mo
     assert.ok(!c.includes('--dangerously-skip-permissions'));
   }
 });
-test('helpycode args: no cwd means no mcp file written, still builds args', () => {
-  const a = RT.getRuntime('helpycode').buildArgs({ model: 'm1' }, 'hi', { helpycodePath: '/fake/hc-nocwd' }, { mcpServers: { board: {} } }, { exec: fakeHelpyExec });
-  assert.ok(a.includes('--model') && a.includes('m1') && a[a.length - 1] === 'hi');
+test('helpycode mcp: file-method without opts.env throws (no safe way to deliver the config)', () => {
+  assert.throws(
+    () => RT.getRuntime('helpycode').buildArgs({ model: 'm1' }, 'hi', { helpycodePath: '/fake/hc-noenv' }, { mcpServers: { board: {} } }, { exec: fakeHelpyExec }),
+    /needs opts\.env/,
+  );
 });
-test('helpycode mcp: derived mcp is file-method via the ask-agent layer; config written to cwd', () => {
-  const fs2 = require('fs'); const os = require('os');
-  const cwd = fs2.mkdtempSync(path.join(os.tmpdir(), 'hc-test-'));
+test('helpycode mcp: per-run config in a temp dir via <BIN>_CONFIG, never in the shared cwd', () => {
+  const os = require('node:os');
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'hc-test-'));
   const mcp = { mcpServers: { board: { command: '/bin/node', args: ['srv.js', '--node', 'n1'], env: { ELECTRON_RUN_AS_NODE: '1' } } } };
   const rt = RT.getRuntime('helpycode');
-  const a = rt.buildArgs({ model: 'm1' }, 'hi', { helpycodePath: '/fake/hc-mcp' }, mcp, { cwd, exec: fakeHelpyExec, askAgent: true });
+  const env = {};
+  const a = rt.buildArgs({ model: 'm1' }, 'hi', { helpycodePath: '/fake/a/helpycode' }, mcp, { cwd, exec: fakeHelpyExec, askAgent: true, env });
   assert.ok(a.includes('--model') && a.includes('m1') && a[a.length - 1] === 'hi');
-  const cfg = JSON.parse(fs2.readFileSync(path.join(cwd, 'helpycode.json'), 'utf8'));
+  assert.ok(env.HELPYCODE_CONFIG && env.HELPYCODE_CONFIG.endsWith('helpycode.json'));
+  const cfg = JSON.parse(fs.readFileSync(env.HELPYCODE_CONFIG, 'utf8'));
   assert.deepStrictEqual(cfg.mcp.board.command, ['/bin/node', 'srv.js', '--node', 'n1']);
   assert.strictEqual(cfg.mcp.board.enabled, true);
   assert.deepStrictEqual(cfg.mcp.board.environment, { ELECTRON_RUN_AS_NODE: '1' });
-  fs2.rmSync(cwd, { recursive: true, force: true });
+  assert.ok(!fs.existsSync(path.join(cwd, 'helpycode.json')), 'no config file may land in the shared cwd');
+  fs.rmSync(path.dirname(env.HELPYCODE_CONFIG), { recursive: true, force: true });
+  fs.rmSync(cwd, { recursive: true, force: true });
+});
+test('helpycode mcp: two concurrent dispatches get distinct configs with their own node id', () => {
+  const os = require('node:os');
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'hc-race-'));
+  const mk = (nodeId) => ({ mcpServers: { board: { command: '/bin/node', args: ['srv.js', '--node', nodeId] } } });
+  const envA = {}; const envB = {};
+  const rt = RT.getRuntime('helpycode');
+  rt.buildArgs({ model: 'm1' }, 'hi', { helpycodePath: '/fake/a/helpycode' }, mk('n_A'), { cwd, exec: fakeHelpyExec, askAgent: true, env: envA });
+  rt.buildArgs({ model: 'm1' }, 'hi', { helpycodePath: '/fake/b/helpycode' }, mk('n_B'), { cwd, exec: fakeHelpyExec, askAgent: true, env: envB });
+  assert.notStrictEqual(envA.HELPYCODE_CONFIG, envB.HELPYCODE_CONFIG);
+  assert.strictEqual(JSON.parse(fs.readFileSync(envA.HELPYCODE_CONFIG, 'utf8')).mcp.board.command[3], 'n_A');
+  assert.strictEqual(JSON.parse(fs.readFileSync(envB.HELPYCODE_CONFIG, 'utf8')).mcp.board.command[3], 'n_B');
+  fs.rmSync(path.dirname(envA.HELPYCODE_CONFIG), { recursive: true, force: true });
+  fs.rmSync(path.dirname(envB.HELPYCODE_CONFIG), { recursive: true, force: true });
+  fs.rmSync(cwd, { recursive: true, force: true });
 });
 test('helpycode parseEvent is generic profile-driven parsing (older documented event shapes)', () => {
   const { normalizeRuntimeProfile } = require('../src/runtime-profile');
@@ -187,7 +208,7 @@ test('helpycode parseEvent on the live 0.3.5 stream: tool calls stream, only rea
 });
 test('capabilities derive from the profile, honestly: help-only sees resume only', () => {
   // help-only derivation (no probe/model call) knows the resume flag but nothing about the event stream
-  assert.deepStrictEqual(RT.getRuntime('helpycode').capabilities({ helpycodePath: '/fake/hc-caps' }, fakeHelpyExec), { tokens: false, cost: false, mcp: false, resume: true });
+  assert.deepStrictEqual(RT.getRuntime('helpycode').capabilities({ helpycodePath: '/fake/hc-caps' }, fakeHelpyExec), { tokens: false, cost: false, mcp: true, resume: true });
   // with a probe + ask-agent-derived profile, every claim is backed by a profile field
   const full = RT.deriveRuntimeProfile('/fake/hc-caps-full', { exec: fakeHelpyExec, label: 'HelpyCode', askAgent: true });
   assert.deepStrictEqual(RT.capabilitiesFromProfile(full), { tokens: true, cost: true, mcp: true, resume: true });

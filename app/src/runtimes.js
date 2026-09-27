@@ -4,7 +4,7 @@
 // purely from that profile data.
 const { execFileSync } = require('child_process');
 const { buildClaudeArgs, normalizeNode, splitArgs } = require('./agent-config');
-const { buildProfileArgs, getPath, writeFileMcpConfig } = require('./profile-runner');
+const { buildProfileArgs, writePerRunMcpConfig, binConfigEnvKey, getPath } = require('./profile-runner');
 const { introspectRuntime, defaultExec, makeExec } = require('./introspector');
 
 // Derived-profile cache, stamped with the CLI's --version: a binary is introspected once per
@@ -53,14 +53,13 @@ function profileRuntime(id, label, binFromSettings) {
     buildArgs(node, prompt, settings, mcp, opts = {}) {
       const n = normalizeNode(node);
       const profile = profileFor(settings, opts);
-      if (mcp && profile.mcp.method === 'file' && opts.cwd) {
-        // One config file per node/run, passed via <BIN>_CONFIG (opencode-style). Writing it into a shared
-        // cwd made concurrent agents overwrite each other's board identity ("task not visible").
-        const os = require('os'), path = require('path'), fs = require('fs');
-        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-squad-mcp-'));
-        writeFileMcpConfig(dir, profile.mcp.flag, mcp);
-        if (opts.env) opts.env[String(binFromSettings(settings || {})).split('/').pop().toUpperCase().replace(/[^A-Z0-9]/g, '_') + '_CONFIG'] = path.join(dir, profile.mcp.flag);
-        else writeFileMcpConfig(opts.cwd, profile.mcp.flag, mcp);
+      if (mcp && mcp.mcpServers && Object.keys(mcp.mcpServers).length && profile.mcp.method === 'file') {
+        // One config per run in a fresh temp dir, delivered via <BIN>_CONFIG (opencode-style). Writing
+        // it into a shared cwd made concurrent agents overwrite each other's board identity ("task not
+        // visible"); without an env to carry the per-run path there is no safe way to inject it at all.
+        const bin = binFromSettings(settings || {});
+        if (!opts.env) throw new Error(`${label}: file-method MCP needs opts.env (per-run config via ${binConfigEnvKey(bin)})`);
+        writePerRunMcpConfig(bin, profile.mcp.flag, mcp, opts.env);
       }
       // Same effective-mode rule as buildClaudeArgs: unset falls through to bypassPermissions.
       // Without the derived bypass flag, non-interactive profile-runtime runs auto-reject permission
