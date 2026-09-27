@@ -183,11 +183,13 @@ function toCSV(runs) {
 
 // Usage limits: subscription auth is rate-limited on rolling 5h / weekly windows (no cost, since it's covered by
 // the plan); API-key auth is limited by tokens/cost instead. Limits are configurable per project; 0 means disabled.
-const LIMITS_DEFAULTS = { fiveHourLimit: 0, weeklyLimit: 0, tokenLimit: 0, costLimit: 0, warnPct: 80 };
+const GUARD_DEFAULT_PCT = 90;
+const LIMITS_DEFAULTS = { fiveHourLimit: 0, weeklyLimit: 0, tokenLimit: 0, costLimit: 0, warnPct: 80, guardThresholdPct: GUARD_DEFAULT_PCT };
 function normalizeLimits(l = {}) {
   const num = (v, d = 0) => Math.max(0, Number(v) || d);
   const warnPct = Math.min(100, Math.max(1, Number(l.warnPct) || LIMITS_DEFAULTS.warnPct));
-  return { fiveHourLimit: num(l.fiveHourLimit), weeklyLimit: num(l.weeklyLimit), tokenLimit: num(l.tokenLimit), costLimit: num(l.costLimit), warnPct };
+  const guardThresholdPct = Math.min(100, Math.max(1, Number(l.guardThresholdPct) || LIMITS_DEFAULTS.guardThresholdPct));
+  return { fiveHourLimit: num(l.fiveHourLimit), weeklyLimit: num(l.weeklyLimit), tokenLimit: num(l.tokenLimit), costLimit: num(l.costLimit), warnPct, guardThresholdPct };
 }
 // 'subscription' runs are rate-limited by request windows; anything else (api/proxy/bedrock/vertex/unknown) is
 // billed, so it's limited by tokens/cost instead. No hard-coded runtime list: this only looks at how the run billed.
@@ -220,5 +222,33 @@ function usageStatus(runs, limits, now = Date.now()) {
   return { authTypes, fiveHour, weekly, tokens, cost, warn, pause };
 }
 
+// Subscription rate-limit snapshot as reported by the CLI's init event (percent of window used + reset time,
+// not $ — subscription auth isn't billed per token). Field names are read generically/defensively since they
+// vary across CLI versions; an unrecognized shape just yields null rather than a guessed value.
+function parseRateLimitWindow(o) {
+  if (!o || typeof o !== 'object') return null;
+  let pct = o.utilization != null ? Number(o.utilization) : o.pct != null ? Number(o.pct)
+    : (o.used != null && o.limit) ? Number(o.used) / Number(o.limit) : null;
+  if (pct == null || Number.isNaN(pct)) return null;
+  if (pct > 1) pct = pct / 100; // some CLIs report 0-100 instead of 0-1
+  const resetsAt = o.resets_at || o.resetsAt || o.reset_at || o.resetAt || null;
+  return { pct: Math.max(0, Math.min(1, pct)), resetsAt };
+}
+function parseRateLimits(ev = {}) {
+  const src = ev.rate_limits || ev.rateLimits || {};
+  const fiveHour = parseRateLimitWindow(src.five_hour || src.fiveHour || src['5h']);
+  const weekly = parseRateLimitWindow(src.week || src.weekly || src.seven_day || src.sevenDay);
+  if (!fiveHour && !weekly) return null;
+  return { fiveHour, weekly };
+}
+// Guard against the configured subscription-usage threshold (default 90%), independent of the count-based
+// fiveHourLimit/weeklyLimit above: uses the CLI's own reported utilization + reset time, not a local request count.
+function subscriptionGuard(rateLimits, thresholdPct = GUARD_DEFAULT_PCT) {
+  const mk = (w) => ({ pct: w ? w.pct : 0, resetsAt: w ? w.resetsAt : null, pause: !!(w && w.pct * 100 >= thresholdPct) });
+  const fiveHour = mk(rateLimits && rateLimits.fiveHour);
+  const weekly = mk(rateLimits && rateLimits.weekly);
+  return { fiveHour, weekly, pause: fiveHour.pause || weekly.pause, thresholdPct };
+}
+
 module.exports = { resultSnapshot, tokensForRun, BILLING_MODES, BILLING_SOURCES, normalizeBilling, applyBillingEnv, detectBilling, costNote, tokensFromResult, totalTokens, newRun, applyEvent, finishRun, summarize, total, modelStats, toCSV, CSV_COLS,
-  LIMITS_DEFAULTS, normalizeLimits, authType, windowUsage, limitStatus, usageStatus };
+  LIMITS_DEFAULTS, normalizeLimits, authType, windowUsage, limitStatus, usageStatus, parseRateLimitWindow, parseRateLimits, subscriptionGuard, GUARD_DEFAULT_PCT };

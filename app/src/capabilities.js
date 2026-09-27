@@ -45,4 +45,20 @@ function discoverCapabilities(rt, settings = {}, { exec, initEvent } = {}) {
   return base;
 }
 
-module.exports = { parseHelpText, probeHelp, fromInitEvent, discoverCapabilities };
+const TTL_MS = 24 * 60 * 60 * 1000; // re-probe at least once a day even with no signature change
+
+// A stable signature of "what would change the probe result": runtime, CLI version, model, provider/billing mode.
+// Recomputed by the caller (orchestrator) on every run so a version bump or model switch triggers a re-probe.
+function capabilitySignature({ runtime, version, model, provider } = {}) {
+  return [runtime || '', version || '', model || '', provider || ''].join('|');
+}
+
+// Whether a node's cached capabilities are stale: never probed, past TTL, or runtime/version/model/provider changed.
+function needsReprobe(node = {}, signature, { ttlMs = TTL_MS, now = Date.now() } = {}) {
+  if (!node.capabilities || !node.capabilitiesProbedAt) return true;
+  if (node.capabilitiesSignature !== signature) return true;
+  const age = now - new Date(node.capabilitiesProbedAt).getTime();
+  return !(age >= 0 && age < ttlMs);
+}
+
+module.exports = { parseHelpText, probeHelp, fromInitEvent, discoverCapabilities, capabilitySignature, needsReprobe, TTL_MS };

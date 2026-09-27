@@ -14,6 +14,7 @@ const C = require('./controls');
 const IDLE = require('./idle');
 const WT = require('./worktree');
 const RT = require('./runtimes');
+const CAP = require('./capabilities');
 
 const MCP_SERVER = path.join(__dirname, 'mcp-server.js');
 
@@ -122,15 +123,28 @@ class Orchestrator extends EventEmitter {
   }
   // Subscription (5h/weekly) and API (tokens/cost) usage limits: warn once, then pause new dispatch when hit.
   // Configured in settings.usageLimits; 0 disables a given limit. Does not stop an already-running agent.
+  // Also guards against the CLI's own reported subscription rate-limit % (see subscriptionRateLimits), which is
+  // independent of the count-based fiveHourLimit/weeklyLimit above and defaults to pausing at 90% of the window.
   checkUsageLimits(nodeId) {
     const settings = this.store.getSettings();
     const status = U.usageStatus(this.store.listRuns(), settings.usageLimits);
-    this.usageStatus = status;
-    if (status.pause && !this.usagePaused) { this.usagePaused = true; this.log(nodeId || null, 'error', 'Usage limit reached: pausing new dispatch.'); this.notify('Usage limit reached', 'Pausing new agent dispatch until the window resets.'); }
-    else if (!status.pause) this.usagePaused = false;
-    if (status.warn && !status.pause && !this.usageWarned) { this.usageWarned = true; this.log(nodeId || null, 'system', 'Usage warning: approaching configured limit.'); this.notify('Usage warning', 'Approaching a configured usage limit.'); }
+    const rlAll = Object.values(this.subscriptionRateLimits || {});
+    const combinedRL = rlAll.reduce((acc, rl) => ({
+      fiveHour: (!acc.fiveHour || (rl.fiveHour && rl.fiveHour.pct > acc.fiveHour.pct)) ? rl.fiveHour : acc.fiveHour,
+      weekly: (!acc.weekly || (rl.weekly && rl.weekly.pct > acc.weekly.pct)) ? rl.weekly : acc.weekly,
+    }), { fiveHour: null, weekly: null });
+    const guard = U.subscriptionGuard(combinedRL, (settings.usageLimits && settings.usageLimits.guardThresholdPct) || U.GUARD_DEFAULT_PCT);
+    this.usageStatus = { ...status, subscriptionGuard: guard };
+    const pause = status.pause || guard.pause;
+    if (pause && !this.usagePaused) {
+      this.usagePaused = true;
+      this.log(nodeId || null, 'error', guard.pause && !status.pause ? `Subscription usage guard: pausing new dispatch (>= ${guard.thresholdPct}% of window).` : 'Usage limit reached: pausing new dispatch.');
+      this.notify('Usage limit reached', 'Pausing new agent dispatch until the window resets.');
+      this.emit('usage-limit-guard', { nodeId: nodeId || null, guard, status });
+    } else if (!pause) this.usagePaused = false;
+    if (status.warn && !pause && !this.usageWarned) { this.usageWarned = true; this.log(nodeId || null, 'system', 'Usage warning: approaching configured limit.'); this.notify('Usage warning', 'Approaching a configured usage limit.'); }
     else if (!status.warn) this.usageWarned = false;
-    return status;
+    return this.usageStatus;
   }
   // Stop one agent's current run (the rest keep going). Its task goes to review.
   stopAgent(nodeId, why = 'stopped by human') {
@@ -453,6 +467,22 @@ class Orchestrator extends EventEmitter {
       const mcpStatus = (ev.mcp_servers || []).map((s) => `${s.name}:${s.status}`).join(',');
       if (run && ev.session_id) run.sessionId = ev.session_id;
       if (run && run.usage) U.applyEvent(run.usage, ev);
+      const rl = U.parseRateLimits(ev);
+      if (rl) { (this.subscriptionRateLimits ||= {})[node.id] = rl; this.checkUsageLimits(node.id); }
+      // Automatic capability discovery: every run's init event is a free, live "probe" (richer than --help),
+      // so cache it per node and re-merge whenever the model/provider changed or the TTL lapsed since the last
+      // one (capabilities.needsReprobe) — no extra CLI invocation needed. Manual Refresh (main.js IPC) still
+      // does a full --help probe on demand.
+      try {
+        const signature = CAP.capabilitySignature({ runtime, model: ev.model, provider: run && run.usage ? run.usage.billingMode : undefined });
+        const fromInit = CAP.fromInitEvent(ev);
+        const hasNewData = fromInit.slashCommands.length || fromInit.skills.length || fromInit.modes.length;
+        if (hasNewData || CAP.needsReprobe(node, signature)) {
+          const prev = node.capabilities || {};
+          const merged = { ...prev, ...fromInit, slashCommands: [...new Set([...(prev.slashCommands || []), ...fromInit.slashCommands])] };
+          this.store.updateNode(node.id, { capabilities: merged, capabilitiesProbedAt: merged.probedAt, capabilitiesSignature: signature });
+        }
+      } catch {}
       this.log(node.id, 'system', `session ${ev.session_id} model=${ev.model} apiKeySource=${ev.apiKeySource ?? '?'} mcp=${mcpStatus}`);
     }
   }

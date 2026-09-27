@@ -81,10 +81,38 @@ test('capabilities: parses --help text into slash commands / bare commands, neve
   assert.equal(missing.ok, false); assert.equal(missing.error, 'not installed');
 });
 
+test('capabilities: needsReprobe triggers on missing/expired cache and signature changes', () => {
+  const now = Date.now();
+  assert.equal(CAP.needsReprobe({}, 'claude|1.0|opus|auto', { now }), true);
+  const fresh = { capabilities: { ok: true }, capabilitiesProbedAt: new Date(now - 1000).toISOString(), capabilitiesSignature: 'claude|1.0|opus|auto' };
+  assert.equal(CAP.needsReprobe(fresh, 'claude|1.0|opus|auto', { now }), false);
+  assert.equal(CAP.needsReprobe(fresh, 'claude|1.1|opus|auto', { now }), true); // version changed
+  const stale = { ...fresh, capabilitiesProbedAt: new Date(now - CAP.TTL_MS - 1000).toISOString() };
+  assert.equal(CAP.needsReprobe(stale, 'claude|1.0|opus|auto', { now }), true); // TTL lapsed
+});
+
 test('capabilities: init event data merges over --help probe, no hard-coded lists', () => {
   const rt = { id: 'claude', bin: () => 'claude' };
   const c = CAP.discoverCapabilities(rt, {}, { exec: () => '/compact', initEvent: { slash_commands: ['review'], skills: ['pdf'], permission_modes: ['default', 'plan'] } });
   assert.deepEqual(c.slashCommands.sort(), ['/compact', '/review']);
   assert.deepEqual(c.skills, ['pdf']); assert.deepEqual(c.modes, ['default', 'plan']);
   assert.equal(c.runtime, 'claude');
+});
+
+test('usage: subscription rate limits parsed as % of window + reset time, not $', () => {
+  const rl = U.parseRateLimits({ rate_limits: { five_hour: { utilization: 0.95, resets_at: '2026-01-01T00:00:00Z' }, week: { used: 50, limit: 100 } } });
+  assert.equal(rl.fiveHour.pct, 0.95); assert.equal(rl.fiveHour.resetsAt, '2026-01-01T00:00:00Z');
+  assert.equal(rl.weekly.pct, 0.5);
+  assert.equal(U.parseRateLimits({}), null);
+  // 0-100 scale is normalized to 0-1
+  const rl2 = U.parseRateLimits({ rateLimits: { fiveHour: { pct: 92 } } });
+  assert.equal(rl2.fiveHour.pct, 0.92);
+});
+
+test('usage: subscriptionGuard pauses at the configured threshold (default 90%)', () => {
+  const rl = { fiveHour: { pct: 0.85, resetsAt: 't' }, weekly: { pct: 0.5, resetsAt: null } };
+  assert.equal(U.subscriptionGuard(rl).pause, false);
+  assert.equal(U.subscriptionGuard({ fiveHour: { pct: 0.9 } }).pause, true);
+  assert.equal(U.subscriptionGuard(rl, 80).pause, true);
+  assert.equal(U.subscriptionGuard(null).pause, false);
 });
