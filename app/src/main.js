@@ -804,6 +804,37 @@ async function guiE2E() {
     await shot('helpycode-node-config-reloaded');
     console.log('[gui-e2e] helpycode', JSON.stringify({ draft, rtId, model, saved }));
   };
+  // Wake-run UI (t_03a0e1a0): feed S.orch.agents[id].activity exactly as the backend shapes it
+  // (orchestrator wakeRun: {trigger:'message', messageId, fromNodeId, excerpt, taskId, startedAt}) and
+  // check the Board banner + presence chip, the Team and Overview node badges, then cleared again.
+  const wakeShots = async () => {
+    await waitFor(`return !!document.querySelector('#tpl-select option')`); await ex(`await refresh();`);
+    const cur = await ex(`return { p: ctx.p, t: S.teamId }`);
+    const ps = pm.store(cur.p || pid(), cur.t); let nodes = ps.getTeam().nodes;
+    if (nodes.length < 2) { ps.addNode({ name: 'Pia', role: 'PM', x: 60, y: 60 }); ps.addNode({ name: 'Devon', role: 'Dev', x: 320, y: 160 }); nodes = ps.getTeam().nodes; }
+    const [pmN, dev] = nodes;
+    const task = ps.createTask({ title: 'Wake demo', assignee: dev.id });
+    await ex(`await refresh(); await w(200);`); // pick up the seeded nodes before injecting wake state
+    // Re-seed right before every read: a background refresh() replaces S (and S.orch) at any time.
+    const seed = `S.orch.agents = { '${dev.id}': { status: 'working', activity: { trigger: 'message', messageId: 'm1', fromNodeId: '${pmN.id}', excerpt: 'Please look at the failing test', taskId: '${task.id}', startedAt: Date.now() } } }; renderIdle(); renderGraph(); renderOverview();`;
+    await ex(`$('#tabs button[data-tab=board]').click(); await w(200);`);
+    const board = await ex(`${seed} await w(100); return { wakebar: !$('#wakebar').classList.contains('hidden'), text: ($('#wakebar .wakebar') || {}).textContent || '', chip: !!document.querySelector('#presence .pchip.wake') }`);
+    expect('wake: Board banner shows woken-by-message with presence chip and task link', board.wakebar && board.text.includes('woken by message from Pia') && board.chip && board.text.includes('Wake demo'), board);
+    await shot('wake-board-on');
+    await ex(`$('#tabs button[data-tab=team]').click(); await w(200);`);
+    const team = await ex(`${seed} await w(100); return { badge: !!document.querySelector('#graph .wakerunbadge'), linked: !!document.querySelector('#graph .wakerunbadge.linked') }`);
+    expect('wake: Team node shows the linked wake badge', team.badge && team.linked, team);
+    await shot('wake-team-on');
+    await ex(`$('#tabs button[data-tab=overview]').click(); await w(200);`);
+    const ov = await ex(`${seed} await w(100); return { badge: !!document.querySelector('#ov-graph .wakerunbadge'), working: !!document.querySelector('#ov-graph .node.working') }`);
+    expect('wake: Overview node shows the wake badge while working', ov.badge && ov.working, ov);
+    await shot('wake-overview-on');
+    await ex(`$('#tabs button[data-tab=board]').click(); await w(200);`);
+    const off = await ex(`S.orch.agents = {}; renderIdle(); renderGraph(); renderOverview(); await w(100); return { wakebarHidden: $('#wakebar').classList.contains('hidden'), chip: !!document.querySelector('#presence .pchip.wake') }`);
+    expect('wake: cleared activity hides the banner and chip', off.wakebarHidden && !off.chip, off);
+    await shot('wake-board-cleared');
+    console.log('[gui-e2e] wake', JSON.stringify({ board, team, ov, off }));
+  };
   try {
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'helpycode') { await helpycodeShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'wikilogs') { await wikiLogsShots(); throw null; }
@@ -820,6 +851,7 @@ async function guiE2E() {
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'polish') { await polishShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'mainlogswiki') { await mainLogsWikiShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'critique') { await critiqueShots(); throw null; }
+    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'wake') { await wakeShots(); throw null; }
     // project/team management through the UI: create a project from the Startup template, then a Solo team, then switch back.
     // Wait until the template select is filled (the first refresh loads the templates) before choosing one.
     await ex(`$('#tabs button[data-tab=team]').click(); await w(300);`); // Chat is the default tab; the flow below clicks the graph

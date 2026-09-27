@@ -827,12 +827,12 @@ function runningIds() {
 }
 const presence = (id) => (S.orch.idle ? S.orch.idle.includes(id) : !runningIds().includes(id)) ? 'idle' : 'busy';
 // Wake-run: an agent running without an in_progress task because a message woke it. One selector so
-// Board, Team and Overview can't disagree. Reads the live-run trigger fields the backend sets
-// ({trigger:'message', fromNodeId, excerpt, taskId, count}); null when the run isn't a wake, the
+// Board, Team and Overview can't disagree. Reads the backend's live-run activity fields
+// (a.activity: {trigger:'message', fromNodeId, excerpt, taskId, count}); null when the run isn't a wake, the
 // agent isn't actually running, or it picked up a task (the task badge wins).
 function wakeRun(id) {
   const a = S.orch.agents[id] || {};
-  const r = a.run && typeof a.run === 'object' ? a.run : a;
+  const r = a.activity && typeof a.activity === 'object' ? a.activity : (a.run && typeof a.run === 'object' ? a.run : a);
   const w = a.wake && typeof a.wake === 'object' ? { ...r, ...a.wake } : (r.trigger === 'message' ? r : null);
   if (!w) return null;
   if (a.status !== 'working' && presence(id) !== 'busy') return null;
