@@ -8,6 +8,7 @@ const { buildClaudeArgs, applyPreset, normalizeNode } = require('./agent-config'
 const { enabledTools } = require('./board-tools');
 const { normalizeMode, iterationPrompt, nextStep, judgeArgs, parseJudge, isLastLoop } = require('./agent-modes');
 const U = require('./usage');
+const TL = require('./timeline');
 const PF = require('./preflight');
 const C = require('./controls');
 const IDLE = require('./idle');
@@ -73,7 +74,13 @@ class Orchestrator extends EventEmitter {
   agent(id) { return (this.agents[id] ||= { runCost: 0, runTokens: 0, pendingHuman: [], stopRequested: false, budgetStop: null, status: 'idle', iteration: 0, cost: 0, inputTokens: 0, outputTokens: 0, cacheTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, runs: 0, taskId: null, model: '', runtime: '', billingSource: '' }); }
   // modelStats: per-model aggregate across this project's persisted runs + tasks (see usage.js modelStats for the field shape).
   modelStats() { let rs = []; try { rs = this.store.listRuns(); } catch {} let ts = []; try { ts = this.store.listTasks(); } catch {} return U.modelStats(rs, ts); }
-  snapshot() { return { running: this.running, totalCost: this.totalCost, billedCost: this.billedCost || 0, subCost: this.subCost || 0, runs: this.runs, active: [...this.procs.keys()].map((id) => ({ nodeId: id, taskId: this.agent(id).taskId, cwd: this.cwds && this.cwds.get(id) || null })), runCost: this.runCost || 0, runTokens: this.runTokens || 0, budgetStop: this.budgetStop || null, agents: Object.fromEntries(Object.entries(this.agents).map(([k, a]) => [k, { ...a, pendingHuman: a.pendingHuman.length }])), tokens: this.tokens || { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 }, modelStats: this.modelStats() }; }
+  // timeline: per-run start/end per agent+task (TL.timeline, see timeline.js for the shape).
+  timeline() { let rs = []; try { rs = this.store.listRuns(); } catch {} return TL.timeline(rs); }
+  // logs: structured {ts, agentId, level, text} entries from the persisted orchestrator log.
+  logs(limit) { let ls = []; try { ls = this.store.readLogs(limit); } catch {} return TL.logEntries(ls); }
+  // wiki: [{title, body, updatedAt, author}], from the store's {title: {...}} page map.
+  wiki() { let ps = {}; try { ps = this.store.listWiki(); } catch {} return TL.wikiPages(ps); }
+  snapshot() { return { running: this.running, totalCost: this.totalCost, billedCost: this.billedCost || 0, subCost: this.subCost || 0, runs: this.runs, active: [...this.procs.keys()].map((id) => ({ nodeId: id, taskId: this.agent(id).taskId, cwd: this.cwds && this.cwds.get(id) || null })), runCost: this.runCost || 0, runTokens: this.runTokens || 0, budgetStop: this.budgetStop || null, agents: Object.fromEntries(Object.entries(this.agents).map(([k, a]) => [k, { ...a, pendingHuman: a.pendingHuman.length }])), tokens: this.tokens || { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 }, modelStats: this.modelStats(), timeline: this.timeline(), logs: this.logs(), wiki: this.wiki() }; }
   // Account one finished run: agent counters, session totals, persisted history.
   record(rec) {
     const a = this.agent(rec.nodeId); const t = (this.tokens ||= { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 });
