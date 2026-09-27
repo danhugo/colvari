@@ -17,15 +17,17 @@
 <div id="body">
 <aside id="sidebar">
   <div id="inbox-side" class="inbox-side" title="Open questions and approvals for you">Inbox <span class="badge" id="inbox-badge"></span></div>
-  <h4>Projects</h4>
+  <section class="sb-sec"><h4>Projects</h4>
   <div id="projectlist"></div>
-  <div class="toolbar"><button id="newproject">+ Project</button><button id="renproject">Rename</button><button id="delproject">Delete</button></div>
-  <h4>Teams</h4>
+  <div class="sb-actions"><button id="newproject" title="New project">＋ New</button><button id="renproject" title="Rename project">✎ Rename</button><button id="delproject" class="danger" title="Delete project">🗑</button></div></section>
+  <section class="sb-sec"><h4>Team</h4>
   <div id="teamlist"></div>
-  <div class="toolbar"><button id="newteam">+ Team</button><button id="renteam">Rename</button><button id="dupteam">Duplicate</button><button id="delteam">Delete</button></div>
-  <div class="toolbar"><button id="exportteam">Export JSON</button><button id="importteam">Import JSON</button><input id="importfile" type="file" accept=".json,application/json" class="hidden"></div>
-  <label class="muted">Template for new project/team</label>
-  <select id="tpl-select"></select>
+  <div class="sb-actions"><button id="newteam" title="New team">＋ New</button><button id="renteam" title="Rename team">✎ Rename</button><button id="dupteam" title="Duplicate team">⧉ Copy</button><button id="delteam" class="danger" title="Delete team">🗑</button></div></section>
+  <section class="sb-sec"><h4>Import / Export</h4>
+  <div class="sb-actions"><button id="exportteam" title="Export team as JSON">⤓ Export</button><button id="importteam" title="Import team from JSON">⤒ Import</button><input id="importfile" type="file" accept=".json,application/json" class="hidden"></div></section>
+  <section class="sb-sec"><h4>Settings</h4>
+  <label class="muted" for="tpl-select">Template for new project/team</label>
+  <select id="tpl-select"></select></section>
 </aside>
 <main>
   <section id="tab-chat" class="tab active">
