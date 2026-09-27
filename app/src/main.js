@@ -428,6 +428,11 @@ nativeTheme.on('updated', () => { if (win && !win.isDestroyed()) win.setBackgrou
 ipcMain.handle('api', async (_e, name, ctx, ...args) => {
   if (!api[name]) throw new Error('unknown api ' + name);
   return api[name](ctx || {}, ...args);
+  // Live per-node data for the graph: runtime, model, status (working|idle|needs-human).
+  nodeStatus: (c) => { const s = ST(c); const st = orchFor(c.p).agentStates(); const ag = orchFor(c.p).agents || {}; const inbox = s.listInbox({ status: 'open' });
+    return Object.fromEntries(s.getTeam().nodes.map((n) => [n.id, { runtime: n.runtime, model: n.model || null, teamId: n.teamId,
+      status: inbox.some((i) => i.nodeId === n.id) ? 'needs-human' : (ag[n.id] || {}).status === 'working' || st[n.id] === 'busy' ? 'working' : 'idle' }])); },
+  crossEdges: (c) => TS(c).incomingCrossEdges(), setViewport: (c, v) => TS(c).setViewport(v), getViewport: (c) => TS(c).getViewport(), setPositions: (c, pos) => TS(c).setPositions(pos),
 });
 
 // Human inbox watcher: MCP servers write inbox.json from other processes, so poll for new open items.

@@ -92,13 +92,36 @@ class Store {
   }
   removeNode(nid) {
     this.update(this.teamFile(), { nodes: [], edges: [] }, (t) => { t.nodes = t.nodes.filter((n) => n.id !== nid); t.edges = t.edges.filter((e) => e.from !== nid && e.to !== nid); });
+    for (const tid of this.teamIds()) if ('team-' + tid !== this.teamFile()) this.update('team-' + tid, { nodes: [], edges: [] }, (t) => { t.edges = t.edges.filter((e) => e.to !== nid); });
+  }
+  teamIds() { const m = this.meta(); return (m && m.teams || []).map((t) => t.id); }
+  nodeTeam(nid) { return this.teamIds().find((tid) => this.read('team-' + tid, { nodes: [] }).nodes.some((n) => n.id === nid)) || null; }
+  // Edges from other teams that point into this team (stored in the source team's file), flagged crossTeam.
+  incomingCrossEdges() {
+    const mine = new Set(this.getTeam().nodes.map((n) => n.id)); const out = [];
+    for (const tid of this.teamIds()) if ('team-' + tid !== this.teamFile()) for (const e of this.read('team-' + tid, { edges: [] }).edges) if (mine.has(e.to)) out.push({ ...e, crossTeam: true, fromTeam: tid });
+    return out;
+  }
+  // Canvas viewport { x, y, zoom } persisted per team graph.
+  getViewport() { return this.read(this.teamFile(), {}).viewport || null; }
+  setViewport(v) {
+    const vp = { x: Number(v.x) || 0, y: Number(v.y) || 0, zoom: Math.min(4, Math.max(0.1, Number(v.zoom) || 1)) };
+    this.update(this.teamFile(), { nodes: [], edges: [] }, (t) => { t.viewport = vp; }); return vp;
+  }
+  // Bulk position save after drag / auto-layout: { nodeId: { x, y } }.
+  setPositions(pos) {
+    return this.update(this.teamFile(), { nodes: [], edges: [] }, (t) => {
+      for (const n of t.nodes) { const p = pos[n.id]; if (p && Number.isFinite(+p.x) && Number.isFinite(+p.y)) { n.x = +p.x; n.y = +p.y; } }
+      return t.nodes.map((n) => ({ id: n.id, x: n.x, y: n.y }));
+    });
   }
   // type: assign (can create tasks for target, implies message), message (send_message only), review (target reviews source's tasks)
   addEdge(from, to, type = 'assign') {
     if (!EDGE_TYPES.includes(type)) throw new Error('bad edge type ' + type);
     return this.update(this.teamFile(), { nodes: [], edges: [] }, (t) => {
       if (from === to) throw new Error('self edge not allowed');
-      if (!t.nodes.find((n) => n.id === from) || !t.nodes.find((n) => n.id === to)) throw new Error('unknown node');
+      // source must be in this team; target may be in any team of the project (cross-team edge)
+      if (!t.nodes.find((n) => n.id === from) || !(t.nodes.find((n) => n.id === to) || this.nodeTeam(to))) throw new Error('unknown node');
       let e = t.edges.find((x) => x.from === from && x.to === to && (x.type || 'assign') === type);
       if (!e) { e = { id: id('e'), from, to, type }; t.edges.push(e); }
       return e;
