@@ -4,41 +4,68 @@
 const { normalizeRuntimeProfile } = require('./runtime-profile');
 
 // "  run           Run a task and print JSON events" -> { name: 'run', desc: '...' }
+// Some CLIs (e.g. helpycode/yargs) prefix every command with the binary name instead of indenting
+// bare names: "  helpycode run [message..]     run HelpyCode with a message". Detect that prefix by
+// noticing the same first token repeats across every command row, and strip it before extracting
+// the actual command name (dropping bracketed/positional-only rows like "helpycode [project]").
 function parseCommands(help) {
-  const out = [];
+  const rows = [];
   const lines = String(help || '').split('\n');
   let inCommands = false;
   for (const line of lines) {
     if (/^\s*(Commands|Sub[- ]?commands):?\s*$/i.test(line)) { inCommands = true; continue; }
     if (inCommands) {
       if (!line.trim()) { inCommands = false; continue; }
-      const m = line.match(/^\s{2,}(\/?[\w:-]+)\s{2,}(.*)$/);
-      if (m) out.push({ name: m[1], desc: m[2].trim() });
-      else if (!/^\s{2,}\S/.test(line)) inCommands = false;
+      if (!/^\s{2,}\S/.test(line)) { inCommands = false; continue; }
+      const m = line.match(/^\s{2,}(\S.*?)\s{2,}(.*)$/);
+      if (m) rows.push({ cmd: m[1], desc: m[2].trim() });
     }
+  }
+  if (!rows.length) return [];
+  const firstTokens = rows.map((r) => r.cmd.split(/\s+/)[0]);
+  const hasPrefix = firstTokens.length > 1 && firstTokens.every((t) => t === firstTokens[0]);
+  const out = [];
+  for (const r of rows) {
+    const cmd = hasPrefix ? r.cmd.slice(firstTokens[0].length).trim() : r.cmd;
+    const name = (cmd.split(/\s+/)[0] || '');
+    if (!name || /^[\[<]/.test(name)) continue;
+    out.push({ name, desc: r.desc });
   }
   return out;
 }
 
-// Prefer a command whose description advertises non-interactive/JSON output; else exec/run; else first.
+// Prefer an exec/run command by name; else one whose description advertises non-interactive/JSON
+// output (name check first: plenty of unrelated commands mention JSON in their description, e.g.
+// helpycode's "export ... export session data as JSON"); else first.
 function pickRunCommand(commands) {
-  const byHint = commands.find((c) => /json|non-interactiv/i.test(c.desc));
-  if (byHint) return byHint.name;
   const byName = commands.find((c) => /^(exec|run)$/i.test(c.name));
   if (byName) return byName.name;
+  const byHint = commands.find((c) => /json|non-interactiv/i.test(c.desc));
+  if (byHint) return byHint.name;
   return commands[0] ? commands[0].name : '';
 }
 
 // "--effort <level>   Reasoning effort (low, medium, high)" -> { flag: '--effort', values: [...] }
+// Also matches CLIs that call the flag "--variant" and describe it with an "e.g., a, b, c" list
+// wrapped across multiple help lines (e.g. real helpycode's "--variant ... (provider-specific
+// reasoning effort, e.g., high, max, minimal)"); flatten whitespace first so wrapping can't hide it.
 function findEffort(text) {
-  const m = String(text || '').match(/(--effort)\s*(?:<[^>]*>)?[^\n(]*\(([^)]+)\)/i);
+  const flat = String(text || '').replace(/\s+/g, ' ');
+  const m = flat.match(/(--effort|--variant|--reasoning-effort)\b[^()]*\(([^)]*)\)/i);
   if (!m) return { flag: '', values: [] };
-  return { flag: m[1], values: m[2].split(',').map((s) => s.trim()).filter(Boolean) };
+  let inner = m[2];
+  const eg = inner.match(/e\.g\.,?\s*(.*)$/i);
+  if (eg) inner = eg[1];
+  return { flag: m[1], values: inner.split(',').map((s) => s.trim()).filter(Boolean) };
 }
 
 function findResume(text, commands) {
   if (/--resume\b/.test(text)) return '--resume';
   if (commands.some((c) => c.name === 'resume')) return 'resume';
+  const flat = String(text || '').replace(/\s+/g, ' ');
+  const short = flat.match(/(-\w),\s*--session\b/i);
+  if (short) return short[1];
+  if (/--session\b/.test(flat)) return '--session';
   return '';
 }
 
@@ -106,8 +133,20 @@ function parseJsonLines(out) {
   return events;
 }
 
+// Default exec: some CLIs (e.g. real helpycode, a yargs app) print --help to stderr even though they
+// exit 0, so stdout alone can come back empty; merge both streams and never throw.
+function defaultExec(bin, args) {
+  const { spawnSync } = require('child_process');
+  const r = spawnSync(bin, args, { encoding: 'utf8', timeout: 10000 });
+  return String((r.stdout || '') + (r.stderr || ''));
+}
+
 // exec(bin, args) -> stdout string; must not throw for --help calls that exit non-zero (caller should catch).
-function introspectRuntime(bin, exec, opts = {}) {
+// exec is optional; when omitted (or when the second arg is an opts object instead of a function),
+// falls back to defaultExec above.
+function introspectRuntime(bin, execOrOpts, maybeOpts) {
+  const exec = typeof execOrOpts === 'function' ? execOrOpts : defaultExec;
+  const opts = (typeof execOrOpts === 'function' ? maybeOpts : execOrOpts) || {};
   const safeExec = (args) => { try { return String(exec(bin, args) || ''); } catch (e) { return String((e && e.stdout) || ''); } };
   const help = safeExec(['--help']);
   const commands = parseCommands(help);
