@@ -309,6 +309,9 @@ header .pill { border:none; background:none; color:var(--fg-muted); font-size:va
 #graph .chip rect { fill:var(--bg-code); stroke:var(--border); } #graph .chip text { font-size:9.5px; fill:var(--fg-secondary); font-family:var(--font-mono); }
 #graph .chip-em rect { fill:var(--accent-soft); stroke:var(--accent); } #graph .chip-em text { fill:var(--accent); font-weight:var(--fw-semibold); }
 #graph .chip-em.chip-default rect { fill:var(--bg-code); stroke:var(--border); } #graph .chip-em.chip-default text { fill:var(--fg-secondary); font-weight:var(--fw-normal, normal); }
+#graph .chip-usage rect { fill:var(--bg); stroke:var(--border); stroke-dasharray:2,2; } #graph .chip-usage text { fill:var(--fg-muted); }
+#runtimetable { width:100%; border-collapse:collapse; margin:8px 0; } #runtimetable th, #runtimetable td { text-align:left; padding:4px 8px; border-bottom:1px solid var(--line); font-size:12px; }
+#rt-draft fieldset { margin-top:10px; }
 #graph .capsdot circle { fill:var(--fg-muted); opacity:.55; } #graph .capsdot.caps-ok circle { fill:var(--success); opacity:1; } #graph .capsdot.caps-error circle { fill:var(--danger); opacity:1; }
 #graph .status circle { fill:var(--fg-muted); } #graph .status.s-working circle { fill:var(--success); } #graph .status.s-needs-human circle { fill:var(--warning-strong); }
 #graph .handle { fill:var(--bg-raised); stroke:var(--accent); stroke-width:2; opacity:0; cursor:crosshair; transition:opacity var(--dur-fast), r var(--dur-fast); }

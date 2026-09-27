@@ -85,6 +85,88 @@ const RT_PRESETS = [{ name: 'Planner', runtime: 'claude', model: 'opus' }, { nam
 const costCell = (usd, source, rt) => !canCost(rt) ? '<span class="costnote" title="this runtime does not report cost">—</span>' : source === 'subscription' ? `<span class="costnote" title="API-equivalent $${(usd || 0).toFixed(4)} (reported by Claude CLI)">${COST_NOTE.subscription}</span>` : `$${(usd || 0).toFixed(4)} <span class="costnote">API-equivalent</span>`;
 const billTag = (src, detail) => `<span class="bill bill-${esc(src || 'unknown')}" title="${esc(detail || '')}">${esc(src || 'unknown')}</span>`;
 
+// ---------- custom runtimes: add-by-path -> stub introspection -> editable draft profile ----------
+// Stored client-side (no backend support yet); node.runtime holds "custom:<id>" once assigned.
+const CUSTOM_RT_KEY = 'customRuntimes';
+const loadCustomRuntimes = () => { try { return JSON.parse(localStorage.getItem(CUSTOM_RT_KEY)) || []; } catch { return []; } };
+const saveCustomRuntimes = (list) => { try { localStorage.setItem(CUSTOM_RT_KEY, JSON.stringify(list)); } catch {} };
+const isCustomRuntime = (id) => String(id || '').startsWith('custom:');
+const customRuntimeId = (bin) => 'custom:' + String(bin).split(/[\\/]/).pop().replace(/[^a-z0-9_.-]/gi, '_').toLowerCase();
+const findCustomRuntime = (id) => loadCustomRuntimes().find((r) => r.id === id);
+const runtimeLabel = (id) => VENDOR[id] || (findCustomRuntime(id) || {}).label || id;
+// Every runtime selectable on a node, backend-known (C.runtimes) plus locally-defined custom ones.
+function allRuntimeOptions() {
+  const backend = Object.entries((S.config || {}).runtimes || {}).map(([id, r]) => ({ id, label: r.label, installed: r.installed, version: r.version, capabilities: r.capabilities, custom: false }));
+  const custom = loadCustomRuntimes().map((r) => ({ id: r.id, label: r.label, installed: true, version: r.version, capabilities: { tokens: false, cost: false, mcp: false, resume: !!r.resume }, custom: true }));
+  return [...backend, ...custom];
+}
+// Agreed draft-profile schema (per t_833956fa): label, bin, version, models[], defaultModel, effort[], variants[],
+// resume, eventMapping{kind:label}. Real introspection lands via IPC from Devon's runtime work; until then this
+// synthesizes a plausible draft from the binary path alone, clearly marked as a stub.
+async function introspectRuntime(bin) {
+  try {
+    const real = await call('introspectRuntime', bin);
+    if (real) return { ...real, bin, stub: false };
+  } catch {} // no backend handler yet (or it failed) -> fall back to a client-side stub
+  const name = String(bin).split(/[\\/]/).pop().replace(/\.(exe|sh)$/i, '');
+  const label = name.charAt(0).toUpperCase() + name.slice(1);
+  return {
+    bin, stub: true, label, version: null,
+    models: ['default'], defaultModel: 'default',
+    effort: ['low', 'medium', 'high'], variants: [],
+    resume: false,
+    eventMapping: { text: 'text', tool: 'tool', tool_result: 'tool_result', error: 'error', result: 'result', system: 'system' },
+  };
+}
+function renderRuntimesSection() {
+  const list = loadCustomRuntimes();
+  const rows = list.map((r) => `<tr><td>${esc(r.label)}${r.stub ? ' <span class="costnote" title="Introspection stub — no live CLI probe yet">stub</span>' : ''}</td><td><code>${esc(r.bin)}</code></td><td>${esc(r.version || '?')}</td><td>${esc(r.models.join(', '))}</td><td>${r.resume ? '✓' : '✗'}</td><td><button data-editrt="${esc(r.id)}">Edit</button><button data-delrt="${esc(r.id)}">Delete</button></td></tr>`).join('');
+  return `<h3>Runtimes</h3><p class="muted">Add a runtime by its binary path, review the detected (or stubbed) profile, then assign it to an agent node from the Team tab.</p>
+    <table id="runtimetable"><tr><th>Label</th><th>Binary</th><th>Version</th><th>Models</th><th>Resume</th><th></th></tr>${rows || '<tr><td colspan="6" class="muted">No custom runtimes yet.</td></tr>'}</table>
+    <div class="toolbar"><input id="rt-path" placeholder="/usr/local/bin/my-agent-cli" style="flex:1"><button id="rt-detect">Detect</button></div>
+    <div id="rt-draft"></div>`;
+}
+let rtDraft = null; // in-progress add/edit draft profile, or null
+function draftFieldsHtml(d) {
+  return `<fieldset><legend>${d.editingId ? 'Edit' : 'Review'} runtime profile${d.stub ? ' <span class="costnote">(stub — no live CLI response; edit before saving)</span>' : ''}</legend>
+    <label>Label</label><input id="rd-label" value="${esc(d.label)}">
+    <label>Binary path</label><input id="rd-bin" value="${esc(d.bin)}">
+    <label>Models (comma-separated)</label><input id="rd-models" value="${esc(d.models.join(', '))}">
+    <label>Default model</label><input id="rd-defmodel" value="${esc(d.defaultModel || '')}">
+    <label>Effort levels (comma-separated)</label><input id="rd-effort" value="${esc((d.effort || []).join(', '))}">
+    <label>Variants (comma-separated, optional)</label><input id="rd-variants" value="${esc((d.variants || []).join(', '))}">
+    <label class="inline"><input type="checkbox" id="rd-resume" ${d.resume ? 'checked' : ''}> Supports resume/continue session</label>
+    <label>Event mapping <span class="muted">(stream kind: label, one per line)</span></label>
+    <textarea id="rd-eventmap" rows="4">${esc(Object.entries(d.eventMapping || {}).map(([k, v]) => `${k}: ${v}`).join('\n'))}</textarea>
+    <p><button id="rd-save" class="primary">Save runtime</button> <button id="rd-cancel">Cancel</button></p>
+  </fieldset>`;
+}
+function wireDraftForm() {
+  const box = $('#rt-draft'); if (!rtDraft) { box.innerHTML = ''; return; }
+  box.innerHTML = draftFieldsHtml(rtDraft);
+  $('#rd-save').onclick = () => {
+    const eventMapping = Object.fromEntries($('#rd-eventmap').value.split('\n').map((l) => l.split(':').map((s) => s.trim())).filter(([k, v]) => k && v));
+    const profile = {
+      id: rtDraft.editingId || customRuntimeId($('#rd-bin').value.trim() || rtDraft.bin),
+      label: $('#rd-label').value.trim() || rtDraft.label, bin: $('#rd-bin').value.trim() || rtDraft.bin, version: rtDraft.version,
+      models: $('#rd-models').value.split(',').map((s) => s.trim()).filter(Boolean), defaultModel: $('#rd-defmodel').value.trim(),
+      effort: $('#rd-effort').value.split(',').map((s) => s.trim()).filter(Boolean), variants: $('#rd-variants').value.split(',').map((s) => s.trim()).filter(Boolean),
+      resume: $('#rd-resume').checked, eventMapping, stub: !!rtDraft.stub,
+    };
+    const list = loadCustomRuntimes().filter((r) => r.id !== profile.id);
+    list.push(profile); saveCustomRuntimes(list); rtDraft = null; refresh();
+  };
+  $('#rd-cancel').onclick = () => { rtDraft = null; renderSettings(); };
+}
+function wireRuntimesSection() {
+  $('#rt-detect').onclick = act(async () => {
+    const bin = $('#rt-path').value.trim(); if (!bin) return;
+    const profile = await introspectRuntime(bin); rtDraft = profile; wireDraftForm();
+  });
+  document.querySelectorAll('[data-editrt]').forEach((b) => b.onclick = () => { const r = findCustomRuntime(b.dataset.editrt); rtDraft = { ...r, editingId: r.id }; wireDraftForm(); });
+  document.querySelectorAll('[data-delrt]').forEach((b) => b.onclick = act(async () => { saveCustomRuntimes(loadCustomRuntimes().filter((r) => r.id !== b.dataset.delrt)); refresh(); }));
+}
+
 // ---------- discovered capabilities (modes/skills/commands/MCP): collapsible groups, search, per-agent toggles ----------
 const CAPS_LOADING = new Set();
 let capsSearch = '';
@@ -343,7 +425,9 @@ function renderGraph() {
     el('text', { x: 30, y: 30.5, class: 'avtext', 'text-anchor': 'middle' }, g).textContent = initials(n.name);
     el('text', { x: 52, y: 23, class: 'nname' }, g).textContent = clipText(n.name, Math.max(6, Math.round(16 / Math.max(1, 11 / (13 * VP.zoom)))));
     el('text', { x: 52, y: 38, class: 'nrole' }, g).textContent = clipText(n.role, 20);
-    let cx = 12; for (const chip of [VENDOR[ns.runtime || n.runtime || 'claude'] || ns.runtime || n.runtime, ns.model || n.model || 'default'].filter(Boolean)) { const t = clipText(chip, 14); const w = 10 + t.length * 5.6; const cg = el('g', { class: 'chip', transform: `translate(${cx},46)` }, g); el('rect', { width: w, height: 14, rx: 7 }, cg); el('text', { x: w / 2, y: 10.5, 'text-anchor': 'middle' }, cg).textContent = t; cx += w + 4; }
+    const rtId = ns.runtime || n.runtime || 'claude';
+    let cx = 12; for (const chip of [runtimeLabel(rtId), ns.model || n.model || 'default'].filter(Boolean)) { const t = clipText(chip, 14); const w = 10 + t.length * 5.6; const cg = el('g', { class: 'chip', transform: `translate(${cx},46)` }, g); el('rect', { width: w, height: 14, rx: 7 }, cg); el('text', { x: w / 2, y: 10.5, 'text-anchor': 'middle' }, cg).textContent = t; cx += w + 4; }
+    if (rtId !== 'claude') { const a = S.orch.agents[n.id] || {}; const t = clipText(`${fmtTok(a.inputTokens)}/${fmtTok(a.outputTokens)} tok`, 20); const w = 10 + t.length * 5.6; const cg = el('g', { class: 'chip chip-usage', title: 'usage: input/output tokens', transform: `translate(${cx},46)` }, g); el('rect', { width: w, height: 14, rx: 7 }, cg); el('text', { x: w / 2, y: 10.5, 'text-anchor': 'middle' }, cg).textContent = t; el('title', {}, cg).textContent = `${runtimeLabel(rtId)} usage: ${fmtTok(a.inputTokens)} in / ${fmtTok(a.outputTokens)} out`; cx += w + 4; }
     const effort = n.effort || 'low';
     for (const chip of [`E:${effort}`, n.autoCompact ? `AC:${n.autoCompact}` : null].filter(Boolean)) { const t = clipText(chip, 14); const w = 10 + t.length * 5.6; const isDefaultEffort = chip === `E:${effort}` && !n.effort; const cg = el('g', { class: 'chip chip-em' + (isDefaultEffort ? ' chip-default' : ''), transform: `translate(${cx},46)` }, g); el('title', {}, cg).textContent = chip.startsWith('E:') ? `Reasoning effort: ${effort}${isDefaultEffort ? ' (default)' : ''}` : `Auto-compact window: ${n.autoCompact}`; el('rect', { width: w, height: 14, rx: 7 }, cg); el('text', { x: w / 2, y: 10.5, 'text-anchor': 'middle' }, cg).textContent = t; cx += w + 4; }
     const capsSt = !n.capabilities ? 'none' : (n.capabilities.error || n.capabilities.ok === false) ? 'error' : 'ok';
@@ -526,10 +610,10 @@ function renderNodeForm() {
     <label>Name</label><input id="nf-name" value="${esc(n.name)}">
     <label>Role <span class="muted">(free text; presets: ${presets.length})</span></label><input id="nf-role" list="rolelist" value="${esc(n.role)}"><datalist id="rolelist">${C.roles.map((r) => `<option value="${esc(r)}">`).join('')}</datalist>
     <div class="toolbar"><button id="nf-applypreset" ${presets.some((p) => p.name.toLowerCase() === String(n.role).toLowerCase()) ? '' : 'disabled'}>Apply preset</button><button id="nf-savepreset">Save as role preset</button></div>
-    <label>Runtime</label><select id="nf-runtime">${Object.entries(C.runtimes || { claude: { installed: true, label: 'Claude Code', capabilities: {} } }).map(([id, r]) => `<option value="${id}" ${id === (n.runtime || 'claude') ? 'selected' : ''} ${r.installed ? '' : 'disabled'}>${esc(r.label)}${r.installed ? ' ' + esc(r.version || '') : ' (not installed)'}</option>`).join('')}</select>
+    <label>Runtime</label><select id="nf-runtime">${allRuntimeOptions().map((r) => `<option value="${r.id}" ${r.id === (n.runtime || 'claude') ? 'selected' : ''} ${r.installed ? '' : 'disabled'}>${esc(r.label)}${r.custom ? ' (custom)' : ''}${r.installed ? ' ' + esc(r.version || '') : ' (not installed)'}</option>`).join('')}</select>
     <div id="nf-caps" class="muted"></div>
     <div class="toolbar rtpresets"><span class="muted">Quick preset:</span>${RT_PRESETS.map((p) => `<button data-rtp="${p.name}" ${(C.runtimes || {})[p.runtime] && !C.runtimes[p.runtime].installed ? 'disabled title="' + p.runtime + ' not installed"' : ''}>${p.name} <small>${VENDOR[p.runtime]}/${p.model || 'default'}</small></button>`).join('')}</div>
-    <label>Model <span class="muted">(alias or any model ID, e.g. a proxy/provider model; empty = claude CLI default)</span></label><input id="nf-model" list="modellist" value="${esc(n.model || '')}" placeholder="default (claude CLI default)" spellcheck="false"><datalist id="modellist">${MODELS.map((m) => `<option value="${esc(m)}">`).join('')}</datalist>
+    <label>Model <span class="muted">(alias or any model ID, e.g. a proxy/provider model; empty = claude CLI default)</span></label><input id="nf-model" list="modellist" value="${esc(n.model || '')}" placeholder="default (claude CLI default)" spellcheck="false"><datalist id="modellist">${(isCustomRuntime(n.runtime) && findCustomRuntime(n.runtime) ? findCustomRuntime(n.runtime).models : MODELS).map((m) => `<option value="${esc(m)}">`).join('')}</datalist>
     <label>Working directory</label><input id="nf-workdir" value="${esc(n.workdir)}" placeholder="${esc(S.dir)}">
     <label>System prompt</label><textarea id="nf-prompt" rows="6">${esc(n.systemPrompt)}</textarea>
     <fieldset id="nf-modebox"><legend>Run mode</legend>
@@ -572,7 +656,11 @@ function renderNodeForm() {
     <p><button id="nf-save" class="primary">Save</button></p>
     ${a.budgetStop ? `<p class="warn">${esc(a.budgetStop)}</p>` : ''}<p class="muted">Status: ${a.status || 'idle'} · runs ${a.runs || 0} · ${fmtTok(a.inputTokens)} in / ${fmtTok(a.outputTokens)} out / ${fmtTok(a.cacheTokens)} cache tok${a.model ? ' · ' + esc(a.model) : ''}${a.billingSource ? ' · ' + a.billingSource : ''}</p>`;
   const BILL_NOTE = { auto: 'Detected per run from the CLI init event (apiKeySource) and env.', subscription: 'API keys and proxy/Bedrock/Vertex env vars are removed so the run uses your claude.ai login. ' + COST_NOTE.subscription + '.', api: 'Billed per token to the API key in the agent env vars (or inherited env).', proxy: 'Requests go to the base URL; the provider bills you. Reported cost is only an API-equivalent estimate.' };
-  const showCaps = () => { const r = (C.runtimes || {})[$('#nf-runtime').value]; $('#nf-caps').innerHTML = r ? ['tokens', 'cost', 'mcp', 'resume'].map((k) => `<span class="cap ${r.capabilities[k] ? 'on' : 'off'}">${r.capabilities[k] ? '✓' : '✗'} ${k}</span>`).join(' ') : ''; };
+  const showCaps = () => {
+    const rid = $('#nf-runtime').value; const r = allRuntimeOptions().find((x) => x.id === rid);
+    $('#nf-caps').innerHTML = r ? ['tokens', 'cost', 'mcp', 'resume'].map((k) => `<span class="cap ${r.capabilities[k] ? 'on' : 'off'}">${r.capabilities[k] ? '✓' : '✗'} ${k}</span>`).join(' ') : '';
+    const custom = findCustomRuntime(rid); $('#modellist').innerHTML = (custom ? custom.models : MODELS).map((m) => `<option value="${esc(m)}">`).join('');
+  };
   $('#nf-runtime').onchange = showCaps; showCaps();
   f.querySelectorAll('[data-rtp]').forEach((b) => { b.onclick = () => { const p = RT_PRESETS.find((x) => x.name === b.dataset.rtp); $('#nf-runtime').value = p.runtime; $('#nf-model').value = p.model; showCaps(); }; });
   const showBill = () => { const m = $('#nf-billing').value; $('.bill-proxy-url').classList.toggle('hidden', m !== 'proxy'); $('#nf-billnote').textContent = BILL_NOTE[m] || ''; };
@@ -926,7 +1014,9 @@ function renderSettings() {
     <div id="presetform"><label>Name</label><input id="pr-name"><label>Default system prompt</label><textarea id="pr-prompt" rows="3"></textarea>
     <label>Default allowed tools</label><input id="pr-allowed" placeholder="Read, Grep"><label>Default disallowed tools</label><input id="pr-disallowed">
     <label>Permission mode</label><select id="pr-perm"><option value="">project default</option>${(S.config.permissionModes || []).map((m) => `<option>${m}</option>`).join('')}</select>
-    <p><button id="pr-save">Save preset</button></p></div>`;
+    <p><button id="pr-save">Save preset</button></p></div>
+    <hr>${renderRuntimesSection()}`;
+  wireRuntimesSection(); wireDraftForm();
   document.querySelectorAll('[data-delp]').forEach((b) => b.onclick = act(async () => { await call('deletePreset', b.dataset.delp); refresh(); }));
   document.querySelectorAll('[data-editp]').forEach((b) => b.onclick = () => { const p = s.rolePresets.find((x) => x.name === b.dataset.editp); $('#pr-name').value = p.name; $('#pr-prompt').value = p.systemPrompt; $('#pr-allowed').value = p.allowedTools.join(', '); $('#pr-disallowed').value = p.disallowedTools.join(', '); $('#pr-perm').value = p.permissionMode; });
   $('#pr-save').onclick = act(async () => { await call('savePreset', { name: $('#pr-name').value, systemPrompt: $('#pr-prompt').value, allowedTools: $('#pr-allowed').value, disallowedTools: $('#pr-disallowed').value, permissionMode: $('#pr-perm').value }); refresh(); });
