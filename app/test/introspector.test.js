@@ -12,6 +12,8 @@ const codexHelp = fs.readFileSync(path.join(__dirname, 'fixtures/help-codex.txt'
 // "--effort"/"resume" — this is the shape that broke the original parser (docs/helpycode-smoke.md).
 const realHelpycodeTop = fs.readFileSync(path.join(__dirname, 'fixtures/help-helpycode-real-top.txt'), 'utf8');
 const realHelpycodeRun = fs.readFileSync(path.join(__dirname, 'fixtures/help-helpycode-real-run.txt'), 'utf8');
+// Recorded from the real installed `helpycode models` (0.3.5): plain model-id lines, no JSON.
+const realHelpycodeModels = fs.readFileSync(path.join(__dirname, 'fixtures/models-helpycode.txt'), 'utf8');
 
 test('parseCommands / pickRunCommand work on a fictional CLI (no CLI-specific code)', () => {
   const cmds = IN.parseCommands(helpycodeHelp);
@@ -94,4 +96,20 @@ test('introspectRuntime derives a working profile against real installed-helpyco
   assert.strictEqual(profile.effortFlag, '--variant');
   assert.deepStrictEqual(profile.effortValues, ['high', 'max', 'minimal']);
   assert.strictEqual(profile.resumeFlag, '-s');
+});
+
+test('recorded `helpycode models` output: modelsCommand is derived; fixture is real model-id lines', () => {
+  const profile = IN.introspectRuntime('helpycode', (bin, args) => {
+    assert.strictEqual(bin, 'helpycode');
+    if (args[0] === 'run' && args.includes('--help')) return realHelpycodeRun;
+    if (args.includes('--help')) return realHelpycodeTop;
+    throw new Error('unexpected exec ' + JSON.stringify(args));
+  }, { id: 'helpycode', label: 'HelpyCode', probe: false });
+  assert.deepStrictEqual(profile.modelsCommand, ['models']);
+  // The recorded fixture is the real listing shape: one bare model id per line. Known gap (see
+  // docs/onboarding-introspection.md): nothing parses these lines into the draft's model list yet,
+  // so the UI still takes model ids as free text (src/main.js helpycode gui-e2e scenario).
+  const ids = realHelpycodeModels.trim().split('\n').map((l) => l.trim()).filter(Boolean);
+  assert.ok(ids.length >= 2, 'expected the real helpycode model listing in the fixture');
+  assert.ok(ids.every((id) => /^[a-z0-9][a-z0-9._/-]*$/i.test(id)), ids.join(','));
 });

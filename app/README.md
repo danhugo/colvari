@@ -78,7 +78,7 @@ Scope is enforced on the server side (`src/board-tools.js`, `src/scope.js`):
 - Status changes: only for tasks assigned to the agent, created by it, or assigned to one of its outgoing neighbours.
 - Comments and `list_tasks`: only for tasks of the agent and its direct neighbours.
 
-Other agent CLIs are wired up generically via a `RuntimeProfile` (`src/runtime-profile.js`), derived by `src/introspector.js` and driven by `src/profile-runner.js` — no CLI-specific code in the runner. See `docs/helpycode-smoke.md` for a real (non-Claude) CLI end-to-end smoke test against the board MCP server, including a gap found in the introspector against a real CLI's `--help` output.
+Other agent CLIs are wired up generically via a `RuntimeProfile` (`src/runtime-profile.js`), derived by `src/introspector.js` and driven by `src/profile-runner.js` — no CLI-specific code in the runner. New runtimes are onboarded from the CLI itself: Settings > Runtimes > Detect runs the introspector (`--help` + subcommand help + one probe run) and yields an editable draft profile; if help parsing is not enough, the ladder falls back to a probe run and finally to asking the agent for its own profile JSON (schema-validated). See `docs/onboarding-introspection.md` for the full flow, fixtures and known gaps, and `docs/helpycode-smoke.md` for a real (non-Claude) CLI end-to-end smoke test against the board MCP server.
 
 ## Roles, presets and per-agent permissions
 

@@ -14,16 +14,14 @@ don't re-run it for unrelated changes.
   which makes `src/mcp-server.js` exit silently with `MODULE_NOT_FOUND` — check that first if the
   agent reports "board MCP tools not available").
 
-## Known gap: generic introspector doesn't parse helpycode's real `--help`
+## Historical note: the old "introspector can't parse real helpycode --help" gap
 
-`introspectRuntime('helpycode', ...)` (src/introspector.js) currently derives an empty profile
-(`argsTemplate: ['--model', '{model}', '{prompt}']`, no `run` subcommand, no MCP method) against the
-*real* `helpycode --help` output, because `parseCommands` expects `  <name>  <desc>` lines but
-helpycode prefixes every command with the binary name (`  helpycode run [message..]     run ...`).
-The introspector's own tests only exercise a hand-written fixture (`help-helpycode.txt`) that already
-matches the expected shape, so this gap wasn't caught there. Filed as a finding for the core
-RuntimeProfile owner; until fixed, build the profile for real helpycode by hand (see below) rather
-than trusting the introspector's output.
+When this smoke test was written, `introspectRuntime('helpycode', ...)` derived an empty profile
+against the *real* `helpycode --help` output, because `parseCommands` expected `  <name>  <desc>`
+lines while helpycode prefixes every command with the binary name. **Since fixed**: `parseCommands`
+now detects and strips the repeated binary-name prefix, and `test/introspector.test.js` derives the
+full profile from the recorded real output (`test/fixtures/help-helpycode-real-*.txt`). See
+`docs/onboarding-introspection.md` for the current flow.
 
 ## Wiring the board MCP server into a project directory
 
