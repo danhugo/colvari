@@ -204,3 +204,59 @@ test('real event: recorded rate_limit_event parses to numeric 5h/weekly percenta
   assert.ok(rl.fiveHour.resetsAt);
   assert.ok(rl.weekly.resetsAt);
 });
+
+// --- End-to-end values from the recorded real `claude -p --output-format stream-json --verbose` run
+// (test/fixtures/real-init-event.json + real-rate-limit-event.json, captured on this machine) ---
+
+test('real event: recorded system/init has 123 slash commands (incl goal/loop), 58 skills, modes>=2', () => {
+  const initEvent = JSON.parse(fixture('real-init-event.json'));
+  assert.equal(initEvent.slash_commands.length, 123);
+  assert.ok(initEvent.slash_commands.includes('goal'));
+  assert.ok(initEvent.slash_commands.includes('loop'));
+  assert.equal(initEvent.skills.length, 58);
+
+  const rt = { id: 'claude', bin: () => 'claude' };
+  const c = CAP.discoverCapabilities(rt, {}, { exec: () => '', initEvent, ...FS_OPTS });
+  assert.equal(c.skills.length, 58);
+  assert.equal(c.slashCommands.length, initEvent.slash_commands.length);
+  const modeNames = c.categorized.filter((x) => x.category === 'mode').map((x) => x.name);
+  assert.ok(modeNames.length >= 2);
+  assert.ok(modeNames.includes('goal') && modeNames.includes('loop'));
+});
+
+test('real event: rate_limit_event exposes both five_hour and seven_day utilization + resetsAt', () => {
+  const rateLimitEvent = JSON.parse(fixture('real-rate-limit-event.json'));
+  const w = rateLimitEvent.rate_limit_info.unifiedWindows;
+  assert.equal(typeof w.five_hour.utilization, 'number');
+  assert.ok(w.five_hour.resetsAt);
+  assert.equal(typeof w.seven_day.utilization, 'number');
+  assert.ok(w.seven_day.resetsAt);
+
+  const rl = U.parseRateLimits(rateLimitEvent);
+  assert.equal(rl.fiveHour.pct, w.five_hour.utilization);
+  assert.equal(rl.weekly.pct, w.seven_day.utilization);
+  assert.equal(rl.fiveHour.resetsAt, new Date(w.five_hour.resetsAt * 1000).toISOString());
+  assert.equal(rl.weekly.resetsAt, new Date(w.seven_day.resetsAt * 1000).toISOString());
+});
+
+test('real event: two consecutive probes of the same init event replace, not accumulate, counts', () => {
+  const initEvent = JSON.parse(fixture('real-init-event.json'));
+  const rt = { id: 'claude', bin: () => 'claude' };
+
+  // Manual-refresh style (main.js): each discoverCapabilities() call wholesale-overwrites node.capabilities.
+  const first = CAP.discoverCapabilities(rt, {}, { exec: () => '', initEvent, ...FS_OPTS });
+  const second = CAP.discoverCapabilities(rt, {}, { exec: () => '', initEvent, ...FS_OPTS });
+  assert.equal(first.skills.length, 58); assert.equal(second.skills.length, 58);
+  assert.equal(first.slashCommands.length, second.slashCommands.length);
+
+  // Automatic per-run style (orchestrator.js): slashCommands are unioned+deduped against the previous
+  // stored capabilities on every init event, so replaying the identical event must not grow the count.
+  const fromInit = CAP.fromInitEvent(initEvent);
+  let node = { capabilities: null };
+  for (let i = 0; i < 2; i++) {
+    const prev = node.capabilities || {};
+    node.capabilities = { ...prev, ...fromInit, slashCommands: [...new Set([...(prev.slashCommands || []), ...fromInit.slashCommands])] };
+  }
+  assert.equal(node.capabilities.slashCommands.length, initEvent.slash_commands.length);
+  assert.equal(node.capabilities.skills.length, 58);
+});
