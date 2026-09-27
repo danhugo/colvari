@@ -53,6 +53,8 @@ Every graph node shows small vendor/model chips (e.g. `Claude` / `opus`) next to
 
 `npm run gui-e2e:limits` (also run as part of the full `npm run gui-e2e`) stubs 5h-window runs directly into `runs.json` (no real model calls) and checks: the meter reads 60% used with a stale run outside the window correctly excluded, then crosses warn (86%) and pause (100%) as the configured limit tightens; a real `Orchestrator` refuses to start a ready `todo` task while paused; graph badges render both agents' runtime/model; and a freshly added agent's capabilities panel is populated right away. Shots: `limits-meter-{light,dark}`, `limits-pause-banner`, `limits-graph-badges-{light,dark}`.
 
+`npm run gui-e2e:discovery` (also run as part of the full `npm run gui-e2e`) feeds the recorded real init event (`test/fixtures/real-init-event.json`, 58 skills / 123 slash commands including `goal`/`loop`) through `discoverCapabilities` exactly as a real Refresh would, and checks the Usage tab's Discovery panel (`#us-discovery`) shows those exact counts (Skills `58`, Commands `123`, Modes including `goal`/`loop`); it also checks the panel never renders a `↻` reset chip when no reset time is reported, and never renders a stale `↻0m`/`↻NaN` chip once a limit is configured but the reported window has already elapsed. Shot: `discovery-panel`.
+
 ## Agent run modes and sessions
 
 Each agent has a **Run mode**, set in the agent panel (`src/agent-modes.js`):

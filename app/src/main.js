@@ -418,6 +418,39 @@ async function guiE2E() {
     console.log('[gui-e2e] limits', JSON.stringify({ under, cli, warn, pause, guardTaskStatus: s.getTask(guardTask.id).status, chips, effortChips, probeBefore: dotBefore, probeAfter: dotAfter, discovered: !!added.capabilities }));
     require('electron').nativeTheme.themeSource = 'system';
   };
+  // Discovery panel regression: the recorded real init event (58 skills / 123 slash commands, incl.
+  // goal+loop modes — test/fixtures/real-init-event.json) drives the Usage tab's #us-discovery panel the
+  // same way a real Refresh would (discoverCapabilities({initEvent}) -> node.capabilities), so the panel's
+  // Skills/Commands cards must show exactly those counts, and the 5h/weekly reset chip must never render
+  // for a resetsAt that is null or already past (0/negative ms) — no misleading "↻0m"/"↻NaNm".
+  const discoveryPanelShots = async () => {
+    await waitFor(`return !!document.querySelector('#tpl-select option')`); await ex(`await refresh();`); const cur = await ex(`return { p: ctx.p, t: S.teamId }`);
+    const p = cur.p || pid(); const ts = pm.store(p, cur.t); const s = pm.store(p);
+    let nodes = ts.getTeam().nodes;
+    if (!nodes.length) { ts.addNode({ name: 'Pia', role: 'PM', runtime: 'claude', model: 'opus', x: 60, y: 60 }); nodes = ts.getTeam().nodes; }
+    const [pm1] = nodes;
+    const initEvent = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'test', 'fixtures', 'real-init-event.json'), 'utf8'));
+    const rt = RT.getRuntime(pm1.runtime || 'claude');
+    // Same call main.js's discoverCapabilities IPC makes on a real Refresh once a live init event exists.
+    const capabilities = CAP.discoverCapabilities(rt, s.getSettings(), { exec: () => '', initEvent });
+    ts.updateNode(pm1.id, { capabilities, capabilitiesProbedAt: capabilities.probedAt });
+    const prevLim = s.getSettings().usageLimits; s.saveSettings({ usageLimits: { fiveHourLimit: 0, weeklyLimit: 0, tokenLimit: 0, costLimit: 0, warnPct: 80 } });
+    await ex(`$('#tabs button[data-tab=usage]').click(); await refresh(); await w(400);`);
+    const panel = await ex(`return { skills: $('#us-discovery .cards .stat:nth-child(1) b')?.textContent, commands: $('#us-discovery .cards .stat:nth-child(2) b')?.textContent, modes: $('#us-discovery .cards .stat:nth-child(3) small:last-child')?.textContent, text: $('#us-discovery').textContent }`);
+    expect('discovery panel: Skills card equals the fixture\'s 58 skills after Refresh', panel.skills === '58', panel);
+    expect('discovery panel: Commands card equals the fixture\'s 123 slash commands after Refresh', panel.commands === '123', panel);
+    expect('discovery panel: Modes list includes goal and loop', /goal/.test(panel.modes) && /loop/.test(panel.modes), panel.modes);
+    expect('discovery panel: no reset chip (↻) rendered when no limit/resetsAt is reported', !/↻/.test(panel.text), panel.text);
+    await shot('discovery-panel');
+    // Now with a limit configured but resetsAt null/at-or-before-now (unavailable/expired): still no "↻0m".
+    s.saveSettings({ usageLimits: { fiveHourLimit: 10, weeklyLimit: 10, tokenLimit: 0, costLimit: 0, warnPct: 80 } });
+    for (let i = 0; i < 3; i++) s.addRun({ id: 'disc-' + i, projectId: p, nodeId: pm1.id, agent: pm1.name, kind: 'agent', billingSource: 'subscription', startedAt: new Date(0).toISOString(), inputTokens: 10, outputTokens: 5 });
+    await ex(`await refresh(); await w(400);`);
+    const noReset = await ex(`return $('#us-discovery').textContent`);
+    expect('discovery panel: reset chip never renders for a resetsAt already in the past (stale window)', !/↻0m|↻NaN/.test(noReset), noReset);
+    s.saveSettings({ usageLimits: prevLim });
+    console.log('[gui-e2e] discovery', JSON.stringify({ panel, skillsCount: capabilities.skills.length, commandsCount: capabilities.slashCommands.length }));
+  };
   // Existing-data scenario: a project that predates capability probing, usage limits and reasoning-effort
   // fields (nodes added straight through the store, like a real legacy project.json). Nothing here should
   // crash or silently no-op: probing still works on demand, the limit meter still shows up once the CLI's
@@ -728,6 +761,7 @@ async function guiE2E() {
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'parallel') { await parallelShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'mixed') { await mixedShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'limits') { await limitsShots(); throw null; }
+    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'discovery') { await discoveryPanelShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'existingdata') { await existingDataShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'polish') { await polishShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'mainlogswiki') { await mainLogsWikiShots(); throw null; }
@@ -922,6 +956,7 @@ async function guiE2E() {
     if (!process.env.SKIP_WIKILOGS) await mainLogsWikiShots();
     if (!process.env.SKIP_CRITIQUE) await critiqueShots();
     if (!process.env.SKIP_LIMITS) await limitsShots();
+    if (!process.env.SKIP_DISCOVERY) await discoveryPanelShots();
     nativeTheme.themeSource = 'system';
     const tasks = store.listTasks();
     console.log('[gui-e2e]', JSON.stringify({ edges: store.getTeam().edges.length, tasks: tasks.map((t) => [t.title, t.status, t.iterations || 0, !!t.sessionId]), cost: orch.snapshot().totalCost }));
