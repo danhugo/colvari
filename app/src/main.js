@@ -324,7 +324,51 @@ async function guiE2E() {
     console.log('[gui-e2e] mixed', JSON.stringify({ chips, st, rt }));
     s.saveSettings({ claudePath: prev.claudePath, codexPath: prev.codexPath });
   };
+  // Wiki + Logs tabs: empty states, page list + rendered markdown typography, readable log rows (time/avatar/level), filter by agent + search, auto-scroll.
+  const wikiLogsShots = async () => {
+    await waitFor(`return !!document.querySelector('#tpl-select option')`); await ex(`await refresh();`); const cur = await ex(`return { p: ctx.p, t: S.teamId }`);
+    const ps = pm.store(cur.p || pid(), cur.t); let nodes = ps.getTeam().nodes;
+    if (nodes.length < 2) { ps.addNode({ name: 'Pia', role: 'PM', x: 60, y: 60 }); ps.addNode({ name: 'Devon', role: 'Dev', x: 320, y: 160 }); nodes = ps.getTeam().nodes; }
+    const [a, b] = nodes;
+    await ex(`$('#tabs button[data-tab=wiki]').click(); await refresh(); sel.page = null; renderWiki(); await w(300);`);
+    const wempty = await ex(`return { list: $('#wikilist').textContent, view: $('#wk-view').textContent }`);
+    expect('wiki: empty state (no pages)', /No pages yet/.test(wempty.list) && /No wiki pages yet/.test(wempty.view), wempty);
+    await shot('28-wiki-empty');
+    await ex(`$('#tabs button[data-tab=obs]').click(); await refresh(); await w(300);`);
+    const lempty = await ex(`return $('#log').textContent`);
+    expect('logs: empty state (no activity)', /No activity yet/.test(lempty), lempty);
+    await shot('29-logs-empty');
+    ps.writeWiki('Runbook', '# Runbook\n\nHow the team operates.\n\n## Steps\n\n- Plan the work\n- Assign to Devon\n- Review before done\n\nSee [the repo](https://example.com) for more.\n\n```\nnpm test\n```\n', 'Pia');
+    ps.writeWiki('Glossary', '## Terms\n\n- **PM**: plans the work\n- **Dev**: builds it\n', 'Devon');
+    await ex(`await refresh(); renderWiki(); await w(300);`);
+    const wlist = await ex(`return document.querySelectorAll('#wikilist div[data-t]').length`);
+    expect('wiki: page list populated', wlist === 2, wlist);
+    await ex(`document.querySelector('#wikilist div[data-t="Runbook"]').click(); await w(300);`);
+    const wview = await ex(`return { h1: document.querySelectorAll('#wk-view h1').length, h2: document.querySelectorAll('#wk-view h2').length, li: document.querySelectorAll('#wk-view li').length, ul: document.querySelectorAll('#wk-view ul').length, a: document.querySelectorAll('#wk-view a').length, pre: document.querySelectorAll('#wk-view pre').length }`);
+    expect('wiki: rendered markdown has headings, list, link, code block', wview.h1 === 1 && wview.h2 === 1 && wview.li >= 3 && wview.ul >= 1 && wview.a === 1 && wview.pre === 1, wview);
+    const L = (ago, nodeId, kind, text) => `logs.push({ projectId: ctx.p, nodeId: '${nodeId}', kind: '${kind}', text: ${JSON.stringify(text)}, at: Date.now() - ${ago} });`;
+    await ex(`$('#tabs button[data-tab=obs]').click(); ${L(90000, a.id, 'system', '▶ ' + a.name + ' starts "Runbook" in /x')}${L(80000, a.id, 'text', 'Planning the steps.')}${L(70000, b.id, 'tool', 'Write {"file_path":"color.txt"}')}${L(60000, b.id, 'error', 'ENOENT: no such file')}
+      await refresh(); renderLog(); await w(300);`);
+    const rows = await ex(`return document.querySelectorAll('#log .logrow').length`);
+    expect('logs: readable rows rendered for all agents', rows === 4, rows);
+    await shot('30-logs-rows');
+    await ex(`$('#logfilter').value = '${b.id}'; $('#logfilter').dispatchEvent(new Event('change')); await w(200);`);
+    const filtered = await ex(`return document.querySelectorAll('#log .logrow').length`);
+    expect('logs: filter by agent narrows rows', filtered === 2, filtered);
+    await ex(`$('#logfilter').value = ''; $('#logfilter').dispatchEvent(new Event('change')); $('#logsearch').value = 'ENOENT'; $('#logsearch').dispatchEvent(new Event('input')); await w(200);`);
+    const searched = await ex(`return { rows: document.querySelectorAll('#log .logrow').length, err: !!document.querySelector('#log .logrow.lv-error') }`);
+    expect('logs: search narrows rows and error level is coloured', searched.rows === 1 && searched.err, searched);
+    await ex(`$('#logsearch').value = ''; $('#logsearch').dispatchEvent(new Event('input')); await w(200);`);
+    for (const t of ['light', 'dark']) {
+      require('electron').nativeTheme.themeSource = t;
+      await ex(`$('#tabs button[data-tab=wiki]').click(); await w(300);`); await shot(`wiki-${t}`);
+      await ex(`$('#tabs button[data-tab=obs]').click(); await w(300);`); await shot(`logs-${t}`);
+    }
+    require('electron').nativeTheme.themeSource = 'system';
+    console.log('[gui-e2e] wikilogs', JSON.stringify({ wempty, lempty, wlist, wview, rows, filtered, searched }));
+  };
   try {
+    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'wikilogs') { await wikiLogsShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'graph') { await graphShots(); for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`$('#tabs button[data-tab=team]').click(); await w(500);`); await shot(`graph-${t}`); } require('electron').nativeTheme.themeSource = 'system'; throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'chat') { await chatShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'firstrun') { await firstrunInbox(); throw null; }
