@@ -30,12 +30,25 @@ function notify(n, pid) {
   try { if (!Notification.isSupported() || (ST({ p: pid }).getSettings().notifications === false)) return; const p = pm.get(pid); new Notification({ title: `${n.title}${p ? ' · ' + p.name : ''}`, body: n.body || '' }).show(); } catch {}
 }
 
+// Autorun: act like the human in the real UI (select project, type goal, press Run). File: {"project": name, "goal": text}.
+async function autorun(file) {
+  const { project, goal } = JSON.parse(require('fs').readFileSync(file, 'utf8'));
+  const p = pm.list().find((x) => x.name === project); if (!p) return console.error('[autorun] no project', project);
+  const w = (ms) => new Promise((r) => setTimeout(r, ms));
+  await w(800);
+  await win.webContents.executeJavaScript(`document.querySelector('#projectlist div[data-pid="${p.id}"]').click()`); await w(1200);
+  await win.webContents.executeJavaScript(`(() => { const g = document.querySelector('#goal'); g.value = ${JSON.stringify(goal)}; document.querySelector('#run').click(); })()`);
+  console.log('[autorun] started', p.name);
+  orchFor(p.id).once('done', () => console.log('[autorun] done', p.name));
+}
+
 function createWindow() {
   win = new BrowserWindow({ width: 1400, height: 900, title: 'Agents Squad', webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false } });
   win.webContents.on('console-message', (_e, level, message) => { if (level >= 2) console.error('[renderer]', message); });
   win.webContents.on('did-finish-load', async () => {
     console.log('[agents-squad] renderer loaded');
     if (process.env.AGENTS_SQUAD_GUI_E2E) return guiE2E();
+    if (process.env.AGENTS_SQUAD_AUTORUN) return autorun(process.env.AGENTS_SQUAD_AUTORUN);
     if (!process.env.AGENTS_SQUAD_SMOKE) return;
     // UI smoke test: add two agents, create a task, check the DOM, then quit.
     const js = `(async () => { const w = (ms) => new Promise(r => setTimeout(r, ms));
@@ -60,7 +73,9 @@ async function guiE2E() {
   const waitFor = async (js, ms = 10000) => { for (let t = 0; t < ms; t += 200) { if (await ex(js)) return true; await new Promise((r) => setTimeout(r, 200)); } return false; };
   // Overview screenshots (idle, active, stuck) from injected renderer state; no claude runs needed.
   const overviewShots = async () => {
-    const ps = pm.store(pid()); let nodes = ps.getTeam().nodes;
+    // Seed into whatever project/team the renderer is showing (earlier steps may have switched it).
+    await ex(`await refresh();`); const cur = await ex(`return { p: ctx.p, t: S.teamId }`);
+    const ps = pm.store(cur.p || pid(), cur.t); let nodes = ps.getTeam().nodes;
     if (nodes.length < 2) { ps.addNode({ name: 'Pia', role: 'PM', x: 60, y: 60 }); ps.addNode({ name: 'Devon', role: 'Dev', x: 320, y: 160 }); nodes = ps.getTeam().nodes; }
     const [a, b] = nodes; if (!ps.getTeam().edges.some((e) => e.from === a.id && e.to === b.id)) ps.addEdge(a.id, b.id, 'assign');
     const t = ps.createTask({ title: 'Overview demo', assignee: b.id }); ps.commentTask(t.id, a.id, 'Please build the overview.');
@@ -69,13 +84,14 @@ async function guiE2E() {
     const L = (ago, nodeId, kind, text) => `logs.push({ projectId: ctx.p, nodeId: '${nodeId}', kind: '${kind}', text: ${JSON.stringify(text)}, at: Date.now() - ${ago} });`;
     await ex(`${L(240000, a.id, 'system', '▶ Pia starts "Goal" in /x')}${L(200000, a.id, 'tool', 'mcp__board__create_task {"title":"Overview demo","assignee":"' + b.id + '"}')}${L(150000, a.id, 'tool', 'mcp__board__update_task_status {"status":"done"}')}${L(120000, a.id, 'result', 'success cost=$0 turns=3')}
       ${L(3000, a.id, 'tool', 'mcp__board__send_message {"to":"' + b.id + '","text":"ping"}')}${L(100000, b.id, 'system', '▶ Devon starts "Overview demo" in /x')}${L(60000, b.id, 'tool', 'Write {"file_path":"src/overview.js"}')}${L(2000, b.id, 'tool', 'Bash {"command":"npm test"}')}
-      S.orch.agents = { '${b.id}': { status: 'working', taskId: '${t.id}' } }; $('#ov-task').value = '${t.id}'; renderOverview(); await w(600);`);
+      await w(600); S.orch.agents = { '${b.id}': { status: 'working', taskId: '${t.id}' } }; $('#ov-task').value = '${t.id}'; renderOverview();`);
+    // Checks inject orch state right before asserting: a background refresh() replaces S (and S.orch) at any time.
+    expect('overview: working node glows', await ex(`S.orch.agents = { '${b.id}': { status: 'working', taskId: '${t.id}' } }; renderOverview(); return !!document.querySelector('#ov-graph .node.working')`));
     await shot('12-overview-active');
-    expect('overview: working node glows', await ex(`return !!document.querySelector('#ov-graph .node.working')`));
     expect('overview: timeline lanes and thread chips', await ex(`return document.querySelectorAll('#ov-timeline .run').length >= 2 && document.querySelectorAll('#ov-thread .chip').length >= 1`));
-    await ex(`S.settings.stuckMinutes = 1; S.orch.agents = { '${b.id}': { status: 'working', startedAt: Date.now() - 600000 } }; for (const l of logs) if (l.nodeId === '${b.id}') l.at -= 300000; renderOverview(); await w(1500);`);
+    await ex(`for (const l of logs) if (l.nodeId === '${b.id}') l.at -= 300000; await w(1500);`);
+    expect('overview: stuck badge with Stop and Nudge', await ex(`S.settings.stuckMinutes = 1; S.orch.agents = { '${b.id}': { status: 'working', startedAt: Date.now() - 600000 } }; renderOverview(); return !!document.querySelector('#ov-graph .node.stuck') && !!document.querySelector('[data-ovstop]') && !!document.querySelector('[data-ovnudge]')`));
     await shot('13-overview-stuck');
-    expect('overview: stuck badge with Stop and Nudge', await ex(`return !!document.querySelector('#ov-graph .node.stuck') && !!document.querySelector('[data-ovstop]') && !!document.querySelector('[data-ovnudge]')`));
   };
   try {
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'overview') { await overviewShots(); throw null; }
