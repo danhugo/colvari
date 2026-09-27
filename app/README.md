@@ -123,25 +123,25 @@ PM guidance: split goals into independent tasks so every report has one in fligh
 
 ## Mixing vendors
 
-Each agent picks its runtime (Claude Code, Codex) and model on its own node, so one team can mix vendors: e.g. a Claude/Opus PM, a Codex Dev and a Claude/Haiku Reviewer. The graph shows a runtime + model chip on every node. Codex has no MCP here, so a Codex agent cannot use the board tools; when its run exits 0 the orchestrator moves its task to done (non-zero goes to review), and `blockedBy` chains still order it between Claude agents.
+Each agent picks its runtime (Claude Code, Codex) and model on its own node, so one team can mix vendors: e.g. a Claude/Opus PM, a Codex Dev and a Claude/Haiku Reviewer. The graph and the Overview show a runtime + model badge on every node. Codex agents get the board MCP server too (passed as `codex exec -c mcp_servers.board.*` overrides), so they call `comment_task`, `update_task_status` etc. themselves. If a Codex run exits 0 without setting a status, the orchestrator still moves the task to done (non-zero goes to review). `blockedBy` chains order it between Claude agents. The Usage tab has a **By vendor** table: Codex tokens are counted, its cost shows `—` (Codex reports no cost), Claude shows $.
 
 - `node --test test/mixed-vendor.test.js`: fake `claude` + `codex` bins; PM → Dev → Reviewer chain finishes in dependency order, with the right binary and `--model`/`-m` for each, and Codex tokens/thread id stored on the run.
-- `npm run gui-e2e:mixed`: the same team in the app; shots `e2e-shots/28-mixed-graph-{light,dark}.png` (runtime/model chips) and `29-mixed-overview-{light,dark}.png`.
+- `npm run gui-e2e:mixed`: the same team in the app; checks the graph chips, the Overview `vendor · model` lines and the Usage By-vendor split (Codex 107 tok / `—`, Claude $). Shots `e2e-shots/28-mixed-graph-{light,dark}.png`, `29-mixed-overview-{light,dark}.png`, `30-mixed-usage-{light,dark}.png`.
 
-Live run (2026-09-27, codex-cli 0.144.6, ChatGPT login, on a throwaway worktree of this repo): one Codex Dev (`gpt-5.6-terra`, bypassPermissions) was given "create app/MIXED_VENDOR.txt with one line". Transcript as logged by the orchestrator:
+Live run (2026-09-27, codex-cli 0.144.6, ChatGPT login, orchestrator from this repo, scratch git repo): one Codex Dev (`gpt-5.6-terra`, bypassPermissions) was told to create `MIXED_VENDOR.txt`, then call `comment_task` and `update_task_status` itself. Orchestrator log:
 
 ```
-▶ Cody starts "Add app/MIXED_VENDOR.txt" in /tmp/squad-live-codex [mode=single]
-codex thread 01a0e172-c3fe-7990-8936-6be0e4a06d3a
-I'll add the requested single-line file, then mark the assigned task done on the team board.
-file_change add /private/tmp/squad-live-codex/app/MIXED_VENDOR.txt
-shell test "$(cat app/MIXED_VENDOR.txt)" = "written by codex via agents-squad" && ...
-Created `app/MIXED_VENDOR.txt` with the exact requested line.
-codex turn completed: 92591 in / 756 out
-■ Cody finished (exit 0, 1 iteration(s), single run)   → task done in 23.8s
+▶ Cody starts "Add MIXED_VENDOR.txt" in /tmp/squad-live2/work [mode=single]
+codex thread 01a0e17a-4673-7152-ab78-a385ec3b748c
+file_change add /private/tmp/squad-live2/work/MIXED_VENDOR.txt
+mcp__board__comment_task {"taskId":"t_72c314bf","text":"Added MIXED_VENDOR.txt with the requested line."}
+mcp__board__update_task_status {"taskId":"t_72c314bf","status":"done"}
+Created `MIXED_VENDOR.txt` with the requested line, commented on the task board, and marked task `t_72c314bf` done.
+codex turn completed: 84237 in / 409 out
+■ Cody finished (exit 0, 1 iteration(s), single run)
 ```
 
-Cost: 92,591 input / 756 output tokens. Codex reports no dollar cost (capability `cost: false`), so Usage shows tokens only; on a ChatGPT login it counts against that plan, not an API bill. Note: the account default `gpt-5.6-sol` was rejected ("not supported when using Codex with a ChatGPT account"), so the task went to review with exit 1. Set a supported model on Codex nodes.
+The task comment's author is `Cody`, so the done status came from Codex and not from the exit-0 fallback. Cost: 84,237 input / 409 output tokens, no dollar figure. On a ChatGPT login the usage counts against that plan. Gotchas: the MCP server needs `npm install` in `app/`. Without it the server crashes on start, and Codex just says "board MCP tools aren't available" (it does not fail). Also, the account default `gpt-5.6-sol` is rejected on ChatGPT logins, so set a supported model on Codex nodes.
 
 ## Limitations
 
