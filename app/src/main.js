@@ -339,17 +339,17 @@ async function guiE2E() {
     s.addRun({ id: 'lim-stale', projectId: p, nodeId: pm1.id, agent: pm1.name, kind: 'agent', billingSource: 'subscription', startedAt: new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString(), inputTokens: 10, outputTokens: 5 });
     const prevLim = s.getSettings().usageLimits; s.saveSettings({ usageLimits: { fiveHourLimit: 10, weeklyLimit: 0, tokenLimit: 0, costLimit: 0, warnPct: 80 } });
     await ex(`$('#tabs button[data-tab=usage]').click(); await refresh(); await w(500);`);
-    const under = await ex(`return { fill: $('#us-limits .meter-fill').style.width, pct: $('#us-limits .stat small.warn, #us-limits .stat small.muted')?.textContent, warn: /Approaching a usage limit/.test($('#us-limits').textContent), pause: /limit has been reached/.test($('#us-limits').textContent) }`);
+    const under = await ex(`return { fill: $('#limitmeter .lm-fill').style.width, pct: $('#us-limits .stat small.warn, #us-limits .stat small.muted')?.textContent, warn: /Approaching a usage limit/.test($('#us-limits').textContent), pause: /limit has been reached/.test($('#us-limits').textContent) }`);
     expect('usage limits: meter shows 60% used, 6 stale-excluded, no warn/pause yet', under.fill === '60%' && /60% used/.test(under.pct) && !under.warn && !under.pause, under);
     for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`await w(200);`); await shot(`limits-meter-${t}`); }
     // Cross the warn line (80%), then the pause line (100%) — both computed straight off the same stubbed runs.
     s.saveSettings({ usageLimits: { fiveHourLimit: 7, weeklyLimit: 0, tokenLimit: 0, costLimit: 0, warnPct: 80 } });
     await ex(`await refresh(); await w(400);`);
-    const warn = await ex(`return { pct: $('#us-limits .meter-fill').style.width, warn: /Approaching a usage limit/.test($('#us-limits').textContent) }`);
+    const warn = await ex(`return { pct: $('#limitmeter .lm-fill').style.width, warn: /Approaching a usage limit/.test($('#us-limits').textContent) }`);
     expect('usage limits: 6/7 = 86% crosses the warn line', warn.pct === '86%' && warn.warn, warn);
     s.saveSettings({ usageLimits: { fiveHourLimit: 6, weeklyLimit: 0, tokenLimit: 0, costLimit: 0, warnPct: 80 } });
     await ex(`await refresh(); await w(400);`);
-    const pause = await ex(`return { pct: $('#us-limits .meter-fill').style.width, pause: /limit has been reached/.test($('#us-limits').textContent) }`);
+    const pause = await ex(`return { pct: $('#limitmeter .lm-fill').style.width, pause: /limit has been reached/.test($('#us-limits').textContent) }`);
     expect('usage limits: 6/6 = 100% crosses the pause line', pause.pct === '100%' && pause.pause, pause);
     await shot('limits-pause-banner');
     // The dispatch guard itself: a real orchestrator with a todo task ready to run must NOT start it while paused.
