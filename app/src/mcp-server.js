@@ -22,7 +22,7 @@ const reg = (name, description, shape) => enabled.has(name) && server.tool(name,
 });
 
 reg('list_team', 'Show yourself and the teammates you can assign tasks to / receive tasks from.', {});
-reg('list_tasks', 'List board tasks visible to you.', { status: STATUS.optional(), mine: z.boolean().optional() });
+reg('list_tasks', 'List board tasks visible to you. Excludes done tasks and trims description/comments by default (small output); pass includeDone or status:"done" to see done tasks, or taskId to get one task in full (with comments).', { status: STATUS.optional(), mine: z.boolean().optional(), includeDone: z.boolean().optional(), taskId: z.string().optional() });
 reg('create_task', 'Create a task assigned to yourself or a teammate you have an outgoing edge to (id or name). Use blockedBy to make it wait for other tasks.', { title: z.string(), description: z.string().optional(), assignee: z.string().optional(), parentId: z.string().optional(), blockedBy: z.array(z.string()).optional().describe('ids of tasks that must be done before this one starts'), priority: PRIORITY.optional().describe('P0 (highest) .. P3 (lowest); default P2') });
 reg('update_task_status', 'Change a task status (todo, in_progress, review, done). Reviewers may move tasks of agents they review to review/done.', { taskId: z.string(), status: STATUS, priority: PRIORITY.optional().describe('optionally re-prioritize the task (P0 highest .. P3 lowest)') });
 reg('comment_task', 'Add a comment to a task.', { taskId: z.string(), text: z.string() });

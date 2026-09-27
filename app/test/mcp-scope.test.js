@@ -36,7 +36,8 @@ test('status/comment/visibility scope', () => {
   assert.throws(() => makeTools(s, qa.id).update_task_status({ taskId: t.id, status: 'todo' }), /scope/);
   assert.throws(() => makeTools(s, qa.id).comment_task({ taskId: t.id, text: 'hi' }), /scope/);
   assert.equal(makeTools(s, qa.id).list_tasks().length, 0);
-  assert.equal(makeTools(s, pm.id).list_tasks().length, 1);
+  assert.equal(makeTools(s, pm.id).list_tasks().length, 0); // done tasks excluded by default
+  assert.equal(makeTools(s, pm.id).list_tasks({ includeDone: true }).length, 1);
   const team = makeTools(s, pm.id).list_team();
   assert.deepEqual(team.canAssignTo.map((n) => n.name), ['Dev']);
   assert.throws(() => makeTools(s, 'ghost').list_tasks(), /unknown caller/);

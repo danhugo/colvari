@@ -12,7 +12,13 @@ function enabledTools(node) {
 function makeTools(store, nodeId) {
   const team = () => store.getTeam();
   const nodeName = (t, id) => (t.nodes.find((n) => n.id === id) || {}).name || id;
-  const fmtTask = (t, tk, all) => { const open = C.openBlockers(tk, all || store.listTasks()); return { ...tk, assigneeName: nodeName(t, tk.assignee), ...(open.length ? { blockedByOpen: open } : {}) }; };
+  // Trim heavy fields (full description, comment history) from list results; comment_task/update_task_status
+  // callers still get a task's full record via the store, but bulk listing stays small so it doesn't flood context.
+  const fmtTask = (t, tk, all, { brief = false } = {}) => {
+    const open = C.openBlockers(tk, all || store.listTasks());
+    const base = brief ? { ...tk, description: tk.description ? tk.description.slice(0, 200) : tk.description, comments: tk.comments.length } : tk;
+    return { ...base, assigneeName: nodeName(t, tk.assignee), ...(open.length ? { blockedByOpen: open } : {}) };
+  };
   const me = () => { const t = team(); const n = t.nodes.find((x) => x.id === nodeId); if (!n) throw new Error('unknown caller node ' + nodeId); return t; };
   const resolve = (t, ref, what) => { const n = t.nodes.find((x) => x.id === ref || x.name === ref); if (!n) throw new Error(`unknown ${what} "${ref}"`); return n; };
   const impl = {
@@ -26,10 +32,20 @@ function makeTools(store, nodeId) {
         reviews: reviewees(t, nodeId).map(brief), reviewedBy: outgoing(t, nodeId, ['review']).map(brief),
       };
     },
-    list_tasks({ status, mine } = {}) {
+    // By default excludes done tasks and trims description/comments, so a full-board listing stays small
+    // enough for the 40%-autocompact budget; pass status:'done' (or includeDone) or taskId for full detail.
+    list_tasks({ status, mine, includeDone = false, taskId } = {}) {
       const t = me();
       const all = store.listTasks();
-      return all.filter((tk) => (!status || tk.status === status) && (mine ? tk.assignee === nodeId : visibleTask(t, nodeId, tk))).map((tk) => fmtTask(t, tk, all));
+      if (taskId) {
+        const tk = all.find((x) => x.id === taskId);
+        if (!tk || !visibleTask(t, nodeId, tk)) throw new Error('no visible task ' + taskId);
+        return fmtTask(t, tk, all);
+      }
+      const showDone = includeDone || status === 'done';
+      return all
+        .filter((tk) => (!status || tk.status === status) && (showDone || tk.status !== 'done') && (mine ? tk.assignee === nodeId : visibleTask(t, nodeId, tk)))
+        .map((tk) => fmtTask(t, tk, all, { brief: true }));
     },
     create_task({ title, description = '', assignee, parentId = null, blockedBy = [], priority }) {
       const t = me();
