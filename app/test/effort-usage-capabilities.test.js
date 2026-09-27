@@ -77,7 +77,7 @@ test('usageStatus warns then pauses on configured limits', () => {
   const old = [{ kind: 'agent', billingSource: 'subscription', startedAt: new Date(now - 6 * 60 * 60 * 1000).toISOString() }];
   assert.equal(U.usageStatus(old, { fiveHourLimit: 1 }, now).fiveHour.used, 0);
   // disabled limit (0) never warns/pauses
-  assert.deepEqual(U.usageStatus(runs, {}, now).fiveHour, { used: 5, limit: 0, pct: 0, warn: false, pause: false });
+  assert.deepEqual(U.usageStatus(runs, {}, now).fiveHour, { used: 5, limit: 0, pct: 0, warn: false, pause: false, resetsAt: null });
 });
 
 test('usageStatus: API auth tracks tokens/cost, not request windows', () => {
