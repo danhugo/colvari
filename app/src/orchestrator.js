@@ -463,6 +463,11 @@ class Orchestrator extends EventEmitter {
       const own = run && run.usage ? run.usage : null;
       this.log(node.id, ev.is_error ? 'error' : 'result', `${ev.subtype} cost=$${(own ? own.reportedCostUsd : cost).toFixed(4)} turns=${ev.num_turns}${own && own.resumedFrom ? ` (this run only; session total $${cost.toFixed(4)})` : ''}`);
       this.changed();
+    } else if (ev.type === 'rate_limit_event') {
+      // The claude CLI's real, live 5h/weekly usage % — a separate stream event (rate_limit_info.unifiedWindows),
+      // not part of the system/init event below. This is the actual source for the top bar's "5h"/"weekly" meter.
+      const rl = U.parseRateLimits(ev);
+      if (rl) { (this.subscriptionRateLimits ||= {})[node.id] = rl; this.checkUsageLimits(node.id); this.changed(); }
     } else if (ev.type === 'system' && ev.subtype === 'init') {
       const mcpStatus = (ev.mcp_servers || []).map((s) => `${s.name}:${s.status}`).join(',');
       if (run && ev.session_id) run.sessionId = ev.session_id;

@@ -101,8 +101,10 @@ test('capabilities: needsReprobe triggers on missing/expired cache and signature
 });
 
 test('capabilities: init event data merges over --help probe, no hard-coded lists', () => {
+  const fs = require('fs'); const os = require('os'); const path = require('path');
+  const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'cap-home-'));
   const rt = { id: 'claude', bin: () => 'claude' };
-  const c = CAP.discoverCapabilities(rt, {}, { exec: () => '/compact', initEvent: { slash_commands: ['review'], skills: ['pdf'], permission_modes: ['default', 'plan'] } });
+  const c = CAP.discoverCapabilities(rt, {}, { exec: () => '/compact', initEvent: { slash_commands: ['review'], skills: ['pdf'], permission_modes: ['default', 'plan'] }, cwd: fakeHome, home: fakeHome });
   assert.deepEqual(c.slashCommands.sort(), ['/compact', '/review']);
   assert.deepEqual(c.skills, ['pdf']); assert.deepEqual(c.modes, ['default', 'plan']);
   assert.equal(c.runtime, 'claude');
@@ -116,6 +118,13 @@ test('usage: subscription rate limits parsed as % of window + reset time, not $'
   // 0-100 scale is normalized to 0-1
   const rl2 = U.parseRateLimits({ rateLimits: { fiveHour: { pct: 92 } } });
   assert.equal(rl2.fiveHour.pct, 0.92);
+});
+
+test('usage: parseRateLimits reads the CLI\'s real "rate_limit_event" stream event (rate_limit_info.unifiedWindows), not just system/init', () => {
+  const ev = { type: 'rate_limit_event', rate_limit_info: { unifiedWindows: { five_hour: { utilization: 0.36, resetsAt: 1790520600 }, seven_day: { utilization: 0.22, resetsAt: 1790989200 } } } };
+  const rl = U.parseRateLimits(ev);
+  assert.equal(rl.fiveHour.pct, 0.36); assert.equal(rl.fiveHour.resetsAt, new Date(1790520600 * 1000).toISOString());
+  assert.equal(rl.weekly.pct, 0.22); assert.equal(rl.weekly.resetsAt, new Date(1790989200 * 1000).toISOString());
 });
 
 test('usage: subscriptionGuard pauses at the configured threshold (default 90%)', () => {
@@ -140,8 +149,10 @@ test('usage: providerUsageStatus reports real usage or an explicit reason', () =
 });
 
 test('capabilities: goal/loop/workflow run modes and mcp servers are always categorized (fixes "Modes: none found")', () => {
+  const fs = require('fs'); const os = require('os'); const path = require('path');
+  const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'cap-home-'));
   const rt = { id: 'claude', bin: () => 'claude' };
-  const c = CAP.discoverCapabilities(rt, { mcpServers: { board: {} } }, { exec: () => 'usage: claude' });
+  const c = CAP.discoverCapabilities(rt, { mcpServers: { board: {} } }, { exec: () => 'usage: claude', cwd: fakeHome, home: fakeHome });
   const modeNames = c.categorized.filter((x) => x.category === 'mode').map((x) => x.name).sort();
   assert.deepEqual(modeNames, ['goal', 'loop', 'single', 'workflow']);
   const mcpNames = c.categorized.filter((x) => x.category === 'mcp').map((x) => x.name);
@@ -150,13 +161,27 @@ test('capabilities: goal/loop/workflow run modes and mcp servers are always cate
 
 test('capabilities: scanLocalPlugins finds project .claude/skills and .claude/commands, never throws on missing dirs', () => {
   const fs = require('fs'); const os = require('os'); const path = require('path');
-  assert.deepEqual(CAP.scanLocalPlugins('/no/such/dir'), { skills: [], commands: [] });
+  const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'cap-home-'));
+  assert.deepEqual(CAP.scanLocalPlugins('/no/such/dir', { home: fakeHome }), { skills: [], commands: [] });
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cap-test-'));
   fs.mkdirSync(path.join(dir, '.claude', 'skills', 'my-skill'), { recursive: true });
   fs.mkdirSync(path.join(dir, '.claude', 'commands'), { recursive: true });
   fs.writeFileSync(path.join(dir, '.claude', 'commands', 'review.md'), '# review');
-  const r = CAP.scanLocalPlugins(dir);
+  const r = CAP.scanLocalPlugins(dir, { home: fakeHome });
   assert.deepEqual(r.skills, ['my-skill']); assert.deepEqual(r.commands, ['/review']);
+});
+
+test('capabilities: scanLocalPlugins also picks up user ~/.claude and installed-plugin skills/commands', () => {
+  const fs = require('fs'); const os = require('os'); const path = require('path');
+  const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'cap-home-'));
+  fs.mkdirSync(path.join(fakeHome, '.claude', 'skills', 'user-skill'), { recursive: true });
+  const pluginDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cap-plugin-'));
+  fs.mkdirSync(path.join(pluginDir, 'commands'), { recursive: true });
+  fs.writeFileSync(path.join(pluginDir, 'commands', 'plugcmd.md'), '# plugcmd');
+  fs.mkdirSync(path.join(fakeHome, '.claude', 'plugins'), { recursive: true });
+  fs.writeFileSync(path.join(fakeHome, '.claude', 'plugins', 'installed_plugins.json'), JSON.stringify({ plugins: { 'p@m': [{ installPath: pluginDir }] } }));
+  const r = CAP.scanLocalPlugins('/no/such/dir', { home: fakeHome });
+  assert.deepEqual(r.skills, ['user-skill']); assert.deepEqual(r.commands, ['/plugcmd']);
 });
 
 test('agent-config: enabledCapabilities persist on the node and are passed to the run via the system prompt', () => {

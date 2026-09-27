@@ -231,11 +231,16 @@ function parseRateLimitWindow(o) {
     : (o.used != null && o.limit) ? Number(o.used) / Number(o.limit) : null;
   if (pct == null || Number.isNaN(pct)) return null;
   if (pct > 1) pct = pct / 100; // some CLIs report 0-100 instead of 0-1
-  const resetsAt = o.resets_at || o.resetsAt || o.reset_at || o.resetAt || null;
+  let resetsAt = o.resets_at || o.resetsAt || o.reset_at || o.resetAt || null;
+  if (typeof resetsAt === 'number') resetsAt = new Date(resetsAt * 1000).toISOString(); // CLI reports epoch seconds
   return { pct: Math.max(0, Math.min(1, pct)), resetsAt };
 }
+// Two shapes the CLI reports rate limits in: a "system"/"init" event's rate_limits field (older/simpler), and
+// the live "rate_limit_event" stream event's rate_limit_info.unifiedWindows (real shape seen on Claude Code
+// 2.x: { five_hour: { utilization, resetsAt }, seven_day: { utilization, resetsAt } }, resetsAt in epoch seconds).
 function parseRateLimits(ev = {}) {
-  const src = ev.rate_limits || ev.rateLimits || {};
+  const info = ev.rate_limit_info && typeof ev.rate_limit_info === 'object' ? ev.rate_limit_info : null;
+  const src = info ? (info.unifiedWindows || {}) : (ev.rate_limits || ev.rateLimits || {});
   const fiveHour = parseRateLimitWindow(src.five_hour || src.fiveHour || src['5h']);
   const weekly = parseRateLimitWindow(src.week || src.weekly || src.seven_day || src.sevenDay);
   if (!fiveHour && !weekly) return null;

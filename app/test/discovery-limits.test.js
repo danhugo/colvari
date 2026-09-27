@@ -9,11 +9,15 @@ const CAP = require('../src/capabilities');
 const U = require('../src/usage');
 
 const fixture = (name) => fs.readFileSync(path.join(__dirname, 'fixtures', name), 'utf8');
+// Isolate discoverCapabilities' filesystem scan (user ~/.claude, plugins cache, project .claude) from
+// whatever is actually installed on the machine running the tests, so results stay deterministic.
+const FAKE_HOME = fs.mkdtempSync(path.join(require('os').tmpdir(), 'cap-home-'));
+const FS_OPTS = { cwd: FAKE_HOME, home: FAKE_HOME };
 
 test('discovery: claude --help fixture surfaces this repo\'s goal/loop/workflow-relevant commands', () => {
   const rt = { id: 'claude', bin: () => 'claude' };
   const help = fixture('help-claude.txt');
-  const c = CAP.discoverCapabilities(rt, {}, { exec: () => help });
+  const c = CAP.discoverCapabilities(rt, {}, { exec: () => help, ...FS_OPTS });
   assert.equal(c.ok, true);
   assert.equal(c.runtime, 'claude');
   assert.ok(c.slashCommands.includes('/loop'), 'finds /loop (goal/loop-style automation)');
@@ -25,7 +29,7 @@ test('discovery: claude --help fixture surfaces this repo\'s goal/loop/workflow-
 test('discovery: codex --help fixture surfaces its goal-mode subcommand', () => {
   const rt = { id: 'codex', bin: () => 'codex' };
   const help = fixture('help-codex.txt');
-  const c = CAP.discoverCapabilities(rt, {}, { exec: () => help });
+  const c = CAP.discoverCapabilities(rt, {}, { exec: () => help, ...FS_OPTS });
   assert.equal(c.ok, true);
   assert.ok(c.commands.includes('goal'), 'finds the goal subcommand');
   assert.ok(c.commands.includes('exec') && c.commands.includes('apply'));
@@ -38,6 +42,7 @@ test('discovery: a live init event\'s modes/skills win over --help for the same 
   const c = CAP.discoverCapabilities(rt, {}, {
     exec: () => help,
     initEvent: { slash_commands: ['loop', 'workflow'], skills: ['superpowers:test-driven-development'], permission_modes: ['default', 'plan', 'acceptEdits'] },
+    ...FS_OPTS,
   });
   // union of --help + init-event slash commands, deduped
   assert.ok(c.slashCommands.includes('/review')); // from --help
@@ -49,7 +54,7 @@ test('discovery: a live init event\'s modes/skills win over --help for the same 
 
 test('discovery: an uninstalled runtime binary reports ok:false with no crash', () => {
   const rt = { id: 'ghost', bin: () => 'ghost-cli' };
-  const c = CAP.discoverCapabilities(rt, {}, { exec: () => { const e = new Error('spawn ENOENT'); e.code = 'ENOENT'; throw e; } });
+  const c = CAP.discoverCapabilities(rt, {}, { exec: () => { const e = new Error('spawn ENOENT'); e.code = 'ENOENT'; throw e; }, ...FS_OPTS });
   assert.equal(c.ok, false);
   assert.equal(c.error, 'not installed');
   assert.deepEqual(c.slashCommands, []);

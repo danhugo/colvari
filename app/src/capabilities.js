@@ -28,26 +28,62 @@ function detectAppModes(helpText = '') {
   return [...found];
 }
 
-// Read one directory level of skill/command definitions (Claude Code style: .claude/skills/<name>/SKILL.md,
-// .claude/commands/<name>.md) from the project directory, so plugin-provided skills/commands are found even
-// without a live CLI session. Never throws; missing dirs just yield []. Scoped to the project (not the user's
-// home) so discovery results stay deterministic and specific to this project's own plugins.
-function scanLocalPlugins(cwd) {
+// One level of skill/command definitions from a single "<root>/.claude"-style directory
+// (skills/<name>/SKILL.md dirs, commands/<name>.md files). Never throws; missing dirs just yield [].
+function scanClaudeDir(root) {
   const skills = [], commands = [];
+  try {
+    const skillsDir = path.join(root, 'skills');
+    for (const name of fs.readdirSync(skillsDir, { withFileTypes: true })) {
+      if (name.isDirectory()) skills.push(name.name);
+    }
+  } catch {}
+  try {
+    const cmdDir = path.join(root, 'commands');
+    for (const name of fs.readdirSync(cmdDir, { withFileTypes: true })) {
+      if (name.isFile() && name.name.endsWith('.md')) commands.push('/' + name.name.replace(/\.md$/, ''));
+    }
+  } catch {}
+  return { skills, commands };
+}
+
+// Installed-plugin install paths (each its own "<installPath>/skills", "<installPath>/commands" tree):
+// marketplace-installed plugins from ~/.claude/plugins/installed_plugins.json, plus org/team plugins synced
+// straight into ~/.claude/plugins/synced/<sync-id>/<plugin-name> (no manifest entry of their own). Never throws.
+function installedPluginRoots(home) {
+  const roots = [];
+  try {
+    const manifest = JSON.parse(fs.readFileSync(path.join(home, '.claude', 'plugins', 'installed_plugins.json'), 'utf8'));
+    for (const entries of Object.values(manifest.plugins || {})) {
+      for (const e of (Array.isArray(entries) ? entries : [])) if (e && e.installPath) roots.push(e.installPath);
+    }
+  } catch {}
+  try {
+    const syncedDir = path.join(home, '.claude', 'plugins', 'synced');
+    for (const syncId of fs.readdirSync(syncedDir, { withFileTypes: true })) {
+      if (!syncId.isDirectory()) continue;
+      const syncRoot = path.join(syncedDir, syncId.name);
+      for (const plugin of fs.readdirSync(syncRoot, { withFileTypes: true })) {
+        if (plugin.isDirectory()) roots.push(path.join(syncRoot, plugin.name));
+      }
+    }
+  } catch {}
+  return roots;
+}
+
+// Read skill/command definitions (Claude Code style: .claude/skills/<name>/SKILL.md, .claude/commands/<name>.md)
+// from every source Claude Code itself resolves them from, so Refresh (no live CLI session) reports the same
+// skills/commands the initial scan saw from a live session: the project's own .claude, the user's ~/.claude,
+// and every installed plugin's own skills/commands tree (from ~/.claude/plugins/installed_plugins.json).
+function scanLocalPlugins(cwd, { home } = {}) {
+  const skills = [], commands = [];
+  home = home || require('os').homedir();
   const roots = [cwd].filter(Boolean).map((d) => path.join(d, '.claude'));
+  roots.push(path.join(home, '.claude'));
+  roots.push(...installedPluginRoots(home));
   for (const root of roots) {
-    try {
-      const skillsDir = path.join(root, 'skills');
-      for (const name of fs.readdirSync(skillsDir, { withFileTypes: true })) {
-        if (name.isDirectory()) skills.push(name.name);
-      }
-    } catch {}
-    try {
-      const cmdDir = path.join(root, 'commands');
-      for (const name of fs.readdirSync(cmdDir, { withFileTypes: true })) {
-        if (name.isFile() && name.name.endsWith('.md')) commands.push('/' + name.name.replace(/\.md$/, ''));
-      }
-    } catch {}
+    const found = scanClaudeDir(root);
+    skills.push(...found.skills); commands.push(...found.commands);
   }
   return { skills: [...new Set(skills)], commands: [...new Set(commands)] };
 }
@@ -87,9 +123,9 @@ function fromInitEvent(ev = {}) {
 
 // Probe one runtime adapter (from ./runtimes RUNTIMES[id]) for this project's settings. Merges a live init
 // event's data over the --help probe when available (init events are more accurate but only exist after a run).
-function discoverCapabilities(rt, settings = {}, { exec, initEvent, cwd } = {}) {
+function discoverCapabilities(rt, settings = {}, { exec, initEvent, cwd, home } = {}) {
   const help = probeHelp(rt.bin(settings), ['--help'], exec);
-  const local = scanLocalPlugins(cwd || settings.workdir || process.cwd());
+  const local = scanLocalPlugins(cwd || settings.workdir || process.cwd(), { home });
   const skills = [...new Set(local.skills)];
   const mcpServers = Object.keys((settings.mcpServers && typeof settings.mcpServers === 'object') ? settings.mcpServers : {});
   let base = {
@@ -135,4 +171,4 @@ function needsReprobe(node = {}, signature, { ttlMs = TTL_MS, now = Date.now() }
 // only matters once a node already has a first probe on record.
 const needsInitialProbe = (node = {}) => !node.capabilities;
 
-module.exports = { parseHelpText, probeHelp, fromInitEvent, discoverCapabilities, capabilitySignature, needsReprobe, needsInitialProbe, detectAppModes, scanLocalPlugins, categorize, TTL_MS };
+module.exports = { parseHelpText, probeHelp, fromInitEvent, discoverCapabilities, capabilitySignature, needsReprobe, needsInitialProbe, detectAppModes, scanLocalPlugins, scanClaudeDir, installedPluginRoots, categorize, TTL_MS };
