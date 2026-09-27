@@ -20,6 +20,13 @@ test('autoCompact is "auto" or a token window clamped to 100k-1M', () => {
   assert.equal(normalizeNode({ autoCompact: 0 }).autoCompact, '');
 });
 
+test('legacy percentage autoCompact values (<=100) are migrated to CLI default, not clamped', () => {
+  assert.equal(normalizeNode({ autoCompact: 80 }).autoCompact, '');
+  assert.equal(normalizeNode({ autoCompact: '80' }).autoCompact, '');
+  assert.equal(normalizeNode({ autoCompact: 100 }).autoCompact, '');
+  assert.equal(normalizeNode({ autoCompact: 1 }).autoCompact, '');
+});
+
 test('migration: "--effort low" in extraArgs becomes effort=low and is stripped', () => {
   const n = normalizeNode({ extraArgs: '--effort low --verbose' });
   assert.equal(n.effort, 'low');
