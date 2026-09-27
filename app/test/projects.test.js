@@ -53,7 +53,7 @@ test('project create / rename / delete, isolated boards', () => {
 test('templates produce expected graphs', () => {
   const pm = new ProjectManager(root());
   const pid = pm.list()[0].id;
-  for (const [k, n, e] of [['startup', 3, 2], ['solo', 1, 0], ['research', 4, 4]]) {
+  for (const [k, n, e] of [['startup', 4, 3], ['solo', 1, 0], ['research', 4, 4]]) {
     const t = pm.createTeam(pid, k, k);
     const g = pm.store(pid, t.id).getTeam();
     assert.equal(g.nodes.length, n, k); assert.equal(g.edges.length, e, k);
@@ -61,7 +61,7 @@ test('templates produce expected graphs', () => {
   const st = pm.get(pid).teams.find((t) => t.name === 'startup');
   const g = pm.store(pid, st.id).getTeam();
   const name = (id) => g.nodes.find((x) => x.id === id).name;
-  assert.deepEqual(g.edges.map((x) => `${name(x.from)}>${name(x.to)}`), ['PM>Dev', 'Dev>Reviewer']);
+  assert.deepEqual(g.edges.map((x) => `${name(x.from)}>${name(x.to)}`), ['PM>Dev', 'Dev>Reviewer', 'PM>Critic']);
   assert.throws(() => pm.createTeam(pid, 'x', 'nope'), /unknown template/);
   assert.ok(TEMPLATES.startup.label);
 });
@@ -72,9 +72,9 @@ test('multiple teams: per-team edits, merged view for orchestrator/MCP', () => {
   const t1 = pm.get(pid).teams[0].id; const t2 = pm.createTeam(pid, 'B', 'startup').id;
   const s1 = pm.store(pid, t1); const n = s1.addNode({ name: 'Solo', role: 'Dev' });
   assert.equal(s1.getTeam().nodes.length, 1);
-  assert.equal(pm.store(pid, t2).getTeam().nodes.length, 3);
+  assert.equal(pm.store(pid, t2).getTeam().nodes.length, 4);
   const all = pm.store(pid).getTeam();
-  assert.equal(all.nodes.length, 4);
+  assert.equal(all.nodes.length, 5);
   assert.equal(all.nodes.find((x) => x.id === n.id).teamId, t1);
   // MCP tools see the merged graph: PM in team B can assign to its Dev
   const g2 = pm.store(pid, t2).getTeam();

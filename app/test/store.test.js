@@ -69,3 +69,16 @@ test('human inbox: ask_human blocks until answered, approvals create items', asy
   const [a] = s.listInbox({ status: 'open' }); assert.equal(a.kind, 'approval');
   s.answerInbox(a.id, 'approve'); assert.equal(s.getTask(t.id).status, 'done'); assert.equal(s.listInbox({ status: 'open' }).length, 0);
 });
+
+test('parent task auto-completes when all subtasks are done', () => {
+  const s = new Store(fs.mkdtempSync(path.join(os.tmpdir(), 'sq-')));
+  const root = s.createTask({ title: 'goal' });
+  const p = s.createTask({ title: 'p', parentId: root.id });
+  const a = s.createTask({ title: 'a', parentId: p.id });
+  const b = s.createTask({ title: 'b', parentId: p.id });
+  s.updateTask(a.id, { status: 'done' });
+  assert.equal(s.getTask(p.id).status, 'todo');
+  s.updateTask(b.id, { status: 'done' });
+  assert.equal(s.getTask(p.id).status, 'done');
+  assert.equal(s.getTask(root.id).status, 'done');
+});

@@ -25,10 +25,11 @@ function buildPrompt(team, node, task, extra = {}) {
   const unread = extra.unread || 0;
   const tools = enabledTools(node);
   const roleHints = {
-    PM: 'You own the goal. Break it into concrete tasks and assign them to your teammates with create_task. Do not write code yourself if a Dev is available.',
+    PM: 'You own the goal. Break it into concrete tasks and assign them to your teammates with create_task. Do not write code yourself if a Dev is available. If a Critic is on the team: first create a plan-review task for the Critic and make every Dev task blockedBy it; finally create a Critic verification task (blockedBy the Dev tasks) that requires evidence such as screenshots before the goal is done.',
     Planner: 'Split work into small, concrete tasks and assign them to the right teammates.',
     Dev: 'Implement the task in your working directory using your tools. Keep changes minimal.',
     Reviewer: 'Review the work described in the task. Comment findings on the task.',
+    Critic: 'Critique plans before work starts and verify finished work with concrete evidence (test output, screenshots). Comment findings; only mark done when the evidence holds.',
     QA: 'Verify the work actually functions. Comment results on the task.',
   };
   return [

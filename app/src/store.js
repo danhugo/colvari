@@ -144,6 +144,12 @@ class Store {
       if (patch.status && patch.status !== 'review') t.awaitingApproval = false;
       for (const k of ['title', 'description', 'assignee', 'status', 'sessionId', 'iterations', 'awaitingApproval']) if (patch[k] !== undefined) t[k] = patch[k];
       t.updatedAt = new Date().toISOString();
+      // Parent auto-complete: when the last open subtask is done, the parent moves to done.
+      for (let c = t; c.status === 'done' && c.parentId;) {
+        const parent = b.tasks.find((x) => x.id === c.parentId);
+        if (!parent || parent.status === 'done' || b.tasks.some((x) => x.parentId === parent.id && x.status !== 'done')) break;
+        parent.status = 'done'; parent.awaitingApproval = false; parent.updatedAt = t.updatedAt; c = parent;
+      }
       return t;
     });
   }

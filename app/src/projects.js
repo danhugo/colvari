@@ -17,13 +17,14 @@ function defaultRoot() { return process.env.AGENTS_SQUAD_HOME || process.env.AGE
 const TEMPLATES = {
   blank: { label: 'Blank', nodes: [], edges: [] },
   startup: {
-    label: 'Startup (PM -> Dev -> Reviewer)',
+    label: 'Startup (PM -> Critic, Dev -> Reviewer)',
     nodes: [
       { key: 'pm', name: 'PM', role: 'PM', x: 60, y: 80 },
       { key: 'dev', name: 'Dev', role: 'Dev', x: 280, y: 80 },
       { key: 'rev', name: 'Reviewer', role: 'Reviewer', x: 500, y: 80 },
+      { key: 'crit', name: 'Critic', role: 'Critic', x: 280, y: 220 },
     ],
-    edges: [['pm', 'dev'], ['dev', 'rev']],
+    edges: [['pm', 'dev'], ['dev', 'rev'], ['pm', 'crit']],
   },
   solo: { label: 'Solo (one Dev)', nodes: [{ key: 'dev', name: 'Solo Dev', role: 'Dev', x: 60, y: 80, systemPrompt: 'You work alone: plan, implement and verify the task yourself.' }], edges: [] },
   research: {
