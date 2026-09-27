@@ -603,8 +603,8 @@ function renderLog() {
   const box = $('#log'); const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 20;
   const all = logs.filter((l) => l.projectId === ctx.p && (!teamIds || teamIds.has(l.nodeId)));
   const rows = all.filter((l) => (!f || l.nodeId === f) && (!q || l.text.toLowerCase().includes(q)));
-  box.innerHTML = rows.length ? rows.slice(-800).map(logRow).join('')
-    : `<p class="muted logempty">${all.length ? 'No log lines match your filter.' : 'No activity yet — run the team to see agent logs here.'}</p>`;
+  const empty = teamIds && !all.length ? 'No messages for this team.' : (all.length ? 'No log lines match your filter.' : 'No activity yet — run the team to see agent logs here.');
+  box.innerHTML = rows.length ? rows.slice(-800).map(logRow).join('') : `<p class="muted logempty">${empty}</p>`;
   if (atBottom && $('#logauto').checked) box.scrollTop = box.scrollHeight;
 }
 $('#logteam').onchange = () => { sel.logTeam = $('#logteam').value; $('#logfilter').value = ''; renderObs(); renderLog(); };
