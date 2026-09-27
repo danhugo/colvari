@@ -10,6 +10,7 @@ const { normalizeMode, iterationPrompt, nextStep, judgeArgs, parseJudge, isLastL
 const U = require('./usage');
 const PF = require('./preflight');
 const C = require('./controls');
+const IDLE = require('./idle');
 const WT = require('./worktree');
 const RT = require('./runtimes');
 
@@ -142,6 +143,18 @@ class Orchestrator extends EventEmitter {
     this.emit('done', this.snapshot());
   }
 
+  agentStates() { return IDLE.agentStates(this.store.getTeam(), this.store.listTasks(), this.agents); }
+  // Board message to each PM with open goals whose reports are idle; repeats only when the idle set changes.
+  nudgeIdle() {
+    this.nudged ||= new Map();
+    for (const n of IDLE.idleNudges(this.store.getTeam(), this.store.listTasks(), this.agents)) {
+      if (this.nudged.get(n.pmId) === n.text) continue;
+      this.nudged.set(n.pmId, n.text);
+      this.store.sendMessage({ from: 'system', to: n.pmId, text: n.text });
+      this.log(n.pmId, 'system', 'nudge: ' + n.text);
+    }
+  }
+
   tick() {
     if (!this.running) return;
     const s = this.store.getSettings();
@@ -155,6 +168,7 @@ class Orchestrator extends EventEmitter {
       if (this.runs >= s.maxRuns) { this.log(null, 'system', `maxRuns (${s.maxRuns}) reached`); break; }
       this.runTask(team.nodes.find((n) => n.id === task.assignee), task, team, s);
     }
+    try { this.nudgeIdle(); } catch (e) { this.log(null, 'error', 'idle nudge: ' + e.message); }
     if (this.procs.size === 0) {
       this.running = false;
       const why = !todo.length ? 'No more todo tasks. Finished.' : !ready.length ? `Stopped: ${todo.length} todo task(s) are blocked by unfinished dependencies or over budget` : 'Stopped: run limit reached';
