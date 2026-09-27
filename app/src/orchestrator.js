@@ -423,7 +423,7 @@ class Orchestrator extends EventEmitter {
       if (base !== null) {
         const b = m.mode === 'loop' && !isLastLoop(m, i) ? baseDefer : base;
         const prompt = human ? humanPrompt(human, resume || wf ? null : b) : iterationPrompt(m, b, i, { reason: judge && judge.reason, task: wf ? (this.store.getTask(task.id) || task) : null });
-        try { args = RT.getRuntime(cfg.runtime).buildArgs(runCfg, prompt, settings, mcp, { resume, cwd }); }
+        try { args = RT.getRuntime(cfg.runtime).buildArgs(runCfg, prompt, settings, mcp, { resume, cwd, env }); }
         catch (e) { this.log(node.id, 'error', 'bad agent settings: ' + e.message); }
       }
       if (i > 0) this.log(node.id, 'system', `↻ ${node.name} iteration ${i + 1} (${m.mode})`);
@@ -514,16 +514,11 @@ class Orchestrator extends EventEmitter {
   onEvent(node, line, run, runtime = 'claude') {
     let ev; try { ev = JSON.parse(line); } catch { return this.log(node.id, 'raw', line); }
     const a = this.agent(node.id);
-    if (runtime === 'codex') {
-      const o = RT.parseCodexEvent(ev);
-      for (const [k, t] of o.logs) if (String(t).trim()) this.log(node.id, k, t);
-      if (run && o.sessionId) { run.sessionId = o.sessionId; if (run.usage) run.usage.sessionId = o.sessionId; }
-      if (run && o.result !== undefined) run.result = o.result;
-      if (o.tokens) { if (run && run.usage) { run.usage.inputTokens = (run.usage.inputTokens || 0) + o.tokens.inputTokens; run.usage.outputTokens = (run.usage.outputTokens || 0) + o.tokens.outputTokens; this.changed(); } } // record() adds the run's totals to the agent counters at close; adding them here too would double-count
-      return;
-    }
-    if (runtime === 'helpycode') {
-      const o = RT.parseHelpycodeEvent(ev);
+    // Runtimes that declare a parseEvent hook (codex, profile-driven CLIs) parse their own events;
+    // no per-CLI branch here. Claude's stream-json stays handled inline below.
+    const rt = (() => { try { return RT.getRuntime(runtime); } catch { return null; } })();
+    if (rt && rt.parseEvent) {
+      const o = rt.parseEvent(ev, this.store.getSettings());
       for (const [k, t] of o.logs) if (String(t).trim()) this.log(node.id, k, t);
       if (run && o.sessionId) { run.sessionId = o.sessionId; if (run.usage) run.usage.sessionId = o.sessionId; }
       if (run && o.result !== undefined) run.result = o.result;
