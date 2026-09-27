@@ -2,6 +2,8 @@
 // parses newline-delimited JSON stdout via the profile's eventMapping, and feeds usage into a
 // usage.js-shaped run record. Supports resume, effort ("variant"), and board MCP injection.
 const { spawn } = require('child_process');
+const fs = require('fs');
+const path = require('path');
 const { normalizeRuntimeProfile, fillArgsTemplate } = require('./runtime-profile');
 const { newRun } = require('./usage');
 
@@ -25,7 +27,18 @@ function mcpArgs(profile, mcpConfig) {
   if (!mcpConfig || profile.mcp.method === 'none') return [];
   if (profile.mcp.method === 'json-flag') return [profile.mcp.flag, JSON.stringify(mcpConfig)];
   if (profile.mcp.method === 'toml-override') return tomlMcpArgs(profile.mcp.flag, mcpConfig);
-  return [];
+  return []; // 'file': written to cwd by writeFileMcpConfig, not passed as an arg
+}
+
+// board MCP server -> a project-local config file (e.g. helpycode's <cwd>/helpycode.json), the shape
+// an opencode-derived CLI expects: { mcp: { <name>: { type: 'local', command: [bin, ...args], enabled } } }.
+function writeFileMcpConfig(cwd, filename, mcpConfig) {
+  const mcp = {};
+  for (const [name, sv] of Object.entries((mcpConfig && mcpConfig.mcpServers) || {})) {
+    mcp[name] = { type: 'local', command: [sv.command, ...(sv.args || [])], enabled: true };
+    if (sv.env && Object.keys(sv.env).length) mcp[name].environment = sv.env;
+  }
+  fs.writeFileSync(path.join(cwd, filename), JSON.stringify({ $schema: 'https://opencode.ai/config.json', mcp }, null, 2));
 }
 
 // Build the full argv (after the binary) for one run.
@@ -59,6 +72,7 @@ function applyProfileEvent(run, ev, mapping) {
 // spawnFn is injectable for tests; defaults to child_process.spawn.
 function runProfile(profile, opts = {}, spawnFn = spawn) {
   const p = normalizeRuntimeProfile(profile);
+  if (opts.mcpConfig && p.mcp.method === 'file' && opts.cwd) writeFileMcpConfig(opts.cwd, p.mcp.flag, opts.mcpConfig);
   const args = buildProfileArgs(p, opts);
   const run = { ...newRun({ model: opts.model || '' }), reasoningTokens: 0 };
   const startedMs = Date.now();
@@ -88,4 +102,4 @@ function runProfile(profile, opts = {}, spawnFn = spawn) {
   });
 }
 
-module.exports = { buildProfileArgs, applyProfileEvent, runProfile, mcpArgs };
+module.exports = { buildProfileArgs, applyProfileEvent, runProfile, mcpArgs, writeFileMcpConfig, getPath };

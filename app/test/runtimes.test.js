@@ -50,3 +50,31 @@ test('codex gets board MCP via -c overrides and honors model', () => {
   assert.deepEqual(a.slice(a.indexOf('-m'), a.indexOf('-m') + 2), ['-m', 'gpt-5']);
   assert.equal(a[a.length - 1], 'hi');
 });
+
+test('helpycode args: run --format json, model, variant, resume, writes mcp config file to cwd', () => {
+  const fs = require('fs'); const os = require('os'); const path = require('path');
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'hc-test-'));
+  const mcp = { mcpServers: { board: { command: '/bin/node', args: ['srv.js', '--node', 'n1'], env: { ELECTRON_RUN_AS_NODE: '1' } } } };
+  const a = RT.getRuntime('helpycode').buildArgs({ model: 'elice/z-ai/glm-5.3-flash', effort: 'high' }, 'hi', {}, mcp, { resume: 'S1', cwd });
+  assert.deepStrictEqual(a, ['run', '-s', 'S1', '--format', 'json', '--model', 'elice/z-ai/glm-5.3-flash', '--variant', 'high', 'hi']);
+  const cfg = JSON.parse(fs.readFileSync(path.join(cwd, 'helpycode.json'), 'utf8'));
+  assert.deepStrictEqual(cfg.mcp.board.command, ['/bin/node', 'srv.js', '--node', 'n1']);
+  assert.strictEqual(cfg.mcp.board.enabled, true);
+  assert.deepStrictEqual(cfg.mcp.board.environment, { ELECTRON_RUN_AS_NODE: '1' });
+  fs.rmSync(cwd, { recursive: true, force: true });
+});
+test('helpycode args: no cwd means no mcp file written, still builds args', () => {
+  const a = RT.getRuntime('helpycode').buildArgs({ model: 'm1' }, 'hi', {}, { mcpServers: { board: {} } }, {});
+  assert.ok(a.includes('--model') && a.includes('m1') && a[a.length - 1] === 'hi');
+});
+test('helpycode event parsing (fake-agent-cli / documented real event shapes)', () => {
+  assert.strictEqual(RT.parseHelpycodeEvent({ type: 'session', session_id: 'S1' }).sessionId, 'S1');
+  const m = RT.parseHelpycodeEvent({ type: 'message', text: 'pong' });
+  assert.strictEqual(m.result, 'pong'); assert.deepStrictEqual(m.logs, [['text', 'pong']]);
+  const r = RT.parseHelpycodeEvent({ type: 'result', usage: { input_tokens: 12, output_tokens: 6, reasoning_tokens: 2 }, total_cost_usd: 0.0003 });
+  assert.deepStrictEqual(r.tokens, { inputTokens: 12, outputTokens: 8 });
+  assert.strictEqual(r.cost, 0.0003); assert.ok(r.done);
+});
+test('capabilities: helpycode claims tokens/cost/mcp/resume (verified live, helpycode 0.3.5)', () => {
+  assert.deepStrictEqual(RT.RUNTIMES.helpycode.capabilities, { tokens: true, cost: true, mcp: true, resume: true });
+});
