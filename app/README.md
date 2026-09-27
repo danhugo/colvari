@@ -154,3 +154,8 @@ The task comment's author is `Cody`, so the done status came from Codex and not 
 
 ### Screenshots (light + dark)
 `npm run gui-e2e` writes `e2e-shots/main-{chat,team,board,inbox,overview,firstrun}-{light,dark}.png` for the main screens, forcing the theme via Electron `nativeTheme`.
+
+### Logs and Wiki at scale
+`npm run gui-e2e:mainlogswiki` (also run as part of the full `npm run gui-e2e`) seeds a realistic fixture — 20 agents, 30+ wiki pages, and 540 log lines split into 3 sessions per agent — and checks both tabs hold up at that size, at 1280x800:
+- **Logs**: the left `#logagents` list shows every agent plus "All agents" with a running line count; the log pane (`#log`) renders 20+ rows and scrolls internally. Clicking one agent filters `#log` down to just that agent's lines across its sessions — its own conversation, in order, including the `▶ … starts session N` markers. Shots: `main-logs-{light,dark}.png` (all agents), `main-logs-session-{light,dark}.png` (one agent's session).
+- **Wiki**: the page list (`#wikipages`) holds 30+ pages; the `#wk-search` box filters by title/content live and shows a "No pages match" empty state for a query with no hits. Shots: `main-wiki-{light,dark}.png` (full list), and, on a freshly created project with no pages or log lines yet, `main-wiki-empty-{light,dark}.png`.

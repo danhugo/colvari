@@ -367,6 +367,64 @@ async function guiE2E() {
     require('electron').nativeTheme.themeSource = 'system';
     console.log('[gui-e2e] wikilogs', JSON.stringify({ wempty, lempty, wlist, wview, rows, filtered, searched }));
   };
+  // Realistic Logs/Wiki fixture (t_2f1aa27f): 20 agents, 30+ wiki pages, 500+ log lines spread across 3
+  // sessions per agent. Proves the log pane scrolls and reads as multi-turn conversations per agent
+  // ("session" = clicking an agent in #logagents filters #log to just its lines), the wiki page list and
+  // search work at scale, and a fresh team still shows the empty states.
+  const mainLogsWikiShots = async () => {
+    await waitFor(`return !!document.querySelector('#tpl-select option')`); await ex(`await refresh();`); const cur = await ex(`return { p: ctx.p, t: S.teamId }`);
+    const gp = cur.p || pid(); const ps = pm.store(gp, cur.t);
+    const roles = ['PM', 'Dev', 'Dev', 'Dev', 'Reviewer', 'Critic'];
+    for (let i = ps.getTeam().nodes.length; i < 20; i++) ps.addNode({ name: `LWAgent ${i + 1}`, role: roles[i % roles.length], x: 40 + (i % 5) * 200, y: 40 + Math.floor(i / 5) * 120 });
+    const nodes = ps.getTeam().nodes.slice(0, 20);
+    for (let i = 0; i < 32; i++) ps.writeWiki(`Runbook ${i + 1}`, `# Runbook ${i + 1}\n\nStep-by-step notes for scenario ${i + 1}.\n\n- Plan\n- Build\n- Review\n`, nodes[i % nodes.length].name);
+    const kinds = ['text', 'tool', 'tool_result', 'error'];
+    const logData = [];
+    for (const node of nodes) {
+      for (let session = 0; session < 3; session++) {
+        logData.push({ nodeId: node.id, kind: 'system', text: `▶ ${node.name} starts session ${session + 1}` });
+        for (let line = 1; line < 9; line++) {
+          const kind = kinds[(line + session) % kinds.length];
+          logData.push({ nodeId: node.id, kind, text: `[session ${session + 1}] ${kind} turn ${line}: ${kind === 'error' ? 'ENOENT: missing fixture' : kind === 'tool' ? 'Read {"file_path":"notes.txt"}' : kind === 'tool_result' ? '42 lines' : 'Working through step ' + line + '.'}` });
+        }
+      }
+    }
+    logData.forEach((d, i) => { d.at = Date.now() - (logData.length - i) * 1000; });
+    expect('logs fixture has 500+ lines across 20 agents x 3 sessions', logData.length >= 500, logData.length);
+    await ex(`$('#tabs button[data-tab=obs]').click(); const D = ${JSON.stringify(logData)}; for (const d of D) logs.push({ projectId: ctx.p, ...d }); await refresh(); renderLog(); renderObs(); await w(400);`);
+    const agents = await ex(`return document.querySelectorAll('#logagents .logagent-row[data-id]').length`);
+    expect('logs: sidebar lists all 20 agents (+ All agents)', agents === 21, agents);
+    const overview = await ex(`const box = $('#log'); return { rows: document.querySelectorAll('#log .logrow').length, scrolls: box.scrollHeight > box.clientHeight }`);
+    expect('logs: pane shows 20+ lines and scrolls', overview.rows > 20 && overview.scrolls, overview);
+    for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`await w(300);`); await shot(`main-logs-${t}`); }
+    const target = nodes[3];
+    await ex(`document.querySelector('#logagents .logagent-row[data-id="${target.id}"]').click(); await w(300);`);
+    const session = await ex(`return { sel: document.querySelector('#logagents .logagent-row.sel')?.dataset.id, rows: [...document.querySelectorAll('#log .logrow')].map((r) => r.querySelector('.logtext').textContent) }`);
+    expect('logs: clicking an agent opens just its own session conversation (27 lines, 3 "starts session")', session.sel === target.id && session.rows.length === 27 && session.rows.filter((r) => /starts session/.test(r)).length === 3, { sel: session.sel, count: session.rows.length, starts: session.rows.filter((r) => /starts session/.test(r)).length });
+    for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`await w(300);`); await shot(`main-logs-session-${t}`); }
+    await ex(`$('#logagents .logagent-row[data-id=""]').click(); await w(200);`);
+    await ex(`$('#tabs button[data-tab=wiki]').click(); await refresh(); sel.page = null; renderWiki(); await w(300);`);
+    const wlist = await ex(`return document.querySelectorAll('#wikipages div[data-t]').length`);
+    expect('wiki: page list has 30+ pages', wlist >= 30, wlist);
+    for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`await w(300);`); await shot(`main-wiki-${t}`); }
+    await ex(`$('#wk-search').value = 'Runbook 7'; $('#wk-search').dispatchEvent(new Event('input')); await w(200);`);
+    const searched = await ex(`return document.querySelectorAll('#wikipages div[data-t]').length`);
+    expect('wiki: search narrows the page list (title match)', searched >= 1 && searched < wlist, { searched, wlist });
+    await ex(`$('#wk-search').value = 'no such page anywhere'; $('#wk-search').dispatchEvent(new Event('input')); await w(200);`);
+    const noMatch = await ex(`return { count: document.querySelectorAll('#wikipages div[data-t]').length, msg: $('#wikipages').textContent }`);
+    expect('wiki: search with no results shows a no-match empty state', noMatch.count === 0 && /No pages match/.test(noMatch.msg), noMatch);
+    await ex(`$('#wk-search').value = ''; $('#wk-search').dispatchEvent(new Event('input')); await w(200);`);
+    require('electron').nativeTheme.themeSource = 'system';
+    // Wiki (and logs) are project-scoped, not team-scoped, so the empty state needs a brand-new project.
+    const emptyProject = pm.create('Fresh project');
+    await ex(`switchTo({ p: '${emptyProject.id}' }); await w(300); $('#tabs button[data-tab=wiki]').click(); await refresh(); sel.page = null; renderWiki(); await w(300);`);
+    const wempty = await ex(`return { list: $('#wikipages').textContent, view: $('#wk-view').textContent }`);
+    expect('wiki: fresh team shows the empty state', /No pages yet/.test(wempty.list) && /No wiki pages yet/.test(wempty.view), wempty);
+    for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`await w(300);`); await shot(`main-wiki-empty-${t}`); }
+    require('electron').nativeTheme.themeSource = 'system';
+    await ex(`switchTo(${JSON.stringify(cur.p ? cur : { p: gp })}); await w(300);`);
+    console.log('[gui-e2e] mainlogswiki', JSON.stringify({ agents, overview, wlist, searched, noMatch: noMatch.count, wempty }));
+  };
   // Polish shots: graph at zoom 0.4 and 1.0 plus the sidebar, for both teams, light+dark. Node names must stay >= 11px on screen at 0.4.
   const polishShots = async () => {
     await waitFor(`return !!document.querySelector('#tpl-select option')`); await ex(`await refresh();`); const cur = await ex(`return { p: ctx.p, t: S.teamId }`);
@@ -430,6 +488,7 @@ async function guiE2E() {
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'parallel') { await parallelShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'mixed') { await mixedShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'polish') { await polishShots(); throw null; }
+    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'mainlogswiki') { await mainLogsWikiShots(); throw null; }
     // project/team management through the UI: create a project from the Startup template, then a Solo team, then switch back.
     // Wait until the template select is filled (the first refresh loads the templates) before choosing one.
     await ex(`$('#tabs button[data-tab=team]').click(); await w(300);`); // Chat is the default tab; the flow below clicks the graph
@@ -617,6 +676,7 @@ async function guiE2E() {
       }
       const bg = await ex(`return getComputedStyle(document.documentElement).getPropertyValue('--bg').trim()`); expect(`theme ${theme} applied`, bg === BG[theme], { bg, dt: await ex(`return document.documentElement.dataset.theme + '|' + matchMedia('(prefers-color-scheme: dark)').matches + '|' + getComputedStyle(document.documentElement).getPropertyValue('--bg-app')`) });
     }
+    if (!process.env.SKIP_WIKILOGS) await mainLogsWikiShots();
     nativeTheme.themeSource = 'system';
     const tasks = store.listTasks();
     console.log('[gui-e2e]', JSON.stringify({ edges: store.getTeam().edges.length, tasks: tasks.map((t) => [t.title, t.status, t.iterations || 0, !!t.sessionId]), cost: orch.snapshot().totalCost }));
