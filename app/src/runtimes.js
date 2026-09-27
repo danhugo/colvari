@@ -132,13 +132,34 @@ function parseCodexEvent(ev) {
 // eventMapping. Run totals are claimed when a usage-bearing event is seen: either an explicit
 // `result`-typed event (claude/helpycode convention) or any event whose mapped input/output/cost
 // paths carry numbers (e.g. helpycode's current `step_finish` events). `done` only on such events.
+// opencode-derived CLIs (helpycode 0.3.5, captured live) also stream tool activity as
+// {type:'tool_use', part:{type:'tool', tool, state:{status:'pending'|'running'|'completed'|'error',
+// input, output, metadata:{exit}}}} — the part is re-emitted per state change, but a fast tool may
+// only ever surface as 'completed'. Their step_finish carries that step's usage; only
+// part.reason === 'stop' ends the turn, so intermediate steps log a `system` step line and stay
+// not-done. This stdout stream is the only live feed used — helpycode's own log files rotate
+// quickly, so they are not a readable fallback for activity.
 function parseProfileEvent(ev, profile) {
   const out = { logs: [] };
   const em = profile.eventMapping || {};
+  const part = ev.part || {};
+  if (ev.type === 'tool_use' && part.type === 'tool') {
+    const st = part.state || {};
+    const name = part.tool || 'tool';
+    if (st.status === 'pending' || st.status === 'running') out.logs.push(['tool', `${name} ${JSON.stringify(st.input || {}).slice(0, 300)}`]);
+    else {
+      const exit = st.metadata ? st.metadata.exit : undefined;
+      const kind = st.status === 'error' || (Number.isFinite(exit) && exit !== 0) ? 'tool_error' : 'tool_result';
+      out.logs.push([kind, `${name}: ${String(st.output ?? st.error ?? '').slice(0, 400)}`]);
+    }
+    return out;
+  }
   const text = getPath(ev, em.textPath);
   if (typeof text === 'string' && text) { out.logs.push(['text', text]); out.result = text; }
   const sessionId = getPath(ev, em.sessionIdPath);
-  if (sessionId != null) { out.sessionId = String(sessionId); out.logs.push(['system', `${profile.label} session ${sessionId}`]); }
+  // opencode-derived CLIs put the session id on every event: capture it silently, log only a
+  // dedicated session-type event (a line per event would flood the live log).
+  if (sessionId != null) { out.sessionId = String(sessionId); if (ev.type === 'session') out.logs.push(['system', `${profile.label} session ${sessionId}`]); }
   if (ev.type === 'error') { out.failed = true; out.logs.push(['error', String(ev.message || 'error')]); }
   const input = Number(getPath(ev, em.inputPath)) || 0;
   const output = Number(getPath(ev, em.outputPath)) || 0;
@@ -147,8 +168,8 @@ function parseProfileEvent(ev, profile) {
     const reasoning = Number(getPath(ev, em.reasoningPath)) || 0;
     out.tokens = { inputTokens: input, outputTokens: output + reasoning };
     out.cost = Number(cost) || 0;
-    out.done = true;
-    out.logs.push(['result', `${profile.label} result: ${input} in / ${output + reasoning} out`]);
+    out.done = ev.type !== 'step_finish' || part.reason === 'stop';
+    out.logs.push([out.done ? 'result' : 'system', `${profile.label} ${out.done ? 'result' : 'step'}: ${input} in / ${output + reasoning} out`]);
   }
   return out;
 }

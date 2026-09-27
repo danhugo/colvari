@@ -125,6 +125,51 @@ test('helpycode parseEvent on the CURRENT stream shape: totals fire on usage-bea
   const text = rt.parseEvent(lines[1], { helpycodePath: '/fake/hc-live-events' }, { exec: fakeHelpyExec });
   assert.strictEqual(text.result, 'pong');
 });
+
+// t_9d30cabe regression: the REAL 0.3.5 stream (captured live, see probe-helpycode-live.jsonl) has no
+// `result` event at all — text/tool_use/step_finish with payloads under `part` and a top-level
+// sessionID. Tool calls must stream, intermediate steps must not claim done, and the derived mapping
+// must not claim the tool's string output as token usage.
+const liveLines = fs.readFileSync(path.join(__dirname, 'fixtures/probe-helpycode-live.jsonl'), 'utf8');
+function liveHelpyExec(bin, args) {
+  if (args[0] === '--version') return 'helpycode 0.3.5\n';
+  if (args[0] === 'run' && args.includes('--help')) return realHelpycodeRun;
+  if (args.includes('--help')) return realHelpycodeTop;
+  if (args[0] === 'run') return liveLines;
+  throw new Error('unexpected exec ' + JSON.stringify(args));
+}
+test('helpycode parseEvent on the live 0.3.5 stream: tool calls stream, only reason=stop is done', () => {
+  const rt = RT.getRuntime('helpycode');
+  const profile = RT.deriveRuntimeProfile('/fake/hc-real-stream', { exec: liveHelpyExec, label: 'HelpyCode' });
+  // derivation from the tool-bearing probe stream: token paths must claim the numeric token leaves,
+  // not the tool event's string output
+  assert.strictEqual(profile.eventMapping.inputPath, 'part.tokens.input');
+  assert.strictEqual(profile.eventMapping.outputPath, 'part.tokens.output');
+  const S = { helpycodePath: '/fake/hc-real-stream' };
+  const lines = liveLines.trim().split('\n').map((l) => JSON.parse(l));
+  const stepStart = rt.parseEvent(lines[0], S, { exec: liveHelpyExec });
+  assert.strictEqual(stepStart.sessionId, 'ses_f1c984ff5ffeHOb1YehdKxJfnP');
+  assert.deepStrictEqual(stepStart.logs, []); // session id is on every event: capture silently, no flood
+  const text = rt.parseEvent(lines[1], S, { exec: liveHelpyExec });
+  assert.deepStrictEqual(text.logs, [['text', 'working...']]); assert.strictEqual(text.result, 'working...');
+  const tool = rt.parseEvent(lines[2], S, { exec: liveHelpyExec });
+  assert.deepStrictEqual(tool.logs, [['tool_result', 'bash: probe-tvok\n']]);
+  const mid = rt.parseEvent(lines[3], S, { exec: liveHelpyExec });
+  assert.deepStrictEqual(mid.tokens, { inputTokens: 12301, outputTokens: 36 }); // 27 output + 9 reasoning
+  assert.ok(!mid.done); assert.strictEqual(mid.cost, 0);
+  assert.deepStrictEqual(mid.logs, [['system', 'HelpyCode step: 12301 in / 36 out']]);
+  const last = rt.parseEvent(lines[5], S, { exec: liveHelpyExec });
+  assert.deepStrictEqual(last.tokens, { inputTokens: 61, outputTokens: 3 });
+  assert.strictEqual(last.cost, 0.0003); assert.ok(last.done);
+  assert.deepStrictEqual(last.logs, [['result', 'HelpyCode result: 61 in / 3 out']]);
+  // a tool that surfaces only as pending (re-emitted per state change) shows the call itself
+  const pending = RT.parseProfileEvent({ type: 'tool_use', part: { type: 'tool', tool: 'bash', state: { status: 'running', input: { command: 'echo hi' } } } }, profile);
+  assert.deepStrictEqual(pending.logs, [['tool', 'bash {"command":"echo hi"}']]);
+  // a failed command (nonzero exit) is a tool_error, not a tool_result
+  const bad = RT.parseProfileEvent({ type: 'tool_use', part: { type: 'tool', tool: 'bash', state: { status: 'completed', output: 'nope', metadata: { exit: 1 } } } }, profile);
+  assert.strictEqual(bad.logs[0][0], 'tool_error');
+  assert.ok(RT.parseProfileEvent({ type: 'error', message: 'bad model' }, profile).failed);
+});
 test('capabilities derive from the profile, honestly: help-only sees resume only', () => {
   // help-only derivation (no probe/model call) knows the resume flag but nothing about the event stream
   assert.deepStrictEqual(RT.getRuntime('helpycode').capabilities({ helpycodePath: '/fake/hc-caps' }, fakeHelpyExec), { tokens: false, cost: false, mcp: false, resume: true });

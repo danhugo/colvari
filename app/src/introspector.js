@@ -126,6 +126,10 @@ const KEY_SYNONYMS = {
 };
 
 // Scan parsed probe events for keys matching known synonyms; first match per field wins.
+// Token/cost fields must claim a numeric leaf: an opencode-derived probe stream also contains
+// tool events whose `output` leaf is the tool's string result, and claiming that as outputPath
+// would silently zero the token totals (t_9d30cabe).
+const NUMERIC_FIELDS = new Set(['inputPath', 'outputPath', 'reasoningPath', 'cachePath', 'costPath']);
 function deriveEventMapping(events) {
   const mapping = { textPath: '', sessionIdPath: '', costPath: '', inputPath: '', outputPath: '', reasoningPath: '', cachePath: '' };
   for (const ev of events) {
@@ -133,7 +137,7 @@ function deriveEventMapping(events) {
     for (const [path, value] of Object.entries(flat)) {
       const leaf = path.split('.').pop();
       for (const [field, re] of Object.entries(KEY_SYNONYMS)) {
-        if (!mapping[field] && re.test(leaf) && (field === 'textPath' ? typeof value === 'string' : true)) mapping[field] = path;
+        if (!mapping[field] && re.test(leaf) && (field === 'textPath' ? typeof value === 'string' : true) && (!NUMERIC_FIELDS.has(field) || typeof value === 'number')) mapping[field] = path;
       }
     }
   }
