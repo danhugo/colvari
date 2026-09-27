@@ -123,6 +123,7 @@ button:focus-visible, input:focus, select:focus, textarea:focus { outline:none; 
 .col:not(:has(.card))::after { content:'Nothing here yet'; display:block; color:var(--fg-muted); font-size:var(--text-xs); text-align:center; padding:var(--space-6) 0; border:1px dashed var(--border-strong); border-radius:var(--radius-md); }
 .tag { border-radius:var(--radius-full); } .tag.blocked { color:var(--warning-text); background:var(--warning-soft); border-color:transparent; }
 .tag.live { background:var(--success-soft); color:var(--success-text); border-color:transparent; }
+.tag.ready { background:var(--accent-soft, var(--success-soft)); color:var(--accent-text, var(--accent)); border-color:transparent; }
 .badge { background:var(--danger); border-radius:var(--radius-full); font-weight:var(--fw-semibold); }
 .toast { background:var(--bg-raised); border-color:var(--border); border-left-color:var(--accent); border-radius:var(--radius-md); box-shadow:var(--shadow-lg); animation:rise var(--dur-base) var(--ease-spring); }
 @keyframes rise { from { opacity:0; transform:translateY(8px); } }

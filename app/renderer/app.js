@@ -120,7 +120,8 @@ document.querySelectorAll('#tabs button').forEach((b) => b.onclick = () => {
 
 // ---------- header ----------
 function renderHeader() {
-  const o = S.orch; $('#runstate').textContent = o.running ? `running (${o.runs} runs)` : 'idle';
+  const o = S.orch; const par = o.running ? runningIds().length : 0;
+  $('#runstate').textContent = o.running ? `running · ${par > 1 ? `${par} in parallel` : `${par || 1} agent`} · ${o.runs || 0} runs` : 'idle';
   $('#runstate').classList.toggle('on', !!o.running);
   // Money pill: only runs billed per token (API key / proxy / cloud) show a $ figure; subscription-only sessions show a quiet "subscription" pill.
   const c = $('#totalcost'); const billed = o.billedCost || 0; const sub = o.subCost || 0;
@@ -456,7 +457,13 @@ function renderNodeForm() {
 
 // ---------- idle / busy ----------
 // Busy = an agent run in progress. Uses S.orch.idle (node ids) when the API provides it, else derives from agent status.
-const presence = (id) => (S.orch.idle ? S.orch.idle.includes(id) : (S.orch.agents[id] || {}).status !== 'working') ? 'idle' : 'busy';
+// Parallel runs: S.orch.running may be an array of node ids (or {nodeId}) when the API provides it; else agents with status 'working', else assignees of in-progress tasks.
+function runningIds() {
+  const r = S.orch.running; if (Array.isArray(r)) return r.map((x) => (typeof x === 'string' ? x : x.nodeId || x.id));
+  const w = Object.entries(S.orch.agents || {}).filter(([, a]) => a.status === 'working').map(([k]) => k);
+  return w.length || !r ? w : [...new Set(S.tasks.filter((t) => t.status === 'in_progress' && t.assignee).map((t) => t.assignee))];
+}
+const presence = (id) => (S.orch.idle ? S.orch.idle.includes(id) : !runningIds().includes(id)) ? 'idle' : 'busy';
 function renderIdle() {
   const idle = S.team.nodes.filter((n) => presence(n.id) === 'idle'); const show = S.team.nodes.length && idle.length;
   document.querySelectorAll('.idlebanner').forEach((b) => { b.classList.toggle('hidden', !show); if (!show) return;
@@ -472,8 +479,9 @@ function renderBoard() {
   if (cur) sa.value = cur;
   renderIdle();
   $('#columns').innerHTML = STATUSES.map((st) => `<div class="col"><h3>${st.replaceAll('_', ' ')} (${S.tasks.filter((t) => t.status === st).length})</h3>${
-    S.tasks.filter((t) => t.status === st).map((t) => { const bl = openBlockers(t); const w = (S.orch.agents[t.assignee] || {}); const live = w.status === 'working' && w.taskId === t.id;
-      return `<div class="card ${sel.task === t.id ? 'sel' : ''}${t.awaitingApproval ? ' approval' : ''}" data-id="${t.id}"><b>${esc(t.title)}</b>${live ? '<span class="tag live">live</span>' : ''}${bl.length ? `<span class="tag blocked" title="waits for: ${esc(bl.map(taskTitle).join(', '))}">blocked (${bl.length})</span>` : ''}${t.awaitingApproval ? '<span class="tag approval">needs approval</span>' : ''}<small>${esc(nodeName(t.assignee))} · ${t.comments.length} comments</small></div>`; }).join('')}</div>`).join('');
+    S.tasks.filter((t) => t.status === st).map((t) => { const bl = openBlockers(t); const w = (S.orch.agents[t.assignee] || {}); const live = (w.status === 'working' && w.taskId === t.id) || (!w.status && t.status === 'in_progress' && runningIds().includes(t.assignee));
+      const ready = !bl.length && ['todo', 'backlog'].includes(t.status);
+      return `<div class="card ${sel.task === t.id ? 'sel' : ''}${t.awaitingApproval ? ' approval' : ''}" data-id="${t.id}"><b>${esc(t.title)}</b>${live ? '<span class="tag live">live</span>' : ''}${bl.length ? `<span class="tag blocked" title="waits for: ${esc(bl.map(taskTitle).join(', '))}">Blocked by ${esc(taskTitle(bl[0]).slice(0, 28))}${bl.length > 1 ? ` +${bl.length - 1}` : ''}</span>` : ready ? '<span class="tag ready">Ready</span>' : ''}${t.awaitingApproval ? '<span class="tag approval">needs approval</span>' : ''}<small>${esc(nodeName(t.assignee))} · ${t.comments.length} comments</small></div>`; }).join('')}</div>`).join('');
   document.querySelectorAll('.card').forEach((c) => c.onclick = () => { sel.task = c.dataset.id; renderBoard(); });
   const d = $('#taskdetail'); const t = S.tasks.find((x) => x.id === sel.task);
   if (!t) { d.innerHTML = '<p class="muted">Create a goal task, assign it to an agent (usually the PM), then press Run.</p>'; return; }
