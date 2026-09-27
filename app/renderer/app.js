@@ -100,23 +100,83 @@ function allRuntimeOptions() {
   const custom = loadCustomRuntimes().map((r) => ({ id: r.id, label: r.label, installed: true, version: r.version, capabilities: { tokens: false, cost: false, mcp: false, resume: !!r.resume }, custom: true }));
   return [...backend, ...custom];
 }
-// Agreed draft-profile schema (per t_833956fa): label, bin, version, models[], defaultModel, effort[], variants[],
-// resume, eventMapping{kind:label}. Real introspection lands via IPC from Devon's runtime work; until then this
-// synthesizes a plausible draft from the binary path alone, clearly marked as a stub.
+// Agreed introspection result shape (t_94eef7a1): { profile, sources } — sources says where each derived
+// field came from: help = --help parsing, probe = live probe run, agent = agent-reported, fallback =
+// default guess. Backends still returning the bare profile get conservatively inferred sources here, so
+// unconfirmed fields always show up as low-confidence and the UI contract stays stable either way.
+const SRC_META = {
+  help: { label: 'help', title: 'parsed from the CLI --help output' },
+  models: { label: 'models', title: 'parsed from the CLI models command output' },
+  probe: { label: 'probe', title: 'from a live probe run of the CLI' },
+  agent: { label: 'agent', title: 'reported by the agent itself' },
+  fallback: { label: 'fallback', title: 'default assumption — not confirmed by the CLI' },
+  edited: { label: 'edited', title: 'manually edited' },
+};
+const normSrc = (s, def) => {
+  const o = typeof s === 'string' ? { source: s } : (s || def || {});
+  const source = SRC_META[o.source] ? o.source : 'fallback';
+  return { source, confidence: o.confidence || (source === 'fallback' ? 'low' : 'high'), note: o.note || '' };
+};
+// Values matching the introspector's fallback defaults (models ['default'], default event-mapping paths,
+// empty effort) can't be told apart from real parses by the renderer, so they are marked low-confidence.
+function inferSources(p) {
+  const emDefaults = { text: 'text', session: 'session_id', cost: 'cost', input: 'input_tokens', output: 'output_tokens', reasoning: 'reasoning_tokens', cache: 'cache_read_tokens' };
+  const em = p.eventMapping || {};
+  const stubNote = { source: 'fallback', note: 'stub — no live CLI response' };
+  return {
+    bin: { source: 'edited', note: 'binary path you entered' },
+    label: p.label && p.label !== p.bin ? { source: 'help' } : { source: 'fallback', note: 'defaults to the binary name' },
+    models: (p.models || []).length && !(p.models.length === 1 && p.models[0] === 'default') ? { source: 'help' } : { source: 'fallback', note: 'no model list parsed — please fill in' },
+    defaultModel: p.defaultModel && p.defaultModel !== 'default' ? { source: 'help' } : { source: 'fallback', note: 'no default parsed' },
+    effort: (p.effort || []).length ? { source: 'help' } : { source: 'fallback', note: 'no effort levels parsed' },
+    variants: (p.variants || []).length ? { source: 'help' } : { source: 'fallback' },
+    resume: p.resume ? { source: 'help' } : { source: 'fallback', note: 'no resume flag found in help' },
+    eventMapping: Object.fromEntries(Object.entries(emDefaults).map(([k, def]) => [k, em[k] && em[k] !== def ? { source: 'probe' } : { source: 'fallback', note: 'default path — no probe data' }])),
+    ...(p.stub ? Object.fromEntries(['label', 'models', 'defaultModel', 'effort', 'variants', 'resume'].map((k) => [k, stubNote])) : {}),
+  };
+}
+function draftSources(p, sources) {
+  const inf = inferSources(p);
+  const raw = sources || {};
+  // The backend reports provenance under introspector field names (effortValues, resumeFlag,
+  // modelsCommand, ...); map them onto the draft form's field names, falling back to inference.
+  const aliases = { effort: ['effortValues'], resume: ['resumeFlag'], models: ['modelsCommand'] };
+  const srcFor = (uiKey) => {
+    if (uiKey in raw) return normSrc(raw[uiKey]);
+    const hit = (aliases[uiKey] || []).find((a) => a in raw);
+    return normSrc(hit ? raw[hit] : inf[uiKey]);
+  };
+  const out = {};
+  for (const k of ['label', 'bin', 'models', 'defaultModel', 'effort', 'variants', 'resume']) out[k] = srcFor(k);
+  out.eventMapping = {};
+  const emRaw = raw.eventMapping;
+  if (typeof emRaw === 'string' || (emRaw && (emRaw.source || emRaw.confidence))) {
+    // single provenance for the whole mapping — the backend derives it in one probe/agent pass
+    for (const k of Object.keys(p.eventMapping || {})) out.eventMapping[k] = normSrc(emRaw);
+  } else {
+    for (const [ek, ev] of Object.entries(emRaw || {})) out.eventMapping[ek] = normSrc(ev);
+    for (const [k, v] of Object.entries(inf.eventMapping)) if (!out.eventMapping[k]) out.eventMapping[k] = normSrc(v);
+  }
+  if (!Object.keys(out.eventMapping).length) out.eventMapping = Object.fromEntries(Object.entries(inf.eventMapping).map(([k, v]) => [k, normSrc(v)]));
+  return out;
+}
 async function introspectRuntime(bin) {
+  let profile = null, sources = null;
   try {
     const real = await call('introspectRuntime', bin);
-    if (real) return { ...real, bin, stub: false };
+    if (real) { profile = real.profile || real; sources = real.sources; }
   } catch {} // no backend handler yet (or it failed) -> fall back to a client-side stub
-  const name = String(bin).split(/[\\/]/).pop().replace(/\.(exe|sh)$/i, '');
-  const label = name.charAt(0).toUpperCase() + name.slice(1);
-  return {
-    bin, stub: true, label, version: null,
-    models: ['default'], defaultModel: 'default',
-    effort: ['low', 'medium', 'high'], variants: [],
-    resume: false,
-    eventMapping: { text: 'text', tool: 'tool', tool_result: 'tool_result', error: 'error', result: 'result', system: 'system' },
-  };
+  if (!profile) {
+    const name = String(bin).split(/[\\/]/).pop().replace(/\.(exe|sh)$/i, '');
+    profile = {
+      bin, stub: true, label: name.charAt(0).toUpperCase() + name.slice(1), version: null,
+      models: ['default'], defaultModel: 'default',
+      effort: ['low', 'medium', 'high'], variants: [],
+      resume: false,
+      eventMapping: { text: 'text', tool: 'tool', tool_result: 'tool_result', error: 'error', result: 'result', system: 'system' },
+    };
+  }
+  return { ...profile, bin: profile.bin || bin, stub: !!profile.stub, sources: draftSources(profile, sources) };
 }
 function renderRuntimesSection() {
   const list = loadCustomRuntimes();
@@ -127,32 +187,91 @@ function renderRuntimesSection() {
     <div id="rt-draft"></div>`;
 }
 let rtDraft = null; // in-progress add/edit draft profile, or null
+// Provenance badge for one draft field (or one eventMapping sub-key via `sub`); low-confidence fields
+// get a "· verify" hint and an amber row. After the user edits a field the badge flips to "edited"
+// while the title keeps the original derivation.
+function srcBadge(key, sub) {
+  const map = rtDraft.sources || {};
+  const s = normSrc(sub ? (map.eventMapping || {})[sub] : map[key]);
+  const low = s.confidence === 'low';
+  const title = `${SRC_META[s.source].title}${s.note ? ' — ' + s.note : ''}${low ? ' · low confidence — please verify' : ''}`;
+  return `<span class="srcbadge src-${s.source}${low ? ' srclow' : ''}" data-srckey="${esc(key)}" data-srcsub="${esc(sub || '')}" data-srctitle="${esc(SRC_META[s.source].title)}" title="${esc(title)}">${SRC_META[s.source].label}${low ? ' · verify' : ''}</span>`;
+}
+// Composite badge for the eventMapping textarea: "probe" when the probe run confirmed anything,
+// "fallback · verify" when every path is a default guess.
+function emBadge() {
+  const em = (rtDraft.sources || {}).eventMapping || {};
+  const vals = Object.values(em).map(normSrc);
+  const has = (s) => vals.some((v) => v.source === s);
+  const src = has('probe') ? 'probe' : has('agent') ? 'agent' : 'fallback';
+  const low = src !== 'probe';
+  const defaults = Object.keys(em).filter((k) => normSrc(em[k]).source !== 'probe');
+  const note = has('probe') ? `paths confirmed by the probe run${defaults.length ? ' · defaults kept for: ' + defaults.join(', ') : ''}` : vals.length ? SRC_META[src].title : 'no probe data — all paths are defaults';
+  return `<span class="srcbadge src-${src}${low ? ' srclow' : ''}" data-srckey="eventMapping" data-srctitle="${esc(SRC_META[src].title)}" title="${esc(note + (low ? ' · low confidence — please verify' : ''))}">${SRC_META[src].label}${low ? ' · verify' : ''}</span>`;
+}
 function draftFieldsHtml(d) {
-  return `<fieldset><legend>${d.editingId ? 'Edit' : 'Review'} runtime profile${d.stub ? ' <span class="costnote">(stub — no live CLI response; edit before saving)</span>' : ''}</legend>
-    <label>Label</label><input id="rd-label" value="${esc(d.label)}">
-    <label>Binary path</label><input id="rd-bin" value="${esc(d.bin)}">
-    <label>Models (comma-separated)</label><input id="rd-models" value="${esc(d.models.join(', '))}">
-    <label>Default model</label><input id="rd-defmodel" value="${esc(d.defaultModel || '')}">
-    <label>Effort levels (comma-separated)</label><input id="rd-effort" value="${esc((d.effort || []).join(', '))}">
-    <label>Variants (comma-separated, optional)</label><input id="rd-variants" value="${esc((d.variants || []).join(', '))}">
-    <label class="inline"><input type="checkbox" id="rd-resume" ${d.resume ? 'checked' : ''}> Supports resume/continue session</label>
-    <label>Event mapping <span class="muted">(stream kind: label, one per line)</span></label>
-    <textarea id="rd-eventmap" rows="4">${esc(Object.entries(d.eventMapping || {}).map(([k, v]) => `${k}: ${v}`).join('\n'))}</textarea>
+  const isLow = (key) => normSrc((rtDraft.sources || {})[key]).confidence === 'low';
+  const f = (label, inner, key) => `<div class="rt-field${isLow(key) ? ' lowconf' : ''}"><label>${label} ${srcBadge(key)}</label>${inner}</div>`;
+  const emLow = !Object.values((rtDraft.sources || {}).eventMapping || {}).some((s) => normSrc(s).source === 'probe');
+  return `<fieldset><legend>${d.editingId ? 'Edit' : 'Review'} runtime profile${d.stub ? ' <span class="costnote">(stub — no live CLI response; edit before saving)</span>' : ''}
+    <span class="muted">source: <b>help</b> = --help · <b>probe</b> = live run · <b>agent</b> = self-reported · <b>fallback</b> = guess</span></legend>
+    ${f('Label', `<input id="rd-label" value="${esc(d.label)}">`, 'label')}
+    ${f('Binary path', `<input id="rd-bin" value="${esc(d.bin)}">`, 'bin')}
+    ${f('Models (comma-separated)', `<input id="rd-models" value="${esc(d.models.join(', '))}">`, 'models')}
+    ${f('Default model', `<input id="rd-defmodel" value="${esc(d.defaultModel || '')}">`, 'defaultModel')}
+    ${f('Effort levels (comma-separated)', `<input id="rd-effort" value="${esc((d.effort || []).join(', '))}">`, 'effort')}
+    ${f('Variants (comma-separated, optional)', `<input id="rd-variants" value="${esc((d.variants || []).join(', '))}">`, 'variants')}
+    <div class="rt-field"><label class="inline"><input type="checkbox" id="rd-resume" ${d.resume ? 'checked' : ''}> Supports resume/continue session ${srcBadge('resume')}</label></div>
+    <div class="rt-field${emLow ? ' lowconf' : ''}"><label>Event mapping <span class="muted">(stream kind: label, one per line)</span> ${emBadge()}</label><textarea id="rd-eventmap" rows="4">${esc(Object.entries(d.eventMapping || {}).map(([k, v]) => `${k}: ${v}`).join('\n'))}</textarea></div>
+    <div id="rd-error" role="alert"></div>
     <p><button id="rd-save" class="primary">Save runtime</button> <button id="rd-cancel">Cancel</button></p>
   </fieldset>`;
+}
+// Flip a field's badge to "edited" (keeping the original derivation in the tooltip + draft.sources).
+function markEdited(key, sub) {
+  const map = rtDraft.sources || (rtDraft.sources = {});
+  const prev = sub ? (map.eventMapping || {})[sub] : map[key];
+  const orig = normSrc(prev);
+  if (orig.source === 'edited') return;
+  const rec = { source: 'edited', confidence: 'high', note: `was ${SRC_META[orig.source].title}` };
+  if (sub) { map.eventMapping = map.eventMapping || {}; map.eventMapping[sub] = rec; } else map[key] = rec;
+  document.querySelectorAll(`.srcbadge[data-srckey="${key}"]`).forEach((b) => {
+    b.className = 'srcbadge src-edited'; // the human has now confirmed the value — no more low-confidence warn
+    b.textContent = 'edited';
+    b.title = `manually edited — ${b.dataset.srctitle || 'originally derived'}`;
+  });
+}
+function draftErrors(p, mapLines) {
+  const errs = [];
+  if (!p.label) errs.push('Label is required.');
+  if (!p.bin) errs.push('Binary path is required.');
+  if (!p.models.length) errs.push('At least one model is required — the CLI reported none, so add one.');
+  if (p.defaultModel && !p.models.includes(p.defaultModel)) errs.push(`Default model "${p.defaultModel}" is not in the model list.`);
+  if (mapLines.bad.length) errs.push(`Event mapping: ${mapLines.bad.length} line(s) without "kind: label" were dropped — fix or remove them.`);
+  return errs;
 }
 function wireDraftForm() {
   const box = $('#rt-draft'); if (!rtDraft) { box.innerHTML = ''; return; }
   box.innerHTML = draftFieldsHtml(rtDraft);
+  for (const [id, key] of [['rd-label', 'label'], ['rd-bin', 'bin'], ['rd-models', 'models'], ['rd-defmodel', 'defaultModel'], ['rd-effort', 'effort'], ['rd-variants', 'variants']]) {
+    const el = document.getElementById(id); if (el) el.addEventListener('input', () => markEdited(key));
+  }
+  $('#rd-resume').addEventListener('change', () => markEdited('resume'));
+  $('#rd-eventmap').addEventListener('input', () => markEdited('eventMapping'));
   $('#rd-save').onclick = () => {
-    const eventMapping = Object.fromEntries($('#rd-eventmap').value.split('\n').map((l) => l.split(':').map((s) => s.trim())).filter(([k, v]) => k && v));
+    const mapLines = $('#rd-eventmap').value.split('\n').map((l) => l.split(':').map((s) => s.trim())).reduce((a, kv) => { (kv[0] && kv[1] ? a.good : a.bad).push(kv); return a; }, { good: [], bad: [] });
     const profile = {
       id: rtDraft.editingId || customRuntimeId($('#rd-bin').value.trim() || rtDraft.bin),
       label: $('#rd-label').value.trim() || rtDraft.label, bin: $('#rd-bin').value.trim() || rtDraft.bin, version: rtDraft.version,
       models: $('#rd-models').value.split(',').map((s) => s.trim()).filter(Boolean), defaultModel: $('#rd-defmodel').value.trim(),
       effort: $('#rd-effort').value.split(',').map((s) => s.trim()).filter(Boolean), variants: $('#rd-variants').value.split(',').map((s) => s.trim()).filter(Boolean),
-      resume: $('#rd-resume').checked, eventMapping, stub: !!rtDraft.stub,
+      resume: $('#rd-resume').checked, eventMapping: Object.fromEntries(mapLines.good), stub: !!rtDraft.stub,
+      sources: rtDraft.sources,
     };
+    const errs = draftErrors(profile, mapLines);
+    for (const [id, bad] of [['rd-label', !profile.label], ['rd-bin', !profile.bin], ['rd-models', !profile.models.length], ['rd-defmodel', !!profile.defaultModel && !profile.models.includes(profile.defaultModel)], ['rd-eventmap', !!mapLines.bad.length]]) document.getElementById(id).classList.toggle('invalid', bad);
+    $('#rd-error').textContent = errs.join('\n');
+    if (errs.length) return; // block save on an invalid profile; errors are shown inline above
     const list = loadCustomRuntimes().filter((r) => r.id !== profile.id);
     list.push(profile); saveCustomRuntimes(list); rtDraft = null; refresh();
   };
@@ -163,7 +282,7 @@ function wireRuntimesSection() {
     const bin = $('#rt-path').value.trim(); if (!bin) return;
     const profile = await introspectRuntime(bin); rtDraft = profile; wireDraftForm();
   });
-  document.querySelectorAll('[data-editrt]').forEach((b) => b.onclick = () => { const r = findCustomRuntime(b.dataset.editrt); rtDraft = { ...r, editingId: r.id }; wireDraftForm(); });
+  document.querySelectorAll('[data-editrt]').forEach((b) => b.onclick = () => { const r = findCustomRuntime(b.dataset.editrt); rtDraft = { ...r, editingId: r.id, sources: draftSources(r, r.sources) }; wireDraftForm(); });
   document.querySelectorAll('[data-delrt]').forEach((b) => b.onclick = act(async () => { saveCustomRuntimes(loadCustomRuntimes().filter((r) => r.id !== b.dataset.delrt)); refresh(); }));
 }
 
