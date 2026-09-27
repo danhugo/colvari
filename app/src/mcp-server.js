@@ -14,6 +14,7 @@ const tools = makeTools(store, arg('--node'));
 const enabled = new Set(enabledTools(store.getTeam().nodes.find((n) => n.id === arg('--node'))));
 const server = new McpServer({ name: 'board', version: '0.1.0' });
 const STATUS = z.enum(['todo', 'in_progress', 'review', 'done', 'waiting_for_human']);
+const PRIORITY = z.enum(['P0', 'P1', 'P2', 'P3']);
 
 const reg = (name, description, shape) => enabled.has(name) && server.tool(name, description, shape, async (args) => {
   try { return { content: [{ type: 'text', text: JSON.stringify(await tools[name](args || {}), null, 2) }] }; }
@@ -22,8 +23,8 @@ const reg = (name, description, shape) => enabled.has(name) && server.tool(name,
 
 reg('list_team', 'Show yourself and the teammates you can assign tasks to / receive tasks from.', {});
 reg('list_tasks', 'List board tasks visible to you.', { status: STATUS.optional(), mine: z.boolean().optional() });
-reg('create_task', 'Create a task assigned to yourself or a teammate you have an outgoing edge to (id or name). Use blockedBy to make it wait for other tasks.', { title: z.string(), description: z.string().optional(), assignee: z.string().optional(), parentId: z.string().optional(), blockedBy: z.array(z.string()).optional().describe('ids of tasks that must be done before this one starts') });
-reg('update_task_status', 'Change a task status (todo, in_progress, review, done). Reviewers may move tasks of agents they review to review/done.', { taskId: z.string(), status: STATUS });
+reg('create_task', 'Create a task assigned to yourself or a teammate you have an outgoing edge to (id or name). Use blockedBy to make it wait for other tasks.', { title: z.string(), description: z.string().optional(), assignee: z.string().optional(), parentId: z.string().optional(), blockedBy: z.array(z.string()).optional().describe('ids of tasks that must be done before this one starts'), priority: PRIORITY.optional().describe('P0 (highest) .. P3 (lowest); default P2') });
+reg('update_task_status', 'Change a task status (todo, in_progress, review, done). Reviewers may move tasks of agents they review to review/done.', { taskId: z.string(), status: STATUS, priority: PRIORITY.optional().describe('optionally re-prioritize the task (P0 highest .. P3 lowest)') });
 reg('comment_task', 'Add a comment to a task.', { taskId: z.string(), text: z.string() });
 reg('send_message', 'Send a direct message to a teammate you have a message or assign edge to (id or name).', { to: z.string(), text: z.string(), taskId: z.string().optional() });
 reg('read_messages', 'Read your inbox (messages from teammates with an edge to you, and from the human). Marks them read.', { unreadOnly: z.boolean().optional(), from: z.string().optional() });

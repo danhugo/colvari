@@ -24,6 +24,15 @@ function validateDeps(taskId, deps, tasks) {
   return ids;
 }
 
+// ---- priority ----
+const PRIORITIES = ['P0', 'P1', 'P2', 'P3'];
+const DEFAULT_PRIORITY = 'P2';
+const PRIORITY_RANK = Object.fromEntries(PRIORITIES.map((p, i) => [p, i]));
+function normalizePriority(p) { return PRIORITIES.includes(p) ? p : DEFAULT_PRIORITY; }
+const priorityRank = (t) => PRIORITY_RANK[t && t.priority] ?? PRIORITY_RANK[DEFAULT_PRIORITY];
+// Highest priority first (P0..P3); ties keep original relative order (stable sort).
+const byPriority = (tasks) => [...tasks].sort((a, b) => priorityRank(a) - priorityRank(b));
+
 // ---- budgets ----
 const num = (v) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? n : 0; };
 // Returns null or a reason string. agent: orchestrator counters of one node; totals: {cost, tokens} of this Run.
@@ -56,4 +65,4 @@ function parseLogs(text, limit = 2000) {
   return out.slice(-limit);
 }
 
-module.exports = { depIds, openBlockers, isBlocked, validateDeps, budgetExceeded, projectBudgetExceeded, needsApproval, gateStatus, LOG_CAP, logLine, parseLogs };
+module.exports = { depIds, openBlockers, isBlocked, validateDeps, budgetExceeded, projectBudgetExceeded, needsApproval, gateStatus, LOG_CAP, logLine, parseLogs, PRIORITIES, DEFAULT_PRIORITY, normalizePriority, priorityRank, byPriority };

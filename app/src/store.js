@@ -159,10 +159,10 @@ class Store {
     return ts;
   }
   getTask(tid) { return this.listTasks().find((t) => t.id === tid); }
-  createTask({ title, description = '', assignee = null, createdBy = 'human', parentId = null, blockedBy = [] }) {
+  createTask({ title, description = '', assignee = null, createdBy = 'human', parentId = null, blockedBy = [], priority }) {
     if (!title) throw new Error('title required');
     const now = new Date().toISOString();
-    const task = { id: id('t'), title, description, assignee, status: 'todo', createdBy, parentId, blockedBy: [], comments: [], createdAt: now, updatedAt: now };
+    const task = { id: id('t'), title, description, assignee, status: 'todo', priority: C.normalizePriority(priority), createdBy, parentId, blockedBy: [], comments: [], createdAt: now, updatedAt: now };
     this.update('board', { tasks: [] }, (b) => { task.blockedBy = C.validateDeps(task.id, blockedBy, b.tasks); b.tasks.push(task); });
     return task;
   }
@@ -228,7 +228,8 @@ class Store {
       if (patch.status && !STATUSES.includes(patch.status)) throw new Error('bad status ' + patch.status);
       if (patch.blockedBy !== undefined) t.blockedBy = C.validateDeps(tid, patch.blockedBy, b.tasks);
       if (patch.status && patch.status !== 'review') t.awaitingApproval = false;
-      for (const k of ['title', 'description', 'assignee', 'status', 'sessionId', 'iterations', 'awaitingApproval', 'reopenCount', 'worktreePath', 'worktreeBranch', 'isConflictResolution', 'conflictBranch', 'conflictRetries']) if (patch[k] !== undefined) t[k] = patch[k];
+      if (patch.priority !== undefined) t.priority = C.normalizePriority(patch.priority);
+      for (const k of ['title', 'description', 'assignee', 'status', 'sessionId', 'iterations', 'awaitingApproval', 'reopenCount', 'worktreePath', 'worktreeBranch', 'isConflictResolution', 'conflictBranch', 'conflictRetries', 'parkedForHuman']) if (patch[k] !== undefined) t[k] = patch[k];
       t.updatedAt = new Date().toISOString();
       // Parent auto-complete: when the last open subtask is done, the parent moves to done.
       for (let c = t; c.status === 'done' && c.parentId;) {
@@ -403,4 +404,4 @@ class Store {
   deletePreset(name) { return this.saveSettings({ rolePresets: this.getSettings().rolePresets.filter((x) => x.name !== name) }).rolePresets; }
 }
 
-module.exports = { Store, ROLES, STATUSES, defaultProjectDir };
+module.exports = { Store, ROLES, STATUSES, PRIORITIES: C.PRIORITIES, defaultProjectDir };

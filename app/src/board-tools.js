@@ -31,19 +31,22 @@ function makeTools(store, nodeId) {
       const all = store.listTasks();
       return all.filter((tk) => (!status || tk.status === status) && (mine ? tk.assignee === nodeId : visibleTask(t, nodeId, tk))).map((tk) => fmtTask(t, tk, all));
     },
-    create_task({ title, description = '', assignee, parentId = null, blockedBy = [] }) {
+    create_task({ title, description = '', assignee, parentId = null, blockedBy = [], priority }) {
       const t = me();
       const target = assignee ? resolve(t, assignee, 'assignee') : t.nodes.find((n) => n.id === nodeId);
       if (!canAssign(t, nodeId, target.id)) throw new Error(`scope violation: ${nodeName(t, nodeId)} cannot assign tasks to ${target.name} (no assign edge)`);
-      return store.createTask({ title, description, assignee: target.id, createdBy: nodeId, parentId, blockedBy });
+      return store.createTask({ title, description, assignee: target.id, createdBy: nodeId, parentId, blockedBy, priority });
     },
-    update_task_status({ taskId, status }) {
+    update_task_status({ taskId, status, priority }) {
       const t = me(); const tk = store.getTask(taskId);
       if (!tk) throw new Error('no task ' + taskId);
       if (!canSetStatus(t, nodeId, tk, status)) throw new Error('scope violation: cannot modify this task');
       if (tk.awaitingApproval && status === 'done') throw new Error('this task is waiting for human approval; only a human can move it to done');
       const g = C.gateStatus(status, t.nodes.find((n) => n.id === tk.assignee), store.getSettings());
-      const r = store.updateTask(taskId, g);
+      // Explicit agent-initiated review (vs. the orchestrator parking an incomplete/failed run for a human):
+      // eligible for reviewer dispatch / auto-advance so its dependents unblock.
+      if (g.status === 'review') g.parkedForHuman = false;
+      const r = store.updateTask(taskId, priority !== undefined ? { ...g, priority } : g);
       return g.awaitingApproval ? { ...r, note: 'Moved to review: a human must approve this task before it is done.' } : r;
     },
     comment_task({ taskId, text }) {

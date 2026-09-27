@@ -184,10 +184,13 @@ class Orchestrator extends EventEmitter {
   }
   stop() {
     this.running = false;
-    for (const p of this.procs.values()) p.kill('SIGTERM');
     this.log(null, 'system', 'Orchestrator stopped');
     this.changed();
-    this.emit('done', this.snapshot());
+    // Only report the run done once every agent process has actually exited (kill is async: SIGTERM
+    // doesn't stop them synchronously), never while one is still running/pending.
+    if (this.procs.size === 0) this.emit('done', this.snapshot());
+    else this._stopPending = true;
+    for (const p of this.procs.values()) p.kill('SIGTERM');
   }
 
   // Reset any in_progress task whose assignee has no live session/process back to todo so it gets
@@ -220,18 +223,48 @@ class Orchestrator extends EventEmitter {
     }
   }
 
+  // Tasks left in review that never got picked back up (their reviewer's process crashed/exited, or
+  // the run stopped mid-way). With no reviewer configured for the assignee, auto-advances the task to
+  // done (once) so its dependents unblock, instead of leaving it stranded forever. Returns the
+  // (possibly stale) tasks still in review that DO have a reviewer, ready for dispatch.
+  autoAdvanceReviews(team) {
+    const out = [];
+    for (const t of this.store.listTasks()) {
+      if (t.status !== 'review' || t.awaitingApproval || t.parkedForHuman) continue;
+      const reviewer = outgoing(team, t.assignee, ['review']).map((id) => team.nodes.find((n) => n.id === id)).find(Boolean);
+      if (reviewer) { out.push({ task: t, node: reviewer }); continue; }
+      (this._autoAdvanced ||= new Set());
+      if (this._autoAdvanced.has(t.id)) continue;
+      this._autoAdvanced.add(t.id);
+      this.store.updateTask(t.id, { status: 'done' });
+      this.store.commentTask(t.id, 'orchestrator', 'auto-advanced to done: no reviewer is configured for this task (no review edge from the assignee).');
+      this.log(t.assignee, 'system', `↷ "${t.title}" auto-advanced to done (no reviewer)`);
+    }
+    return out;
+  }
+
   tick() {
-    if (!this.running) return;
+    if (!this.running) {
+      // Draining after stop(): report done exactly once every agent has actually exited.
+      if (this._stopPending && this.procs.size === 0) { this._stopPending = false; this.emit('done', this.snapshot()); }
+      return;
+    }
     const s = this.store.getSettings();
     const team = this.store.getTeam();
+    // Sweep + write auto-advances first so a task's own dependents see it done within this same tick.
+    const reviewReady = this.autoAdvanceReviews(team).map(({ task, node }) => ({ task: this.store.getTask(task.id), node }));
     const all = this.store.listTasks();
     const todo = all.filter((t) => t.status === 'todo' && team.nodes.some((n) => n.id === t.assignee));
-    const ready = todo.filter((t) => !C.isBlocked(t, all) && !this.agent(t.assignee).budgetStop && !this.usagePaused);
-    for (const task of ready) {
+    const readyTodo = todo.filter((t) => !C.isBlocked(t, all) && !this.agent(t.assignee).budgetStop && !this.usagePaused)
+      .map((t) => ({ task: t, node: team.nodes.find((n) => n.id === t.assignee) }));
+    const readyReview = reviewReady.filter(({ task, node }) => !C.isBlocked(task, all) && !this.agent(node.id).budgetStop && !this.usagePaused);
+    // Highest priority first (P0..P3); stable sort, so same-priority tasks keep arrival order.
+    const ready = [...readyTodo, ...readyReview].sort((a, b) => C.priorityRank(a.task) - C.priorityRank(b.task));
+    for (const { task, node } of ready) {
       if (s.maxConcurrency > 0 && this.procs.size >= s.maxConcurrency) break; // 0 = unlimited
-      if (this.procs.has(task.assignee)) continue;
+      if (this.procs.has(node.id)) continue;
       if (this.runs >= s.maxRuns) { this.log(null, 'system', `maxRuns (${s.maxRuns}) reached`); break; }
-      this.runTask(team.nodes.find((n) => n.id === task.assignee), task, team, s);
+      this.runTask(node, task, team, s);
     }
     try { this.nudgeIdle(); } catch (e) { this.log(null, 'error', 'idle nudge: ' + e.message); }
     if (this.procs.size === 0) {
@@ -239,11 +272,12 @@ class Orchestrator extends EventEmitter {
       // process exited/crashed without updating status) and re-dispatch them instead of blocking forever.
       if (this.reconcileOrphanedTasks()) { setImmediate(() => this.tick()); return; }
       this.running = false;
-      const why = !todo.length ? 'No more todo tasks. Finished.' : !ready.length ? `Stopped: ${todo.length} todo task(s) are blocked by unfinished dependencies or over budget` : 'Stopped: run limit reached';
+      const why = !todo.length && !ready.length ? 'No more todo tasks. Finished.' : !ready.length ? `Stopped: ${todo.length} todo task(s) are blocked by unfinished dependencies or over budget` : 'Stopped: run limit reached';
       this.log(null, 'system', why);
       const waiting = all.filter((t) => t.awaitingApproval).length;
       this.notify('Run finished', why + (waiting ? ` ${waiting} task(s) wait for your approval.` : ''));
       this.changed();
+      // No agents running/pending at this point (procs is empty and nothing is left to dispatch): safe to report done.
       this.emit('done', this.snapshot());
     }
   }
@@ -413,12 +447,15 @@ class Orchestrator extends EventEmitter {
     const t = this.store.getTask(task.id);
     const gate = (st) => C.gateStatus(st, node, this.store.getSettings());
     if (m.mode === 'goal' && t && judge && !judge.met && t.status === 'done') {
-      this.store.updateTask(task.id, { status: 'review' });
+      // Parked for a human, not a "please review this" hand-off: never auto-dispatched/auto-advanced.
+      this.store.updateTask(task.id, { status: 'review', parkedForHuman: true });
       this.store.commentTask(task.id, 'orchestrator', judge.inconclusive ? `Goal check was inconclusive after ${i} iteration(s): ${judge.reason}. Check the result yourself.` : `Goal condition not met after ${i} iteration(s) (${reason}): ${judge.reason}`);
     } else if (t && t.status === 'in_progress') {
       // Agent ended without updating status: success -> done, failure -> back to review for a human.
       const ok = code === 0 && this.running && !stoppedWhy && !(m.mode === 'goal' && !(judge && judge.met));
-      this.store.updateTask(task.id, gate(ok ? 'done' : 'review'));
+      const g = gate(ok ? 'done' : 'review');
+      if (!ok) g.parkedForHuman = true;
+      this.store.updateTask(task.id, g);
       this.store.commentTask(task.id, 'orchestrator', stoppedWhy ? `Agent stopped (${stoppedWhy}) after ${i} iteration(s); moved to review.` : `Agent exited (code ${code}) without setting status after ${i} iteration(s) (${reason}); moved automatically.`);
     }
     const t2 = this.store.getTask(task.id);

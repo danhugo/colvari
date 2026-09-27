@@ -89,11 +89,24 @@ test('orchestrator: blocked task waits for its dependency', async () => {
 test('orchestrator: blocked-only board stops with a clear reason', async () => {
   const d = tmp('squad-ctl-'); const s = new Store(path.join(d, 'p')); s.saveSettings({ claudePath: fakeClaude(d, RESULT(0)) });
   const x = s.addNode({ name: 'X', role: 'Dev' });
-  const a = s.createTask({ title: 'a', assignee: x.id }); s.updateTask(a.id, { status: 'review' });
+  // No reviewer edge from x anywhere: an in_progress task parked for a human (not an agent hand-off,
+  // hence parkedForHuman) is the one case that stays stuck and blocks its dependent.
+  const a = s.createTask({ title: 'a', assignee: x.id }); s.updateTask(a.id, { status: 'review', parkedForHuman: true });
   s.createTask({ title: 'b', assignee: x.id, blockedBy: [a.id] });
   const o = new Orchestrator(s); const notes = []; o.on('notify', (n) => notes.push(n));
   await runToDone(o);
   assert.equal(o.runs, 0); assert.match(notes[0].body, /blocked/);
+});
+
+test('orchestrator: review task with no reviewer edge auto-advances so its dependent is not stuck', async () => {
+  const d = tmp('squad-ctl-'); const s = new Store(path.join(d, 'p')); s.saveSettings({ claudePath: fakeClaude(d, RESULT(0)) });
+  const x = s.addNode({ name: 'X', role: 'Dev' });
+  const a = s.createTask({ title: 'a', assignee: x.id }); s.updateTask(a.id, { status: 'review' });
+  const b = s.createTask({ title: 'b', assignee: x.id, blockedBy: [a.id] });
+  const o = new Orchestrator(s);
+  await runToDone(o);
+  assert.equal(s.getTask(a.id).status, 'done');
+  assert.equal(s.getTask(b.id).status, 'done');
 });
 
 test('orchestrator: agent budget stops that agent, project budget stops the Run', async () => {
