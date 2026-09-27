@@ -93,7 +93,52 @@ async function guiE2E() {
     expect('overview: stuck badge with Stop and Nudge', await ex(`S.settings.stuckMinutes = 1; S.orch.agents = { '${b.id}': { status: 'working', startedAt: Date.now() - 600000 } }; renderOverview(); return !!document.querySelector('#ov-graph .node.stuck') && !!document.querySelector('[data-ovstop]') && !!document.querySelector('[data-ovnudge]')`));
     await shot('13-overview-stuck');
   };
+  // First-run guide (steps 1-3) in a fresh project, then Human Inbox: ask_human with choices, answer, approval item.
+  const firstrunInbox = async () => {
+    const fp = pm.create('First run'); const fstore = pm.store(fp.id); const forch = orchFor(fp.id);
+    const work = fs.mkdtempSync(path.join(require('os').tmpdir(), 'squad-fr-'));
+    const origPick = api.pickDir; api.pickDir = async () => work;
+    await ex(`window.confirm = () => true; $('#tabs button[data-tab=team]').click(); P = await call('listProjects'); renderSidebar(); document.querySelector('#projectlist [data-pid="${fp.id}"]').click(); await w(800); $('#reopenguide').click(); await w(300);`);
+    const guideShown = await ex(`return !$('#guide').classList.contains('hidden') && !!$('#g-team')`);
+    await ex(`$('#g-dir').click(); await w(600);`); api.pickDir = origPick;
+    const dirShown = await ex(`return $('#guide').textContent.includes(${JSON.stringify(work)})`);
+    await shot('14-firstrun-1');
+    await ex(`$('#g-team').click();`);
+    const tested = await waitFor(`return document.querySelectorAll('#guide li').length === 3 && !!$('#g-test') && !$('#g-test').disabled`, 180000);
+    await shot('14-firstrun-2');
+    const fn = fstore.getTeam(); const dev = fn.nodes.find((n) => n.role === 'Dev') || {};
+    await ex(`$('#g-goal').value = ${JSON.stringify('Write the chosen color into color.txt. PM: delegate this to the Dev. Dev: before writing, you MUST call the ask_human tool with question "Which color?" and choices ["red","blue"], then write exactly the answer into color.txt in the working directory.')}; await w(200);`);
+    await shot('14-firstrun-3');
+    await ex(`$('#g-start').click(); await w(1500);`);
+    const fr = { guideShown, dirShown, nodes: fn.nodes.map((n) => n.role), edges: fn.edges.length, workdirs: fn.nodes.every((n) => n.workdir === work), tested, preflight: fstore.getTeam().nodes.map((n) => n.preflight && n.preflight.ok),
+      started: forch.running || forch.runs > 0, guideHiddenAfterStart: await ex(`return $('#guide').classList.contains('hidden')`) };
+    console.log('[gui-e2e] firstrun', JSON.stringify(fr));
+    expect('first-run guide: steps 1-3 through to the first goal', guideShown && dirShown && fr.nodes.length === 3 && fr.edges === 2 && fr.workdirs && tested && fr.started, fr);
+    // (b) the Dev asks the human; badge, Inbox item, answer through the UI.
+    let q = null; for (let i = 0; i < 150 && !q; i++) { await new Promise((r) => setTimeout(r, 2000)); q = fstore.listInbox({ status: 'open' }).find((x) => x.kind === 'question'); }
+    const ib = { asked: !!q, question: q && q.question, choices: q && q.choices, taskStatus: q && q.taskId && fstore.getTask(q.taskId).status };
+    ib.badge = await ex(`await refresh(); return $('#inbox-badge').textContent`);
+    await ex(`$('#tabs button[data-tab=inbox]').click(); await w(400);`); await shot('15-inbox-question');
+    ib.clicked = await ex(`const b = [...document.querySelectorAll('.ib-choice')].find((x) => x.dataset.v === 'blue'); if (!b) return false; b.click(); await w(800); return true;`);
+    ib.statusAfterAnswer = q && q.taskId && fstore.getTask(q.taskId).status; ib.answer = q && fstore.getInboxItem(q.id).answer;
+    await shot('15-inbox-answered');
+    for (let i = 0; i < 150; i++) { await new Promise((r) => setTimeout(r, 2000)); if (!forch.running) break; }
+    ib.color = fs.existsSync(path.join(work, 'color.txt')) ? fs.readFileSync(path.join(work, 'color.txt'), 'utf8').trim() : null;
+    ib.badgeAfter = await ex(`await refresh(); return $('#inbox-badge').textContent`);
+    // (c) an approval request (requireApproval puts finished tasks in review + awaitingApproval) shows in the Inbox.
+    const at = fstore.createTask({ title: 'Ship first run', assignee: dev.id }); fstore.updateTask(at.id, { status: 'review', awaitingApproval: true });
+    ib.approvalShown = await ex(`await refresh(); await w(300); return [...document.querySelectorAll('.inboxitem')].some((d) => d.textContent.includes('Ship first run') && d.querySelector('.ib-choice[data-v=approve]'))`);
+    await shot('16-inbox-approval');
+    await ex(`[...document.querySelectorAll('.inboxitem')].find((d) => d.textContent.includes('Ship first run')).querySelector('.ib-choice').click(); await w(800);`);
+    ib.approvedStatus = fstore.getTask(at.id).status;
+    console.log('[gui-e2e] inbox', JSON.stringify(ib));
+    expect('inbox: ask_human item with choices, badge 1, task waiting', ib.asked && (ib.choices || []).includes('blue') && ib.badge === '1' && ib.taskStatus === 'waiting_for_human', ib);
+    expect('inbox: answered through the UI, task back to in_progress', ib.clicked && ib.answer === 'blue' && ib.statusAfterAnswer === 'in_progress', ib);
+    expect('inbox: agent output uses the answer', ib.color === 'blue', ib);
+    expect('inbox: approval item shown and approved', ib.approvalShown && ib.approvedStatus === 'done', ib);
+  };
   try {
+    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'firstrun') { await firstrunInbox(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'overview') { await overviewShots(); throw null; }
     // project/team management through the UI: create a project from the Startup template, then a Solo team, then switch back.
     // Wait until the template select is filled (the first refresh loads the templates) before choosing one.
@@ -247,6 +292,7 @@ async function guiE2E() {
       expect('workflow mode ran the slash command through the GUI', f7.cmd === 'CMD-RAN ARGTEXT', f7);
       expect('resumed runs are counted per run, not cumulatively', [...goalRuns, ...loopRuns].filter((r) => r.resumedFrom).every((r) => r.usageBasis === 'delta'), f7);
     }
+    await firstrunInbox();
     await overviewShots();
     const tasks = store.listTasks();
     console.log('[gui-e2e]', JSON.stringify({ edges: store.getTeam().edges.length, tasks: tasks.map((t) => [t.title, t.status, t.iterations || 0, !!t.sessionId]), cost: orch.snapshot().totalCost }));
