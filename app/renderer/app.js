@@ -62,7 +62,7 @@ async function refresh() {
   renderAll();
 }
 const nodeName = (id) => (S.allNodes.find((n) => n.id === id) || {}).name || (id ? id : 'unassigned');
-function renderAll() { renderSidebar(); renderGraph(); renderPreflightBar(); renderNodeForm(); renderBoard(); renderWiki(); renderObs(); renderSettings(); renderHeader(); renderUsage(); renderOverview(); renderInbox(); renderGuide(); renderChat(); }
+function renderAll() { renderSidebar(); renderGraph(); renderPreflightBar(); renderNodeForm(); renderBoard(); renderWiki(); renderObs(); renderSettings(); renderHeader(); renderLimitMeter(); renderUsage(); renderOverview(); renderInbox(); renderGuide(); renderChat(); }
 const fmtTok = (n) => { n = n || 0; return n >= 1e6 ? (n / 1e6).toFixed(2) + 'M' : n >= 1e4 ? (n / 1e3).toFixed(1) + 'k' : String(n); };
 const COST_NOTE = { subscription: 'Covered by subscription — not billed per token', other: 'API-equivalent (reported by Claude CLI)' };
 const VENDOR = { claude: 'Claude', codex: 'Codex', opencode: 'OpenCode' };
@@ -154,6 +154,24 @@ function renderHeader() {
   const t = o.tokens || {}; const tt = $('#totaltokens');
   tt.textContent = `${fmtTok((t.inputTokens || 0) + (t.outputTokens || 0))} tok · ${fmtTok((t.cacheReadTokens || 0) + (t.cacheCreationTokens || 0))} cache`;
   tt.title = `Measured tokens this session: ${t.inputTokens || 0} in / ${t.outputTokens || 0} out / ${t.cacheReadTokens || 0} cache read / ${t.cacheCreationTokens || 0} cache write`;
+}
+// ---------- top-bar limits meter (subscription 5h/weekly windows; no $ shown, just % + reset countdown) ----------
+const fmtCountdown = (ms) => { if (ms <= 0) return 'now'; const h = Math.floor(ms / 3600000), m = Math.floor((ms % 3600000) / 60000); return h > 0 ? `${h}h ${m}m` : `${m}m`; };
+function resetIn(windowMs) {
+  const cutoff = Date.now() - windowMs;
+  const subs = RUNS.filter((r) => r.kind === 'agent' && r.billingSource === 'subscription' && new Date(r.startedAt || 0).getTime() >= cutoff);
+  if (!subs.length) return 0;
+  return Math.max(0, Math.min(...subs.map((r) => new Date(r.startedAt).getTime())) + windowMs - Date.now());
+}
+async function renderLimitMeter() {
+  let st; try { st = await call('usageStatus'); } catch { st = null; }
+  const m = $('#limitmeter');
+  if (!st || (!st.fiveHour.limit && !st.weekly.limit)) { m.classList.add('hidden'); m.innerHTML = ''; return; }
+  m.classList.remove('hidden');
+  const part = (label, u, ms) => { if (!u.limit) return ''; const pct = Math.min(100, Math.round(u.pct * 100)); const cls = u.pause ? 'danger' : u.warn ? 'warn' : 'ok';
+    return `<span class="lm-part lm-${cls}" title="${esc(label)}: ${pct}% used · resets in ${fmtCountdown(ms)}"><b>${esc(label)}</b> ${pct}%<i class="lm-bar"><i class="lm-fill" style="width:${pct}%"></i></i><small>↻${fmtCountdown(ms)}</small></span>`; };
+  m.innerHTML = (st.pause ? '<span class="lm-flag lm-danger">paused</span>' : st.warn ? '<span class="lm-flag lm-warn">near limit</span>' : '') +
+    part('5h', st.fiveHour, resetIn(5 * 3600000)) + part('weekly', st.weekly, resetIn(7 * 24 * 3600000));
 }
 function showTab(name) { document.querySelector(`#tabs button[data-tab="${name}"]`).click(); }
 $('#run').onclick = async () => {
@@ -256,6 +274,11 @@ function renderGraph() {
     el('text', { x: 52, y: 23, class: 'nname' }, g).textContent = clipText(n.name, Math.max(6, Math.round(16 / Math.max(1, 11 / (13 * VP.zoom)))));
     el('text', { x: 52, y: 38, class: 'nrole' }, g).textContent = clipText(n.role, 20);
     let cx = 12; for (const chip of [VENDOR[ns.runtime || n.runtime || 'claude'] || ns.runtime || n.runtime, ns.model || n.model || 'default'].filter(Boolean)) { const t = clipText(chip, 14); const w = 10 + t.length * 5.6; const cg = el('g', { class: 'chip', transform: `translate(${cx},46)` }, g); el('rect', { width: w, height: 14, rx: 7 }, cg); el('text', { x: w / 2, y: 10.5, 'text-anchor': 'middle' }, cg).textContent = t; cx += w + 4; }
+    const effort = n.effort || 'low';
+    for (const chip of [effort !== 'low' ? `E:${effort}` : null, n.autoCompact ? `AC:${n.autoCompact}` : null].filter(Boolean)) { const t = clipText(chip, 14); const w = 10 + t.length * 5.6; const cg = el('g', { class: 'chip chip-em', transform: `translate(${cx},46)` }, g); el('title', {}, cg).textContent = chip.startsWith('E:') ? `Reasoning effort: ${effort}` : `Auto-compact window: ${n.autoCompact}`; el('rect', { width: w, height: 14, rx: 7 }, cg); el('text', { x: w / 2, y: 10.5, 'text-anchor': 'middle' }, cg).textContent = t; cx += w + 4; }
+    const capsSt = !n.capabilities ? 'none' : (n.capabilities.error || n.capabilities.ok === false) ? 'error' : 'ok';
+    const cb = el('g', { class: 'capsdot caps-' + capsSt, transform: `translate(10,${H - 8})` }, g); el('circle', { r: 4 }, cb);
+    el('title', {}, cb).textContent = capsSt === 'none' ? 'Capabilities not probed yet' : capsSt === 'error' ? 'Capability probe failed' : `Capabilities probed${n.capabilitiesProbedAt ? ' ' + new Date(n.capabilitiesProbedAt).toLocaleString() : ''}`;
     const sg = el('g', { class: 'status s-' + live, transform: `translate(${W - 16},16)` }, g); el('circle', { r: 5 }, sg); el('title', {}, sg).textContent = live;
     const pres = el('g', { class: 'pres ' + presence(n.id), transform: `translate(${W - 16},16)` }, g); el('circle', { r: 8 }, pres);
     const pf = pfState(n); const bw = 8 + PF_LABEL[pf].length * 6;
@@ -716,11 +739,9 @@ async function renderUsageLimits() {
   const lim = S.settings.usageLimits || {}; let st;
   try { st = await call('usageStatus'); } catch { st = null; }
   const money = (v) => '$' + (v || 0).toFixed(2);
-  $('#us-limits').innerHTML = `<h3>Usage limits</h3>${st && st.warn ? `<p class="warn">Approaching a usage limit.</p>` : ''}${st && st.pause ? `<p class="warn">A usage limit has been reached; new runs may be paused.</p>` : ''}
+  $('#us-limits').innerHTML = `<h3>Usage limits</h3><p class="muted">Subscription 5h/weekly meters now live in the top bar (once a limit is set below).</p>${st && st.warn ? `<p class="warn">Approaching a usage limit.</p>` : ''}${st && st.pause ? `<p class="warn">A usage limit has been reached; new runs may be paused.</p>` : ''}
     <div class="toolbar" style="align-items:flex-start">
     <div class="cards">
-      ${usageLimitBar('Subscription, 5h window', st && st.fiveHour, money)}
-      ${usageLimitBar('Subscription, weekly window', st && st.weekly, money)}
       ${usageLimitBar('API key/proxy, reported cost', st && st.cost, money)}
       ${usageLimitBar('API key/proxy, tokens', st && st.tokens, fmtTok)}
     </div>

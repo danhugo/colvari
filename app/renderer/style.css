@@ -254,6 +254,17 @@ button:focus-visible, input:focus, select:focus, textarea:focus { outline:none; 
 nav button { padding:3px 10px; font-size:var(--text-sm); } nav button.active { background:var(--bg-surface); border-bottom:none; border-radius:var(--radius-xs); box-shadow:var(--shadow-sm); color:var(--fg-primary); }
 nav button.sec { color:var(--fg-muted); padding:3px 7px; } .navsep { width:1px; background:var(--border-strong); margin:3px 4px; }
 header .pill { border:none; background:none; color:var(--fg-muted); font-size:var(--text-xs); padding:2px 4px; } header #runstate { background:var(--bg-hover); color:var(--fg-secondary); padding:2px 8px; } header #runstate.on { background:var(--success-soft); color:var(--success-text); }
+.limitmeter { display:flex; align-items:center; gap:6px; font-size:var(--text-xs); }
+.limitmeter.hidden { display:none; }
+.limitmeter .lm-flag { padding:2px 8px; border-radius:var(--radius-full); font-weight:var(--fw-semibold); }
+.limitmeter .lm-flag.lm-warn { background:var(--warning-soft); color:var(--warning-text); } .limitmeter .lm-flag.lm-danger { background:var(--danger-soft); color:var(--danger); }
+.limitmeter .lm-part { display:flex; align-items:center; gap:5px; padding:2px 8px; border-radius:var(--radius-full); background:var(--bg-hover); color:var(--fg-secondary); }
+.limitmeter .lm-part b { font-weight:var(--fw-semibold); }
+.limitmeter .lm-part.lm-warn { background:var(--warning-soft); color:var(--warning-text); } .limitmeter .lm-part.lm-danger { background:var(--danger-soft); color:var(--danger); }
+.limitmeter .lm-bar { width:34px; height:5px; border-radius:3px; background:var(--line); overflow:hidden; display:inline-block; }
+.limitmeter .lm-fill { display:block; height:100%; background:var(--accent); }
+.limitmeter .lm-warn .lm-fill { background:var(--warning); } .limitmeter .lm-danger .lm-fill { background:var(--danger); }
+.limitmeter .lm-part small { color:var(--fg-muted); font-variant-numeric:tabular-nums; }
 .tlink { font-size:10.5px; opacity:.8; } .bubble { font-size:var(--text-sm); }
 
 /* Idle/busy by shape: idle = hollow ring, busy = spinning arc. */
@@ -277,6 +288,8 @@ header .pill { border:none; background:none; color:var(--fg-muted); font-size:va
 #graph .node.st-working .card { stroke:var(--success); stroke-width:2; } #graph .node.st-needs-human .card { stroke:var(--warning-strong); stroke-width:2; }
 #graph .avtext { fill:#fff; font-size:11px; font-weight:var(--fw-bold); } #graph .nname { font-size:13px; font-weight:var(--fw-semibold); } #graph .nrole { font-size:11px; fill:var(--fg-muted); }
 #graph .chip rect { fill:var(--bg-code); stroke:var(--border); } #graph .chip text { font-size:9.5px; fill:var(--fg-secondary); font-family:var(--font-mono); }
+#graph .chip-em rect { fill:var(--accent-soft); stroke:var(--accent); } #graph .chip-em text { fill:var(--accent); font-weight:var(--fw-semibold); }
+#graph .capsdot circle { fill:var(--fg-muted); opacity:.55; } #graph .capsdot.caps-ok circle { fill:var(--success); opacity:1; } #graph .capsdot.caps-error circle { fill:var(--danger); opacity:1; }
 #graph .status circle { fill:var(--fg-muted); } #graph .status.s-working circle { fill:var(--success); } #graph .status.s-needs-human circle { fill:var(--warning-strong); }
 #graph .handle { fill:var(--bg-raised); stroke:var(--accent); stroke-width:2; opacity:0; cursor:crosshair; transition:opacity var(--dur-fast), r var(--dur-fast); }
 #graph .node:hover .handle, #graph .node.sel .handle { opacity:1; } #graph .handle:hover { r:8; fill:var(--accent); }
