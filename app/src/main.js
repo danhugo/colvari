@@ -360,6 +360,13 @@ async function guiE2E() {
       await ex(`$('#tabs button[data-tab=team]').click(); $('#reopenguide').click(); await w(400);`); await shot(`main-firstrun-${theme}`);
       expect(`firstrun guide opens (${theme})`, await ex(`return !$('#guide').classList.contains('hidden')`));
       await ex(`$('#guide').classList.add('hidden'); await w(200);`);
+      // Idle detection: 3 agents, 1 busy -> banner reads "2 agents idle".
+      const idleTxt = await ex(`$('#tabs button[data-tab=team]').click(); const keep = [S.allNodes, S.orch.agents, S.orch.idle];
+        S.allNodes = [{ id: 'i1', name: 'Ada' }, { id: 'i2', name: 'Bo' }, { id: 'i3', name: 'Cy' }]; S.orch.agents = { i1: { status: 'working' } }; S.orch.idle = ['i2', 'i3'];
+        renderIdle(); await w(300); const b = document.querySelector('.idlebanner[data-where=team]'); const t = b.classList.contains('hidden') ? '' : b.textContent; window.__idleKeep = keep; return t;`);
+      await shot(`idle-banner-${theme}`);
+      expect(`idle banner shows 2 idle (${theme})`, /2 agents idle/.test(idleTxt) && !/Ada/.test(idleTxt), { idleTxt });
+      await ex(`[S.allNodes, S.orch.agents, S.orch.idle] = window.__idleKeep; renderIdle();`);
       const bg = await ex(`return getComputedStyle(document.documentElement).getPropertyValue('--bg').trim()`); expect(`theme ${theme} applied`, bg === BG[theme], { bg, dt: await ex(`return document.documentElement.dataset.theme + '|' + matchMedia('(prefers-color-scheme: dark)').matches + '|' + getComputedStyle(document.documentElement).getPropertyValue('--bg-app')`) });
     }
     nativeTheme.themeSource = 'system';
@@ -421,6 +428,11 @@ const api = {
   taskDiscard: (c, id) => { const r = WT.worktreeDiscard(wtTask(c, id)); ST(c).updateTask(id, { worktreePath: null, worktreeBranch: null }); return r; },
   pickDir: async () => { const { dialog } = require('electron'); const r = await dialog.showOpenDialog(win, { properties: ['openDirectory', 'createDirectory'] }); return r.canceled ? null : r.filePaths[0]; },
   agentStates: (c) => orchFor(c.p).agentStates(),
+  // Live per-node data for the graph: runtime, model, status (working|idle|needs-human).
+  nodeStatus: (c) => { const s = ST(c); const st = orchFor(c.p).agentStates(); const ag = orchFor(c.p).agents || {}; const inbox = s.listInbox({ status: 'open' });
+    return Object.fromEntries(s.getTeam().nodes.map((n) => [n.id, { runtime: n.runtime, model: n.model || null, teamId: n.teamId,
+      status: inbox.some((i) => i.nodeId === n.id) ? 'needs-human' : (ag[n.id] || {}).status === 'working' || st[n.id] === 'busy' ? 'working' : 'idle' }])); },
+  crossEdges: (c) => TS(c).incomingCrossEdges(), setViewport: (c, v) => TS(c).setViewport(v), getViewport: (c) => TS(c).getViewport(), setPositions: (c, pos) => TS(c).setPositions(pos),
   run: (c) => orchFor(c.p).start(), stop: (c) => orchFor(c.p).stop(),
   getPrefs: () => getPrefs(), setPrefs: (_c, patch) => setPrefs(patch || {}),
 };
@@ -428,11 +440,6 @@ nativeTheme.on('updated', () => { if (win && !win.isDestroyed()) win.setBackgrou
 ipcMain.handle('api', async (_e, name, ctx, ...args) => {
   if (!api[name]) throw new Error('unknown api ' + name);
   return api[name](ctx || {}, ...args);
-  // Live per-node data for the graph: runtime, model, status (working|idle|needs-human).
-  nodeStatus: (c) => { const s = ST(c); const st = orchFor(c.p).agentStates(); const ag = orchFor(c.p).agents || {}; const inbox = s.listInbox({ status: 'open' });
-    return Object.fromEntries(s.getTeam().nodes.map((n) => [n.id, { runtime: n.runtime, model: n.model || null, teamId: n.teamId,
-      status: inbox.some((i) => i.nodeId === n.id) ? 'needs-human' : (ag[n.id] || {}).status === 'working' || st[n.id] === 'busy' ? 'working' : 'idle' }])); },
-  crossEdges: (c) => TS(c).incomingCrossEdges(), setViewport: (c, v) => TS(c).setViewport(v), getViewport: (c) => TS(c).getViewport(), setPositions: (c, pos) => TS(c).setPositions(pos),
 });
 
 // Human inbox watcher: MCP servers write inbox.json from other processes, so poll for new open items.

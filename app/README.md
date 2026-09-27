@@ -107,6 +107,14 @@ Logic lives in `src/controls.js`, wired into the store, board tools, orchestrato
 
 `npm run gui-e2e` also covers these: it sets a dependency and sends a message through the UI, approves a task, saves budget and approval settings, and uses the shortcuts, and asserts each result (screenshots `5-deps`, `6-approval`, `7-settings`, `8-shortcuts`).
 
+## Parallel work and idle detection
+
+Agents run in parallel: each agent with an `in_progress` task (or a live run) is **busy**, everyone else is **idle**. The Team and Board tabs show a banner such as **"2 agents idle: Bo, Cy"** with an *Assign work* button that jumps to the new-task form with the first idle agent preselected. Presence is shape-based: a spinning arc = busy, a hollow ring = idle.
+
+The orchestrator also nudges PMs: any node with assign edges to others that still has open goals (tasks it owns or created) gets a board message listing its idle reports. The nudge repeats only when the idle set changes.
+
+PM guidance: split goals into independent tasks so every report has one in flight; give each dev a disjoint file area to avoid conflicts; when nudged, create or reassign tasks rather than waiting on a single agent.
+
 ## Limitations
 
 - Agents run with `bypassPermissions` by default, with no sandbox. Point working directories only at folders you trust agents to change.
