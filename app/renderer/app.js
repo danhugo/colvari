@@ -72,6 +72,25 @@ const RT_PRESETS = [{ name: 'Planner', runtime: 'claude', model: 'opus' }, { nam
 const costCell = (usd, source, rt) => !canCost(rt) ? '<span class="costnote" title="this runtime does not report cost">—</span>' : source === 'subscription' ? `<span class="costnote" title="API-equivalent $${(usd || 0).toFixed(4)} (reported by Claude CLI)">${COST_NOTE.subscription}</span>` : `$${(usd || 0).toFixed(4)} <span class="costnote">API-equivalent</span>`;
 const billTag = (src, detail) => `<span class="bill bill-${esc(src || 'unknown')}" title="${esc(detail || '')}">${esc(src || 'unknown')}</span>`;
 
+// ---------- discovered capabilities (modes/slash commands/skills) ----------
+const CAPS_LOADING = new Set();
+function capsView(n) {
+  if (CAPS_LOADING.has(n.id)) return 'Discovering…';
+  const c = n.capabilities;
+  if (!c) return `Not probed yet. Click Refresh to ask the runtime (${esc(n.runtime || 'claude')}) what it supports.`;
+  if (c.error || c.ok === false) return `Could not discover capabilities: ${esc(c.error || 'unknown error')}`;
+  const list = (label, items) => `<div><b>${label}</b> ${items && items.length ? items.map((x) => `<span class="pill">${esc(x)}</span>`).join(' ') : '<span class="muted">none found</span>'}</div>`;
+  return list('Modes', c.modes) + list('Slash commands', c.slashCommands) + list('Commands', c.commands) + list('Skills', c.skills) +
+    (n.capabilitiesProbedAt ? `<small class="muted">probed ${new Date(n.capabilitiesProbedAt).toLocaleString()}</small>` : '');
+}
+async function refreshCaps(n) {
+  CAPS_LOADING.add(n.id); $('#nf-caps-view').innerHTML = capsView(n);
+  try { n.capabilities = await call('discoverCapabilities', n.id); n.capabilitiesProbedAt = Date.now(); }
+  catch (e) { n.capabilities = { error: e.message || 'not supported by this runtime yet' }; }
+  CAPS_LOADING.delete(n.id);
+  if (sel.node === n.id) $('#nf-caps-view').innerHTML = capsView(n);
+}
+
 // ---------- projects & teams sidebar ----------
 function renderSidebar() {
   $('#projectlist').innerHTML = P.projects.map((p) => `<div data-pid="${p.id}" class="${p.id === ctx.p ? 'sel' : ''}">${esc(p.name)}${p.running ? '<span class="dot" title="running"></span>' : ''}</div>`).join('');
@@ -414,6 +433,13 @@ function renderNodeForm() {
       <div class="bill-proxy-url"><label>Proxy base URL <span class="muted">(sets ANTHROPIC_BASE_URL)</span></label><input id="nf-billurl" value="${esc(n.billingBaseUrl || '')}" placeholder="http://localhost:4000"></div>
       <p class="muted" id="nf-billnote"></p>
     </fieldset>
+    <fieldset id="nf-effort"><legend>Effort &amp; context</legend>
+      <label>Reasoning effort</label><select id="nf-effort-sel">${['low', 'medium', 'high', 'xhigh', 'max'].map((v) => `<option value="${v}" ${(n.effort || 'low') === v ? 'selected' : ''}>${v[0].toUpperCase() + v.slice(1)}</option>`).join('')}</select>
+      <label>Auto-compact at, % of context <span class="muted">(0 = runtime default)</span></label><input id="nf-autocompact" type="number" min="0" max="100" step="5" value="${n.autoCompact || 0}">
+    </fieldset>
+    <fieldset id="nf-caps-box"><legend>Discovered capabilities <button id="nf-caps-refresh" type="button">Refresh</button></legend>
+      <div id="nf-caps-view" class="muted">${capsView(n)}</div>
+    </fieldset>
     <fieldset id="nf-limits"><legend>Budget &amp; approval</legend>
       <label>Budget per Run, $ <span class="muted">(reported cost; 0 = none)</span></label><input id="nf-budgetusd" type="number" min="0" step="0.01" value="${n.budgetUsd || 0}">
       <label>Token budget per Run <span class="muted">(input + output; 0 = none)</span></label><input id="nf-budgettok" type="number" min="0" step="1000" value="${n.budgetTokens || 0}">
@@ -441,10 +467,12 @@ function renderNodeForm() {
   const showMode = () => { const m = $('#nf-mode').value; for (const k of ['goal', 'loop', 'workflow']) document.querySelector('.mode-' + k).classList.toggle('hidden', m !== k); };
   $('#nf-mode').onchange = showMode; showMode();
   $('#nf-perms').ontoggle = () => { sel.permsOpen = $('#nf-perms').open; };
+  $('#nf-caps-refresh').onclick = () => refreshCaps(n);
   const read = () => ({
     runtime: $('#nf-runtime').value, name: $('#nf-name').value, role: $('#nf-role').value.trim() || 'Dev', model: $('#nf-model').value.trim(), workdir: $('#nf-workdir').value.trim(), systemPrompt: $('#nf-prompt').value,
     permissionMode: $('#nf-perm').value, allowedTools: $('#nf-allowed').value, disallowedTools: $('#nf-disallowed').value, maxTurns: +$('#nf-maxturns').value || 0,
     appendSystemPrompt: $('#nf-append').value, addDirs: $('#nf-adddirs').value, env: $('#nf-env').value, extraArgs: $('#nf-extra').value.trim(),
+    effort: $('#nf-effort-sel').value, autoCompact: +$('#nf-autocompact').value || 0,
     mode: $('#nf-mode').value, goalCondition: $('#nf-goalcond').value, maxIterations: +$('#nf-maxiter').value || 5, checkModel: $('#nf-checkmodel').value.trim(),
     loopCount: +$('#nf-loopcount').value || 3, slashCommand: $('#nf-slash').value.trim(), continueSession: $('#nf-continue').checked,
     billingMode: $('#nf-billing').value, billingBaseUrl: $('#nf-billurl').value.trim(),
@@ -671,6 +699,41 @@ function renderUsage() {
   <details><summary>By task</summary>${groupTable('By task', rs, (r) => r.taskId || '', taskName)}</details>`;
   $('#us-runs').innerHTML = `<tr><th>Time</th><th>Agent</th><th>Task</th><th>Kind</th><th>Model</th><th>In</th><th>Out</th><th>Cache read</th><th>Cache write</th><th>Duration</th><th>Turns</th><th>Billing source</th><th>Reported cost</th></tr>` +
     (rs.slice().reverse().slice(0, 500).map((r) => `<tr><td>${new Date(r.startedAt).toLocaleString()}</td><td>${esc(r.agent || agentName(r.nodeId))}</td><td>${esc(r.task || taskName(r.taskId))}</td><td>${esc(r.kind)}${r.iteration > 1 ? ' #' + r.iteration : ''}</td><td title="${esc((r.models || []).join(', '))}">${esc(r.model || '?')}</td><td class="num">${r.inputTokens}</td><td class="num">${r.outputTokens}</td><td class="num">${r.cacheReadTokens}</td><td class="num">${r.cacheCreationTokens}</td><td class="num">${((r.durationMs || 0) / 1000).toFixed(1)}s</td><td class="num">${r.numTurns}</td><td>${billTag(r.billingSource, r.billingDetail)}${r.billingMismatch ? ` <span class="warn" title="agent billing mode: ${esc(r.billingMode)}">≠ ${esc(r.billingMode)}</span>` : ''}</td><td>${costCell(r.reportedCostUsd, r.billingSource, r.runtime || (S.allNodes.find((n) => n.id === r.nodeId) || {}).runtime)}</td></tr>`).join('') || '<tr><td colspan="13" class="muted">No runs recorded yet.</td></tr>');
+  renderUsageLimits();
+}
+// ---------- usage limits (5h/weekly for subscription, tokens/cost for API) ----------
+function usageLimitBar(label, u, fmt) {
+  if (!u || !u.limit) return `<div class="stat"><small>${esc(label)}</small><b>${fmt((u && u.used) || 0)}</b><small class="muted">no limit set</small></div>`;
+  const pct = Math.min(100, Math.round(u.pct != null ? u.pct : (u.used / u.limit) * 100));
+  const cls = u.pause ? 'danger' : u.warn ? 'warn' : 'ok';
+  return `<div class="stat"><small>${esc(label)}</small><b>${fmt(u.used)} <span class="muted">/ ${fmt(u.limit)}</span></b>
+    <div class="meter"><div class="meter-fill ${cls}" style="width:${pct}%"></div></div>
+    <small class="${cls === 'ok' ? 'muted' : 'warn'}">${pct}% used${u.pause ? ' — limit reached' : u.warn ? ' — approaching limit' : ''}</small></div>`;
+}
+async function renderUsageLimits() {
+  const lim = S.settings.usageLimits || {}; let st;
+  try { st = await call('usageStatus'); } catch { st = null; }
+  const money = (v) => '$' + (v || 0).toFixed(2);
+  $('#us-limits').innerHTML = `<h3>Usage limits</h3>${st && st.warn ? `<p class="warn">Approaching a usage limit.</p>` : ''}${st && st.pause ? `<p class="warn">A usage limit has been reached; new runs may be paused.</p>` : ''}
+    <div class="toolbar" style="align-items:flex-start">
+    <div class="cards">
+      ${usageLimitBar('Subscription, 5h window', st && st.fiveHour, money)}
+      ${usageLimitBar('Subscription, weekly window', st && st.weekly, money)}
+      ${usageLimitBar('API key/proxy, reported cost', st && st.cost, money)}
+      ${usageLimitBar('API key/proxy, tokens', st && st.tokens, fmtTok)}
+    </div>
+    <form id="lim-form" class="toolbar" style="flex-wrap:wrap">
+      <label>5h limit, $ <input id="lim-5h" type="number" min="0" step="1" value="${lim.fiveHourLimit || ''}" placeholder="none"></label>
+      <label>Weekly limit, $ <input id="lim-7d" type="number" min="0" step="1" value="${lim.weeklyLimit || ''}" placeholder="none"></label>
+      <label>API cost limit, $ <input id="lim-apiusd" type="number" min="0" step="1" value="${lim.costLimit || ''}" placeholder="none"></label>
+      <label>API token limit <input id="lim-apitok" type="number" min="0" step="1000" value="${lim.tokenLimit || ''}" placeholder="none"></label>
+      <label>Warn at, % <input id="lim-warnpct" type="number" min="1" max="100" step="1" value="${lim.warnPct || 80}"></label>
+      <button id="lim-save">Save limits</button>
+    </form></div>`;
+  $('#lim-save').onclick = act(async (ev) => { ev.preventDefault();
+    await call('saveSettings', { usageLimits: { fiveHourLimit: +$('#lim-5h').value || 0, weeklyLimit: +$('#lim-7d').value || 0, costLimit: +$('#lim-apiusd').value || 0, tokenLimit: +$('#lim-apitok').value || 0, warnPct: +$('#lim-warnpct').value || 80 } });
+    refresh();
+  });
 }
 $('#us-agent').onchange = renderUsage; $('#us-billing').onchange = renderUsage;
 const download = (name, text, type) => { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], { type })); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000); };
