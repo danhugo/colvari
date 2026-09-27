@@ -128,6 +128,16 @@ Logic lives in `src/controls.js`, wired into the store, board tools, orchestrato
 
 `npm run gui-e2e` also covers these: it sets a dependency and sends a message through the UI, approves a task, saves budget and approval settings, and uses the shortcuts, and asserts each result (screenshots `5-deps`, `6-approval`, `7-settings`, `8-shortcuts`).
 
+## Self-update and restart
+
+The app can keep itself current: when a new commit lands on the project repo's base branch (`main`), an update watcher in the main process (`src/self-update.js`, polling every 60 s on both local HEAD and origin) restarts the app on the new code and resumes the team — no more hand-killing the app after every merge. The flow is: **pause the scheduler** (no new dispatch) → **drain** (wait for running agents to finish; they are never interrupted mid-edit, so in-progress tasks and worktrees are always safe, and there is a visible "waiting on N agents" state) → **fast-forward** the checkout with `git merge --ff-only` (refused if the main checkout is dirty) → **run `npm test` and build in a temp worktree** at the new sha so a bad checkout never touches the live tree → only on pass, write the **restart state** (`{wasRunning, reason, fromSha, toSha, ts}` plus a boot-attempt counter) and `app.relaunch()` + exit.
+
+Guards keep this from restart-looping: at least 10 minutes since the last restart and a cap per hour (excess merges just wait for the next poll); a failed test **or** build means **no restart** (the reason is logged and the scheduler resumes on the old code); on boot the restart state is consumed exactly once and the Run auto-resumes if it was running, with an activity-feed entry saying why. If the new code fails to reach "ready" twice, the app rolls back to `fromSha` and disables auto-restart with a visible banner. The user controls it with the Settings toggle **Auto-restart on new merged code** (off by default), and sees when/why it last restarted plus the restart history in Settings.
+
+The PM can also trigger the same guarded flow after a merge with the board MCP tool **`request_self_update`** (registered in `src/mcp-server.js` for PM-role nodes only). It honors the Settings toggle and all the guards above, and the outcome is logged to the activity feed.
+
+Tests: `node --test test/self-update.test.js` drives the real flow against a temp git repo with injected test/build/relaunch fakes (no real-model runs): new commit → drain → pass → restart-state written → resume on boot; test failure → no restart; busy agents block the restart without being interrupted; dirty checkout is refused.
+
 ## Parallel work and idle detection
 
 Agents run in parallel: each agent with an `in_progress` task (or a live run) is **busy**, everyone else is **idle**. The Team and Board tabs show a banner such as **"2 agents idle: Bo, Cy"** with an *Assign work* button that jumps to the new-task form with the first idle agent preselected. Presence is shape-based: a spinning arc = busy, a hollow ring = idle.
