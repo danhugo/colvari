@@ -57,7 +57,7 @@ function pfDetail(n) {
 async function refresh() {
   P = await call('listProjects');
   if (!P.projects.some((p) => p.id === ctx.p)) ctx = { p: P.projects[0].id };
-  S = await call('getAll'); S.inbox = await call('listInbox'); ctx.t = S.teamId; await loadRuns(); await loadLogs(ctx.p);
+  S = await call('getAll'); S.inbox = await call('listInbox'); try { S.nstat = await call('nodeStatus'); S.cross = await call('crossEdges'); } catch { S.nstat = {}; S.cross = []; } ctx.t = S.teamId; await loadRuns(); await loadLogs(ctx.p);
   try { localStorage.setItem('ctx', JSON.stringify(ctx)); } catch {}
   renderAll();
 }
@@ -146,64 +146,215 @@ $('#run').onclick = async () => {
 };
 $('#stop').onclick = async () => { await call('stop'); refresh(); };
 
-// ---------- team graph ----------
-const W = 150, H = 54, SVGNS = 'http://www.w3.org/2000/svg';
+// ---------- team graph (design-tool editor: pan/zoom, drag-to-connect, minimap, auto-layout, context menu) ----------
+const W = 184, H = 66, SVGNS = 'http://www.w3.org/2000/svg';
 function el(tag, attrs, parent) { const e = document.createElementNS(SVGNS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); parent && parent.appendChild(e); return e; }
+let VP = { x: 20, y: 20, zoom: 1 }, vpTeam = null, vpSave = null, lastEdgeType = 'assign', linkDrag = null;
+const agentColor = (id) => { let h = 0; for (const c of String(id)) h = (h * 31 + c.charCodeAt(0)) >>> 0; return (h % 8) + 1; };
+const initials = (s) => String(s || '?').split(/\s+/).map((w) => w[0]).join('').slice(0, 2).toUpperCase();
+const nodeLive = (n) => ((S.nstat || {})[n.id] || {}).status || ((S.orch.agents[n.id] || {}).status === 'working' ? 'working' : 'idle');
+const applyVP = () => { const v = $('#graph > g.viewport'); if (v) v.setAttribute('transform', `translate(${VP.x},${VP.y}) scale(${VP.zoom})`); renderMinimap(); $('#zoomlvl') && ($('#zoomlvl').textContent = Math.round(VP.zoom * 100) + '%'); };
+const saveVP = () => { clearTimeout(vpSave); vpSave = setTimeout(() => call('setViewport', VP).catch(() => {}), 400); };
+const toWorld = (cx, cy) => { const r = $('#graph').getBoundingClientRect(); return [(cx - r.left - VP.x) / VP.zoom, (cy - r.top - VP.y) / VP.zoom]; };
+function zoomAt(f, cx, cy) {
+  const r = $('#graph').getBoundingClientRect(); cx ??= r.left + r.width / 2; cy ??= r.top + r.height / 2;
+  const z = Math.min(2.5, Math.max(0.25, VP.zoom * f)); const [wx, wy] = toWorld(cx, cy);
+  VP = { zoom: z, x: cx - r.left - wx * z, y: cy - r.top - wy * z }; applyVP(); saveVP();
+}
+function graphBox(nodes) {
+  if (!nodes.length) return { x: 0, y: 0, w: 400, h: 300 };
+  const xs = nodes.map((n) => n.x), ys = nodes.map((n) => n.y); const x = Math.min(...xs), y = Math.min(...ys);
+  return { x, y, w: Math.max(...xs) + W - x, h: Math.max(...ys) + H - y };
+}
+function fitView() {
+  const r = $('#graph').getBoundingClientRect(); const b = graphBox(allGraphNodes()); const pad = 48;
+  const z = Math.min(1.5, Math.max(0.25, Math.min((r.width - pad * 2) / b.w, (r.height - pad * 2) / b.h)));
+  VP = { zoom: z, x: (r.width - b.w * z) / 2 - b.x * z, y: (r.height - b.h * z) / 2 - b.y * z }; applyVP(); saveVP();
+}
+// Nodes from other teams linked by cross-team edges, shown as dashed ghosts beside the graph.
+function ghostNodes() {
+  const mine = new Set(S.team.nodes.map((n) => n.id)); const b = graphBox(S.team.nodes); const out = new Map();
+  for (const e of S.team.edges) if (!mine.has(e.to) && !out.has(e.to)) out.set(e.to, { id: e.to, side: 1 });
+  for (const e of S.cross || []) if (!mine.has(e.from) && !out.has(e.from)) out.set(e.from, { id: e.from, side: -1 });
+  let r = 0, l = 0;
+  return [...out.values()].map((g) => ({ ...g, ghost: true, name: nodeName(g.id), role: 'other team', x: g.side > 0 ? b.x + b.w + 120 : b.x - W - 120, y: b.y + (g.side > 0 ? r++ : l++) * (H + 40) }));
+}
+const allGraphNodes = () => [...S.team.nodes, ...ghostNodes()];
+function edgeGeom(a, b, off) { // cubic curve between node borders, shifted sideways by `off` for parallel edges
+  const ax = a.x + W / 2, ay = a.y + H / 2, bx = b.x + W / 2, by = b.y + H / 2, dx = bx - ax, dy = by - ay, len = Math.hypot(dx, dy) || 1;
+  const nx = -dy / len, ny = dx / len; const horiz = Math.abs(dx) * H > Math.abs(dy) * W;
+  const p1 = horiz ? [ax + Math.sign(dx) * W / 2, ay + off * 0.6] : [ax + off * 0.6, ay + Math.sign(dy) * H / 2];
+  const p2 = horiz ? [bx - Math.sign(dx) * W / 2, by + off * 0.6] : [bx + off * 0.6, by - Math.sign(dy) * H / 2];
+  const k = Math.max(40, (horiz ? Math.abs(p2[0] - p1[0]) : Math.abs(p2[1] - p1[1])) / 2);
+  const c1 = horiz ? [p1[0] + Math.sign(dx) * k + nx * off, p1[1] + ny * off] : [p1[0] + nx * off, p1[1] + Math.sign(dy) * k + ny * off];
+  const c2 = horiz ? [p2[0] - Math.sign(dx) * k + nx * off, p2[1] + ny * off] : [p2[0] + nx * off, p2[1] - Math.sign(dy) * k + ny * off];
+  const mid = [0.125 * p1[0] + 0.375 * c1[0] + 0.375 * c2[0] + 0.125 * p2[0], 0.125 * p1[1] + 0.375 * c1[1] + 0.375 * c2[1] + 0.125 * p2[1]];
+  return { d: `M${p1[0]},${p1[1]} C${c1[0]},${c1[1]} ${c2[0]},${c2[1]} ${p2[0]},${p2[1]}`, mid, n: [nx, ny] };
+}
+const overlaps = (r, q) => r.x < q.x + q.w && q.x < r.x + r.w && r.y < q.y + q.h && q.y < r.y + r.h;
 function renderGraph() {
   const svg = $('#graph'); svg.innerHTML = '';
-  const defs = el('defs', {}, svg); const m = el('marker', { id: 'arr', viewBox: '0 0 10 10', refX: 10, refY: 5, markerWidth: 8, markerHeight: 8, orient: 'auto' }, defs);
-  el('path', { d: 'M0,0 L10,5 L0,10 z', fill: 'currentColor', style: 'color:gray' }, m);
-  const byId = Object.fromEntries(S.team.nodes.map((n) => [n.id, n]));
-  for (const e of S.team.edges) {
+  if (vpTeam !== ctx.t) { vpTeam = ctx.t; VP = { x: 20, y: 20, zoom: 1 }; call('getViewport').then((v) => { if (v && v.zoom) { VP = v; applyVP(); } else if (S.team.nodes.length) fitView(); }).catch(() => {}); }
+  const defs = el('defs', {}, svg);
+  for (const t of ['assign', 'message', 'review', 'sel']) { const m = el('marker', { id: 'arr-' + t, viewBox: '0 0 10 10', refX: 9, refY: 5, markerWidth: 7, markerHeight: 7, orient: 'auto-start-reverse' }, defs); el('path', { d: 'M0,1 L9,5 L0,9 z', class: 'arrow arrow-' + t }, m); }
+  const vp = el('g', { class: 'viewport' }, svg); const eL = el('g', { class: 'edges' }, vp), lL = el('g', { class: 'labels' }, vp), nL = el('g', { class: 'nodes' }, vp);
+  const nodes = allGraphNodes(); const byId = Object.fromEntries(nodes.map((n) => [n.id, n]));
+  const edges = [...S.team.edges, ...(S.cross || []).filter((e) => !S.team.edges.some((x) => x.id === e.id))];
+  const pairN = {}, pairI = {}; const pk = (e) => [e.from, e.to].sort().join('|'); edges.forEach((e) => { pairN[pk(e)] = (pairN[pk(e)] || 0) + 1; });
+  const blocks = nodes.map((n) => ({ x: n.x - 4, y: n.y - 4, w: W + 8, h: H + 8 })); const pills = [];
+  for (const e of edges) {
     const a = byId[e.from], b = byId[e.to]; if (!a || !b) continue;
-    const [x1, y1, x2, y2] = clip(a, b);
-    const type = e.type || 'assign';
-    const p = el('line', { x1, y1, x2, y2, class: `edge edge-${type}` + (sel.edge === e.id ? ' sel' : ''), 'marker-end': 'url(#arr)', 'data-id': e.id }, svg);
-    if (type !== 'assign') el('text', { x: (x1 + x2) / 2 + 4, y: (y1 + y2) / 2 - 4, class: 'edgelabel', 'font-size': 10 }, svg).textContent = type;
-    p.onclick = (ev) => { ev.stopPropagation(); sel = { ...sel, edge: e.id, node: null }; renderGraph(); renderNodeForm(); };
+    const key = pk(e); const i = (pairI[key] = (pairI[key] ?? -1) + 1); const cnt = pairN[key];
+    const sign = e.from < e.to ? 1 : -1; const off = (i - (cnt - 1) / 2) * 22 * sign;
+    const type = e.type || 'assign'; const cross = !!(e.crossTeam || a.ghost || b.ghost); const g = edgeGeom(a, b, off);
+    const isSel = sel.edge === e.id;
+    const hit = el('path', { d: g.d, class: 'edgehit' }, eL);
+    el('path', { d: g.d, class: `edge edge-${type}` + (cross ? ' cross' : '') + (isSel ? ' sel' : ''), 'marker-end': `url(#arr-${isSel ? 'sel' : type})`, 'data-id': e.id }, eL);
+    // label pill at the curve midpoint, nudged along the normal until it clears nodes and other pills
+    const label = type + (cross ? ' · cross-team' : ''); const pw = 10 + label.length * 5.8, ph = 16;
+    let [px, py] = g.mid; for (let s = 0, r = { x: px - pw / 2, y: py - ph / 2, w: pw, h: ph }; s < 12 && [...blocks, ...pills].some((q) => overlaps(r, q)); s++) { const d = (s % 2 ? -1 : 1) * Math.ceil((s + 1) / 2) * 12; px = g.mid[0] + g.n[0] * d; py = g.mid[1] + g.n[1] * d; r = { x: px - pw / 2, y: py - ph / 2, w: pw, h: ph }; }
+    pills.push({ x: px - pw / 2, y: py - ph / 2, w: pw, h: ph });
+    const pg = el('g', { class: `epill epill-${type}` + (isSel ? ' sel' : ''), transform: `translate(${px - pw / 2},${py - ph / 2})` }, lL);
+    el('rect', { width: pw, height: ph, rx: ph / 2 }, pg); el('text', { x: pw / 2, y: 11.5, 'text-anchor': 'middle' }, pg).textContent = label;
+    const pick = (ev) => { ev.stopPropagation(); hideMenus(); sel = { ...sel, edge: e.id, node: null }; renderGraph(); renderNodeForm(); };
+    hit.onclick = pick; pg.onclick = pick; hit.oncontextmenu = pg.oncontextmenu = (ev) => { pick(ev); ev.preventDefault(); edgeMenu(ev, e); };
   }
-  for (const n of S.team.nodes) {
-    const st = (S.orch.agents[n.id] || {}).status;
-    const g = el('g', { class: 'node' + (sel.node === n.id || connectFrom === n.id ? ' sel' : '') + (st === 'working' ? ' working' : ''), transform: `translate(${n.x},${n.y})`, style: 'cursor:move' }, svg);
-    el('rect', { width: W, height: H, rx: 8 }, g);
-    const nameEl = el('text', { x: 10, y: 24, 'font-weight': 600 }, g); nameEl.textContent = clipText(n.name, 20); el('title', {}, g).textContent = `${n.name} (${n.role})`;
-    el('text', { x: 10, y: 42, 'font-size': 11, opacity: 0.7 }, g).textContent = clipText(`${n.role}${st === 'working' ? ' · working' : ''}`, 24);
-    const pg = el('g', { class: 'pres ' + presence(n.id), transform: `translate(${W - 14},${H - 14})` }, g); el('circle', { r: 5 }, pg); el('title', {}, pg).textContent = presence(n.id);
-    // Preflight badge sits on the node's top border (a tag), so it never covers the name.
+  for (const n of nodes) {
+    if (n.ghost) { const g = el('g', { class: 'ghost', transform: `translate(${n.x},${n.y})` }, nL); el('rect', { width: W, height: H, rx: 12 }, g); el('text', { x: 14, y: 28, class: 'nname' }, g).textContent = clipText(n.name, 22); el('text', { x: 14, y: 46, class: 'nrole' }, g).textContent = 'in another team'; continue; }
+    const live = nodeLive(n); const ns = (S.nstat || {})[n.id] || {}; const c = agentColor(n.id);
+    const g = el('g', { class: 'node' + (sel.node === n.id || connectFrom === n.id ? ' sel' : '') + ' st-' + live + (live === 'working' ? ' working' : ''), transform: `translate(${n.x},${n.y})`, 'data-id': n.id }, nL);
+    el('rect', { class: 'card', width: W, height: H, rx: 12 }, g);
+    el('rect', { class: 'stripe', width: 4, height: H - 20, x: 0, y: 10, rx: 2, style: `fill:var(--agent-${c})` }, g);
+    el('circle', { class: 'avatar', cx: 30, cy: 26, r: 14, style: `fill:var(--agent-${c})` }, g);
+    el('text', { x: 30, y: 30.5, class: 'avtext', 'text-anchor': 'middle' }, g).textContent = initials(n.name);
+    el('text', { x: 52, y: 23, class: 'nname' }, g).textContent = clipText(n.name, 16);
+    el('text', { x: 52, y: 38, class: 'nrole' }, g).textContent = clipText(n.role, 20);
+    let cx = 12; for (const chip of [ns.runtime || n.runtime || 'claude', ns.model || n.model].filter(Boolean)) { const t = clipText(chip, 14); const w = 10 + t.length * 5.6; const cg = el('g', { class: 'chip', transform: `translate(${cx},46)` }, g); el('rect', { width: w, height: 14, rx: 7 }, cg); el('text', { x: w / 2, y: 10.5, 'text-anchor': 'middle' }, cg).textContent = t; cx += w + 4; }
+    const sg = el('g', { class: 'status s-' + live, transform: `translate(${W - 16},16)` }, g); el('circle', { r: 5 }, sg); el('title', {}, sg).textContent = live;
+    const pres = el('g', { class: 'pres ' + presence(n.id), transform: `translate(${W - 16},16)` }, g); el('circle', { r: 8 }, pres);
     const pf = pfState(n); const bw = 8 + PF_LABEL[pf].length * 6;
-    const badge = el('g', { class: 'pfbadge pf-' + pf, transform: `translate(${W - bw - 8},-8)` }, g);
+    const badge = el('g', { class: 'pfbadge pf-' + pf, transform: `translate(${W - bw - 30},-8)` }, g);
     el('title', {}, badge).textContent = pf === 'fail' && n.preflight ? 'Preflight failed: ' + n.preflight.error : 'Preflight: ' + PF_LABEL[pf];
     el('rect', { width: bw, height: 15, rx: 7 }, badge); el('text', { x: bw / 2, y: 11, 'font-size': 9, 'text-anchor': 'middle' }, badge).textContent = PF_LABEL[pf];
-    g.onmousedown = (ev) => startDrag(ev, n, g);
+    el('title', {}, g).textContent = `${n.name} (${n.role}) — ${live}`;
+    // hover quick actions
+    const qa = el('g', { class: 'qacts', transform: `translate(${W - 104},-30)` }, g);
+    [['✎', 'Edit', () => selectNode(n.id)], ['⧉', 'Duplicate', () => duplicateNode(n)], ['→', 'Connect from here', () => startConnect(n)], ['🗑', 'Delete', () => deleteNode(n)]].forEach(([ic, tip, fn], k) => {
+      const b = el('g', { class: 'qa', transform: `translate(${k * 26},0)` }, qa); el('rect', { width: 24, height: 22, rx: 6 }, b); el('text', { x: 12, y: 15.5, 'text-anchor': 'middle' }, b).textContent = ic; el('title', {}, b).textContent = tip;
+      b.onmousedown = (ev) => ev.stopPropagation(); b.onclick = (ev) => { ev.stopPropagation(); fn(); };
+    });
+    const h = el('circle', { class: 'handle', cx: W, cy: H / 2, r: 6 }, g); el('title', {}, h).textContent = 'Drag to connect';
+    h.onmousedown = (ev) => startLink(ev, n);
+    g.onmousedown = (ev) => { if (ev.button === 0) startDrag(ev, n, g); else if (ev.button === 2) { ev.stopPropagation(); selectNode(n.id); nodeMenu(ev, n); } };
+    g.oncontextmenu = (ev) => { ev.preventDefault(); ev.stopPropagation(); if ($('#ctxmenu').classList.contains('hidden')) { selectNode(n.id); nodeMenu(ev, n); } };
   }
-  svg.onclick = () => { sel = { ...sel, node: null, edge: null }; renderGraph(); renderNodeForm(); };
+  applyVP();
+  svg.onmousedown = (ev) => { if (ev.button === 0) startPan(ev); };
+  svg.oncontextmenu = (ev) => { ev.preventDefault(); canvasMenu(ev); };
+  svg.onwheel = (ev) => { ev.preventDefault(); if (ev.ctrlKey || ev.metaKey || Math.abs(ev.deltaY) > 40 && !ev.deltaX) zoomAt(Math.exp(-ev.deltaY * (ev.ctrlKey ? 0.01 : 0.002)), ev.clientX, ev.clientY); else { VP.x -= ev.deltaX; VP.y -= ev.deltaY; applyVP(); saveVP(); } };
+}
+function renderMinimap() {
+  const mm = $('#minimap'); if (!mm) return; mm.innerHTML = ''; const nodes = allGraphNodes(); const r = $('#graph').getBoundingClientRect(); if (!r.width) return;
+  const view = { x: -VP.x / VP.zoom, y: -VP.y / VP.zoom, w: r.width / VP.zoom, h: r.height / VP.zoom }; const b = graphBox(nodes);
+  const x0 = Math.min(b.x, view.x) - 20, y0 = Math.min(b.y, view.y) - 20, x1 = Math.max(b.x + b.w, view.x + view.w) + 20, y1 = Math.max(b.y + b.h, view.y + view.h) + 20;
+  mm.setAttribute('viewBox', `${x0} ${y0} ${x1 - x0} ${y1 - y0}`);
+  for (const n of nodes) el('rect', { x: n.x, y: n.y, width: W, height: H, rx: 12, class: n.ghost ? 'mghost' : 'mnode', style: n.ghost ? '' : `fill:var(--agent-${agentColor(n.id)})` }, mm);
+  el('rect', { ...view, width: view.w, height: view.h, class: 'mview' }, mm);
+  mm.onmousedown = (ev) => { const go = (e) => { const mr = mm.getBoundingClientRect(); const s = Math.max((x1 - x0) / mr.width, (y1 - y0) / mr.height); const wx = x0 + (e.clientX - mr.left - (mr.width - (x1 - x0) / s) / 2) * s, wy = y0 + (e.clientY - mr.top - (mr.height - (y1 - y0) / s) / 2) * s; VP.x = r.width / 2 - wx * VP.zoom; VP.y = r.height / 2 - wy * VP.zoom; const v = $('#graph > g.viewport'); v && v.setAttribute('transform', `translate(${VP.x},${VP.y}) scale(${VP.zoom})`); };
+    go(ev); const up = () => { window.removeEventListener('mousemove', go); window.removeEventListener('mouseup', up); applyVP(); saveVP(); }; window.addEventListener('mousemove', go); window.addEventListener('mouseup', up); };
+}
+function startPan(ev) {
+  hideMenus(); const sx = ev.clientX, sy = ev.clientY, ox = VP.x, oy = VP.y; let moved = false; $('#graph').classList.add('panning');
+  const mv = (e) => { moved = moved || Math.abs(e.clientX - sx) + Math.abs(e.clientY - sy) > 3; VP.x = ox + e.clientX - sx; VP.y = oy + e.clientY - sy; applyVP(); };
+  const up = () => { window.removeEventListener('mousemove', mv); window.removeEventListener('mouseup', up); $('#graph').classList.remove('panning');
+    if (moved) return saveVP(); if (sel.node || sel.edge) { sel = { ...sel, node: null, edge: null }; renderGraph(); renderNodeForm(); } };
+  window.addEventListener('mousemove', mv); window.addEventListener('mouseup', up);
 }
 const clipText = (s, max) => (String(s).length > max ? String(s).slice(0, max - 1) + '…' : String(s));
-function clip(a, b) { // line from centre of a to border of b
-  const ax = a.x + W / 2, ay = a.y + H / 2, bx = b.x + W / 2, by = b.y + H / 2, dx = bx - ax, dy = by - ay;
-  const t = Math.min(Math.abs((W / 2) / (dx || 1e-9)), Math.abs((H / 2) / (dy || 1e-9)));
+function clip(a, b) { // line from centre of a to border of b (Overview graph)
+  const w = W, h = H, ax = a.x + w / 2, ay = a.y + h / 2, bx = b.x + w / 2, by = b.y + h / 2, dx = bx - ax, dy = by - ay;
+  const t = Math.min(Math.abs((w / 2) / (dx || 1e-9)), Math.abs((h / 2) / (dy || 1e-9)));
   return [ax + dx * t, ay + dy * t, bx - dx * t, by - dy * t];
 }
+function selectNode(id) { hideMenus(); sel = { ...sel, node: id, edge: null }; renderGraph(); renderNodeForm(); }
+async function duplicateNode(n) { const { id, ...rest } = n; const c = await call('addNode', { ...rest, name: n.name + ' copy', x: n.x + 30, y: n.y + H + 30 }); sel.node = c.id; refresh(); }
+async function deleteNode(n) { if (!confirm(`Delete ${n.name}?`)) return; await call('removeNode', n.id); sel.node = null; refresh(); }
+function startConnect(n) { connectMode = true; connectFrom = n.id; $('#connect').classList.add('on'); $('#hint').textContent = `From ${n.name}: click the target node`; renderGraph(); }
+async function connect(from, to, type) { try { await call('addEdge', from, to, type); lastEdgeType = type; } catch (e) { alert(e.message); } refresh(); }
+// Drag from a node's handle; drop on another node opens the edge-type popover (default = last used).
+function startLink(ev, n) {
+  ev.stopPropagation(); ev.preventDefault(); hideMenus(); const vp = $('#graph > g.viewport');
+  const tmp = el('path', { class: 'edge linking' }, vp); const sx = n.x + W, sy = n.y + H / 2; $('#graph').classList.add('linking');
+  const mv = (e) => { const [x, y] = toWorld(e.clientX, e.clientY); const k = Math.max(40, Math.abs(x - sx) / 2); tmp.setAttribute('d', `M${sx},${sy} C${sx + k},${sy} ${x - k},${y} ${x},${y}`);
+    document.querySelectorAll('#graph .node.droptarget').forEach((d) => d.classList.remove('droptarget')); const t = e.target.closest && e.target.closest('#graph .node'); t && t.dataset.id !== n.id && t.classList.add('droptarget'); };
+  const up = (e) => { window.removeEventListener('mousemove', mv); window.removeEventListener('mouseup', up); tmp.remove(); $('#graph').classList.remove('linking');
+    const t = e.target.closest && e.target.closest('#graph .node'); document.querySelectorAll('#graph .node.droptarget').forEach((d) => d.classList.remove('droptarget'));
+    if (t && t.dataset.id !== n.id) edgePopover(e.clientX, e.clientY, n.id, t.dataset.id); };
+  window.addEventListener('mousemove', mv); window.addEventListener('mouseup', up);
+}
+function edgePopover(x, y, from, to) {
+  const types = S.config.edgeTypes.length ? S.config.edgeTypes : ['assign', 'message', 'review'];
+  showMenu(x, y, `<div class="mhead">${esc(nodeName(from))} → ${esc(nodeName(to))}</div>` + types.map((t) => `<button data-t="${t}" class="${t === lastEdgeType ? 'def' : ''}"><i class="sw sw-${t}"></i>${t}<small>${esc(EDGE_DESC[t] || '')}</small></button>`).join(''), 'edgepop');
+  document.querySelectorAll('#ctxmenu button').forEach((b) => b.onclick = () => { hideMenus(); connect(from, to, b.dataset.t); });
+  const d = $('#ctxmenu button.def') || $('#ctxmenu button'); d && d.focus();
+}
+function showMenu(x, y, html, cls = '') {
+  const m = $('#ctxmenu'); m.className = 'ctxmenu ' + cls; m.innerHTML = html; m.style.left = x + 'px'; m.style.top = y + 'px';
+  const r = m.getBoundingClientRect(); if (r.right > innerWidth - 8) m.style.left = (x - r.width) + 'px'; if (r.bottom > innerHeight - 8) m.style.top = (y - r.height) + 'px';
+}
+const hideMenus = () => { const m = $('#ctxmenu'); if (m) m.className = 'ctxmenu hidden'; };
+const menuItems = (items) => items.map((it, i) => it === '-' ? '<hr>' : `<button data-i="${i}" class="${it[2] || ''}">${it[0]}</button>`).join('');
+function bindMenu(items) { document.querySelectorAll('#ctxmenu button[data-i]').forEach((b) => b.onclick = act(async () => { hideMenus(); await items[b.dataset.i][1](); })); }
+function nodeMenu(ev, n) {
+  const items = [['Edit', () => selectNode(n.id)], ['Connect from here', () => startConnect(n)], ['Duplicate', () => duplicateNode(n)], ['Test agent', () => testAgents([n.id])], '-', ['Delete', () => deleteNode(n), 'danger']];
+  showMenu(ev.clientX, ev.clientY, `<div class="mhead">${esc(n.name)}</div>` + menuItems(items)); bindMenu(items);
+}
+function edgeMenu(ev, e) {
+  const items = [...S.config.edgeTypes.map((t) => [`Make ${t}`, async () => { await call('updateEdge', e.id, { type: t }); refresh(); }, (e.type || 'assign') === t ? 'def' : '']), '-', ['Delete edge', async () => { await call('removeEdge', e.id); sel.edge = null; refresh(); }, 'danger']];
+  showMenu(ev.clientX, ev.clientY, `<div class="mhead">${esc(nodeName(e.from))} → ${esc(nodeName(e.to))}</div>` + menuItems(items)); bindMenu(items);
+}
+function canvasMenu(ev) {
+  const [x, y] = toWorld(ev.clientX, ev.clientY);
+  const items = [['Add agent here', () => addAgentAt(x, y)], ['Auto-layout', autoLayout], ['Fit view', fitView], ['Reset zoom', () => zoomAt(1 / VP.zoom)]];
+  showMenu(ev.clientX, ev.clientY, menuItems(items)); bindMenu(items);
+}
+async function addAgentAt(x, y) { const k = S.team.nodes.length; const role = k === 0 ? 'PM' : 'Dev'; const n = await call('addNode', { name: `${role} ${k + 1}`, role, x: Math.round(x), y: Math.round(y) }); sel.node = n.id; refresh(); }
+// Layered (Sugiyama-lite) layout: longest-path layers over assign/review edges, barycentre ordering, centred rows.
+async function autoLayout() {
+  const ns = S.team.nodes; if (!ns.length) return; const ids = new Set(ns.map((n) => n.id));
+  const es = S.team.edges.filter((e) => ids.has(e.from) && ids.has(e.to) && e.from !== e.to && (e.type || 'assign') !== 'message');
+  const layer = Object.fromEntries(ns.map((n) => [n.id, 0]));
+  for (let it = 0; it < ns.length; it++) { let ch = false; for (const e of es) if (layer[e.to] < layer[e.from] + 1 && layer[e.from] + 1 < ns.length) { layer[e.to] = layer[e.from] + 1; ch = true; } if (!ch) break; }
+  const layers = []; ns.forEach((n) => (layers[layer[n.id]] ||= []).push(n.id)); const rows = []; layers.filter(Boolean).forEach((l) => { for (let i = 0; i < l.length; i += 4) rows.push(l.slice(i, i + 4)); });
+  const pos = {}; const maxW = Math.max(...rows.filter(Boolean).map((r) => r.length)); const GX = W + 60, GY = H + 80;
+  rows.filter(Boolean).forEach((row, li) => {
+    if (li) { const bc = (id) => { const p = es.filter((e) => e.to === id && pos[e.from]).map((e) => pos[e.from].x); return p.length ? p.reduce((a, b) => a + b, 0) / p.length : Infinity; }; row.sort((a, b) => bc(a) - bc(b)); }
+    const x0 = 40 + (maxW - row.length) * GX / 2; row.forEach((id, i) => { pos[id] = { x: Math.round(x0 + i * GX), y: 40 + li * GY }; });
+  });
+  await call('setPositions', pos); await refresh(); fitView();
+}
 function startDrag(ev, n, g) {
-  ev.stopPropagation(); const sx = ev.clientX, sy = ev.clientY, ox = n.x, oy = n.y; let moved = false;
-  const mv = (e) => { moved = true; n.x = Math.max(0, ox + e.clientX - sx); n.y = Math.max(10, oy + e.clientY - sy); g.setAttribute('transform', `translate(${n.x},${n.y})`); };
+  ev.stopPropagation(); hideMenus(); const sx = ev.clientX, sy = ev.clientY, ox = n.x, oy = n.y; let moved = false;
+  const mv = (e) => { moved = moved || Math.abs(e.clientX - sx) + Math.abs(e.clientY - sy) > 2; if (!moved) return; n.x = Math.round(ox + (e.clientX - sx) / VP.zoom); n.y = Math.round(oy + (e.clientY - sy) / VP.zoom); g.setAttribute('transform', `translate(${n.x},${n.y})`); };
   const up = async () => {
     window.removeEventListener('mousemove', mv); window.removeEventListener('mouseup', up);
     if (moved) { await call('updateNode', n.id, { x: n.x, y: n.y }); renderGraph(); return; }
     if (connectMode) {
       if (!connectFrom) { connectFrom = n.id; $('#hint').textContent = `From ${n.name}: now click the target node`; }
-      else { try { await call('addEdge', connectFrom, n.id, $('#edgetype').value); } catch (e) { alert(e.message); } connectFrom = null; connectMode = false; $('#connect').classList.remove('on'); $('#hint').textContent = 'Edge added.'; return refresh(); }
+      else { const from = connectFrom; connectFrom = null; connectMode = false; $('#connect').classList.remove('on'); $('#hint').textContent = ''; return connect(from, n.id, $('#edgetype').value); }
     } else sel = { ...sel, node: n.id, edge: null };
     renderGraph(); renderNodeForm();
   };
   window.addEventListener('mousemove', mv); window.addEventListener('mouseup', up);
 }
 $('#addnode').onclick = async () => {
-  const k = S.team.nodes.length; const role = k === 0 ? 'PM' : 'Dev';
-  const n = await call('addNode', { name: `${role} ${k + 1}`, role, x: 60 + (k % 4) * 200, y: 60 + Math.floor(k / 4) * 120 });
-  sel.node = n.id; refresh();
+  const r = $('#graph').getBoundingClientRect(); const [x, y] = toWorld(r.left + r.width / 2 - W / 2, r.top + r.height / 2 - H / 2); addAgentAt(x + (S.team.nodes.length % 3) * 20, y);
 };
-$('#connect').onclick = () => { connectMode = !connectMode; connectFrom = null; $('#connect').classList.toggle('on', connectMode); $('#hint').textContent = connectMode ? 'Click the source node, then the target node' : ''; renderGraph(); };
+$('#connect').onclick = () => { connectMode = !connectMode; connectFrom = null; $('#connect').classList.toggle('on', connectMode); $('#hint').textContent = connectMode ? 'Click the source node, then the target — or drag from a node\'s right handle' : ''; renderGraph(); };
+$('#zoomin').onclick = () => zoomAt(1.2); $('#zoomout').onclick = () => zoomAt(1 / 1.2); $('#fit').onclick = fitView; $('#autolayout').onclick = act(autoLayout);
+document.addEventListener('mousedown', (e) => { if (e.button !== 2 && !e.target.closest('#ctxmenu')) hideMenus(); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') hideMenus(); });
+window.addEventListener('resize', () => renderMinimap());
 $('#testteam').onclick = () => testAgents(S.team.nodes.map((n) => n.id));
 $('#delsel').onclick = async () => {
   if (sel.edge) await call('removeEdge', sel.edge);

@@ -10,9 +10,6 @@ main { flex:1; overflow:hidden; } .tab { display:none; height:100%; padding:10px
 .split { display:flex; gap:10px; flex:1; min-height:0; } .panel { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:10px; width:340px; overflow:auto; }
 .panel.narrow { width:220px; } .panel.grow { flex:1; width:auto; display:flex; flex-direction:column; gap:8px; }
 .panel label { display:block; margin:8px 0 2px; color:var(--muted); } .panel input, .panel select, .panel textarea { width:100%; }
-#graph { flex:1; background:var(--card); border:1px solid var(--line); border-radius:8px; }
-#graph .node rect { fill:var(--bg); stroke:var(--line); stroke-width:1.5; } #graph .node.sel rect { stroke:var(--acc); stroke-width:3; }
-#graph .node.working rect { stroke:var(--ok); stroke-width:3; } #graph text { fill:var(--fg); pointer-events:none; } #graph .edge { stroke:var(--muted); stroke-width:2; fill:none; cursor:pointer; } #graph .edge.sel { stroke:var(--acc); stroke-width:3; }
 #columns { flex:1; display:grid; grid-template-columns:repeat(4,1fr); gap:8px; overflow:auto; } .col { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:8px; }
 .col h3 { margin:0 0 8px; font-size:12px; text-transform:uppercase; color:var(--muted); } .card { border:1px solid var(--line); border-radius:6px; padding:7px; margin-bottom:6px; cursor:pointer; background:var(--bg); } .card.sel { border-color:var(--acc); }
 .card small { color:var(--muted); display:block; } .comment { border-left:3px solid var(--line); padding:2px 8px; margin:6px 0; white-space:pre-wrap; }
@@ -26,7 +23,6 @@ table { border-collapse:collapse; background:var(--card); } td, th { border:1px 
 #sidebar h4 { margin:6px 0 0; font-size:11px; text-transform:uppercase; color:var(--muted); } #sidebar .toolbar button { padding:3px 7px; font-size:12px; }
 #projectlist div, #teamlist div { padding:5px 7px; border-radius:5px; cursor:pointer; } #projectlist div.sel, #teamlist div.sel { background:var(--bg); color:var(--acc); font-weight:600; }
 .dot { display:inline-block; width:7px; height:7px; border-radius:50%; background:var(--ok); margin-left:6px; }
-#graph .edge-message { stroke-dasharray:6 4; } #graph .edge-review { stroke:var(--warning); stroke-dasharray:2 3; } #graph .edgelabel { fill:var(--muted); font-size:10px; }
 .panel .checks label { display:inline-flex; gap:4px; align-items:center; margin:2px 10px 2px 0; color:var(--fg); } .panel .checks input { width:auto; }
 .panel details summary { cursor:pointer; margin-top:10px; font-weight:600; } #presettable { width:100%; margin:6px 0; } #presettable td, #presettable th { text-align:left; padding:2px 6px; }
 #msglist { max-height:200px; overflow:auto; }
@@ -193,3 +189,46 @@ header .pill { border:none; background:none; color:var(--fg-muted); font-size:va
 #graph .pres circle { fill:none; stroke-width:2; stroke:var(--fg-muted); } #graph .pres.busy circle { transform-box:fill-box; transform-origin:center; stroke:var(--success); stroke-dasharray:22 10; animation:spin 1s linear infinite; }
 .idlebanner { display:flex; align-items:center; gap:8px; padding:6px 10px; margin:0 0 8px; border:1px solid var(--border); border-left:3px solid var(--warning); border-radius:var(--radius-sm); background:var(--bg-raised); }
 .presence { display:flex; flex-wrap:wrap; gap:6px; margin:0 0 8px; } .pchip { display:inline-flex; align-items:center; gap:5px; padding:2px 8px; border:1px solid var(--border); border-radius:var(--radius-full); font-size:12px; }
+/* ---- Team graph editor ---- */
+.gtoolbar { gap:var(--space-2); } .gtoolbar .tgroup { display:flex; gap:2px; padding:2px; background:var(--bg-surface); border:1px solid var(--border); border-radius:var(--radius-sm); }
+.gtoolbar .tgroup > * { border:none; background:none; } .gtoolbar .tgroup > button.primary { background:var(--accent); } .gtoolbar .tgroup > button:hover:not(.primary) { background:var(--bg-hover); }
+.gtoolbar button.icon { min-width:30px; } .gtoolbar #hint { font-size:var(--text-xs); margin-left:auto; }
+.canvas { position:relative; flex:1; min-width:0; display:flex; }
+#graph { flex:1; cursor:grab; user-select:none; border:1px solid var(--border); border-radius:var(--radius-md); box-shadow:var(--shadow-sm);
+  background-color:var(--bg-surface); background-image:radial-gradient(circle, var(--border-strong) 1px, transparent 1.2px); background-size:22px 22px; }
+#graph.panning { cursor:grabbing; } #graph.linking, #graph.linking * { cursor:crosshair !important; }
+#graph text { fill:var(--fg-primary); pointer-events:none; font-family:var(--font-sans); }
+#graph .node { cursor:move; } #graph .node .card { fill:var(--bg-raised); stroke:var(--border-strong); stroke-width:1; filter:drop-shadow(0 1px 2px rgba(16,20,40,.10)); transition:stroke var(--dur-fast); }
+#graph .node:hover .card { stroke:var(--accent); } #graph .node.sel .card { stroke:var(--accent); stroke-width:2.5; }
+#graph .node.droptarget .card { stroke:var(--accent); stroke-width:3; stroke-dasharray:5 3; }
+#graph .node.st-working .card { stroke:var(--success); stroke-width:2; } #graph .node.st-needs-human .card { stroke:var(--warning-strong); stroke-width:2; }
+#graph .avtext { fill:#fff; font-size:11px; font-weight:var(--fw-bold); } #graph .nname { font-size:13px; font-weight:var(--fw-semibold); } #graph .nrole { font-size:11px; fill:var(--fg-muted); }
+#graph .chip rect { fill:var(--bg-code); stroke:var(--border); } #graph .chip text { font-size:9.5px; fill:var(--fg-secondary); font-family:var(--font-mono); }
+#graph .status circle { fill:var(--fg-muted); } #graph .status.s-working circle { fill:var(--success); } #graph .status.s-needs-human circle { fill:var(--warning-strong); }
+#graph .handle { fill:var(--bg-raised); stroke:var(--accent); stroke-width:2; opacity:0; cursor:crosshair; transition:opacity var(--dur-fast), r var(--dur-fast); }
+#graph .node:hover .handle, #graph .node.sel .handle { opacity:1; } #graph .handle:hover { r:8; fill:var(--accent); }
+#graph .qacts { opacity:0; pointer-events:none; transition:opacity var(--dur-fast); } #graph .node:hover .qacts { opacity:1; pointer-events:all; }
+#graph .qa { cursor:pointer; } #graph .qa rect { fill:var(--bg-raised); stroke:var(--border-strong); } #graph .qa:hover rect { fill:var(--accent-soft); stroke:var(--accent); } #graph .qa text { font-size:12px; }
+#graph .ghost rect { fill:none; stroke:var(--border-strong); stroke-width:1.5; stroke-dasharray:6 4; } #graph .ghost text { fill:var(--fg-muted); }
+#graph .edge { fill:none; stroke:var(--fg-muted); stroke-width:1.75; pointer-events:none; } #graph .edgehit { fill:none; stroke:transparent; stroke-width:14; cursor:pointer; }
+#graph .edge-assign { stroke:var(--accent); } #graph .edge-message { stroke:var(--info); } #graph .edge-review { stroke:var(--warning-strong); }
+#graph .edge.cross { stroke-dasharray:7 5; } #graph .edge.sel { stroke:var(--fg-primary); stroke-width:3; } #graph .edge.linking { stroke:var(--accent); stroke-dasharray:4 4; }
+#graph .arrow-assign { fill:var(--accent); } #graph .arrow-message { fill:var(--info); } #graph .arrow-review { fill:var(--warning-strong); } #graph .arrow-sel { fill:var(--fg-primary); }
+#graph .epill { cursor:pointer; } #graph .epill rect { fill:var(--bg-raised); stroke:var(--border-strong); } #graph .epill text { font-size:10px; fill:var(--fg-secondary); font-weight:var(--fw-medium); }
+#graph .epill-assign rect { stroke:var(--accent); } #graph .epill-message rect { stroke:var(--info); } #graph .epill-review rect { stroke:var(--warning-strong); } #graph .epill.sel rect { fill:var(--accent-soft); stroke-width:2; }
+.gcontrols { position:absolute; left:12px; bottom:12px; display:flex; align-items:center; gap:2px; padding:3px; background:var(--bg-raised); border:1px solid var(--border); border-radius:var(--radius-sm); box-shadow:var(--shadow-md); }
+.gcontrols button { border:none; background:none; min-width:28px; padding:4px 6px; } .gcontrols button:hover { background:var(--bg-hover); }
+.gcontrols #zoomlvl { font-size:var(--text-xs); color:var(--fg-muted); min-width:38px; text-align:center; font-variant-numeric:tabular-nums; } .gsep { width:1px; height:18px; background:var(--border); margin:0 3px; }
+#minimap { position:absolute; right:12px; bottom:12px; width:170px; height:110px; background:var(--bg-raised); border:1px solid var(--border); border-radius:var(--radius-sm); box-shadow:var(--shadow-md); cursor:pointer; }
+#minimap .mnode { opacity:.75; } #minimap .mghost { fill:none; stroke:var(--fg-muted); stroke-width:4; stroke-dasharray:12 8; } #minimap .mview { fill:color-mix(in srgb, var(--accent) 10%, transparent); stroke:var(--accent); stroke-width:6; }
+.glegend { position:absolute; left:12px; top:10px; display:flex; gap:10px; font-size:var(--text-xs); color:var(--fg-muted); background:color-mix(in srgb, var(--bg-surface) 85%, transparent); padding:3px 8px; border-radius:var(--radius-full); }
+.sw { display:inline-block; width:16px; height:0; border-top:2px solid var(--fg-muted); vertical-align:middle; margin-right:5px; }
+.sw-assign { border-color:var(--accent); } .sw-message { border-color:var(--info); } .sw-review { border-color:var(--warning-strong); } .sw-cross { border-top-style:dashed; }
+.ctxmenu { position:fixed; z-index:50; min-width:180px; padding:4px; background:var(--bg-raised); border:1px solid var(--border-strong); border-radius:var(--radius-sm); box-shadow:var(--shadow-lg); display:flex; flex-direction:column; }
+.ctxmenu.hidden { display:none; } .ctxmenu .mhead { font-size:var(--text-xs); color:var(--fg-muted); padding:4px 8px 6px; border-bottom:1px solid var(--border); margin-bottom:3px; }
+.ctxmenu button { border:none; background:none; text-align:left; padding:6px 8px; border-radius:var(--radius-xs); } .ctxmenu button:hover, .ctxmenu button:focus { background:var(--bg-hover); outline:none; }
+.ctxmenu button.def { font-weight:var(--fw-semibold); } .ctxmenu button.danger { color:var(--danger); } .ctxmenu hr { border:none; border-top:1px solid var(--border); margin:3px 0; width:100%; }
+.ctxmenu.edgepop button small { display:block; color:var(--fg-muted); font-size:var(--text-xs); margin-left:21px; }
+#nodeform { width:320px; padding:var(--space-4); } #nodeform h3 { margin:0 0 var(--space-2); font-size:var(--text-lg); display:flex; align-items:center; gap:var(--space-2); }
+#nodeform label { font-size:var(--text-xs); text-transform:uppercase; letter-spacing:.04em; font-weight:var(--fw-semibold); margin-top:var(--space-3); }
+#nodeform input, #nodeform select, #nodeform textarea { background:var(--bg-app); border-color:var(--border); } #nodeform input:focus, #nodeform select:focus, #nodeform textarea:focus { border-color:var(--accent); box-shadow:var(--ring); outline:none; }
