@@ -73,8 +73,9 @@
   </section>
   <section id="tab-overview" class="tab">
     <div id="ov-stuck"></div>
-    <div class="split"><svg id="ov-graph"></svg><aside class="panel" id="ov-threadpanel"><label>Task thread</label><select id="ov-task"></select><div id="ov-thread"></div></aside></div>
-    <div id="ov-timeline"></div>
+    <div class="split"><svg id="ov-graph"></svg><aside class="panel" id="ov-threadpanel"><div id="ov-threadhead"></div><label>Task thread</label><select id="ov-task"></select><div id="ov-thread"></div></aside></div>
+    <div id="ov-timelinewrap"><div class="ovtl-head"><label>Timeline <span class="muted">(last 15m)</span></label><div class="ovtl-legend"><span><i class="dot-leg run"></i>running</span><span><i class="dot-leg mark"></i>status change</span><span><i class="dot-leg tick"></i>tool call</span></div></div>
+    <div id="ov-timeline"></div></div>
   </section>
   <section id="tab-inbox" class="tab"><div id="inboxlist" class="scroll"></div></section>
   <section id="tab-settings" class="tab"><div class="panel" id="settingsform"></div></section>

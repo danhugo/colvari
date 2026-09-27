@@ -654,35 +654,64 @@ function renderOverview() {
   const now = Date.now(); const L = projLogs(); const stuck = new Set(Overview.stuckAgents(S.orch.agents, L, now, S.settings.stuckMinutes || 5));
   const hot = Overview.edgeFlashes(L, S.team.edges, now);
   const svg = $('#ov-graph'); svg.innerHTML = ''; const byId = Object.fromEntries(S.team.nodes.map((n) => [n.id, n]));
-  for (const e of S.team.edges) { const a = byId[e.from], b = byId[e.to]; if (!a || !b) continue; const [x1, y1, x2, y2] = clip(a, b); el('line', { x1, y1, x2, y2, class: 'edge' + (hot.has(e.id) ? ' flash' : '') }, svg); }
-  for (const n of S.team.nodes) {
-    const st = (S.orch.agents[n.id] || {}).status;
-    const g = el('g', { class: 'node' + (st === 'working' ? ' working' : '') + (stuck.has(n.id) ? ' stuck' : ''), transform: `translate(${n.x},${n.y})`, 'data-id': n.id }, svg);
-    el('rect', { width: W, height: H, rx: 8 }, g); el('text', { x: 10, y: 24, 'font-weight': 600 }, g).textContent = clipText(n.name, 20);
-    el('text', { x: 10, y: 42, 'font-size': 11, opacity: 0.7 }, g).textContent = stuck.has(n.id) ? '⚠ stuck' : `${n.role}${st === 'working' ? ' · working' : ''}`;
+  const defs = el('defs', {}, svg);
+  for (const t of ['assign', 'message', 'review']) { const m = el('marker', { id: 'ovarr-' + t, viewBox: '0 0 10 10', refX: 9, refY: 5, markerWidth: 7, markerHeight: 7, orient: 'auto-start-reverse' }, defs); el('path', { d: 'M0,1 L9,5 L0,9 z', class: 'arrow arrow-' + t }, m); }
+  for (const e of S.team.edges) {
+    const a = byId[e.from], b = byId[e.to]; if (!a || !b) continue; const type = e.type || 'assign'; const [x1, y1, x2, y2] = clip(a, b);
+    el('path', { d: `M${x1},${y1} L${x2},${y2}`, class: `edge edge-${type}` + (hot.has(e.id) ? ' flash' : ''), 'marker-end': `url(#ovarr-${type})` }, svg);
   }
+  for (const n of S.team.nodes) {
+    const live = (S.orch.agents[n.id] || {}).status === 'working' ? 'working' : nodeLive(n); const isStuck = stuck.has(n.id); const c = agentColor(n.id);
+    const g = el('g', { class: 'node' + (live === 'working' ? ' working st-working' : '') + (isStuck ? ' stuck' : ''), transform: `translate(${n.x},${n.y})`, 'data-id': n.id }, svg);
+    el('rect', { class: 'card', width: W, height: H, rx: 12 }, g);
+    el('rect', { class: 'stripe', width: 4, height: H - 20, x: 0, y: 10, rx: 2, style: `fill:var(--agent-${c})` }, g);
+    el('circle', { class: 'avatar', cx: 26, cy: 24, r: 13, style: `fill:var(--agent-${c})` }, g);
+    el('text', { x: 26, y: 28.5, class: 'avtext', 'text-anchor': 'middle' }, g).textContent = initials(n.name);
+    el('text', { x: 47, y: 21, class: 'nname' }, g).textContent = clipText(n.name, 16);
+    el('text', { x: 47, y: 36, class: 'nrole' }, g).textContent = isStuck ? '⚠ stuck' : `${clipText(n.role, 14)}${live === 'working' ? ' · working' : ''}`;
+    const sg = el('g', { class: 'status s-' + live, transform: `translate(${W - 14},14)` }, g); el('circle', { r: 5 }, sg); el('title', {}, sg).textContent = live;
+    el('title', {}, g).textContent = `${n.name} (${n.role}) — ${isStuck ? 'stuck' : live}`;
+  }
+  const gbox = graphBox(S.team.nodes), gpad = 40;
+  svg.setAttribute('viewBox', `${gbox.x - gpad} ${gbox.y - gpad} ${gbox.w + gpad * 2} ${gbox.h + gpad * 2}`);
+  svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
   $('#ov-stuck').innerHTML = [...stuck].map((id) => `<div class="stuckbar">⚠ <b>${esc(nodeName(id))}</b> has produced no output for ${S.settings.stuckMinutes || 5}+ min<span class="spacer"></span><button data-ovstop="${id}">Stop</button><button data-ovnudge="${id}">Nudge</button></div>`).join('');
   document.querySelectorAll('[data-ovstop]').forEach((b) => b.onclick = act(async () => { await call('stopAgent', b.dataset.ovstop); refresh(); }));
   document.querySelectorAll('[data-ovnudge]').forEach((b) => b.onclick = act(async () => { await call('sendToAgent', b.dataset.ovnudge, 'Status check: you have produced no output for a while. Reply with a short status (what you are doing, whether you are blocked), then continue or finish your task.'); refresh(); }));
-  // Timeline: last 15 minutes, one lane per agent, auto-scrolled to now.
-  const ids = S.team.nodes.map((n) => n.id); const lanes = Overview.timeline(L, ids, now); const span = 15 * 60000, LW = 110, PX = Math.max(600, $("#ov-timeline").clientWidth - LW - 30), LH = 26;
+  // Timeline: last 15 minutes, one lane per agent (idle lanes with no recent activity collapsed), auto-scrolled to now.
+  const idsAll = S.team.nodes.map((n) => n.id); const lanes = Overview.timeline(L, idsAll, now); const span = 15 * 60000, LW = 110, PX = Math.max(600, $("#ov-timeline").clientWidth - LW - 30), LH = 26;
   const x = (t) => LW + Math.max(0, (t - (now - span)) / span * PX);
-  const tl = el('svg', { width: LW + PX + 10, height: ids.length * LH + 18 }, null);
-  ids.forEach((id, i) => { const y = i * LH; const ln = lanes[id];
-    el('rect', { x: 0, y, width: LW + PX, height: LH, class: 'lane' + (stuck.has(id) ? ' stuck' : ''), fill: 'transparent' }, tl);
-    el('text', { x: 4, y: y + 17 }, tl).textContent = (stuck.has(id) ? '⚠ ' : '') + clipText(nodeName(id), 14);
-    for (const r of ln.runs) if (r.end >= now - span) el('title', {}, el('rect', { x: x(r.start), y: y + 5, width: Math.max(2, x(r.end) - x(r.start)), height: LH - 10, rx: 3, class: 'run' + (r.live ? ' live' : '') }, tl)).textContent = r.task;
-    for (const t of ln.ticks) if (t.at >= now - span) el('title', {}, el('line', { x1: x(t.at), x2: x(t.at), y1: y + 3, y2: y + LH - 3, class: 'tick' }, tl)).textContent = t.name;
-    for (const m of ln.marks) if (m.at >= now - span) el('title', {}, el('circle', { cx: x(m.at), cy: y + 5, r: 4, class: 'mark' }, tl)).textContent = '→ ' + m.status; });
-  for (let m = 0; m <= 15; m += 5) el('text', { x: x(now - m * 60000) - 14, y: ids.length * LH + 14 }, tl).textContent = m ? `-${m}m` : 'now';
-  const box = $('#ov-timeline'); box.innerHTML = ''; box.appendChild(tl); box.scrollLeft = box.scrollWidth;
+  const active = (id) => { const ln = lanes[id]; return ln.runs.some((r) => r.end >= now - span) || ln.ticks.some((k) => k.at >= now - span) || ln.marks.some((m) => m.at >= now - span); };
+  const ids = idsAll.filter(active); const hiddenCount = idsAll.length - ids.length;
+  const tlbox = $('#ov-timeline'); tlbox.innerHTML = '';
+  if (hiddenCount) { const note = document.createElement('div'); note.className = 'ovtl-note'; note.textContent = `${hiddenCount} idle lane${hiddenCount > 1 ? 's' : ''} hidden (no activity in the last 15m)`; tlbox.appendChild(note); }
+  if (!ids.length) { const empty = document.createElement('p'); empty.className = 'muted ovtl-empty'; empty.textContent = 'No agent activity in the last 15 minutes.'; tlbox.appendChild(empty); }
+  else {
+    const tl = el('svg', { width: LW + PX + 10, height: ids.length * LH + 18 }, null);
+    for (let m = 0; m <= 15; m += 5) { const gx = x(now - m * 60000); el('line', { x1: gx, x2: gx, y1: 0, y2: ids.length * LH, class: 'axisline' }, tl); }
+    ids.forEach((id, i) => { const y = i * LH; const ln = lanes[id];
+      el('rect', { x: 0, y, width: LW + PX, height: LH, class: 'lane' + (stuck.has(id) ? ' stuck' : ''), fill: 'transparent' }, tl);
+      el('text', { x: 4, y: y + 17 }, tl).textContent = (stuck.has(id) ? '⚠ ' : '') + clipText(nodeName(id), 14);
+      for (const r of ln.runs) if (r.end >= now - span) el('title', {}, el('rect', { x: x(r.start), y: y + 5, width: Math.max(2, x(r.end) - x(r.start)), height: LH - 10, rx: 3, class: 'run' + (r.live ? ' live' : '') }, tl)).textContent = r.task;
+      for (const t of ln.ticks) if (t.at >= now - span) el('title', {}, el('line', { x1: x(t.at), x2: x(t.at), y1: y + 3, y2: y + LH - 3, class: 'tick' }, tl)).textContent = t.name;
+      for (const m of ln.marks) if (m.at >= now - span) el('title', {}, el('circle', { cx: x(m.at), cy: y + 5, r: 4, class: 'mark' }, tl)).textContent = '→ ' + m.status; });
+    for (let m = 0; m <= 15; m += 5) el('text', { x: x(now - m * 60000) - 14, y: ids.length * LH + 14 }, tl).textContent = m ? `-${m}m` : 'now';
+    tlbox.appendChild(tl); tlbox.scrollLeft = tlbox.scrollWidth;
+  }
   // Readable task thread.
   const ts = $('#ov-task'); const cur = ts.value || sel.task || (S.tasks[S.tasks.length - 1] || {}).id || '';
   ts.innerHTML = S.tasks.map((t) => `<option value="${t.id}">${esc(t.title)} (${t.status})</option>`).join(''); ts.value = cur;
   const t = S.tasks.find((x) => x.id === ts.value); const open = new Set([...document.querySelectorAll('#ov-thread details[open]')].map((d) => d.dataset.k));
-  $('#ov-thread').innerHTML = !t ? '<p class="muted">No tasks yet.</p>' : Overview.taskThread(t, L, S.messages).map((it, k) => it.type === 'tool'
+  const head = $('#ov-threadhead');
+  if (!t) { head.innerHTML = ''; ts.classList.add('hidden'); }
+  else {
+    ts.classList.remove('hidden');
+    const as = byId[t.assignee]; const ac = as ? agentColor(as.id) : 0;
+    head.innerHTML = `<div class="ovth-title">${esc(t.title)}</div><div class="ovth-meta"><span class="ovth-status ${esc(t.status)}">${esc(t.status)}</span>${as ? `<span class="ovth-assignee"><span class="ovth-av" style="background:var(--agent-${ac})">${esc(initials(as.name))}</span>${esc(as.name)}</span>` : '<span class="muted">Unassigned</span>'}</div>`;
+  }
+  $('#ov-thread').innerHTML = !t ? '<p class="muted empty">No tasks yet.</p>' : Overview.taskThread(t, L, S.messages).map((it, k) => it.type === 'tool'
     ? `<details data-k="${k}" ${open.has(String(k)) ? 'open' : ''}><summary class="chip">🔧 ${esc(it.summary)}</summary><pre>${esc(it.text)}</pre></details>`
-    : `<div class="comment ${it.type === 'message' ? 'msg' : ''}"><b>${esc(it.type === 'message' ? `${nodeName(it.who)} → ${nodeName(it.to)}` : it.who === 'human' || it.who === 'orchestrator' ? it.who : nodeName(it.who))}</b> <small class="muted">${new Date(it.at).toLocaleTimeString()}</small><br>${esc(it.text)}</div>`).join('') || '<p class="muted">Nothing yet.</p>';
+    : `<div class="comment ${it.type === 'message' ? 'msg' : ''}"><b>${esc(it.type === 'message' ? `${nodeName(it.who)} → ${nodeName(it.to)}` : it.who === 'human' || it.who === 'orchestrator' ? it.who : nodeName(it.who))}</b> <small class="muted">${new Date(it.at).toLocaleTimeString()}</small><br>${esc(it.text)}</div>`).join('') || '<p class="muted empty">Nothing yet.</p>';
 }
 $('#ov-task').onchange = renderOverview;
 document.querySelector('#tabs button[data-tab=overview]').addEventListener('click', () => setTimeout(renderOverview));
