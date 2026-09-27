@@ -71,11 +71,11 @@ class Orchestrator extends EventEmitter {
     this.totalCost = 0;
     this.runs = 0;
   }
-  agent(id) { return (this.agents[id] ||= { runCost: 0, runTokens: 0, pendingHuman: [], stopRequested: false, budgetStop: null, status: 'idle', iteration: 0, cost: 0, inputTokens: 0, outputTokens: 0, cacheTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, runs: 0, taskId: null, model: '', runtime: '', billingSource: '' }); }
+  agent(id) { return (this.agents[id] ||= { runCost: 0, runTokens: 0, pendingHuman: [], stopRequested: false, budgetStop: null, status: 'idle', iteration: 0, cost: 0, inputTokens: 0, outputTokens: 0, cacheTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, runs: 0, taskId: null, task: null, model: '', runtime: '', billingSource: '' }); }
   // modelStats: per-model aggregate across this project's persisted runs + tasks (see usage.js modelStats for the field shape).
   modelStats() { let rs = []; try { rs = this.store.listRuns(); } catch {} let ts = []; try { ts = this.store.listTasks(); } catch {} return U.modelStats(rs, ts); }
-  // timeline: per-run start/end per agent+task (TL.timeline, see timeline.js for the shape).
-  timeline() { let rs = []; try { rs = this.store.listRuns(); } catch {} return TL.timeline(rs); }
+  // timeline: per-run start/end per agent+task, lanes ordered needs-attention first (TL.timeline, see timeline.js).
+  timeline() { let rs = []; let ts = []; try { rs = this.store.listRuns(); } catch {} try { ts = this.store.listTasks(); } catch {} return TL.timeline(rs, ts); }
   // logs: structured {ts, agentId, level, text} entries from the persisted orchestrator log.
   logs(limit) { let ls = []; try { ls = this.store.readLogs(limit); } catch {} return TL.logEntries(ls); }
   // wiki: [{title, body, updatedAt, author}], from the store's {title: {...}} page map.
@@ -97,7 +97,8 @@ class Orchestrator extends EventEmitter {
     this.emit('run', rec);
   }
   log(nodeId, kind, text) {
-    const l = { nodeId, kind, text, at: Date.now() };
+    const a = nodeId && this.agents[nodeId];
+    const l = { nodeId, kind, text, at: Date.now(), taskId: (a && a.taskId) || null, task: (a && a.task) || null };
     try { this.store.appendLog(l); } catch {}
     this.emit('log', l);
     // Keep the latest error reason on the agent so the UI can show why it failed (and push it now, not at next run end).
@@ -277,7 +278,7 @@ class Orchestrator extends EventEmitter {
   async runTask(node, task, team, settings) {
     this.runs++;
     this.store.updateTask(task.id, { status: 'in_progress' });
-    const a = this.agent(node.id); a.status = 'working'; a.lastError = null; a.taskId = task.id; a.runs++; a.iteration = 1;
+    const a = this.agent(node.id); a.status = 'working'; a.lastError = null; a.taskId = task.id; a.task = task.title; a.runs++; a.iteration = 1;
     this.procs.set(node.id, { kill() {} }); // reserve the slot synchronously
     this.changed();
     const mcp = this.mcpConfig(node);
@@ -347,7 +348,7 @@ class Orchestrator extends EventEmitter {
     }
     this.procs.delete(node.id); this.cwds.delete(node.id);
     const stoppedWhy = a.stopRequested; a.stopRequested = false;
-    a.status = 'idle'; a.taskId = null; a.iteration = 0;
+    a.status = 'idle'; a.taskId = null; a.task = null; a.iteration = 0;
     const t = this.store.getTask(task.id);
     const gate = (st) => C.gateStatus(st, node, this.store.getSettings());
     if (m.mode === 'goal' && t && judge && !judge.met && t.status === 'done') {
