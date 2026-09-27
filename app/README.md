@@ -121,6 +121,28 @@ The orchestrator also nudges PMs: any node with assign edges to others that stil
 
 PM guidance: split goals into independent tasks so every report has one in flight; give each dev a disjoint file area to avoid conflicts; when nudged, create or reassign tasks rather than waiting on a single agent.
 
+## Mixing vendors
+
+Each agent picks its runtime (Claude Code, Codex) and model on its own node, so one team can mix vendors: e.g. a Claude/Opus PM, a Codex Dev and a Claude/Haiku Reviewer. The graph shows a runtime + model chip on every node. Codex has no MCP here, so a Codex agent cannot use the board tools; when its run exits 0 the orchestrator moves its task to done (non-zero goes to review), and `blockedBy` chains still order it between Claude agents.
+
+- `node --test test/mixed-vendor.test.js`: fake `claude` + `codex` bins; PM → Dev → Reviewer chain finishes in dependency order, with the right binary and `--model`/`-m` for each, and Codex tokens/thread id stored on the run.
+- `npm run gui-e2e:mixed`: the same team in the app; shots `e2e-shots/28-mixed-graph-{light,dark}.png` (runtime/model chips) and `29-mixed-overview-{light,dark}.png`.
+
+Live run (2026-09-27, codex-cli 0.144.6, ChatGPT login, on a throwaway worktree of this repo): one Codex Dev (`gpt-5.6-terra`, bypassPermissions) was given "create app/MIXED_VENDOR.txt with one line". Transcript as logged by the orchestrator:
+
+```
+▶ Cody starts "Add app/MIXED_VENDOR.txt" in /tmp/squad-live-codex [mode=single]
+codex thread 01a0e172-c3fe-7990-8936-6be0e4a06d3a
+I'll add the requested single-line file, then mark the assigned task done on the team board.
+file_change add /private/tmp/squad-live-codex/app/MIXED_VENDOR.txt
+shell test "$(cat app/MIXED_VENDOR.txt)" = "written by codex via agents-squad" && ...
+Created `app/MIXED_VENDOR.txt` with the exact requested line.
+codex turn completed: 92591 in / 756 out
+■ Cody finished (exit 0, 1 iteration(s), single run)   → task done in 23.8s
+```
+
+Cost: 92,591 input / 756 output tokens. Codex reports no dollar cost (capability `cost: false`), so Usage shows tokens only; on a ChatGPT login it counts against that plan, not an API bill. Note: the account default `gpt-5.6-sol` was rejected ("not supported when using Codex with a ChatGPT account"), so the task went to review with exit 1. Set a supported model on Codex nodes.
+
 ## Limitations
 
 - Agents run with `bypassPermissions` by default, with no sandbox. Point working directories only at folders you trust agents to change.

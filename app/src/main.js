@@ -289,12 +289,43 @@ async function guiE2E() {
     expect('parallel: dependent starts after blocker ends', D[0] >= A[1], { A, D });
     s.saveSettings({ claudePath: prev.claudePath, maxConcurrency: prev.maxConcurrency });
   };
+  // Mixed vendors: Claude/Opus PM -> Codex Dev -> Claude/Haiku Reviewer finish a chain through the board (fake bins); graph runtime/model chips + overview.
+  const mixedShots = async () => {
+    await waitFor(`return !!document.querySelector('#tpl-select option')`); await ex(`await refresh();`); const cur = await ex(`return { p: ctx.p, t: S.teamId }`);
+    const p = cur.p || pid(); const ts = pm.store(p, cur.t); const s = pm.store(p); const tmp = require('os').tmpdir();
+    const cl = path.join(tmp, 'squad-mix-claude.sh'); const cx = path.join(tmp, 'squad-mix-codex.sh');
+    fs.writeFileSync(cl, `#!/bin/sh\nsleep 3\necho '{"type":"result","subtype":"success","session_id":"cs","total_cost_usd":0.01,"num_turns":1,"usage":{"input_tokens":5,"output_tokens":2}}'\n`);
+    fs.writeFileSync(cx, `#!/bin/sh\nsleep 3\necho '{"type":"thread.started","thread_id":"T1"}'\necho '{"type":"item.completed","item":{"id":"i0","type":"agent_message","text":"added hello.txt"}}'\necho '{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":7}}'\n`);
+    fs.chmodSync(cl, 0o755); fs.chmodSync(cx, 0o755);
+    const prev = s.getSettings(); s.saveSettings({ claudePath: cl, codexPath: cx });
+    const P = ts.addNode({ name: 'MixPM', role: 'PM', runtime: 'claude', model: 'opus', x: 60, y: 60 });
+    const D = ts.addNode({ name: 'MixDev', role: 'Dev', runtime: 'codex', model: 'gpt-5.6-terra', x: 320, y: 60 });
+    const R = ts.addNode({ name: 'MixRev', role: 'Reviewer', runtime: 'claude', model: 'haiku', x: 580, y: 60 });
+    ts.addEdge(P.id, D.id, 'assign'); ts.addEdge(R.id, D.id, 'review');
+    const plan = s.createTask({ title: 'Mix: plan hello.txt', assignee: P.id });
+    const impl = s.createTask({ title: 'Mix: write hello.txt', assignee: D.id, blockedBy: [plan.id] });
+    const rev = s.createTask({ title: 'Mix: review hello.txt', assignee: R.id, blockedBy: [impl.id] });
+    await ex(`$('#tabs button[data-tab=team]').click(); await refresh(); renderGraph(); await w(400);`);
+    const chips = await ex(`return [...document.querySelectorAll('#graph .chip text')].map((t) => t.textContent)`);
+    expect('mixed: graph chips show codex + claude runtimes and opus/haiku models', ['codex', 'claude', 'opus', 'haiku'].every((c) => chips.some((x) => x.startsWith(c))), chips);
+    const o = orchFor(p); const done = new Promise((r) => o.once('done', r)); o.start();
+    for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`$('#tabs button[data-tab=team]').click(); await refresh(); renderGraph(); await w(400);`); await shot(`28-mixed-graph-${t}`); }
+    await done;
+    for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`$('#tabs button[data-tab=overview]').click(); await refresh(); await w(400);`); await shot(`29-mixed-overview-${t}`); }
+    require('electron').nativeTheme.themeSource = 'system';
+    const st = [plan, impl, rev].map((t) => s.getTask(t.id).status); expect('mixed: all three tasks done', st.every((x) => x === 'done'), st);
+    const rt = [plan, impl, rev].map((t) => (s.listRuns().find((r) => r.taskId === t.id && r.kind === 'agent') || {}).runtime);
+    expect('mixed: runs recorded as claude, codex, claude', rt.join() === 'claude,codex,claude', rt);
+    console.log('[gui-e2e] mixed', JSON.stringify({ chips, st, rt }));
+    s.saveSettings({ claudePath: prev.claudePath, codexPath: prev.codexPath });
+  };
   try {
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'graph') { await graphShots(); for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`$('#tabs button[data-tab=team]').click(); await w(500);`); await shot(`graph-${t}`); } require('electron').nativeTheme.themeSource = 'system'; throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'chat') { await chatShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'firstrun') { await firstrunInbox(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'overview') { await overviewShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'parallel') { await parallelShots(); throw null; }
+    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'mixed') { await mixedShots(); throw null; }
     // project/team management through the UI: create a project from the Startup template, then a Solo team, then switch back.
     // Wait until the template select is filled (the first refresh loads the templates) before choosing one.
     await ex(`$('#tabs button[data-tab=team]').click(); await w(300);`); // Chat is the default tab; the flow below clicks the graph
