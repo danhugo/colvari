@@ -13,7 +13,8 @@
     "gui-e2e:chat": "mkdir -p e2e-shots && AGENTS_SQUAD_PROJECT=$(mktemp -d) AGENTS_SQUAD_GUI_E2E=$PWD/e2e-shots AGENTS_SQUAD_GUI_E2E_ONLY=chat electron .",
     "gui-e2e:graph": "mkdir -p e2e-shots && AGENTS_SQUAD_PROJECT=$(mktemp -d) AGENTS_SQUAD_GUI_E2E=$PWD/e2e-shots AGENTS_SQUAD_GUI_E2E_ONLY=graph electron .",
     "gui-e2e:parallel": "mkdir -p e2e-shots && AGENTS_SQUAD_PROJECT=$(mktemp -d) AGENTS_SQUAD_GUI_E2E=$PWD/e2e-shots AGENTS_SQUAD_GUI_E2E_ONLY=parallel electron .",
-    "gui-e2e:firstrun": "mkdir -p e2e-shots && AGENTS_SQUAD_PROJECT=$(mktemp -d) AGENTS_SQUAD_GUI_E2E=$PWD/e2e-shots AGENTS_SQUAD_GUI_E2E_ONLY=firstrun electron ."
+    "gui-e2e:firstrun": "mkdir -p e2e-shots && AGENTS_SQUAD_PROJECT=$(mktemp -d) AGENTS_SQUAD_GUI_E2E=$PWD/e2e-shots AGENTS_SQUAD_GUI_E2E_ONLY=firstrun electron .",
+    "gui-e2e:wikilogs": "mkdir -p e2e-shots && AGENTS_SQUAD_PROJECT=$(mktemp -d) AGENTS_SQUAD_GUI_E2E=$PWD/e2e-shots AGENTS_SQUAD_GUI_E2E_ONLY=wikilogs electron ."
   },
   "license": "MIT",
   "dependencies": {
