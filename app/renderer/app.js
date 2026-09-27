@@ -347,10 +347,11 @@ function renderGraph() {
     el('title', {}, badge).textContent = pf === 'fail' && n.preflight ? 'Preflight failed: ' + n.preflight.error : 'Preflight: ' + PF_LABEL[pf];
     el('rect', { width: bw, height: 15, rx: 7 }, badge); el('text', { x: bw / 2, y: 11, 'font-size': 9, 'text-anchor': 'middle' }, badge).textContent = PF_LABEL[pf];
     if (live === 'working') {
-      const pctTxt = typeof ns.contextPct === 'number' ? `${Math.round(Math.max(0, Math.min(100, ns.contextPct)))}% ctx` : '— ctx';
-      const pctCls = typeof ns.contextPct !== 'number' ? 'unknown' : ns.contextPct >= 85 ? 'danger' : ns.contextPct >= (S.settings.autoCompactPct || 40) ? 'warn' : 'ok';
+      const ctxPct100 = typeof ns.contextPct === 'number' ? ns.contextPct * 100 : null;
+      const pctTxt = typeof ctxPct100 === 'number' ? `${Math.round(Math.max(0, Math.min(100, ctxPct100)))}% ctx` : '— ctx';
+      const pctCls = typeof ctxPct100 !== 'number' ? 'unknown' : ctxPct100 >= 85 ? 'danger' : ctxPct100 >= (S.settings.autoCompactPct || 40) ? 'warn' : 'ok';
       const ctxlabel = el('text', { x: W - 24, y: 30, class: 'ctxpct ctx-' + pctCls, 'text-anchor': 'end' }, g); ctxlabel.textContent = pctTxt;
-      el('title', {}, ctxlabel).textContent = typeof ns.contextPct === 'number' ? `${fmtTok(ns.contextTokens || 0)} / ${fmtTok(ns.contextWindow || 0)} tokens` : 'Context usage unknown';
+      el('title', {}, ctxlabel).textContent = typeof ctxPct100 === 'number' ? `${fmtTok(ns.contextTokens || 0)} / ${fmtTok(ns.contextWindow || 0)} tokens` : 'Context usage unknown';
     }
     if (ns.compactedAt && Date.now() - ns.compactedAt < 30000) {
       const cbg = el('g', { class: 'compactbadge', transform: `translate(${W / 2 - 44},-8)` }, g);
@@ -359,7 +360,7 @@ function renderGraph() {
     }
     el('title', {}, g).textContent = `${n.name} (${n.role}) — ${live}`;
     if (typeof ns.contextPct === 'number' && live === 'working') {
-      const pct = Math.max(0, Math.min(100, ns.contextPct));
+      const pct = Math.max(0, Math.min(100, ns.contextPct * 100));
       const cls = pct >= 85 ? 'danger' : pct >= (S.settings.autoCompactPct || 40) ? 'warn' : 'ok';
       const ctxg = el('g', { class: 'ctxbar', transform: `translate(0,${H - 4})` }, g);
       el('rect', { class: 'ctxbar-bg', width: W, height: 4 }, ctxg);
