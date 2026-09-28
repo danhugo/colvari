@@ -1430,10 +1430,13 @@ function ledgerFromRuns(rs) {
     if (r.taskId) add(byTask, `${r.taskId}¦${e.runtime}¦${e.provider}¦${e.model}`, e);
     // Account view (t_b1115e48): the same entries grouped by the account that paid, model keys
     // nested. Folded legacy rows display (and merge) under their attributed runtime, so the same
-    // Claude subscription no longer splits into "claude" and "unknown" rows.
+    // Claude subscription no longer splits into "claude" and "unknown" rows. Keys display (and
+    // merge under) the billing channel for subscription runs — mirroring src/usage.js providerOf
+    // (t_f514cc2e) — so stale persisted "firstParty" labels join the same row after the rework.
     const a = accountOf(e);
     const acc = accts.get(a.key) || { key: a.key, name: a.name, detail: a.detail, billingSource: a.billingSource, rows: new Map() };
-    add(acc.rows, `${a.rt}¦${e.provider}¦${e.model}`, a.legacy ? { ...e, runtime: a.rt } : e);
+    const ae = { ...e, runtime: a.rt, provider: e.billingSource === 'subscription' ? 'subscription' : e.provider };
+    add(acc.rows, `${ae.runtime}¦${ae.provider}¦${ae.model}`, ae);
     accts.set(a.key, acc);
   }
   const finish = (m) => [...m.values()].map(({ reported, estimated, unknown, ...row }) => ({ ...row,
