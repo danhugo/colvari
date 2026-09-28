@@ -138,19 +138,76 @@ class Orchestrator extends EventEmitter {
     this._stallKill = new Map();
     this._stallTimer = setInterval(() => this.sweepStalls(), STALL.SWEEP_MS);
     if (this._stallTimer.unref) this._stallTimer.unref();
+    // Perf (t_9d92c3d3): snapshot() runs on every changed()/getAll; its file-derived parts
+    // (modelStats, timeline, wiki, nodeTeams, logs) are memoized by store file signatures so repeated
+    // snapshots with unchanged files cost stats instead of re-reading and re-parsing multi-MB JSON.
+    this._memo = new Map(); // key -> { sig, val }
+    this._logTail = null; // { sig, size, entries } — incremental tail of logs.jsonl
   }
+  // Memoize fn by a cheap signature string: recompute only when the sig differs from last time.
+  // Hand-rolled orchestrators (tests) skip the constructor, so the memo map is lazy.
+  _memoBy(key, sig, fn) {
+    const memo = this._memo ||= new Map();
+    const hit = memo.get(key);
+    if (hit && hit.sig === sig) return hit.val;
+    const val = fn();
+    memo.set(key, { sig, val });
+    return val;
+  }
+  // Store file signatures; a store without sig helpers (minimal mocks) just yields '' (always recompute).
+  sig(name) { try { return this.store.sigFile(name); } catch { return ''; } }
+  logSig() { try { return this.store.logsSig(); } catch { return ''; } }
+  teamsSigOf() { try { return this.store.teamsSig(); } catch { return ''; } }
   agent(id) { return (this.agents[id] ||= { runCost: 0, runTokens: 0, pendingHuman: [], stopRequested: false, budgetStop: null, status: 'idle', iteration: 0, cost: 0, inputTokens: 0, outputTokens: 0, cacheTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, runs: 0, taskId: null, task: null, activity: null, model: '', runtime: '', billingSource: '', contextTokens: null, contextWindow: 0, contextPct: null, lastContextMessageId: null }); }
   // modelStats: per-model aggregate across this project's persisted runs + tasks (see usage.js modelStats for the field shape).
-  modelStats() { let rs = []; try { rs = this.store.listRuns(); } catch {} let ts = []; try { ts = this.store.listTasks(); } catch {} return U.modelStats(rs, ts); }
+  modelStats() { return this._memoBy('modelStats', this.sig('runs') + '|' + this.sig('board'), () => { let rs = []; try { rs = this.store.listRuns(); } catch {} let ts = []; try { ts = this.store.listTasks(); } catch {} return U.modelStats(rs, ts); }); }
   // nodeTeams: {nodeId: {teamId, teamName}} across all teams in the project, for tagging log/timeline entries.
-  nodeTeams() { try { return this.store.nodeTeamMap(); } catch { return {}; } }
+  nodeTeams() { return this._memoBy('nodeTeams', this.teamsSigOf(), () => { try { return this.store.nodeTeamMap(); } catch { return {}; } }); }
   // timeline: per-run start/end per agent+task, lanes ordered needs-attention first (TL.timeline, see timeline.js).
-  timeline() { let rs = []; let ts = []; try { rs = this.store.listRuns(); } catch {} try { ts = this.store.listTasks(); } catch {} return TL.timeline(rs, ts, this.nodeTeams()); }
+  timeline() { return this._memoBy('timeline', this.sig('runs') + '|' + this.sig('board') + '|' + this.teamsSigOf(), () => { let rs = []; try { rs = this.store.listRuns(); } catch {} let ts = []; try { ts = this.store.listTasks(); } catch {} return TL.timeline(rs, ts, this.nodeTeams()); }); }
   // logs: structured {ts, agentId, level, text} entries from the persisted orchestrator log.
-  logs(limit) { let ls = []; try { ls = this.store.readLogs(limit); } catch {} return TL.logEntries(ls, this.nodeTeams()); }
+  // The raw parse is cached incrementally (only newly appended bytes are read+parsed); the mapped
+  // entries are memoized per (file sig, limit, teams sig).
+  logs(limit) {
+    const sig = this.logSig(); const size = Number(sig.split(':')[0]) || 0;
+    let c = this._logTail;
+    if (!c || c.sig !== sig) {
+      // Growth is normally a pure append; the store's trim rewrite (logs over the size cap) can also
+      // leave a bigger file, so confirm the head is untouched before trusting the incremental read.
+      let grew = c && size > c.size && sig && this._logHead() === c.head;
+      let entries;
+      if (grew) {
+        try {
+          const fd = fs.openSync(this.store.logFile(), 'r');
+          try {
+            const buf = Buffer.alloc(size - c.size);
+            fs.readSync(fd, buf, 0, buf.length, c.size);
+            entries = c.entries.concat(C.parseLogs(buf.toString('utf8'), Infinity));
+          } finally { fs.closeSync(fd); }
+        } catch { entries = this.store.readLogs(Infinity); }
+      } else { try { entries = this.store.readLogs(Infinity); } catch { entries = []; } }
+      if (entries.length > C.LOG_CAP) entries = entries.slice(-C.LOG_CAP);
+      c = this._logTail = { sig, size, head: this._logHead(), entries };
+    }
+    return this._memoBy('logEntries|' + limit, sig + '|' + this.teamsSigOf(), () => TL.logEntries(c.entries.slice(-(limit ?? Infinity)), this.nodeTeams()));
+  }
+  _logHead() {
+    try {
+      const fd = fs.openSync(this.store.logFile(), 'r');
+      try { const buf = Buffer.alloc(64); const n = fs.readSync(fd, buf, 0, 64, 0); return buf.toString('utf8', 0, n); } finally { fs.closeSync(fd); }
+    } catch { return ''; }
+  }
   // wiki: [{title, body, updatedAt, author}], from the store's {title: {...}} page map.
-  wiki() { let ps = {}; try { ps = this.store.listWiki(); } catch {} return TL.wikiPages(ps); }
+  wiki() { return this._memoBy('wiki', this.sig('wiki'), () => { let ps = {}; try { ps = this.store.listWiki(); } catch {} return TL.wikiPages(ps); }); }
+  // Cheap in-memory fingerprint (no I/O): everything volatile the snapshot exposes besides file-backed parts.
+  memSig() { return JSON.stringify([this.running, this.runs, this.runCost, this.runTokens, this.totalCost, this.billedCost, this.subCost, this.budgetStop, this.usagePaused, this.usageStatus || null, this.procs.size, this.agents, this.subscriptionRateLimits]); }
+  // Combined fingerprint for change-driven polling: in-memory state + every file the snapshot reads.
+  versionSig() { return [this.memSig(), this.sig('runs'), this.sig('board'), this.sig('wiki'), this.teamsSigOf(), this.logSig()].join('|'); }
   snapshot() { return { running: this.running, totalCost: this.totalCost, billedCost: this.billedCost || 0, subCost: this.subCost || 0, runs: this.runs, active: [...this.procs.keys()].map((id) => ({ nodeId: id, taskId: this.agent(id).taskId, cwd: this.cwds && this.cwds.get(id) || null })), runCost: this.runCost || 0, runTokens: this.runTokens || 0, budgetStop: this.budgetStop || null, agents: Object.fromEntries(Object.entries(this.agents).map(([k, a]) => [k, { ...a, pendingHuman: a.pendingHuman.length }])), tokens: this.tokens || { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 }, modelStats: this.modelStats(), timeline: this.timeline(), logs: this.logs(), wiki: this.wiki(), nodeTeams: this.nodeTeams() }; }
+  // Renderer-facing snapshot: the UI reads only agents + run scalars, so the file-backed display parts
+  // (modelStats/timeline/logs/wiki/nodeTeams) are pure IPC payload — ~1.4MB per change on a large
+  // project. Kept out of getAll and state pushes; snapshot() stays whole for other consumers.
+  snapshotSlim() { const s = this.snapshot(); for (const k of ['modelStats', 'timeline', 'logs', 'wiki', 'nodeTeams']) delete s[k]; return s; }
   // Account one finished run: agent counters, session totals, persisted history.
   record(rec) {
     const a = this.agent(rec.nodeId); const t = (this.tokens ||= { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 });
@@ -391,7 +448,7 @@ class Orchestrator extends EventEmitter {
         .map((p) => ({ pid: Number(p[0]), ppid: Number(p[1]), state: p[2], cpuMs: stimeToMs(p[3]), command: p.slice(4).join(' ') }));
     } catch { return null; }
   }
-  changed() { this.emit('state', this.snapshot()); }
+  changed() { this.emit('state', this.snapshotSlim()); }
 
   start() {
     if (this.running) return;

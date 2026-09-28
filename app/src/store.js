@@ -15,6 +15,13 @@ const WT = require('./worktree');
 const ROLES = SUGGESTED_ROLES; // suggestions only: roles are free text
 const STATUSES = ['todo', 'in_progress', 'review', 'done', 'waiting_for_human', 'merge_conflict'];
 
+// Version-map keys whose getAll section changed since the client's last fetch (all keys when `since`
+// is null = first load / project switch). Pure so the delta contract is testable without Electron.
+function pickChanged(v, since) {
+  if (!since) return Object.keys(v);
+  return Object.keys(v).filter((k) => since[k] !== v[k]);
+}
+
 function defaultProjectDir(name = 'default') {
   return path.join(os.homedir(), '.agents-squad', name);
 }
@@ -38,6 +45,23 @@ class Store {
     return m && m.teams && m.teams[0] ? 'team-' + m.teams[0].id : 'team';
   }
   file(name) { return path.join(this.dir, name + '.json'); }
+  logFile() { return path.join(this.dir, 'logs.jsonl'); }
+  // Cheap change fingerprint for change-driven refreshes: 'size:mtimeMs' (or '' when absent).
+  sigFile(name) { try { const st = fs.statSync(this.file(name)); return st.size + ':' + st.mtimeMs; } catch { return ''; } }
+  logsSig() { try { const st = fs.statSync(this.logFile()); return st.size + ':' + st.mtimeMs; } catch { return ''; } }
+  // Signature of every team file in the project (+ project.json, which lists them) — covers the
+  // union-of-teams "allNodes" view. Not a substitute for a per-team sig (that's sigFile(teamFile())).
+  teamsSig() {
+    let sig = this.sigFile('project');
+    const m = this.meta();
+    for (const t of (m && m.teams) || []) sig += '|' + this.sigFile('team-' + t.id);
+    return sig;
+  }
+  // One stats pass over everything the renderer's getAll is built from; the renderer polls this
+  // instead of re-fetching whole files, then asks only for sections whose sig changed.
+  versions() {
+    return { project: this.sigFile('project'), board: this.sigFile('board'), wiki: this.sigFile('wiki'), settings: this.sigFile('settings'), messages: this.sigFile('messages'), runs: this.sigFile('runs'), inbox: this.sigFile('inbox'), logs: this.logsSig(), teams: this.teamsSig() };
+  }
   read(name, dflt) {
     try { return JSON.parse(fs.readFileSync(this.file(name), 'utf8')); } catch { return dflt; }
   }
@@ -353,8 +377,25 @@ class Store {
     try { if (fs.statSync(f).size > 3e6) { const keep = C.parseLogs(fs.readFileSync(f, 'utf8'), C.LOG_CAP); this.withLock(() => fs.writeFileSync(f, keep.map(C.logLine).join('\n') + '\n')); } } catch {}
   }
   // level (info/warn/error, derived from kind via TL.levelOf) lets the UI default its filter to warn+error.
+  // Tails logs.jsonl instead of reading it whole: reads backward from EOF in growing windows until
+  // `limit` complete lines are available, so a multi-MB log costs one small read, not a full parse.
   readLogs(limit = 2000) {
-    try { return C.parseLogs(fs.readFileSync(path.join(this.dir, 'logs.jsonl'), 'utf8'), limit).map((l) => ({ ...l, level: TL.levelOf(l.kind) })); } catch { return []; }
+    try {
+      const f = this.logFile(); const st = fs.statSync(f);
+      let bytes = Math.min(st.size, Math.max(256 * 1024, limit * 300));
+      let out = [];
+      for (;;) {
+        const buf = Buffer.alloc(bytes);
+        const fd = fs.openSync(f, 'r');
+        try { fs.readSync(fd, buf, 0, bytes, st.size - bytes); } finally { fs.closeSync(fd); }
+        let text = buf.toString('utf8');
+        if (bytes < st.size) text = text.slice(text.indexOf('\n') + 1); // drop the partial first line
+        out = C.parseLogs(text, limit);
+        if (out.length >= limit || bytes >= st.size) break;
+        bytes = Math.min(st.size, bytes * 4);
+      }
+      return out.map((l) => ({ ...l, level: TL.levelOf(l.kind) }));
+    } catch { return []; }
   }
   clearLogs() { try { fs.unlinkSync(path.join(this.dir, 'logs.jsonl')); } catch {} }
 
@@ -404,4 +445,4 @@ class Store {
   deletePreset(name) { return this.saveSettings({ rolePresets: this.getSettings().rolePresets.filter((x) => x.name !== name) }).rolePresets; }
 }
 
-module.exports = { Store, ROLES, STATUSES, PRIORITIES: C.PRIORITIES, defaultProjectDir };
+module.exports = { Store, ROLES, STATUSES, PRIORITIES: C.PRIORITIES, defaultProjectDir, pickChanged };

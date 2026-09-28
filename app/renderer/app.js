@@ -54,23 +54,35 @@ function pfDetail(n) {
     <p class="muted">${p.version ? 'claude ' + esc(p.version) + ' · ' : ''}${p.model ? esc(p.model) + ' · ' : ''}apiKeySource=${esc(p.apiKeySource ?? '?')} · ${p.latencyMs || 0} ms · ${fmtTok(t.inputTokens)} in / ${fmtTok(t.outputTokens)} out${t.cacheReadTokens || t.cacheCreationTokens ? ' / ' + fmtTok((t.cacheReadTokens || 0) + (t.cacheCreationTokens || 0)) + ' cache' : ''} · $${(p.costUsd || 0).toFixed(4)} · ${esc(new Date(p.at).toLocaleString())}</p>`;
 }
 
+// Change-driven refresh (t_9d92c3d3): the 2s tick polls the tiny state version; only when some
+// signature changed is getAll called, and then it returns just the changed sections (deltas merged
+// into S). Same data as before — whole-project fetches and full re-renders only happen on real change.
+let lastV = null, lastVProject = null, runsChanged = true;
+const sameVersion = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 async function refresh() {
   // Fetch into locals first; only swap the live P/S/ctx (and render) once everything required succeeds,
   // so a failed/partial IPC round-trip can't blank out a good previous render.
   const prevCtx = ctx;
   try {
+    let v = null;
+    if (ctx.p) { try { v = await call('getStateVersion'); } catch { v = null; } } // unknown project (boot/deleted): fall through to the full path
+    if (v && lastVProject === ctx.p && lastV && sameVersion(v, lastV)) return; // nothing changed anywhere
     const p = await call('listProjects');
     if (!p.projects.some((pr) => pr.id === ctx.p)) ctx = { p: p.projects[0].id }; // must land on global ctx before the calls below, which read it
-    const s = await call('getAll');
+    const since = v && lastVProject === ctx.p ? lastV : null;
+    const runsChanged = !since || since.runs !== v.runs;
+    const s = await call('getAll', since);
     s.inbox = await call('listInbox');
     try { s.nstat = await call('nodeStatus'); s.cross = await call('crossEdges'); }
     catch { s.nstat = S.nstat || {}; s.cross = S.cross || []; }
     ctx.t = s.teamId;
-    P = p; S = s;
+    P = p; S = { ...S, ...s };
+    lastV = s.v || v; lastVProject = ctx.p;
   } catch (e) {
     ctx = prevCtx; console.warn('refresh failed, keeping previous data', e); return;
   }
-  await loadRuns(); await loadLogs(ctx.p); await loadSelfUpdate();
+  if (runsChanged) await loadRuns(); // runs.json (796KB) is re-read only when its file actually changed
+  await loadLogs(ctx.p); await loadSelfUpdate();
   try { localStorage.setItem('ctx', JSON.stringify(ctx)); } catch {}
   renderAll();
 }
@@ -942,6 +954,7 @@ function renderBoard() {
   if (!t) { d.innerHTML = '<p class="muted">Create a goal task, assign it to an agent (usually the PM), then press Run.</p>'; return; }
   const keep = Object.fromEntries(['td-msg', 'td-note', 'td-comment'].map((k) => [k, $('#' + k) && $('#' + k).value])); const focused = document.activeElement && document.activeElement.id;
   const ag = S.orch.agents[t.assignee] || {}; const live = ag.status === 'working' && ag.taskId === t.id; const bl = openBlockers(t); const deps = new Set(t.blockedBy || []);
+  const cmtCut = Math.max(0, t.comments.length - 200); const cmts = t.comments.slice(-200); // cap long comment threads
   d.innerHTML = `<h3>${priorityBadge(t)} ${esc(t.title)}</h3><p class="muted">${t.id} · by ${esc(t.createdBy === 'human' ? 'human' : nodeName(t.createdBy))}</p>
     ${t.awaitingApproval ? `<div class="approvebox"><b>Waiting for your approval.</b> The agent marked this task done.<textarea id="td-note" rows="2" placeholder="Note (optional; required context when requesting changes)"></textarea><p><button id="td-approve" class="primary">Approve → done</button> <button id="td-reject">Request changes → todo</button></p></div>` : ''}
     ${live || (t.assignee && ag.status === 'working') ? `<div class="livebox"><div class="toolbar"><b>${live ? 'Live' : esc(wakeLabel(t.assignee) || nodeName(t.assignee) + ' is working on another task')}</b>${live ? `<span class="muted">iteration ${ag.iteration || 1}${ag.pendingHuman ? ' · message queued' : ''}</span><span class="spacer"></span><button id="td-stopagent">Stop agent</button>` : ''}</div>${live ? '<pre id="td-live"></pre>' : ''}</div>` : ''}
@@ -953,7 +966,7 @@ function renderBoard() {
     <div id="td-deps" class="checks deps">${S.tasks.filter((x) => x.id !== t.id).map((x) => `<label class="${deps.has(x.id) && x.status !== 'done' ? 'open' : ''}"><input type="checkbox" value="${x.id}" ${deps.has(x.id) ? 'checked' : ''}> ${esc(x.title)} <span class="muted">(${x.status})</span></label>`).join('') || '<span class="muted">no other tasks</span>'}</div>
     <label>Description</label><div class="comment">${esc(t.description) || '<span class="muted">none</span>'}</div>
     ${t.sessionId ? `<p class="muted">Session <code>${esc(t.sessionId)}</code>${t.iterations ? ` · ${t.iterations} iteration(s)` : ''}</p>` : ''}
-    <label>Comments</label>${t.comments.map((c) => `<div class="comment"><b>${esc(c.author)}</b>: ${esc(c.text)}</div>`).join('') || '<p class="muted">none</p>'}
+    <label>Comments</label>${(cmtCut ? `<p class="muted">${cmtCut} earlier comments hidden</p>` : '') + cmts.map((c) => `<div class="comment"><b>${esc(c.author)}</b>: ${esc(c.text)}</div>`).join('') || '<p class="muted">none</p>'}
     <textarea id="td-comment" rows="2" placeholder="Add comment"></textarea>
     <p><button id="td-addc">Comment</button> <button id="td-del">Delete task</button>${t.worktreePath ? ` <button id="td-diff">Diff</button> <button id="td-merge">Merge</button> <button id="td-discard">Discard</button>` : ''}</p><div id="td-diffbox"></div>`;
   if ($('#td-diff')) {
@@ -1346,9 +1359,19 @@ function spreadOverlaps(nodes) {
     return k === 0 ? n : { ...n, x: n.x + k * (W + 24), y: n.y };
   });
 }
+// Skip-no-op renders (t_9d92c3d3): the 1s tick rebuilds the Overview (graph SVG + timeline + thread)
+// only when an input changed. ovLive remembers whether the last render drew time-visible state
+// (live run bars, edge flashes, stuck badges) — those keep a 2s cadence; a fully idle board freezes.
+let ovSig = null, ovLive = false;
 function renderOverview() {
   if (!$('#tab-overview.active')) return;
-  const now = Date.now(); const L = projLogs(); const stuck = new Set(Overview.stuckAgents(S.orch.agents, L, now, S.settings.stuckMinutes || 5));
+  const now = Date.now(); const L = projLogs();
+  const working = Object.values(S.orch.agents || {}).some((a) => a.status === 'working');
+  const bucket = working || ovLive ? Math.floor(now / 2000) : 0;
+  const sig = Overview.overviewKey({ projectId: ctx.p, nodes: S.team.nodes, edges: S.team.edges, agents: S.orch.agents, tasks: S.tasks, messages: S.messages, logs: L, stuckMinutes: S.settings.stuckMinutes, selectedTask: $('#ov-task').value || sel.task || '', bucket });
+  if (sig === ovSig) return;
+  ovSig = sig;
+  const stuck = new Set(Overview.stuckAgents(S.orch.agents, L, now, S.settings.stuckMinutes || 5));
   const hot = Overview.edgeFlashes(L, S.team.edges, now);
   const ovNodes = spreadOverlaps(S.team.nodes);
   const svg = $('#ov-graph'); svg.innerHTML = ''; const byId = Object.fromEntries(ovNodes.map((n) => [n.id, n]));
@@ -1411,7 +1434,7 @@ function renderOverview() {
     for (let m = 0; m <= 15; m += 5) el('text', { x: x(now - m * 60000) - 14, y: ids.length * LH + 14 }, tl).textContent = m ? `-${m}m` : 'now';
     tlbox.appendChild(tl); tlbox.scrollLeft = tlbox.scrollWidth;
   }
-  // Readable task thread.
+  // Readable task thread (capped to the latest 300 entries; older history stays on the Board).
   const ts = $('#ov-task'); const activeTask = S.tasks.find((t) => t.status === 'in_progress');
   const cur = ts.value || sel.task || (activeTask || S.tasks[S.tasks.length - 1] || {}).id || '';
   ts.innerHTML = S.tasks.map((t) => `<option value="${t.id}">${esc(t.title)} (${t.status})</option>`).join(''); ts.value = cur;
@@ -1423,12 +1446,14 @@ function renderOverview() {
     const as = byId[t.assignee]; const ac = as ? agentColor(as.id) : 0;
     head.innerHTML = `<div class="ovth-title">${esc(t.title)}</div><div class="ovth-meta"><span class="ovth-status ${esc(t.status)}">${esc(t.status)}</span>${as ? `<span class="ovth-assignee"><span class="ovth-av" style="background:var(--agent-${ac})">${esc(initials(as.name))}</span>${esc(as.name)}</span>` : '<span class="muted">Unassigned</span>'}</div>`;
   }
-  $('#ov-thread').innerHTML = !t ? '<p class="muted empty">No tasks yet.</p>' : Overview.taskThread(t, L, S.messages).map((it, k) => it.type === 'tool'
+  const items = t ? Overview.taskThread(t, L, S.messages) : []; const cut = Math.max(0, items.length - 300); const shown = cut ? items.slice(-300) : items;
+  $('#ov-thread').innerHTML = !t ? '<p class="muted empty">No tasks yet.</p>' : (cut ? `<p class="muted empty">${cut} earlier entries hidden — open the task on the Board for the full history.</p>` : '') + (shown.map((it, k) => it.type === 'tool'
     ? `<details data-k="${k}" ${open.has(String(k)) ? 'open' : ''}><summary class="chip">🔧 ${esc(it.summary)}</summary><pre>${esc(it.text)}</pre></details>`
-    : `<div class="comment ${it.type === 'message' ? 'msg' : ''}"><b>${esc(it.type === 'message' ? `${nodeName(it.who)} → ${nodeName(it.to)}` : it.who === 'human' || it.who === 'orchestrator' ? it.who : nodeName(it.who))}</b> <small class="muted">${new Date(it.at).toLocaleTimeString()}</small><br>${esc(it.text)}</div>`).join('') || '<p class="muted empty">Nothing yet.</p>';
+    : `<div class="comment ${it.type === 'message' ? 'msg' : ''}"><b>${esc(it.type === 'message' ? `${nodeName(it.who)} → ${nodeName(it.to)}` : it.who === 'human' || it.who === 'orchestrator' ? it.who : nodeName(it.who))}</b> <small class="muted">${new Date(it.at).toLocaleTimeString()}</small><br>${esc(it.text)}</div>`).join('') || '<p class="muted empty">Nothing yet.</p>');
+  ovLive = stuck.size > 0 || hot.size > 0 || Object.values(lanes).some((l) => l.runs.some((r) => r.live));
 }
 $('#ov-task').onchange = renderOverview;
-document.querySelector('#tabs button[data-tab=overview]').addEventListener('click', () => setTimeout(renderOverview));
+document.querySelector('#tabs button[data-tab=overview]').addEventListener('click', () => setTimeout(() => { ovSig = null; renderOverview(); }));
 setInterval(renderOverview, 1000);
 
 // ---------- chat: #company room, task threads, working indicator, composer ----------
@@ -1462,13 +1487,20 @@ function renderYourTurn(ev) {
 function updateNewPill() { const btn = $('#chat-newpill'); const n = CH.pendingNew || 0; btn.classList.toggle('hidden', n <= 0); if (n > 0) btn.querySelector('span').textContent = n; }
 $('#chat-newpill').onclick = () => { const room = $('#chat-room'); room.scrollTop = room.scrollHeight; CH.pendingNew = 0; updateNewPill(); };
 $('#chat-room').addEventListener('scroll', () => { const room = $('#chat-room'); if (room.scrollHeight - room.scrollTop - room.clientHeight < 40) { CH.pendingNew = 0; updateNewPill(); } });
+// Skip-no-op renders (t_9d92c3d3): the feed signature is checked BEFORE the expensive roomEvents walk,
+// so an unchanged room costs no DOM work at all. chatSig is reset to force a redraw (tab switch, send).
+let chatSig = null;
 function renderChat() {
   if (!$('#tab-chat.active')) return;
-  const ev = Chat.roomEvents(projLogs(), S.tasks, S.messages, S.inbox); const working = new Set(Object.keys(S.orch.agents || {}).filter((id) => S.orch.agents[id].status === 'working'));
+  const working = new Set(Object.keys(S.orch.agents || {}).filter((id) => S.orch.agents[id].status === 'working'));
+  const L = projLogs();
+  const sig = Chat.feedKey({ projectId: ctx.p, thread: CH.thread, logs: L, tasks: S.tasks, messages: S.messages, inbox: S.inbox, nodes: S.allNodes, working });
+  if (sig === chatSig) return;
+  chatSig = sig;
+  const ev = Chat.roomEvents(L, S.tasks, S.messages, S.inbox); // capped to the last Chat.MAX (500) events
   CH.asks = ev.filter((e) => e.type === 'question').map((e) => e.who);
-  const key = [ctx.p, ev.length, (ev[ev.length - 1] || {}).at, [...working].join(), CH.thread, S.allNodes.map((n) => n.name).join(), (S.inbox || []).map((i) => i.id).join()].join('|');
   $('#chat-typing').innerHTML = [...working].map((id) => `<span class="typing"><span class="spin"></span>${esc(who(id).name)} is working<span class="dots"></span></span>`).join(' · ');
-  if (key === CH.key) return; CH.key = key; renderYourTurn(ev);
+  renderYourTurn(ev);
   const room = $('#chat-room'); const atBottom = room.scrollHeight - room.scrollTop - room.clientHeight < 40;
   const delta = Math.max(0, ev.length - (CH.evLen || 0)); CH.evLen = ev.length;
   room.innerHTML = ev.length ? renderGroups(ev, working) : S.team.nodes.length ? `<div class="cempty"><b>#company is quiet</b>Type a goal below, or @mention an agent (e.g. <code>@${esc(S.team.nodes[0].name)} write hello.txt</code>).</div>` : '<div class="cempty"><b>No team yet</b>Create your team in the Team tab (or use the first-run guide), then chat with it here.</div>';
@@ -1499,7 +1531,7 @@ async function chatSend() {
   if (p.kind === 'task') { await call('createTask', { title: p.text.slice(0, 80), description: p.text, assignee: p.nodeId }); if (!S.orch.running) await call('run'); }
   else if (p.kind === 'message') await call('sendToAgent', p.nodeId, p.text);
   else { if (!confirm(`Start a new goal for the team?\n\n“${p.text.slice(0, 200)}”\n\nThis runs your agents (may cost tokens).`)) return; $('#goal').value = p.text; await $('#run').onclick(); }
-  i.value = ''; chatPreview(); CH.key = ''; refresh();
+  i.value = ''; chatPreview(); chatSig = null; refresh();
 }
 $('#chat-input').addEventListener('input', chatPreview);
 $('#chat-input').addEventListener('keydown', (e) => {
@@ -1509,7 +1541,7 @@ $('#chat-input').addEventListener('keydown', (e) => {
   else if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); act(chatSend)(); }
 });
 $('#chat-send').onclick = act(chatSend);
-document.querySelector('#tabs button[data-tab=chat]').addEventListener('click', () => setTimeout(() => { CH.key = ''; renderChat(); }));
+document.querySelector('#tabs button[data-tab=chat]').addEventListener('click', () => setTimeout(() => { chatSig = null; renderChat(); }));
 setInterval(renderChat, 1000);
 
 // ---------- human inbox (ask_human questions + approvals) ----------

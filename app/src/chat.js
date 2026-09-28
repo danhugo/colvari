@@ -60,5 +60,21 @@
   // @mention autocomplete: the partial "@xx" at the end of the text -> matching nodes.
   function mentionMatches(text, nodes) { const m = /(?:^|\s)@(\w*)$/.exec(String(text)); if (!m) return null; return (nodes || []).filter((n) => n.name.toLowerCase().startsWith(m[1].toLowerCase())); }
 
-  return { avatarColor, initials, toolLabel, roomEvents, group, parseComposer, preview, mentionMatches, GROUP_MS, MAX };
+  // Signature of every input the room feed reads (pure, used by the renderer's 1s tick to skip the
+  // expensive roomEvents walk + DOM rebuild when nothing changed). Task comments bump task.updatedAt,
+  // and logs are append/prepend/clear-only, so this catches every change the feed can show.
+  function feedKey(inp) {
+    const logs = inp.logs || [], tasks = inp.tasks || [], messages = inp.messages || [], inbox = inp.inbox || [];
+    return JSON.stringify([
+      inp.projectId, inp.thread || null,
+      logs.length, logs.length ? logs[0].at : null, logs.length ? logs[logs.length - 1].at : null,
+      tasks.map((t) => [t.id, t.updatedAt, (t.comments || []).length]),
+      messages.length, messages.length ? messages[messages.length - 1].at : null,
+      inbox.map((i) => i.id),
+      (inp.nodes || []).map((n) => [n.id, n.name, n.role]),
+      [...(inp.working || [])].sort(),
+    ]);
+  }
+
+  return { avatarColor, initials, toolLabel, roomEvents, group, parseComposer, preview, mentionMatches, GROUP_MS, MAX, feedKey };
 });
