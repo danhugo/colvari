@@ -204,3 +204,16 @@ test('runAlive: a real working child still counts as alive', async () => {
     assert.equal(realRunAlive(orch, cli), true);
   } finally { killTree(cli.pid); }
 });
+
+// A stopped CLI cannot reap its exited children, so defunct descendants pile up under it. Their ps
+// state carries flags ('ZN', 'Z+'...) — only the first char is the primary state (live-proved
+// 2026-09-28: state 'ZN' defeated the old `!== 'Z'` check and blocked recovery forever).
+test('runAlive: defunct descendants with flagged ps state (ZN/Z+) do not count as alive', () => {
+  const { orch } = setup();
+  orch.procTable = () => [
+    { pid: 100, ppid: 1, state: 'TN', cpuMs: 6680, command: 'helpycode run --format json' },
+    { pid: 101, ppid: 100, state: 'ZN', cpuMs: 0, command: '<defunct>' },
+    { pid: 102, ppid: 100, state: 'Z+', cpuMs: 0, command: '<defunct>' },
+  ];
+  assert.equal(realRunAlive(orch, { pid: 100, exitCode: null }), false);
+});

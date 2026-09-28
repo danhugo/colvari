@@ -375,7 +375,9 @@ class Orchestrator extends EventEmitter {
       for (const r of kids.get(queue.pop()) || []) {
         if (seen.has(r.pid) || isBoardHelper(r)) continue; // skipped node's subtree stays unreachable
         seen.add(r.pid); queue.push(r.pid);
-        if (r.state !== 'Z') return true;
+        // Primary ps state is the first char; flags follow ('ZN' = defunct+nice). A stopped CLI cannot
+        // reap its exited children, so defunct descendants pile up — they are not liveness.
+        if (r.state[0] !== 'Z') return true;
       }
     }
     return false;
