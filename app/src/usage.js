@@ -538,9 +538,15 @@ function usageProviders({ runs = [], limits, nodes = [], rateLimitsByNode = {}, 
     if (rl) g.rl.push(rl);
     groups.set(provider, g);
   }
+  const claimed = new Set(groups.keys());
+  // Runs can predate the runtime stamp (legacy persisted data, imports) and so name no provider. On a
+  // single-provider team they can only belong to that one provider — count them there. With several
+  // providers attribution would be a guess, so they stay uncounted rather than fabricating a split.
+  const orphans = runs.filter((r) => r && r.kind === 'agent' && !claimed.has(r.runtime || 'unknown'));
   const providers = [];
   for (const [provider, g] of groups) {
-    const pRuns = runs.filter((r) => r.kind === 'agent' && (r.runtime || 'unknown') === provider);
+    const pRuns = runs.filter((r) => r.kind === 'agent' && (r.runtime || 'unknown') === provider)
+      .concat(groups.size === 1 ? orphans : []);
     // plan: how this provider's agents are billed — actual run billing wins, then a node's configured mode.
     const billed = new Set(pRuns.map((r) => authType(r.billingSource)));
     const plan = billed.has('subscription') ? 'subscription' : billed.has('api') ? 'api'
