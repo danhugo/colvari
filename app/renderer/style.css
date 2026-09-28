@@ -498,3 +498,7 @@ header .pill { border:none; background:none; color:var(--fg-muted); font-size:va
 .cchip.subagent.child { margin-left:14px; }
 .cchip.subagent.child > summary { color:var(--fg-secondary); }
 .cchip.subagent .sev-res { color:var(--term-green); }
+#ov-graph-wrap { position:relative; cursor:grab; } #ov-graph-wrap.panning { cursor:grabbing; user-select:none; }
+.ov-legend { position:sticky; float:left; margin:10px 0 -30px 12px; z-index:1; }
+.ov-sw-flash { box-shadow:0 0 6px var(--accent, #6b7cff); }
+.ov-purpose { margin:0 0 6px; font-size:var(--text-xs); }
