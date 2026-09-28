@@ -1,7 +1,10 @@
 // Pure tool implementations with scope enforcement. Used by the MCP server and by tests.
+const fs = require('fs');
+const path = require('path');
 const { outgoing, incoming, canAssign, canMessage, reviewees, visibleTask, canSetStatus } = require('./scope');
 const { BOARD_TOOLS } = require('./agent-config');
 const C = require('./controls');
+const SU = require('./self-update');
 
 // Board tools this node may use (the rest are disabled in the node's settings).
 function enabledTools(node) {
@@ -105,6 +108,16 @@ function makeTools(store, nodeId) {
     write_wiki({ title, content }) {
       const t = me();
       return store.writeWiki(title, content, nodeName(t, nodeId));
+    },
+    // PM-only: ask the app to update itself to the newest code. The request is a file the app's
+    // UpdateWatcher consumes on its next poll; it still honors the auto-restart setting and the
+    // restart guards, and every outcome lands in the activity feed.
+    request_self_update({ reason = '' } = {}) {
+      const t = me();
+      const n = t.nodes.find((x) => x.id === nodeId);
+      if (!n || String(n.role).toLowerCase() !== 'pm') throw new Error('scope violation: request_self_update is PM-only');
+      fs.writeFileSync(SU.requestFile(store.dir), JSON.stringify({ reason: String(reason || '').slice(0, 500), from: nodeId, ts: new Date().toISOString() }));
+      return { requested: true, note: 'Picked up on the next watcher poll if auto-restart is on; the result appears in the activity feed.' };
     },
   };
   // Wrap each tool with the per-agent enable check (read at call time, so toggles apply to the next call).

@@ -31,5 +31,6 @@ reg('read_messages', 'Read your inbox (messages from teammates with an edge to y
 reg('ask_human', 'Ask the human a question and WAIT for the answer (blocks until answered in the Inbox). Your task goes to waiting_for_human meanwhile. Returns {answer}.', { question: z.string(), choices: z.array(z.string()).optional().describe('optional answer buttons'), taskId: z.string().optional() });
 reg('read_wiki', 'Read a wiki page by title, or list page titles when title is omitted.', { title: z.string().optional() });
 reg('write_wiki', 'Create or overwrite a markdown wiki page.', { title: z.string(), content: z.string() });
+reg('request_self_update', 'PM only: ask the app to update itself to the newest merged code (safe restart: waits for agents, runs tests, relaunches). Honors the auto-restart setting and restart guards.', { reason: z.string().optional().describe('why the update is being requested') });
 
 server.connect(new StdioServerTransport());

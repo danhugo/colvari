@@ -389,7 +389,7 @@ class Store {
   }
 
   // ---- settings ----
-  getSettings() { return { claudePath: 'claude', maxConcurrency: 8, maxRuns: 30, permissionMode: 'bypassPermissions', rolePresets: [], budgetUsd: 0, budgetTokens: 0, requireApproval: false, useWorktrees: false, usageLimits: {}, autoCompactPct: 40, stallTimeoutMin: 10, ...this.read('settings', {}) }; }
+  getSettings() { return { claudePath: 'claude', maxConcurrency: 8, maxRuns: 30, permissionMode: 'bypassPermissions', rolePresets: [], budgetUsd: 0, budgetTokens: 0, requireApproval: false, useWorktrees: false, usageLimits: {}, autoCompactPct: 40, stallTimeoutMin: 10, autoRestart: false, ...this.read('settings', {}) }; }
   saveSettings(s) {
     const next = { ...this.getSettings(), ...s };
     if (s.rolePresets) {
