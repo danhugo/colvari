@@ -332,3 +332,54 @@ test('subdir layout: lockfile pathspec and test worktree cwd are under app/', as
   assert.ok(/squad-selfupdate/.test(wtTest[1]), 'npm test runs in the temp worktree');
   assert.ok(wtTest[1].endsWith('/app'), 'npm test runs in the worktree\'s app/ subdir, got ' + wtTest[1]);
 });
+
+// 2026-09-28 dogfood: with the store migrated underneath it, the running app's post-run task write
+// threw ("no task …"), runTask's promise died unhandled (no .catch at the dispatch site), the proc
+// slot leaked, and the drain waited for two agents that had already exited — forever, with dispatch
+// paused. A slot must be released however the run's bookkeeping ends, and an aborted update must
+// still hand dispatch back.
+test('drain: a run whose bookkeeping crashes releases its slot; drain completes; abort resumes dispatch', async () => {
+  const { Store } = require('../src/store');
+  const { Orchestrator } = require('../src/orchestrator');
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'su-crashdrain-'));
+  const fake = path.join(d, 'fake-claude.sh');
+  fs.writeFileSync(fake, '#!/bin/sh\necho \'{"type":"result","subtype":"success","session_id":"s1","total_cost_usd":0.001,"num_turns":1,"usage":{"input_tokens":10,"output_tokens":10}}\'\n');
+  fs.chmodSync(fake, 0o755);
+  const s = new Store(path.join(d, 'p'));
+  s.saveSettings({ claudePath: fake, maxRuns: 5, autoRestart: true });
+  const a = s.addNode({ name: 'A', role: 'Dev' });
+  s.createTask({ title: 'crash my bookkeeping', assignee: a.id });
+  const o = new Orchestrator(s);
+  const waitFor = async (fn, what) => { const t0 = Date.now(); while (!fn()) { if (Date.now() - t0 > 8000) throw new Error('timeout: ' + what); await new Promise((r) => setTimeout(r, 10)); } };
+  o.start();
+  await waitFor(() => o.procs.size === 1, 'task dispatched');
+  // The store breaks mid-run (the migration scenario): every post-run task write throws.
+  const realUpdate = s.updateTask.bind(s);
+  s.updateTask = () => { throw new Error('no task t_x'); };
+  o.dispatchPaused = true; // the watcher pauses while the agent is running
+  await waitFor(() => o.procs.size === 0, 'slot released despite the bookkeeping crash');
+  assert.strictEqual(o.agents[a.id].status, 'idle', 'agent state reset after the crash');
+  assert.ok(s.readLogs().some((l) => /agent run crashed/.test(l.text) && /no task/.test(l.text)), 'the crash is logged, not a silent unhandled rejection');
+
+  // The watcher drains (0 procs), tests on the new code fail, the update aborts — and unpausing
+  // must resume dispatch: the orphaned task is reconciled, re-dispatched and finishes.
+  s.updateTask = realUpdate;
+  const git = fakeGit(); const npm = fakeNpm({ testFails: true });
+  const w = new UpdateWatcher({
+    store: s, repoDir: '/repo', pollMs: 3.6e6,
+    git, npm,
+    relaunch: () => { w.relaunched = (w.relaunched || 0) + 1; },
+    procCount: () => o.procs.size,
+    runActive: () => o.running,
+    setPaused: (v) => { o.dispatchPaused = v; if (!v) setImmediate(() => o.tick()); },
+    sleep: () => new Promise((r) => setTimeout(r, 1)),
+  });
+  await drain(w); // baseline
+  git.setOrigin(SHA2);
+  await drain(w);
+  assert.strictEqual(w.phase, 'idle', 'drain completed and the failed update aborted back to idle');
+  assert.match(w.status().lastError, /tests failed/);
+  await waitFor(() => !o.running, 'run resumed after the abort');
+  assert.strictEqual(s.getTask(s.listTasks()[0].id).status, 'done', 'the interrupted task finished after dispatch resumed');
+  o.stop && o.stop();
+});

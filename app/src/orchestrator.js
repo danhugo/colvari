@@ -353,27 +353,37 @@ class Orchestrator extends EventEmitter {
     a.activity = { trigger: 'message', messageId: msgs[0].id, fromNodeId: msgs[0].from, excerpt: msgs[0].text.slice(0, 200), taskId: (msgs.find((m) => m.taskId) || {}).taskId || null, startedAt: Date.now() };
     a.runs++; this.runs++;
     this.procs.set(node.id, { kill() {} }); // reserve the slot synchronously
-    this.changed();
-    let cfg;
-    try { cfg = normalizeNode(applyPreset(node, settings.rolePresets || [])); } catch (e) { cfg = { env: {}, mode: 'single' }; this.log(node.id, 'error', 'bad agent settings: ' + e.message); }
-    const bill = U.applyBillingEnv(cfg, this.env(cfg)); const env = bill.env;
-    for (const w of bill.warnings) this.log(node.id, 'error', w);
-    const meta = { billingMode: cfg.billingMode || 'auto', runtime: cfg.runtime || 'claude' };
-    a.runtime = meta.runtime; a.model = cfg.model || '';
-    if (!this.cwds) this.cwds = new Map();
-    let cwd = node.workdir || this.store.dir;
-    fs.mkdirSync(cwd, { recursive: true });
-    this.cwds.set(node.id, cwd);
-    const resume = this.lastSession(node.id);
-    this.log(node.id, 'system', `▶ ${node.name} wakes to handle messages in ${cwd}${resume ? ' [resume ' + resume + ']' : ''}`);
-    let args = null;
-    try { args = RT.getRuntime(cfg.runtime).buildArgs(cfg, wakePrompt(team, node, msgs), settings, this.mcpConfig(node), { resume, cwd, env }); }
-    catch (e) { this.log(node.id, 'error', 'bad agent settings: ' + e.message); }
-    const r = await this.spawnRun(node, args, cwd, env, settings, { ...meta, resumedFrom: args && resume ? resume : null });
-    this.procs.delete(node.id); this.cwds.delete(node.id);
-    a.status = 'idle'; a.iteration = 0; a.activity = null;
-    this.log(node.id, 'system', `■ ${node.name} finished the wake run (exit ${r.code})`);
-    this.changed();
+    try {
+      this.changed();
+      let cfg;
+      try { cfg = normalizeNode(applyPreset(node, settings.rolePresets || [])); } catch (e) { cfg = { env: {}, mode: 'single' }; this.log(node.id, 'error', 'bad agent settings: ' + e.message); }
+      const bill = U.applyBillingEnv(cfg, this.env(cfg)); const env = bill.env;
+      for (const w of bill.warnings) this.log(node.id, 'error', w);
+      const meta = { billingMode: cfg.billingMode || 'auto', runtime: cfg.runtime || 'claude' };
+      a.runtime = meta.runtime; a.model = cfg.model || '';
+      if (!this.cwds) this.cwds = new Map();
+      let cwd = node.workdir || this.store.dir;
+      fs.mkdirSync(cwd, { recursive: true });
+      this.cwds.set(node.id, cwd);
+      const resume = this.lastSession(node.id);
+      this.log(node.id, 'system', `▶ ${node.name} wakes to handle messages in ${cwd}${resume ? ' [resume ' + resume + ']' : ''}`);
+      let args = null;
+      try { args = RT.getRuntime(cfg.runtime).buildArgs(cfg, wakePrompt(team, node, msgs), settings, this.mcpConfig(node), { resume, cwd, env }); }
+      catch (e) { this.log(node.id, 'error', 'bad agent settings: ' + e.message); }
+      const r = await this.spawnRun(node, args, cwd, env, settings, { ...meta, resumedFrom: args && resume ? resume : null });
+      a.status = 'idle'; a.iteration = 0; a.activity = null;
+      this.log(node.id, 'system', `■ ${node.name} finished the wake run (exit ${r.code})`);
+      this.changed();
+    } catch (e) {
+      a.status = 'idle'; a.iteration = 0; a.activity = null;
+      this.log(node.id, 'error', `wake run crashed: ${e.message}`);
+      this.changed();
+    } finally {
+      // Released however the bookkeeping above ends: a leaked slot leaves a self-update
+      // drain waiting forever for an agent that already exited.
+      this.procs.delete(node.id); this.cwds.delete(node.id);
+    }
+    if (this.running) setImmediate(() => this.tick());
     if (this.running) setImmediate(() => this.tick());
   }
 
@@ -549,7 +559,7 @@ class Orchestrator extends EventEmitter {
       if (s.maxConcurrency > 0 && this.procs.size >= s.maxConcurrency) break; // 0 = unlimited
       if (this.procs.has(node.id)) continue;
       if (this.runs >= s.maxRuns) { this.log(null, 'system', `maxRuns (${s.maxRuns}) reached`); break; }
-      this.runTask(node, task, team, s);
+      this.runTask(node, task, team, s).catch((e) => this.log(node.id, 'error', 'agent run crashed: ' + e.message));
     }
     try { this.nudgeIdle(); } catch (e) { this.log(null, 'error', 'idle nudge: ' + e.message); }
     if (this.procs.size === 0) {
@@ -622,16 +632,18 @@ class Orchestrator extends EventEmitter {
       child.on('close', (code) => {
         run.done = true;
         if (a.currentRun === run) a.currentRun = null;
-        if (buf.trim()) this.onEvent(node, buf.trim(), run, rt.id);
-        if (run.subs && run.subs.records.length) {
-          // Anything still 'running' can never finish once the CLI is gone: abort before persisting.
-          for (const rec of run.subs.close()) this.emit('subagent', { nodeId: node.id, record: { ...rec } });
-          usage.subagents = run.subs.snapshot(); // per-run history: listRuns()[i].subagents rebuilds after a restart
-          this.syncSubs(node.id, run);
-        }
-        delete usage.baseline;
-        if (usage.sessionId && usage.cumulative) (this.sessionCum ||= new Map()).set(usage.sessionId, usage.cumulative);
-        if (args) this.record(U.finishRun(usage, { code, env, billingMode: meta.billingMode, startedMs }));
+        try {
+          if (buf.trim()) this.onEvent(node, buf.trim(), run, rt.id);
+          if (run.subs && run.subs.records.length) {
+            // Anything still 'running' can never finish once the CLI is gone: abort before persisting.
+            for (const rec of run.subs.close()) this.emit('subagent', { nodeId: node.id, record: { ...rec } });
+            usage.subagents = run.subs.snapshot(); // per-run history: listRuns()[i].subagents rebuilds after a restart
+            this.syncSubs(node.id, run);
+          }
+          delete usage.baseline;
+          if (usage.sessionId && usage.cumulative) (this.sessionCum ||= new Map()).set(usage.sessionId, usage.cumulative);
+          if (args) this.record(U.finishRun(usage, { code, env, billingMode: meta.billingMode, startedMs }));
+        } catch (e) { this.log(node.id, 'error', 'run close bookkeeping crashed: ' + e.message); }
         resolve({ code, ...run });
       });
     });
@@ -675,142 +687,152 @@ class Orchestrator extends EventEmitter {
     this.store.updateTask(task.id, { status: 'in_progress' });
     const a = this.agent(node.id); a.status = 'working'; a.lastError = null; a.taskId = task.id; a.task = task.title; a.runs++; a.iteration = 1;
     this.procs.set(node.id, { kill() {} }); // reserve the slot synchronously
-    this.changed();
-    const mcp = this.mcpConfig(node);
-    let cwd = node.workdir || this.store.dir;
-    fs.mkdirSync(cwd, { recursive: true });
-    // Concurrent runs sharing a workdir each get their own git worktree/branch so their edits don't collide.
-    if (!this.cwds) this.cwds = new Map();
-    const shared = [...this.cwds.entries()].some(([id, d]) => id !== node.id && d === cwd);
-    this.cwds.set(node.id, cwd);
-    if (settings.useWorktrees || shared) {
-      // Conflict-resolution tasks are pre-assigned the original task's worktree/branch (never a
-      // fresh one) so resolving them re-merges the SAME branch instead of stranding it behind a new one.
-      if (task.isConflictResolution && task.worktreePath && fs.existsSync(task.worktreePath)) cwd = task.worktreePath;
-      else {
-        const w = WT.ensureWorktree(cwd, task.id);
-        if (w.warning) this.log(node.id, 'error', 'warning: ' + w.warning);
-        else { cwd = w.cwd; this.store.updateTask(task.id, { worktreePath: w.worktreePath, worktreeBranch: w.worktreeBranch }); }
-      }
-    }
-    const presets = settings.rolePresets || [];
-    const unread = this.store.listMessages({ to: node.id }).filter((m) => !m.read).length;
-    let cfg; let base = null; let baseDefer = null;
     try {
-      cfg = normalizeNode(applyPreset(node, presets)); base = buildPrompt(team, node, task, { presets, unread, boardDir: this.store.dir });
-      const lm = normalizeMode(cfg); // loop mode: every pass but the last is told not to mark the task done
-      baseDefer = lm.mode === 'loop' && lm.loopCount > 1 ? buildPrompt(team, node, task, { presets, unread, boardDir: this.store.dir, deferDone: `${lm.loopCount} passes` }) : base;
-    } catch (e) { cfg = { env: {}, mode: 'single' }; this.log(node.id, 'error', 'bad agent settings: ' + e.message); }
-    const m = normalizeMode(cfg);
-    // Workflow mode: only the task text follows the slash command ($ARGUMENTS); the team context goes in --append-system-prompt.
-    const wf = m.mode === 'workflow' && !!m.slashCommand && base !== null;
-    const runCfg = wf ? { ...cfg, appendSystemPrompt: [base, cfg.appendSystemPrompt].filter(Boolean).join('\n\n') } : cfg;
-    if (m.mode === 'goal' && !m.goalCondition.trim()) { this.log(node.id, 'error', 'goal mode without a completion condition: running once'); m.mode = 'single'; }
-    const bill = U.applyBillingEnv(cfg, this.env(cfg)); const env = bill.env;
-    for (const w of bill.warnings) this.log(node.id, 'error', w);
-    const meta = { taskId: task.id, task: task.title, billingMode: cfg.billingMode || 'auto', runtime: cfg.runtime || 'claude' };
-    // Verified empirically (claude 2.1.283): CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=<fraction 0-1> makes the CLI
-    // auto-compact on its own once context passes that fraction of the window (confirmed via a live
-    // compact_boundary event). So this is set at spawn instead of the app sending /compact itself.
-    // Per-agent threshold wins over the project default so thinkers (PM/reviewer/critic) can compact later.
-    const autoCompactPct = Number(cfg.autoCompactPct || (settings.autoCompactPct ?? 40));
-    if (meta.runtime === 'claude' && autoCompactPct > 0) env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE = String(Math.min(1, autoCompactPct / 100));
-    a.runtime = meta.runtime; a.model = cfg.model || '';
-    let resume = task.sessionId || (m.continueSession ? this.lastSession(node.id) : null);
-    this.log(node.id, 'system', `▶ ${node.name} starts "${task.title}" in ${cwd} [mode=${m.mode}${resume ? ', resume ' + resume : ''}]`);
-    let code = 1; let judge = null; let i = 0; let reason = ''; let human = null; let recover = false;
-    a.stopRequested = false; a.pendingHuman = [];
-    for (;;) {
-      a.iteration = i + 1; this.changed();
-      let args = null;
-      if (base !== null) {
-        const b = m.mode === 'loop' && !isLastLoop(m, i) ? baseDefer : base;
-        const prompt = human ? humanPrompt(human, resume || wf ? null : b) : recover ? stallPrompt(task) : iterationPrompt(m, b, i, { reason: judge && judge.reason, task: wf ? (this.store.getTask(task.id) || task) : null });
-        try { args = RT.getRuntime(cfg.runtime).buildArgs(runCfg, prompt, settings, mcp, { resume, cwd, env }); }
-        catch (e) { this.log(node.id, 'error', 'bad agent settings: ' + e.message); }
-      }
-      if (i > 0) this.log(node.id, 'system', `↻ ${node.name} iteration ${i + 1} (${m.mode})`);
-      const r = await this.spawnRun(node, args, cwd, env, settings, { ...meta, iteration: i + 1, resumedFrom: args && resume ? resume : null });
-      code = r.code; i++; human = null; recover = false;
-      if (r.sessionId) { resume = r.sessionId; this.store.updateTask(task.id, { sessionId: r.sessionId, iterations: i }); }
-      // A run that got through (exit 0) is real progress: the stall counter resets (persisted on the task,
-      // so it survives app restarts — otherwise a restart would re-arm the recovery budget).
-      if (code === 0) { const tp = this.store.getTask(task.id); if (tp && tp.stallRecoveries) this.store.updateTask(task.id, { stallRecoveries: 0 }); }
-      // Stalled run confirmed exited (the watchdog killed it after the run.stalled claim): resume the
-      // same session with a continue prompt, at most STALL.MAX_RECOVERIES times per task (persisted
-      // counter), then park the task for a human. Only when the orchestrator is still running and no
-      // manual stop interleaved.
-      if (r.stalled && code !== 0 && this.running && !a.stopRequested) {
-        const ts = this.store.getTask(task.id);
-        const attempt = ((ts && ts.stallRecoveries) || 0) + 1;
-        if (attempt > STALL.MAX_RECOVERIES) {
-          this.store.updateTask(task.id, { stallRecoveries: attempt, status: 'waiting_for_human' });
-          this.store.commentTask(task.id, 'orchestrator', `Run stalled ${attempt} time(s); the ${STALL.MAX_RECOVERIES} automatic stop+resume recoveries are used up. Parked for a human.`);
-          this.emit('run.recovery_failed', { nodeId: node.id, taskId: task.id, attempt: attempt - 1, final: true });
-          this.log(node.id, 'error', `stall recovery failed: ${attempt - 1} automatic resume(s) already used; parked for a human`);
-          reason = `stalled after ${attempt - 1} recovery attempt(s)`; break;
+      this.changed();
+      const mcp = this.mcpConfig(node);
+      let cwd = node.workdir || this.store.dir;
+      fs.mkdirSync(cwd, { recursive: true });
+      // Concurrent runs sharing a workdir each get their own git worktree/branch so their edits don't collide.
+      if (!this.cwds) this.cwds = new Map();
+      const shared = [...this.cwds.entries()].some(([id, d]) => id !== node.id && d === cwd);
+      this.cwds.set(node.id, cwd);
+      if (settings.useWorktrees || shared) {
+        // Conflict-resolution tasks are pre-assigned the original task's worktree/branch (never a
+        // fresh one) so resolving them re-merges the SAME branch instead of stranding it behind a new one.
+        if (task.isConflictResolution && task.worktreePath && fs.existsSync(task.worktreePath)) cwd = task.worktreePath;
+        else {
+          const w = WT.ensureWorktree(cwd, task.id);
+          if (w.warning) this.log(node.id, 'error', 'warning: ' + w.warning);
+          else { cwd = w.cwd; this.store.updateTask(task.id, { worktreePath: w.worktreePath, worktreeBranch: w.worktreeBranch }); }
         }
-        if (!resume) {
-          // No session id to resume: never silently retry fresh (would lose the session's context).
-          this.store.updateTask(task.id, { stallRecoveries: attempt, status: 'waiting_for_human' });
-          this.store.commentTask(task.id, 'orchestrator', 'Run stalled; automatic recovery failed because the run reported no session id to resume. Parked for a human.');
-          this.emit('run.recovery_failed', { nodeId: node.id, taskId: task.id, attempt, final: true, reason: 'no session' });
-          this.log(node.id, 'error', 'stall recovery failed: no session id was reported, the same session cannot be resumed');
-          reason = 'stalled: no session to resume'; break;
-        }
-        this.store.updateTask(task.id, { stallRecoveries: attempt, status: 'in_progress' });
-        a.stall = { attempt, max: STALL.MAX_RECOVERIES };
-        this.log(node.id, 'system', `↻ stall recovery ${attempt}/${STALL.MAX_RECOVERIES}: resuming the same session with a continue prompt`);
-        this.emit('run.recovering', { nodeId: node.id, taskId: task.id, attempt, max: STALL.MAX_RECOVERIES });
-        recover = true;
-        continue;
       }
-      const msgs = a.pendingHuman.splice(0);
-      if (msgs.length && this.running && !a.stopRequested) {
-        try { this.store.markMessagesRead(msgs.map((x) => x.id)); } catch {}
+      const presets = settings.rolePresets || [];
+      const unread = this.store.listMessages({ to: node.id }).filter((m) => !m.read).length;
+      let cfg; let base = null; let baseDefer = null;
+      try {
+        cfg = normalizeNode(applyPreset(node, presets)); base = buildPrompt(team, node, task, { presets, unread, boardDir: this.store.dir });
+        const lm = normalizeMode(cfg); // loop mode: every pass but the last is told not to mark the task done
+        baseDefer = lm.mode === 'loop' && lm.loopCount > 1 ? buildPrompt(team, node, task, { presets, unread, boardDir: this.store.dir, deferDone: `${lm.loopCount} passes` }) : base;
+      } catch (e) { cfg = { env: {}, mode: 'single' }; this.log(node.id, 'error', 'bad agent settings: ' + e.message); }
+      const m = normalizeMode(cfg);
+      // Workflow mode: only the task text follows the slash command ($ARGUMENTS); the team context goes in --append-system-prompt.
+      const wf = m.mode === 'workflow' && !!m.slashCommand && base !== null;
+      const runCfg = wf ? { ...cfg, appendSystemPrompt: [base, cfg.appendSystemPrompt].filter(Boolean).join('\n\n') } : cfg;
+      if (m.mode === 'goal' && !m.goalCondition.trim()) { this.log(node.id, 'error', 'goal mode without a completion condition: running once'); m.mode = 'single'; }
+      const bill = U.applyBillingEnv(cfg, this.env(cfg)); const env = bill.env;
+      for (const w of bill.warnings) this.log(node.id, 'error', w);
+      const meta = { taskId: task.id, task: task.title, billingMode: cfg.billingMode || 'auto', runtime: cfg.runtime || 'claude' };
+      // Verified empirically (claude 2.1.283): CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=<fraction 0-1> makes the CLI
+      // auto-compact on its own once context passes that fraction of the window (confirmed via a live
+      // compact_boundary event). So this is set at spawn instead of the app sending /compact itself.
+      // Per-agent threshold wins over the project default so thinkers (PM/reviewer/critic) can compact later.
+      const autoCompactPct = Number(cfg.autoCompactPct || (settings.autoCompactPct ?? 40));
+      if (meta.runtime === 'claude' && autoCompactPct > 0) env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE = String(Math.min(1, autoCompactPct / 100));
+      a.runtime = meta.runtime; a.model = cfg.model || '';
+      let resume = task.sessionId || (m.continueSession ? this.lastSession(node.id) : null);
+      this.log(node.id, 'system', `▶ ${node.name} starts "${task.title}" in ${cwd} [mode=${m.mode}${resume ? ', resume ' + resume : ''}]`);
+      let code = 1; let judge = null; let i = 0; let reason = ''; let human = null; let recover = false;
+      a.stopRequested = false; a.pendingHuman = [];
+      for (;;) {
+        a.iteration = i + 1; this.changed();
+        let args = null;
+        if (base !== null) {
+          const b = m.mode === 'loop' && !isLastLoop(m, i) ? baseDefer : base;
+          const prompt = human ? humanPrompt(human, resume || wf ? null : b) : recover ? stallPrompt(task) : iterationPrompt(m, b, i, { reason: judge && judge.reason, task: wf ? (this.store.getTask(task.id) || task) : null });
+          try { args = RT.getRuntime(cfg.runtime).buildArgs(runCfg, prompt, settings, mcp, { resume, cwd, env }); }
+          catch (e) { this.log(node.id, 'error', 'bad agent settings: ' + e.message); }
+        }
+        if (i > 0) this.log(node.id, 'system', `↻ ${node.name} iteration ${i + 1} (${m.mode})`);
+        const r = await this.spawnRun(node, args, cwd, env, settings, { ...meta, iteration: i + 1, resumedFrom: args && resume ? resume : null });
+        code = r.code; i++; human = null; recover = false;
+        if (r.sessionId) { resume = r.sessionId; this.store.updateTask(task.id, { sessionId: r.sessionId, iterations: i }); }
+        // A run that got through (exit 0) is real progress: the stall counter resets (persisted on the task,
+        // so it survives app restarts — otherwise a restart would re-arm the recovery budget).
+        if (code === 0) { const tp = this.store.getTask(task.id); if (tp && tp.stallRecoveries) this.store.updateTask(task.id, { stallRecoveries: 0 }); }
+        // Stalled run confirmed exited (the watchdog killed it after the run.stalled claim): resume the
+        // same session with a continue prompt, at most STALL.MAX_RECOVERIES times per task (persisted
+        // counter), then park the task for a human. Only when the orchestrator is still running and no
+        // manual stop interleaved.
+        if (r.stalled && code !== 0 && this.running && !a.stopRequested) {
+          const ts = this.store.getTask(task.id);
+          const attempt = ((ts && ts.stallRecoveries) || 0) + 1;
+          if (attempt > STALL.MAX_RECOVERIES) {
+            this.store.updateTask(task.id, { stallRecoveries: attempt, status: 'waiting_for_human' });
+            this.store.commentTask(task.id, 'orchestrator', `Run stalled ${attempt} time(s); the ${STALL.MAX_RECOVERIES} automatic stop+resume recoveries are used up. Parked for a human.`);
+            this.emit('run.recovery_failed', { nodeId: node.id, taskId: task.id, attempt: attempt - 1, final: true });
+            this.log(node.id, 'error', `stall recovery failed: ${attempt - 1} automatic resume(s) already used; parked for a human`);
+            reason = `stalled after ${attempt - 1} recovery attempt(s)`; break;
+          }
+          if (!resume) {
+            // No session id to resume: never silently retry fresh (would lose the session's context).
+            this.store.updateTask(task.id, { stallRecoveries: attempt, status: 'waiting_for_human' });
+            this.store.commentTask(task.id, 'orchestrator', 'Run stalled; automatic recovery failed because the run reported no session id to resume. Parked for a human.');
+            this.emit('run.recovery_failed', { nodeId: node.id, taskId: task.id, attempt, final: true, reason: 'no session' });
+            this.log(node.id, 'error', 'stall recovery failed: no session id was reported, the same session cannot be resumed');
+            reason = 'stalled: no session to resume'; break;
+          }
+          this.store.updateTask(task.id, { stallRecoveries: attempt, status: 'in_progress' });
+          a.stall = { attempt, max: STALL.MAX_RECOVERIES };
+          this.log(node.id, 'system', `↻ stall recovery ${attempt}/${STALL.MAX_RECOVERIES}: resuming the same session with a continue prompt`);
+          this.emit('run.recovering', { nodeId: node.id, taskId: task.id, attempt, max: STALL.MAX_RECOVERIES });
+          recover = true;
+          continue;
+        }
+        const msgs = a.pendingHuman.splice(0);
+        if (msgs.length && this.running && !a.stopRequested) {
+          try { this.store.markMessagesRead(msgs.map((x) => x.id)); } catch {}
+          if (this.runs >= settings.maxRuns) { reason = 'maxRuns reached'; break; }
+          human = msgs.map((x) => x.text).join('\n\n'); this.runs++; a.runs++;
+          this.log(node.id, 'system', `↻ ${node.name} resumes with the human message`);
+          const tt = this.store.getTask(task.id); if (tt && tt.status !== 'in_progress') this.store.updateTask(task.id, { status: 'in_progress' });
+          continue;
+        }
+        judge = null;
+        if (m.mode === 'goal' && code === 0 && this.running) judge = await this.judge(node, m, this.store.getTask(task.id) || task, r.result, cwd, env, settings, { ...meta, apiKeySource: r.usage ? r.usage.apiKeySource : null }); // json output has no init event: same env as the agent run
+        const t = this.store.getTask(task.id);
+        const step = nextStep(m, i, { code, stopped: !this.running || !!a.stopRequested, judge, taskStatus: t && t.status });
+        reason = step.why;
+        if (!step.again) break;
         if (this.runs >= settings.maxRuns) { reason = 'maxRuns reached'; break; }
-        human = msgs.map((x) => x.text).join('\n\n'); this.runs++; a.runs++;
-        this.log(node.id, 'system', `↻ ${node.name} resumes with the human message`);
-        const tt = this.store.getTask(task.id); if (tt && tt.status !== 'in_progress') this.store.updateTask(task.id, { status: 'in_progress' });
-        continue;
+        this.runs++; a.runs++;
+        if (t && t.status !== 'in_progress') this.store.updateTask(task.id, { status: 'in_progress' });
       }
-      judge = null;
-      if (m.mode === 'goal' && code === 0 && this.running) judge = await this.judge(node, m, this.store.getTask(task.id) || task, r.result, cwd, env, settings, { ...meta, apiKeySource: r.usage ? r.usage.apiKeySource : null }); // json output has no init event: same env as the agent run
+      const stoppedWhy = a.stopRequested; a.stopRequested = false;
+      a.status = 'idle'; a.taskId = null; a.task = null; a.iteration = 0; a.stall = null;
       const t = this.store.getTask(task.id);
-      const step = nextStep(m, i, { code, stopped: !this.running || !!a.stopRequested, judge, taskStatus: t && t.status });
-      reason = step.why;
-      if (!step.again) break;
-      if (this.runs >= settings.maxRuns) { reason = 'maxRuns reached'; break; }
-      this.runs++; a.runs++;
-      if (t && t.status !== 'in_progress') this.store.updateTask(task.id, { status: 'in_progress' });
+      const gate = (st) => C.gateStatus(st, node, this.store.getSettings());
+      if (m.mode === 'goal' && t && judge && !judge.met && t.status === 'done') {
+        // Parked for a human, not a "please review this" hand-off: never auto-dispatched/auto-advanced.
+        this.store.updateTask(task.id, { status: 'review', parkedForHuman: true });
+        this.store.commentTask(task.id, 'orchestrator', judge.inconclusive ? `Goal check was inconclusive after ${i} iteration(s): ${judge.reason}. Check the result yourself.` : `Goal condition not met after ${i} iteration(s) (${reason}): ${judge.reason}`);
+      } else if (t && t.status === 'in_progress') {
+        // Agent ended without updating status: success -> done, failure -> back to review for a human.
+        const ok = code === 0 && this.running && !stoppedWhy && !(m.mode === 'goal' && !(judge && judge.met));
+        const g = gate(ok ? 'done' : 'review');
+        if (!ok) g.parkedForHuman = true;
+        this.store.updateTask(task.id, g);
+        this.store.commentTask(task.id, 'orchestrator', stoppedWhy ? `Agent stopped (${stoppedWhy}) after ${i} iteration(s); moved to review.` : `Agent exited (code ${code}) without setting status after ${i} iteration(s) (${reason}); moved automatically.`);
+      } else if (t && t.status === 'review' && !t.parkedForHuman && code !== 0 && this.running && !stoppedWhy) {
+        // The agent itself moved this to 'review' (clearing parkedForHuman) but the process then crashed
+        // (nonzero exit). A crashed run must never look like a clean hand-off eligible for silent
+        // auto-advance to done: park it for a human to inspect.
+        this.store.updateTask(task.id, { parkedForHuman: true });
+        this.store.commentTask(task.id, 'orchestrator', `Agent exited (code ${code}) after moving this task to review during iteration ${i}; parked for a human because the run crashed.`);
+      }
+      const t2 = this.store.getTask(task.id);
+      if (t2 && t2.awaitingApproval) { this.log(node.id, 'system', `⏸ "${task.title}" waits for human approval`); this.notify('Approval needed', `${node.name}: ${task.title}`, { taskId: task.id }); }
+      this.log(node.id, 'system', `■ ${node.name} finished (exit ${code}, ${i} iteration(s), ${reason})`);
+      this.changed();
+    } catch (e) {
+      a.status = 'idle'; a.taskId = null; a.task = null; a.iteration = 0; a.stall = null; a.stopRequested = false;
+      this.log(node.id, 'error', `agent run crashed: ${e.message}`);
+      this.changed();
+    } finally {
+      // Released however the bookkeeping above ends: a leaked slot leaves a self-update
+      // drain waiting forever for an agent that already exited.
+      this.procs.delete(node.id); this.cwds.delete(node.id);
     }
-    this.procs.delete(node.id); this.cwds.delete(node.id);
-    const stoppedWhy = a.stopRequested; a.stopRequested = false;
-    a.status = 'idle'; a.taskId = null; a.task = null; a.iteration = 0; a.stall = null;
-    const t = this.store.getTask(task.id);
-    const gate = (st) => C.gateStatus(st, node, this.store.getSettings());
-    if (m.mode === 'goal' && t && judge && !judge.met && t.status === 'done') {
-      // Parked for a human, not a "please review this" hand-off: never auto-dispatched/auto-advanced.
-      this.store.updateTask(task.id, { status: 'review', parkedForHuman: true });
-      this.store.commentTask(task.id, 'orchestrator', judge.inconclusive ? `Goal check was inconclusive after ${i} iteration(s): ${judge.reason}. Check the result yourself.` : `Goal condition not met after ${i} iteration(s) (${reason}): ${judge.reason}`);
-    } else if (t && t.status === 'in_progress') {
-      // Agent ended without updating status: success -> done, failure -> back to review for a human.
-      const ok = code === 0 && this.running && !stoppedWhy && !(m.mode === 'goal' && !(judge && judge.met));
-      const g = gate(ok ? 'done' : 'review');
-      if (!ok) g.parkedForHuman = true;
-      this.store.updateTask(task.id, g);
-      this.store.commentTask(task.id, 'orchestrator', stoppedWhy ? `Agent stopped (${stoppedWhy}) after ${i} iteration(s); moved to review.` : `Agent exited (code ${code}) without setting status after ${i} iteration(s) (${reason}); moved automatically.`);
-    } else if (t && t.status === 'review' && !t.parkedForHuman && code !== 0 && this.running && !stoppedWhy) {
-      // The agent itself moved this to 'review' (clearing parkedForHuman) but the process then crashed
-      // (nonzero exit). A crashed run must never look like a clean hand-off eligible for silent
-      // auto-advance to done: park it for a human to inspect.
-      this.store.updateTask(task.id, { parkedForHuman: true });
-      this.store.commentTask(task.id, 'orchestrator', `Agent exited (code ${code}) after moving this task to review during iteration ${i}; parked for a human because the run crashed.`);
-    }
-    const t2 = this.store.getTask(task.id);
-    if (t2 && t2.awaitingApproval) { this.log(node.id, 'system', `⏸ "${task.title}" waits for human approval`); this.notify('Approval needed', `${node.name}: ${task.title}`, { taskId: task.id }); }
-    this.log(node.id, 'system', `■ ${node.name} finished (exit ${code}, ${i} iteration(s), ${reason})`);
-    this.changed();
+    setImmediate(() => this.tick());
     setImmediate(() => this.tick());
   }
 
