@@ -264,6 +264,49 @@ async function guiE2E() {
     expect('chat: @mention autocomplete + preview + creates a task for the agent', mention.includes(b.name) && pv.includes('task for ' + b.name) && made && made.assignee === b.id, cm);
     expect('chat: inline answer to ask_human', cm.answered === 'dark', cm);
   };
+  // Windowing (t_fb193107): 5k-message fixture, DOM bounded to the latest page, scroll-up prepends
+  // older pages with the anchor held, auto-scroll only at the bottom. Injection-only, no real runs.
+  const windowingShots = async () => {
+    await ex(`window._refresh = refresh; refresh = async () => {}; // keep background refreshes from re-rendering mid-assertion
+      await refresh(); S.allNodes = [{ id: 'a', name: 'Pia', role: 'PM' }, { id: 'b', name: 'Devon', role: 'Dev' }];
+      S.messages = []; S.tasks = []; S.inbox = []; S.orch.agents = {}; RUNS = [];
+      if (!window.__winseed) { window.__winseed = true; const N = 5000, now = Date.now();
+        for (let i = 0; i < N; i++) logs.push({ projectId: ctx.p, nodeId: i % 7 ? 'b' : 'a', kind: ['text','tool','tool_result','text','text'][i % 5], text: 'line-' + i + ' windowing fixture row', at: now - (N - i) * 1000 }); }`);
+    // Chat: latest page only + older bar; render time (median of 5) reported.
+    await ex(`$('#tabs button[data-tab=chat]').click(); await w(200); chatSig = null; renderChat(); await w(200);`);
+    const chat = await ex(`const times = []; for (let i = 0; i < 6; i++) { chatSig = null; const t0 = performance.now(); renderChat(); times.push(performance.now() - t0); }
+      return { med: Math.round([...times.slice(1)].sort((x, y) => x - y)[2] * 10) / 10, bubbles: document.querySelectorAll('#chat-room .bubble').length, nodes: document.querySelectorAll('#chat-room *').length, older: ($('#chat-older') || {}).textContent || '' }`);
+    expect('chat windowing: 5k messages but DOM bounded to the latest page with an older bar', chat.bubbles > 0 && chat.bubbles <= 140 && /earlier/.test(chat.older), chat);
+    // Scroll to the top: older page prepended (older count drops by one page), view anchored (not clamped at 0).
+    await ex(`$('#chat-room').scrollTop = 0; await w(500);`);
+    const chatUp = await ex(`return { bubbles: document.querySelectorAll('#chat-room .bubble').length, top: Math.round($('#chat-room').scrollTop), older: ($('#chat-older') || {}).textContent || '' }`);
+    const olderCount = (t) => +(/(\d+)/.exec(t || '') || [])[1];
+    expect('chat windowing: scroll-up loads older pages and keeps the scroll anchor', chatUp.bubbles > chat.bubbles && chatUp.top > 500 && olderCount(chat.older) - olderCount(chatUp.older) === 100, { chat, chatUp });
+    // New messages while reading history: view stays put, "N new" pill appears; at the bottom it autoscrolls and the window shrinks back.
+    await ex(`const now = Date.now(); for (let i = 0; i < 3; i++) logs.push({ projectId: ctx.p, nodeId: 'b', kind: 'text', text: 'fresh-' + i, at: now + i }); chatSig = null; renderChat(); await w(200);`);
+    const chatKeep = await ex(`return { pill: !$('#chat-newpill').classList.contains('hidden'), top: Math.round($('#chat-room').scrollTop), bubbles: document.querySelectorAll('#chat-room .bubble').length }`);
+    await ex(`$('#chat-room').scrollTop = $('#chat-room').scrollHeight; await w(500);`);
+    const chatBottom = await ex(`return { pill: !$('#chat-newpill').classList.contains('hidden'), bubbles: document.querySelectorAll('#chat-room .bubble').length, atEnd: $('#chat-room').textContent.includes('fresh-2') }`);
+    expect('chat windowing: history view holds with a new-pill, bottom autoscrolls and shrinks the window', chatKeep.pill && chatKeep.top > 500 && chatBottom.bubbles < chatUp.bubbles && chatBottom.atEnd && !chatBottom.pill, { chatKeep, chatBottom });
+    // Logs: same bounds, older bar, agent filter still applies before windowing. Pin to the tail
+    // first — background renderLogs (watcher events) may have run while the tab was hidden, leaving
+    // the box at the top, and scrollTop assignments on a hidden box are no-ops (no scroll event).
+    await ex(`$('#tabs button[data-tab=obs]').click(); await w(200); $('#log').scrollTop = $('#log').scrollHeight; await w(100);`);
+    const log = await ex(`const times = []; for (let i = 0; i < 6; i++) { const t0 = performance.now(); renderLog(); times.push(performance.now() - t0); }
+      return { med: Math.round([...times.slice(1)].sort((x, y) => x - y)[2] * 10) / 10, rows: document.querySelectorAll('#log .logrow').length, older: ($('#log-older') || {}).textContent || '' }`);
+    expect('log windowing: 5k lines but at most one page rendered with an older bar', log.rows > 0 && log.rows <= 200 && /earlier/.test(log.older), log);
+    await ex(`$('#log').scrollTop = 0; await w(500);`);
+    const logUp = await ex(`return { rows: document.querySelectorAll('#log .logrow').length, top: Math.round($('#log').scrollTop), older: ($('#log-older') || {}).textContent || '' }`);
+    expect('log windowing: scroll-up loads older lines and keeps the scroll anchor', logUp.rows > log.rows && logUp.top > 500 && /earlier/.test(logUp.older), logUp);
+    // Back to the tail: the window shrinks again (bounded DOM), then the agent filter still holds.
+    await ex(`$('#log').scrollTop = $('#log').scrollHeight; await w(400); $('#logfilter').innerHTML = '<option value="a">Pia</option>'; $('#logfilter').value = 'a'; renderLog(); await w(200);`);
+    const logF = await ex(`return { rows: document.querySelectorAll('#log .logrow').length, agents: [...new Set([...document.querySelectorAll('#log .logrow .logagent')].map((d) => d.textContent))] }`);
+    expect('log windowing: agent filter bounds the window and selects only that agent', logF.rows > 0 && logF.rows <= 200 && logF.agents.length === 1, logF);
+    console.log('[gui-e2e] windowing', JSON.stringify({ chat, chatUp, chatKeep, chatBottom, log, logUp, logF }));
+    // Drop the fixture so later full-run steps see clean logs, then hand refresh back.
+    await ex(`for (let i = logs.length - 1; i >= 0; i--) if (/windowing fixture row|^fresh-/.test(logs[i].text)) logs.splice(i, 1);
+      logWin = 200; CH.win = null; renderLog(); refresh = window._refresh; await refresh();`);
+  };
   // Graph editor (shots 21-24): 12-node team, connect by mouse, cross-team edge, positions/viewport persistence.
   // Zoom/fit, context menu and auto-layout are feature-detected: checked once the UI ships them, logged as pending until then.
   const graphShots = async () => {
@@ -924,6 +967,7 @@ async function guiE2E() {
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'conflict') { await conflictShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'graph') { await graphShots(); for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`$('#tabs button[data-tab=team]').click(); await w(500);`); await shot(`graph-${t}`); } require('electron').nativeTheme.themeSource = 'system'; throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'chat') { await chatShots(); throw null; }
+    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'windowing') { await windowingShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'firstrun') { await firstrunInbox(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'overview') { await overviewShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'parallel') { await parallelShots(); throw null; }
@@ -1092,6 +1136,7 @@ async function guiE2E() {
     await firstrunInbox();
     await overviewShots();
     await chatShots();
+    await windowingShots();
     if (!process.env.SKIP_GRAPH) await graphShots();
     // Main screens in light + dark (the renderer themes via prefers-color-scheme, driven by nativeTheme).
     const { nativeTheme } = require('electron');
