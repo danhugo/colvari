@@ -1199,6 +1199,31 @@ function groupTable(title, rs, keyFn, labelFn, costless) {
   const rows = Object.entries(g).map(([k, v]) => [k, sumRuns(v)]).sort((a, b) => b[1].total - a[1].total);
   return `<div><h4>${title}</h4><table><tr><th></th><th title="claude processes recorded for this project: agent runs, goal checks and preflights">Processes</th><th>In</th><th>Out</th><th>Cache read</th><th>Cache write</th><th>Total tok</th><th>Reported cost (API-equivalent)</th></tr>${rows.map(([k, s]) => `<tr><td>${esc(labelFn(k))}</td><td class="num">${s.runs}</td><td class="num">${s.inputTokens}</td><td class="num">${s.outputTokens}</td><td class="num">${s.cacheReadTokens}</td><td class="num">${s.cacheCreationTokens}</td><td class="num"><b>${s.total}</b></td><td>${s.billed ? '$' + s.billed.toFixed(4) : ''}${s.sub ? `${s.billed ? ' + ' : ''}<span class="costnote" title="$${s.sub.toFixed(4)} API-equivalent">subscription runs: not billed per token</span>` : ''}${!s.billed && !s.sub ? (costless && costless(k) ? '<span class="costnote" title="this runtime does not report cost">—</span>' : '$0') : ''}</td></tr>`).join('')}</table></div>`;
 }
+// hero: last-14-days stacked token bars (in / out / cache) + headline numbers
+function usageHero(rs, s) {
+  const DAYS = 14, day = 864e5, t0 = new Date(); t0.setHours(0, 0, 0, 0); const start = t0.getTime() - (DAYS - 1) * day;
+  const b = Array.from({ length: DAYS }, (_, i) => ({ d: new Date(start + i * day), io: 0, cache: 0, cost: 0 }));
+  for (const r of rs) { const i = Math.floor((new Date(r.startedAt).getTime() - start) / day); if (i < 0 || i >= DAYS) continue; b[i].io += (r.inputTokens || 0) + (r.outputTokens || 0); b[i].cache += (r.cacheReadTokens || 0) + (r.cacheCreationTokens || 0); b[i].cost += r.reportedCostUsd || 0; }
+  const max = Math.max(1, ...b.map((x) => x.io + x.cache)); const W = 100 / DAYS;
+  const bars = b.map((x, i) => { const hc = x.cache / max * 100, hi = x.io / max * 100; return `<g><title>${x.d.toLocaleDateString()} · ${fmtTok(x.io)} in+out · ${fmtTok(x.cache)} cache${x.cost ? ` · $${x.cost.toFixed(2)}` : ''}</title><rect class="usb-cache" x="${i * W + W * .15}" y="${100 - hc - hi}" width="${W * .7}" height="${hc}"/><rect class="usb-io" x="${i * W + W * .15}" y="${100 - hi}" width="${W * .7}" height="${hi}"/></g>`; }).join('');
+  const today = b[DAYS - 1], cacheHit = s.total ? Math.round(s.cacheReadTokens / s.total * 100) : 0;
+  return `<div class="us-hero"><div class="us-kpis">
+    <div><small>Today</small><b>${fmtTok(today.io + today.cache)}</b><small>tokens${today.cost ? ` · $${today.cost.toFixed(2)}` : ''}</small></div>
+    <div><small>Reported cost</small><b>$${(s.billed + s.sub).toFixed(2)}</b><small>$${s.billed.toFixed(2)} billed · $${s.sub.toFixed(2)} on subscription</small></div>
+    <div><small>Cache hit</small><b>${cacheHit}%</b><small>of tokens read from cache</small></div>
+    <div><small>Avg / run</small><b>${fmtTok(s.runs ? s.total / s.runs : 0)}</b><small>${s.runs ? ((s.durationMs / s.runs) / 1000).toFixed(0) : 0}s · ${s.runs ? (s.numTurns / s.runs).toFixed(1) : 0} turns</small></div>
+  </div><div class="us-chart"><div class="us-chart-head"><small>Last ${DAYS} days</small><span class="us-leg"><i class="usb-io"></i>in + out <i class="usb-cache"></i>cache</span></div>
+  <svg viewBox="0 0 100 100" preserveAspectRatio="none">${bars}</svg><div class="us-axis"><small>${b[0].d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</small><small>today</small></div></div></div>`;
+}
+// ranked share bars: one row per group with token share, cost and a secondary line (runtime / models)
+function barList(title, rs, keyFn, labelFn, subFn) {
+  const g = {}; for (const r of rs) (g[keyFn(r)] ||= []).push(r);
+  const rows = Object.entries(g).map(([k, v]) => [k, sumRuns(v), v]).sort((a, b) => b[1].total - a[1].total);
+  const max = Math.max(1, ...rows.map((x) => x[1].total));
+  return `<div class="us-card"><h4>${title}</h4>${rows.map(([k, x, v]) => { const sub = subFn ? subFn(v) : ''; const cost = x.billed + x.sub; return `<div class="usr" title="${x.runs} runs · ${fmtTok(x.inputTokens)} in / ${fmtTok(x.outputTokens)} out · ${fmtTok(x.cacheReadTokens)} cache read / ${fmtTok(x.cacheCreationTokens)} write">
+    <div class="usr-top"><span class="usr-name">${esc(labelFn(k))}${sub ? ` <small>${esc(sub)}</small>` : ''}</span><span class="usr-val"><b>${fmtTok(x.total)}</b>${cost ? ` <small>$${cost.toFixed(2)}${x.sub && !x.billed ? ' sub' : ''}</small>` : ''}</span></div>
+    <i class="usr-bar"><i class="usr-io" style="width:${(x.inputTokens + x.outputTokens) / max * 100}%"></i><i class="usr-cache" style="width:${(x.cacheReadTokens + x.cacheCreationTokens) / max * 100}%"></i></i></div>`; }).join('') || '<p class="muted">No runs yet.</p>'}</div>`;
+}
 function renderUsage() {
   const fa = $('#us-agent'); const cur = fa.value;
   fa.innerHTML = '<option value="">All</option>' + S.allNodes.map((n) => `<option value="${n.id}">${esc(n.name)}</option>`).join(''); fa.value = cur;
@@ -1208,14 +1233,14 @@ function renderUsage() {
   const agentName = (id) => { const r = RUNS.find((x) => x.nodeId === id); return S.allNodes.some((n) => n.id === id) ? nodeName(id) : (r && r.agent) || id; };
   const taskName = (id) => { const t = S.tasks.find((x) => x.id === id); const r = RUNS.find((x) => x.taskId === id); return (t && t.title) || (r && r.task) || id || '(none)'; };
   const mism = rs.filter((r) => r.billingMismatch).length;
-  $('#us-summary').innerHTML = `<div class="cards">
+  $('#us-summary').innerHTML = usageHero(rs, s) + `<div class="cards">
     <div class="stat"><small>Measured tokens (total)</small><b>${fmtTok(s.total)}</b><small title="Every claude process recorded for this project (all sessions): agent runs, goal checks and preflights.">${s.runs} claude process(es): ${['agent', 'check', 'preflight'].map((k) => `${rs.filter((r) => (r.kind || 'agent') === k).length} ${k}`).join(' · ')} · ${s.numTurns} turns</small></div>
     <div class="stat"><small>Input / Output</small><b>${fmtTok(s.inputTokens)} / ${fmtTok(s.outputTokens)}</b></div>
     <div class="stat"><small>Cache read / write</small><b>${fmtTok(s.cacheReadTokens)} / ${fmtTok(s.cacheCreationTokens)}</b></div>
     <div class="stat" id="us-cost"><small>Reported cost, API-equivalent (Claude CLI)</small><b>$${(s.billed + s.sub).toFixed(4)}</b><small>Billed per token (API key / proxy / cloud): $${s.billed.toFixed(4)}<br>Subscription runs (${rs.filter((r) => r.billingSource === 'subscription').length}): $${s.sub.toFixed(4)}, covered by subscription, not billed per token</small></div>
   </div>${mism ? `<p class="warn">${mism} run(s) did not run on the billing mode set for the agent (see Billing column).</p>` : ''}
-  <div class="toolbar" style="align-items:flex-start">${groupTable('By agent', rs, (r) => r.nodeId, agentName)}${groupTable('By model', rs, (r) => r.model || '?', (k) => k)}${groupTable('By billing source', rs, (r) => r.billingSource || 'unknown', (k) => k)}${groupTable('By vendor', rs, (r) => r.runtime || 'claude', (k) => VENDOR[k] || k, (k) => !canCost(k))}</div>
-  <details><summary>By task</summary>${groupTable('By task', rs, (r) => r.taskId || '', taskName)}</details>`;
+  <div class="us-breakdowns">${barList('By model', rs, (r) => r.model || '?', (k) => k, (v) => runtimeLabel(v[0].runtime || 'claude'))}${barList('By agent', rs, (r) => r.nodeId, agentName, (v) => [...new Set(v.map((r) => r.model).filter(Boolean))].join(', '))}${barList('By runtime', rs, (r) => r.runtime || 'claude', (k) => VENDOR[k] || k)}</div>
+  <details><summary>Detailed tables</summary><div class="toolbar" style="align-items:flex-start">${groupTable('By agent', rs, (r) => r.nodeId, agentName)}${groupTable('By model', rs, (r) => r.model || '?', (k) => k)}${groupTable('By billing source', rs, (r) => r.billingSource || 'unknown', (k) => k)}${groupTable('By vendor', rs, (r) => r.runtime || 'claude', (k) => VENDOR[k] || k, (k) => !canCost(k))}</div>${groupTable('By task', rs, (r) => r.taskId || '', taskName)}</details>`;
   $('#us-runs').innerHTML = `<tr><th>Time</th><th>Agent</th><th>Task</th><th>Kind</th><th>Model</th><th>In</th><th>Out</th><th>Cache read</th><th>Cache write</th><th>Duration</th><th>Turns</th><th>Billing source</th><th>Reported cost</th></tr>` +
     (rs.slice().reverse().slice(0, 500).map((r) => `<tr><td>${new Date(r.startedAt).toLocaleString()}</td><td>${esc(r.agent || agentName(r.nodeId))}</td><td>${esc(r.task || taskName(r.taskId))}</td><td>${esc(r.kind)}${r.iteration > 1 ? ' #' + r.iteration : ''}</td><td title="${esc((r.models || []).join(', '))}">${esc(r.model || '?')}</td><td class="num">${r.inputTokens}</td><td class="num">${r.outputTokens}</td><td class="num">${r.cacheReadTokens}</td><td class="num">${r.cacheCreationTokens}</td><td class="num">${((r.durationMs || 0) / 1000).toFixed(1)}s</td><td class="num">${r.numTurns}</td><td>${billTag(r.billingSource, r.billingDetail)}${r.billingMismatch ? ` <span class="warn" title="agent billing mode: ${esc(r.billingMode)}">≠ ${esc(r.billingMode)}</span>` : ''}</td><td>${costCell(r.reportedCostUsd, r.billingSource, r.runtime || (S.allNodes.find((n) => n.id === r.nodeId) || {}).runtime)}</td></tr>`).join('') || '<tr><td colspan="13" class="muted">No runs recorded yet.</td></tr>');
   renderDiscovery();
