@@ -623,7 +623,7 @@ function graphBox(nodes) {
   const xs = nodes.map((n) => n.x), ys = nodes.map((n) => n.y); const x = Math.min(...xs), y = Math.min(...ys);
   return { x, y, w: Math.max(...xs) + W - x, h: Math.max(...ys) + H - y };
 }
-let vpCount = 0;
+let vpCount = 0, edgeLayout = null; // per-render edge geometry + DOM refs; patched in place by dragEdges during node drags
 function fitIfClipped() { const r = $('#graph').getBoundingClientRect(); const b = graphBox(allGraphNodes()); if (r.width && (b.x * VP.zoom + VP.x < 0 || b.y * VP.zoom + VP.y < 0 || (b.x + b.w) * VP.zoom + VP.x > r.width || (b.y + b.h) * VP.zoom + VP.y > r.height)) fitView(); }
 function fitView() {
   const r = $('#graph').getBoundingClientRect(); const b = graphBox(allGraphNodes()); const pad = 48;
@@ -718,6 +718,7 @@ function renderGraph() {
   const edges = [...S.team.edges, ...(S.cross || []).filter((e) => !S.team.edges.some((x) => x.id === e.id))];
   const pairN = {}, pairI = {}; const pk = (e) => [e.from, e.to].sort().join('|'); edges.forEach((e) => { pairN[pk(e)] = (pairN[pk(e)] || 0) + 1; });
   const blocks = nodes.map((n) => ({ x: n.x - 4, y: n.y - 4, w: W + 8, h: H + 8 })); const pills = [];
+  edgeLayout = { nodes, blocks, per: [] };
   for (const e of edges) {
     const a = byId[e.from], b = byId[e.to]; if (!a || !b) continue;
     const key = pk(e); const i = (pairI[key] = (pairI[key] ?? -1) + 1); const cnt = pairN[key];
@@ -725,13 +726,14 @@ function renderGraph() {
     const type = e.type || 'assign'; const cross = !!(e.crossTeam || a.ghost || b.ghost); const g = edgeGeom(a, b, off, blocks, edgeSeed(e));
     const isSel = sel.edge === e.id;
     const L = cross ? xL : eL; const hit = el('path', { d: g.d, class: 'edgehit' }, L);
-    el('path', { d: g.d, class: `edge edge-${type}` + (cross ? ' cross' : '') + (isSel ? ' sel' : ''), 'marker-end': `url(#arr-${isSel ? 'sel' : type})`, 'data-id': e.id }, L);
+    const ep = el('path', { d: g.d, class: `edge edge-${type}` + (cross ? ' cross' : '') + (isSel ? ' sel' : ''), 'marker-end': `url(#arr-${isSel ? 'sel' : type})`, 'data-id': e.id }, L);
     // label pill at the curve midpoint, nudged along the normal until it clears nodes and other pills
     const label = type + (cross ? ' · cross-team' : ''); const pw = 10 + label.length * 5.8, ph = 16;
     let [px, py] = g.mid; for (let s = 0, r = { x: px - pw / 2, y: py - ph / 2, w: pw, h: ph }; s < 12 && [...blocks, ...pills].some((q) => overlaps(r, q)); s++) { const d = (s % 2 ? -1 : 1) * Math.ceil((s + 1) / 2) * 12; px = g.mid[0] + g.n[0] * d; py = g.mid[1] + g.n[1] * d; r = { x: px - pw / 2, y: py - ph / 2, w: pw, h: ph }; }
     pills.push({ x: px - pw / 2, y: py - ph / 2, w: pw, h: ph });
     const pg = el('g', { class: `epill epill-${type}` + (isSel ? ' sel' : ''), transform: `translate(${px - pw / 2},${py - ph / 2})` }, lL);
     el('rect', { width: pw, height: ph, rx: ph / 2 }, pg); el('text', { x: pw / 2, y: 11.5, 'text-anchor': 'middle' }, pg).textContent = label;
+    edgeLayout.per.push({ e, a, b, off, geo: g, pw, ph, hit, path: ep, pill: pg });
     const pick = (ev) => { ev.stopPropagation(); hideMenus(); sel = { ...sel, edge: e.id, node: null }; renderGraph(); renderNodeForm(); };
     hit.onclick = pick; pg.onclick = pick; hit.oncontextmenu = pg.oncontextmenu = (ev) => { pick(ev); ev.preventDefault(); edgeMenu(ev, e); };
   }
@@ -890,9 +892,24 @@ async function autoLayout() {
   });
   await call('setPositions', pos); await refresh(); fitView();
 }
+// While a node is dragged, re-route every edge against its new position and patch the existing
+// path/pill DOM in place, so connections track the card live instead of jumping on mouseup.
+function dragEdges(n) {
+  if (!edgeLayout) return;
+  const ni = edgeLayout.nodes.indexOf(n); if (ni < 0) return;
+  edgeLayout.blocks[ni] = { x: n.x - 4, y: n.y - 4, w: W + 8, h: H + 8 };
+  const pills = [];
+  for (const it of edgeLayout.per) {
+    it.geo = edgeGeom(it.a, it.b, it.off, edgeLayout.blocks, edgeSeed(it.e));
+    let [px, py] = it.geo.mid; for (let s = 0, r = { x: px - it.pw / 2, y: py - it.ph / 2, w: it.pw, h: it.ph }; s < 12 && [...edgeLayout.blocks, ...pills].some((q) => overlaps(r, q)); s++) { const d = (s % 2 ? -1 : 1) * Math.ceil((s + 1) / 2) * 12; px = it.geo.mid[0] + it.geo.n[0] * d; py = it.geo.mid[1] + it.geo.n[1] * d; r = { x: px - it.pw / 2, y: py - it.ph / 2, w: it.pw, h: it.ph }; }
+    pills.push({ x: px - it.pw / 2, y: py - it.ph / 2, w: it.pw, h: it.ph });
+    it.hit.setAttribute('d', it.geo.d); it.path.setAttribute('d', it.geo.d);
+    it.pill.setAttribute('transform', `translate(${px - it.pw / 2},${py - it.ph / 2})`);
+  }
+}
 function startDrag(ev, n, g) {
   ev.stopPropagation(); hideMenus(); const sx = ev.clientX, sy = ev.clientY, ox = n.x, oy = n.y; let moved = false;
-  const mv = (e) => { moved = moved || Math.abs(e.clientX - sx) + Math.abs(e.clientY - sy) > 2; if (!moved) return; n.x = Math.round(ox + (e.clientX - sx) / VP.zoom); n.y = Math.round(oy + (e.clientY - sy) / VP.zoom); g.setAttribute('transform', `translate(${n.x},${n.y})`); };
+  const mv = (e) => { moved = moved || Math.abs(e.clientX - sx) + Math.abs(e.clientY - sy) > 2; if (!moved) return; n.x = Math.round(ox + (e.clientX - sx) / VP.zoom); n.y = Math.round(oy + (e.clientY - sy) / VP.zoom); g.setAttribute('transform', `translate(${n.x},${n.y})`); dragEdges(n); };
   const up = async () => {
     window.removeEventListener('mousemove', mv); window.removeEventListener('mouseup', up);
     if (moved) { await call('updateNode', n.id, { x: n.x, y: n.y }); renderGraph(); return; }
