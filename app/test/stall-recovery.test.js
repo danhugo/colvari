@@ -1,6 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs'); const os = require('os'); const path = require('path');
+const { spawn } = require('child_process');
 const { Store } = require('../src/store');
 const { Orchestrator } = require('../src/orchestrator');
 
@@ -139,4 +140,80 @@ test('no double resume: a claimed run cannot be claimed or recovered twice', () 
   assert.equal(stalled, 1);
   assert.equal(run.stalled, true);
   disarm(orch);
+});
+
+// ---- runAlive against the real ps table (live-proved gap, 2026-09-28: a SIGSTOP'd helpycode CLI was
+// never recovered because its idle board MCP helper child counted as liveness) ----
+
+// Spawns a real node process standing in for the run's CLI. Its child mimics the shapes that matter:
+// the idle board MCP helper (exact production argv shape, optionally with a grandchild of its own)
+// and a real working child. Detached so the whole tree dies by process group in killTree.
+function spawnFakeCli(root, shape) {
+  const helperJs = path.join(root, 'mcp-server.js');
+  fs.writeFileSync(helperJs, [
+    'if (process.env.HELPER_GRANDCHILD) require("child_process").spawn("/bin/sleep", ["30"], { stdio: "ignore" });',
+    'require("http").createServer(() => {}).listen(0);',
+    'setInterval(() => {}, 1 << 30);',
+  ].join('\n'));
+  const script = `
+    const { spawn } = require('child_process');
+    const [shape, helperJs] = process.argv.slice(1);
+    if (shape === 'helper' || shape === 'helper-tree') spawn(process.execPath, [helperJs, '--project', 'p', '--node', 'n_x'], { stdio: 'ignore' });
+    else if (shape === 'worker') spawn('/bin/sleep', ['30'], { stdio: 'ignore' });
+    setInterval(() => {}, 1 << 30);
+  `;
+  const cli = spawn(process.execPath, ['-e', script, shape, helperJs], { stdio: 'ignore', detached: true, env: { ...process.env, HELPER_GRANDCHILD: shape === 'helper-tree' ? '1' : '' } });
+  cli.unref();
+  return cli;
+}
+
+function killTree(pid) { try { process.kill(-pid, 'SIGKILL'); } catch {} }
+
+// setup() stubs orch.runAlive for the sweep tests above; the liveness tests need the real one.
+const realRunAlive = (orch, child) => Orchestrator.prototype.runAlive.call(orch, 'n_x', child);
+
+test('runAlive: an idle board MCP helper child does not keep a silent run alive', async () => {
+  const { root, orch } = setup();
+  const cli = spawnFakeCli(root, 'helper');
+  try {
+    await waitFor(() => (orch.procTable() || []).some((r) => r.ppid === cli.pid && /mcp-server\.js/.test(r.command || '')));
+    assert.equal(realRunAlive(orch, cli), false);
+  } finally { killTree(cli.pid); }
+});
+
+test('runAlive: the helper subtree is skipped even when the helper has a child of its own', async () => {
+  const { root, orch } = setup();
+  const cli = spawnFakeCli(root, 'helper-tree');
+  try {
+    let helperPid = 0;
+    await waitFor(() => {
+      const rows = orch.procTable() || [];
+      const h = rows.find((r) => r.ppid === cli.pid && /mcp-server\.js/.test(r.command || ''));
+      if (h) helperPid = h.pid;
+      return !!(h && rows.some((r) => r.ppid === helperPid && /sleep/.test(r.command || '')));
+    });
+    assert.equal(realRunAlive(orch, cli), false);
+  } finally { killTree(cli.pid); }
+});
+
+test('runAlive: a real working child still counts as alive', async () => {
+  const { root, orch } = setup();
+  const cli = spawnFakeCli(root, 'worker');
+  try {
+    await waitFor(() => (orch.procTable() || []).some((r) => r.ppid === cli.pid && /sleep/.test(r.command || '')));
+    assert.equal(realRunAlive(orch, cli), true);
+  } finally { killTree(cli.pid); }
+});
+
+// A stopped CLI cannot reap its exited children, so defunct descendants pile up under it. Their ps
+// state carries flags ('ZN', 'Z+'...) — only the first char is the primary state (live-proved
+// 2026-09-28: state 'ZN' defeated the old `!== 'Z'` check and blocked recovery forever).
+test('runAlive: defunct descendants with flagged ps state (ZN/Z+) do not count as alive', () => {
+  const { orch } = setup();
+  orch.procTable = () => [
+    { pid: 100, ppid: 1, state: 'TN', cpuMs: 6680, command: 'helpycode run --format json' },
+    { pid: 101, ppid: 100, state: 'ZN', cpuMs: 0, command: '<defunct>' },
+    { pid: 102, ppid: 100, state: 'Z+', cpuMs: 0, command: '<defunct>' },
+  ];
+  assert.equal(realRunAlive(orch, { pid: 100, exitCode: null }), false);
 });
