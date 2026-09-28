@@ -427,21 +427,18 @@ header .pill { border:none; background:none; color:var(--fg-muted); font-size:va
 .updhist { width:100%; margin:6px 0; } .updhist td, .updhist th { padding:3px 6px; font-size:12px; }
 .updhist code { font-family:var(--font-mono); font-size:11px; }
 .updres.ok { color:var(--ok); } .updres.bad { color:var(--danger); font-weight:600; }
-/* update veil: unmissable but non-blocking notice so a self-update is never mistaken for a hang (t_58cb371a) */
-.updveil { position:fixed; inset:0; pointer-events:none; z-index:900; display:flex; align-items:flex-start; justify-content:center; padding-top:52px; }
+/* update notice: small corner card tucked under the header's right edge (t_6703ba9c; was a
+   full-window veil that covered the screen). pointer-events stay off so a click stalled by the
+   watcher's blocking phases still lands once the main process unblocks. */
+.updveil { position:fixed; top:52px; right:14px; z-index:900; pointer-events:none; max-width:320px; }
 .updveil.hidden { display:none; }
-.uv-card { background:var(--bg-raised); border:1px solid var(--warn); border-left:4px solid var(--warn); border-radius:var(--radius-md); box-shadow:var(--shadow-lg); padding:14px 18px; max-width:540px; display:flex; flex-direction:column; gap:7px; }
+.uv-card { background:var(--bg-raised); border:1px solid var(--warn); border-left:3px solid var(--warn); border-radius:var(--radius-md); box-shadow:var(--shadow-lg); padding:9px 12px; display:flex; flex-direction:column; gap:4px; font-size:var(--text-xs); }
 .uv-card.failed { border-color:var(--danger); border-left-color:var(--danger); }
-.uv-title { font-weight:var(--fw-semibold); font-size:var(--text-md); color:var(--warning-text); }
+.uv-title { font-weight:var(--fw-semibold); color:var(--warning-text); }
 .uv-card.failed .uv-title { color:var(--danger); }
-.uv-steps { display:flex; align-items:center; gap:7px; flex-wrap:wrap; font-size:var(--text-xs); }
-.uv-step { color:var(--fg-muted); padding:2px 9px; border-radius:var(--radius-full); border:1px solid var(--border); }
-.uv-step.done { color:var(--success-text); border-color:var(--success); }
-.uv-step.now { color:var(--warning-text); border-color:var(--warn); background:var(--warning-soft); font-weight:var(--fw-semibold); }
-.uv-sep { color:var(--fg-muted); }
-.uv-phase { font-size:var(--text-sm); }
-.uv-meta { font-size:var(--text-xs); color:var(--fg-muted); } .uv-meta code { font-family:var(--font-mono); }
-.uv-note { font-size:var(--text-xs); color:var(--warning-text); background:var(--warning-soft); border-radius:var(--radius-xs); padding:5px 9px; }
+.uv-phase { color:var(--fg); }
+.uv-meta { color:var(--fg-muted); } .uv-meta code { font-family:var(--font-mono); }
+.uv-note { color:var(--warning-text); background:var(--warning-soft); border-radius:var(--radius-xs); padding:3px 7px; }
 
 /* ---------- subagents: nested collapsible blocks in Logs/Overview/Chat + agent-card badge (t_d716779d) ---------- */
 /* Logs: a subagent call renders as one block (header + its child rows); nested subagents indent. */

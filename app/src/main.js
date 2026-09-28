@@ -13,6 +13,12 @@ const SU = require('./self-update');
 const { introspectRuntime: runIntrospectRuntime } = require('./introspector');
 // The app repo (main checkout): what the UpdateWatcher polls and fast-forwards.
 const APP_ROOT = path.join(__dirname, '..', '..');
+// Self-update (auto-restart on new merged code) is a developer/dogfood feature: only unpackaged
+// runs (electron .) get it. A packaged build — real users — never starts a watcher and shows no
+// update UI; AGENTS_SQUAD_DEV=1 opts a packaged build back into dogfood mode, =0 forces it off
+// from source (e.g. to check the gated-off UX). Exported so agents' MCP servers inherit the gate.
+const DEV_MODE = process.env.AGENTS_SQUAD_DEV ? process.env.AGENTS_SQUAD_DEV !== '0' : !app.isPackaged;
+if (DEV_MODE) process.env.AGENTS_SQUAD_DEV = '1';
 let runtimesCache = null; // detected once per app start (binary + version)
 const runtimes = (settings) => (runtimesCache ||= RT.detectRuntimes(settings, { ...process.env, PATH: [process.env.PATH, require('os').homedir() + '/.local/bin', '/opt/homebrew/bin', '/usr/local/bin'].join(':') }));
 
@@ -35,7 +41,10 @@ function orchFor(pid) {
 }
 // Self-update: one UpdateWatcher per project (polls the repo, safe restart + resume; see self-update.js).
 const watchers = new Map(); // projectId -> UpdateWatcher
+// Outside dev mode there is no watcher at all: status answers a flat "off" and restart requests no-op.
+const updDisabled = () => ({ phase: 'idle', enabled: false, devMode: false, waitingOn: 0, history: [] });
 function watcherFor(pid) {
+  if (!DEV_MODE) return { status: () => updDisabled(), restartNow() {} };
   let w = watchers.get(pid);
   if (!w) {
     const store = pm.store(pid);
@@ -1352,9 +1361,9 @@ const api = {
       status: inbox.some((i) => i.nodeId === n.id) ? 'needs-human' : (ag[n.id] || {}).status === 'working' || st[n.id] === 'busy' ? 'working' : 'idle' }])); },
   crossEdges: (c) => TS(c).incomingCrossEdges(), setViewport: (c, v) => TS(c).setViewport(v), getViewport: (c) => TS(c).getViewport(), setPositions: (c, pos) => TS(c).setPositions(pos),
   run: (c) => orchFor(c.p).start(), stop: (c) => orchFor(c.p).stop(),
-  getSelfUpdateStatus: (c) => watcherFor(c.p).status(),
-  setAutoRestart: (c, on) => { ST(c).saveSettings({ autoRestart: !!on }); return watcherFor(c.p).status(); },
-  restartSelfUpdate: (c) => { watcherFor(c.p).restartNow(); return watcherFor(c.p).status(); },
+  getSelfUpdateStatus: (c) => ({ ...watcherFor(c.p).status(), devMode: DEV_MODE }),
+  setAutoRestart: (c, on) => { if (DEV_MODE) ST(c).saveSettings({ autoRestart: !!on }); return { ...watcherFor(c.p).status(), devMode: DEV_MODE }; },
+  restartSelfUpdate: (c) => { watcherFor(c.p).restartNow(); return { ...watcherFor(c.p).status(), devMode: DEV_MODE }; },
   getPrefs: () => getPrefs(), setPrefs: (_c, patch) => setPrefs(patch || {}),
 };
 nativeTheme.on('updated', () => { if (win && !win.isDestroyed()) win.setBackgroundColor(BG[nativeTheme.shouldUseDarkColors ? 'dark' : 'light']); send('theme', { dark: nativeTheme.shouldUseDarkColors }); });
@@ -1383,6 +1392,7 @@ app.whenReady().then(() => {
   // Self-update: resume a Run interrupted by a safe restart (or roll back a bad update that fails to
   // boot). markBootOk ~15s in proves the new code booted, so a later crash is not a boot failure.
   for (const p of pm.list()) {
+    if (!DEV_MODE) continue; // real users: no self-update polling, no boot resume/rollback
     try {
       const r = SU.bootResume(pm.store(p.id), { repoDir: APP_ROOT });
       watcherFor(p.id); // start polling for new commits right away
