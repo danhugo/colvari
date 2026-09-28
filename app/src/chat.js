@@ -77,4 +77,26 @@
   // @mention autocomplete: the partial "@xx" at the end of the text -> matching nodes.
   function mentionMatches(text, nodes) { const m = /(?:^|\s)@(\w*)$/.exec(String(text)); if (!m) return null; return (nodes || []).filter((n) => n.name.toLowerCase().startsWith(m[1].toLowerCase())); }
 
-  return { avatarColor, initials, toolLabel, roomEvents, group, parseComposer, preview, mentionMatches, GROUP_MS, MAX };});
+  // Signature of every input the room feed reads (pure, used by the renderer's 1s tick to skip the
+  // expensive roomEvents walk + DOM rebuild when nothing changed). Task comments bump task.updatedAt,
+  // logs are append/prepend/clear-only, and subagent bubbles render records from agents/runs
+  // (subRecOf), so all three sources are fingerprinted here.
+  function feedKey(inp) {
+    const logs = inp.logs || [], tasks = inp.tasks || [], messages = inp.messages || [], inbox = inp.inbox || [];
+    const subRecs = (holder) => (holder.subagents || []).map((x) => [x.id, x.status || '', x.endedAt || 0, x.tokens ? (x.tokens.inputTokens || 0) + (x.tokens.outputTokens || 0) : 0]);
+    return JSON.stringify([
+      inp.projectId, inp.thread || null,
+      logs.length, logs.length ? logs[0].at : null, logs.length ? logs[logs.length - 1].at : null,
+      tasks.map((t) => [t.id, t.updatedAt, (t.comments || []).length]),
+      messages.length, messages.length ? messages[messages.length - 1].at : null,
+      inbox.map((i) => i.id),
+      (inp.nodes || []).map((n) => [n.id, n.name, n.role]),
+      [...(inp.working || [])].sort(),
+      ...Object.values(inp.agents || {}).flatMap(subRecs),
+      ...(inp.runs || []).flatMap(subRecs),
+    ]);
+  }
+
+  return { avatarColor, initials, toolLabel, roomEvents, group, parseComposer, preview, mentionMatches, GROUP_MS, MAX, feedKey };
+});
+

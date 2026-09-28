@@ -2,6 +2,7 @@ const { app, BrowserWindow, ipcMain, Notification, nativeTheme } = require('elec
 const path = require('path');
 const { Orchestrator } = require('./orchestrator');
 const { ProjectManager, TEMPLATES } = require('./projects');
+const { pickChanged } = require('./store');
 const AC = require('./agent-config');
 const WT = require('./worktree');
 const U = require('./usage');
@@ -22,7 +23,7 @@ function orchFor(pid) {
   if (!o) {
     o = new Orchestrator(pm.store(pid));
     o.on('log', (l) => send('log', { ...l, projectId: pid }));
-    o.on('state', (s) => send('state', { ...s, projectId: pid }));
+    o.on('state', (s) => send('state', { ...s, projectId: pid })); // slim: the renderer refreshes from the store on receipt
     o.on('notify', (n) => { send('notify', { ...n, projectId: pid }); notify(n, pid); });
     o.on('woken_by_message', (w) => send('woken_by_message', { ...w, projectId: pid }));
     o.on('run.stalled', (e) => send('run-stalled', { ...e, projectId: pid }));
@@ -237,15 +238,15 @@ async function guiE2E() {
     const L = (ago, nodeId, kind, text) => `logs.push({ projectId: ctx.p, nodeId: '${nodeId}', kind: '${kind}', text: ${JSON.stringify(text)}, at: Date.now() - ${ago} });`;
     await ex(`$('#tabs button[data-tab=chat]').click(); ${L(90000, b.id, 'system', '▶ ' + b.name + ' starts "Chat demo" in /x')}${L(80000, b.id, 'text', 'I will add a chat view with bubbles and tool chips.')}
       ${L(70000, b.id, 'tool', 'Read {"file_path":"renderer/app.js"}')}${L(69000, b.id, 'tool_result', '587 lines')}${L(60000, b.id, 'tool', 'Bash {"command":"npm test"}')}${L(59000, b.id, 'tool_result', 'pass 78 fail 0')}
-      await refresh(); CH.key = ''; renderChat(); await w(300); document.querySelector('#chat-room .cchip').open = true; await w(200);`);
+      await refresh(); chatSig = null; renderChat(); await w(300); document.querySelector('#chat-room .cchip').open = true; await w(200);`);
     const room = await ex(`return { groups: document.querySelectorAll('#chat-room .cgroup').length, avatars: document.querySelectorAll('#chat-room .avatar').length, chips: document.querySelectorAll('#chat-room .cchip').length, question: !!document.querySelector('#chat-room .bubble.question .ch-choice'), roles: document.querySelectorAll('#chat-room .role').length, defaultTab: !!$('#tabs button[data-tab=chat]') && TABS[0] === 'chat' }`);
     expect('chat: room with bubbles, avatars, role badges, tool chips, inline question', room.groups >= 2 && room.chips >= 2 && room.question && room.roles >= 2 && room.defaultTab, room);
-    await ex(`await refresh(); CH.key = ''; renderChat(); document.querySelector('#chat-room .cchip').open = true; await w(200);`); await shot('17-chat-room');
+    await ex(`await refresh(); chatSig = null; renderChat(); document.querySelector('#chat-room .cchip').open = true; await w(200);`); await shot('17-chat-room');
     await ex(`document.querySelector('#chat-room [data-thread="${t.id}"]').click(); await w(300);`);
     const th = await ex(`return { open: !$('#chat-thread').classList.contains('hidden'), title: $('#chat-thread .chat-head').textContent, items: document.querySelectorAll('#chat-threadroom .bubble, #chat-threadroom .cchip').length }`);
     expect('chat: thread pane shows the task', th.open && th.title.includes('Chat demo') && th.items >= 3, th);
     await shot('18-chat-thread');
-    const seedWorking = `S.orch = { ...S.orch, running: true, runs: 1, agents: { '${b.id}': { status: 'working', taskId: '${t.id}' } } }; renderHeader(); CH.key = ''; renderChat();`;
+    const seedWorking = `S.orch = { ...S.orch, running: true, runs: 1, agents: { '${b.id}': { status: 'working', taskId: '${t.id}' } } }; renderHeader(); chatSig = null; renderChat();`;
     await ex(`window._refresh = refresh; refresh = async () => {}; if (!$('#tab-chat.active')) $('#tabs button[data-tab=chat]').click(); ${seedWorking} await w(400);`);
     const typing = await ex(`return { typing: $('#chat-typing').textContent, header: $('#runstate').textContent, dot: !!document.querySelector('#chat-room .avatar.working') }`);
     expect('chat: working indicator (text, running header, green dot)', typing.typing.includes(b.name + ' is working') && typing.header.startsWith('running') && typing.dot, typing);
@@ -257,7 +258,7 @@ async function guiE2E() {
     const pv = await ex(`return $('#chat-preview').textContent`); await shot('20-chat-mention');
     await ex(`$('#chat-send').click(); await w(1200);`); api.run = origRun;
     const made = ps.listTasks().find((x) => x.title === 'add a dark theme toggle');
-    await ex(`await refresh(); CH.key = ''; renderChat(); const b = [...document.querySelectorAll('#chat-room .ch-choice')].find((x) => x.dataset.v === 'dark'); b && b.click(); await w(800);`);
+    await ex(`await refresh(); chatSig = null; renderChat(); const b = [...document.querySelectorAll('#chat-room .ch-choice')].find((x) => x.dataset.v === 'dark'); b && b.click(); await w(800);`);
     const cm = { mention, preview: pv, task: made && { assignee: made.assignee, createdBy: made.createdBy }, answered: ps.getInboxItem(q.id).answer };
     console.log('[gui-e2e] chat', JSON.stringify({ room, thread: th, typing, ...cm }));
     expect('chat: @mention autocomplete + preview + creates a task for the agent', mention.includes(b.name) && pv.includes('task for ' + b.name) && made && made.assignee === b.id, cm);
@@ -1136,8 +1137,11 @@ async function guiE2E() {
 function send(ch, data) { if (win && !win.isDestroyed()) win.webContents.send(ch, data); }
 
 // Every API call receives ctx = { p: projectId, t: teamId } from the renderer first.
-const ST = (c) => pm.store(c.p); // project-wide (board, wiki, settings, merged team)
-const TS = (c) => { const ts = pm.get(c.p).teams; return pm.store(c.p, (ts.find((t) => t.id === c.t) || ts[0]).id); }; // the selected team graph
+  const ST = (c) => pm.store(c.p); // project-wide (board, wiki, settings, merged team)
+  const TS = (c) => { const ts = pm.get(c.p).teams; return pm.store(c.p, (ts.find((t) => t.id === c.t) || ts[0]).id); }; // the selected team graph
+  // Cheap change fingerprint for the renderer's polling (t_9d92c3d3): file signatures + the
+  // orchestrator's in-memory sig. `team` folds in settings because getAll decorates team nodes withPF.
+  const stateVersion = (c) => { const s = ST(c); const t = TS(c); const v = s.versions(); v.team = t.sigFile(t.teamFile()) + '|' + v.settings; v.teams = v.teams + '|' + v.settings; v.orch = orchFor(c.p).versionSig(); return v; };
 const withPF = (nodes, settings) => nodes.map((n) => ({ ...n, preflightStatus: PF.preflightStatus(n, settings) }));
 // Test one agent with its exact config and save the result on the node (in whichever team owns it).
 async function testAgent(c, nodeId) {
@@ -1147,7 +1151,7 @@ async function testAgent(c, nodeId) {
   const ts = pm.store(c.p, team.id); const node = ts.getTeam().nodes.find((n) => n.id === nodeId);
   const r = await orchFor(c.p).preflight(node, settings);
   ts.updateNode(nodeId, { preflight: r });
-  send('state', { ...orchFor(c.p).snapshot(), projectId: c.p });
+  send('state', { ...orchFor(c.p).snapshotSlim(), projectId: c.p });
   return r;
 }
 async function testTeam(c) {
@@ -1188,8 +1192,20 @@ const api = {
   createTeam: (c, name, tpl) => pm.createTeam(c.p, name, tpl), renameTeam: (c, tid, name) => pm.renameTeam(c.p, tid, name),
   deleteTeam: (c, tid) => pm.removeTeam(c.p, tid), duplicateTeam: (c, tid) => pm.duplicateTeam(c.p, tid),
   exportTeam: (c, tid) => pm.exportTeam(c.p, tid), importTeam: (c, json) => pm.importTeam(c.p, json),
-  getAll: (c) => { const s = ST(c); const t = TS(c); probeUnprobedAgents(c.p); return { project: s.meta(), teamId: t.teamId, dir: s.dir, team: { ...t.getTeam(), nodes: withPF(t.getTeam().nodes, s.getSettings()) }, allNodes: withPF(s.getTeam().nodes, s.getSettings()), tasks: s.listTasks(), wiki: s.listWiki(), settings: s.getSettings(), messages: s.listMessages().slice(-200), orch: orchFor(c.p).snapshot(),
-    config: { runtimes: runtimes(s.getSettings()), billingModes: U.BILLING_MODES, permissionModes: AC.PERMISSION_MODES, edgeTypes: AC.EDGE_TYPES, boardTools: AC.BOARD_TOOLS, roles: AC.roleSuggestions(s.getSettings().rolePresets, s.getTeam().nodes) } }; },
+  // Delta getAll (t_9d92c3d3): with `since` (the client's last version map) only sections whose
+  // signature changed are returned, so the 2s poll moves kilobytes instead of ~1.8MB of JSON.
+  // Without `since` (first load, project switch, old callers) every section is returned as before.
+  getAll: (c, since) => {
+    const s = ST(c); const t = TS(c); probeUnprobedAgents(c.p);
+    const v = stateVersion(c);
+    const all = { project: s.meta(), team: { ...t.getTeam(), nodes: withPF(t.getTeam().nodes, s.getSettings()) }, allNodes: withPF(s.getTeam().nodes, s.getSettings()), tasks: s.listTasks(), wiki: s.listWiki(), settings: s.getSettings(), messages: s.listMessages().slice(-200), orch: orchFor(c.p).snapshotSlim(),
+      config: { runtimes: runtimes(s.getSettings()), billingModes: U.BILLING_MODES, permissionModes: AC.PERMISSION_MODES, edgeTypes: AC.EDGE_TYPES, boardTools: AC.BOARD_TOOLS, roles: AC.roleSuggestions(s.getSettings().rolePresets, s.getTeam().nodes) } };
+    const sectionOf = { project: 'project', team: 'team', teams: 'allNodes', board: 'tasks', wiki: 'wiki', settings: 'settings', messages: 'messages', orch: 'orch' };
+    const out = { v, teamId: t.teamId, dir: s.dir };
+    for (const k of pickChanged(v, since)) { if (sectionOf[k]) out[sectionOf[k]] = all[sectionOf[k]]; if (k === 'settings') out.config = all.config; }
+    return out;
+  },
+  getStateVersion: (c) => stateVersion(c),
   // New agents are auto-probed for capabilities right away (same probe as the manual Refresh button) so the
   // node form and graph badges never sit on "not probed yet" for an agent the user just added.
   addNode: (c, n) => {
