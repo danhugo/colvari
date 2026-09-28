@@ -71,6 +71,7 @@ class UpdateWatcher extends EventEmitter {
     this.reason = null; this.fromSha = null; this.toSha = null;
     this.waitingOn = 0; this.lastError = null; this.lastCheckAt = null;
     this._seenSha = null;
+    this._deferred = null;
     this._busy = false;
     const restarting = readHistory(this.store.dir).filter((x) => x.result === 'restarting');
     this.lastRestartAt = restarting.length ? Date.parse(restarting[restarting.length - 1].ts) : 0;
@@ -111,7 +112,8 @@ class UpdateWatcher extends EventEmitter {
     return {
       phase: this.phase, reason: this.reason, fromSha: this.fromSha, toSha: this.toSha,
       waitingOn: this.waitingOn, lastError: this.lastError, lastCheckAt: this.lastCheckAt,
-      lastSeenSha: this._seenSha, branch: this.baseBranch(), autoRestart: this.autoRestart(),
+      lastSeenSha: this._seenSha, deferredTo: this._deferred ? this._deferred.sha : null,
+      branch: this.baseBranch(), autoRestart: this.autoRestart(),
       lastRestartAt: this.lastRestartAt || null, restartsLastHour: this.restartsLastHour(),
       history: readHistory(this.store.dir).slice(-10).reverse(),
     };
@@ -132,7 +134,9 @@ class UpdateWatcher extends EventEmitter {
   }
 
   // One poll. Consumes a PM request_self_update file (if any) and starts the flow when there is
-  // something to update, auto-restart is on, and the restart guards allow it.
+  // something to update, auto-restart is on, and the restart guards allow it. An update blocked by
+  // a restart guard is deferred (keeping the from-sha captured when the commits were first seen)
+  // and retried on later polls once the guard clears — skipping must not consume the commit.
   async tick(force = false) {
     if (this.phase !== 'idle' || this._busy) return;
     this.lastCheckAt = new Date().toISOString();
@@ -144,25 +148,34 @@ class UpdateWatcher extends EventEmitter {
     const baseline = prevSeen === null;
     if (baseline) this._seenSha = s.to;
     const isNew = !baseline && s.to !== this._seenSha;
+    const keepDefer = !isNew && !!this._deferred && this._deferred.sha === s.to;
     this._seenSha = s.to;
-    if (!isNew && !req && !force) { this.emitStatus(); return; }
-    const reason = (req && req.reason) || `new commits on ${this.baseBranch()}`;
+    if (!isNew && !keepDefer && !req && !force) { this.emitStatus(); return; }
+    const reason = (req && req.reason) || (keepDefer && this._deferred.reason) || `new commits on ${this.baseBranch()}`;
     if (!this.autoRestart()) {
       if (req) this._log('system', `self-update requested (${reason}) but auto-restart is off; ignoring.`);
       this.emitStatus(); return;
     }
+    const defer = (why) => {
+      if (!keepDefer) this._log('system', `self-update: ${reason} seen but ${why}; skipping — will retry when the guard clears.`);
+      this._deferred = { sha: s.to, reason, from: keepDefer ? this._deferred.from : prevSeen };
+      this.emitStatus();
+    };
     if (!force && this.now() - this.lastRestartAt < this.minIntervalMs) {
-      this._log('system', `self-update: ${reason} seen but the last restart was ${Math.round((this.now() - this.lastRestartAt) / 60000)}min ago (< ${Math.round(this.minIntervalMs / 60000)}min); skipping.`);
-      this.emitStatus(); return;
+      defer(`the last restart was ${Math.round((this.now() - this.lastRestartAt) / 60000)}min ago (< ${Math.round(this.minIntervalMs / 60000)}min)`);
+      return;
     }
     if (!force && this.restartsLastHour() >= this.maxRestartsPerHour) {
-      this._log('system', `self-update: restart guard (${this.maxRestartsPerHour}/hour) hit; skipping ${reason}.`);
-      this.emitStatus(); return;
+      defer(`the restart guard (${this.maxRestartsPerHour}/hour) is hit`);
+      return;
     }
     // fromSha is what we ran before the update: the previously seen sha. By detection time the
     // orchestrator's auto-merge has usually already landed the commits locally, so s.local is
-    // often already == to and would make log/history/rollback all point at the new sha.
-    this.fromSha = isNew && prevSeen ? prevSeen : s.local; this.toSha = s.to; this.reason = reason;
+    // often already == to and would make log/history/rollback all point at the new sha. A deferred
+    // retry keeps the from-sha from when the commits were first seen.
+    this.fromSha = (this._deferred && this._deferred.from) || (isNew && prevSeen ? prevSeen : s.local);
+    this.toSha = s.to; this.reason = reason;
+    this._deferred = null;
     await this._flow();
   }
 

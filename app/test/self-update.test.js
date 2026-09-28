@@ -205,6 +205,59 @@ test('restart guards: min interval and max restarts per hour skip the update', a
   assert.ok(store2.logs.some((l) => /restart guard/.test(l.text)));
 });
 
+// 2026-09-29 live regression: a cooldown skip consumed the new sha (_seenSha advanced before the
+// guards), so the skipped commits never triggered again — the app stayed on old code for good.
+// A guard skip must defer the update and retry it once the guard clears.
+test('cooldown-skipped commits are retried once the min interval passes', async () => {
+  let t = Date.now();
+  const store = fakeStore();
+  appendHistory(store.dir, { ts: new Date(t - 60 * 1000).toISOString(), reason: 'x', fromSha: SHA1, toSha: SHA1, result: 'restarting' });
+  const git = fakeGit();
+  const w = makeWatcher({ store, git });
+  w.now = () => t;
+  await drain(w); // baseline: seen SHA1
+  git.setOrigin(SHA2);
+  await drain(w); // last restart 1min ago: skipped and deferred, not consumed
+  assert.strictEqual(w.phase, 'idle');
+  assert.ok(!w.relaunched);
+  assert.ok(store.logs.some((l) => /min\); skipping/.test(l.text) && /retry/.test(l.text)));
+  assert.strictEqual(w.status().deferredTo, SHA2, 'the update is parked for retry');
+  const logCount = store.logs.length;
+  t += 60 * 1000;
+  await drain(w); // still cooling down: no restart, no repeated skip log
+  assert.ok(!w.relaunched);
+  assert.strictEqual(store.logs.length, logCount, 'no skip-log spam while the guard holds');
+  t += 10 * 60 * 1000;
+  await drain(w); // cooldown over: the same commits now go through
+  assert.strictEqual(w.phase, 'restarting');
+  assert.strictEqual(w.relaunched, 1);
+  const st = readRestartState(w.store.dir);
+  assert.strictEqual(st.fromSha, SHA1, 'fromSha is what ran before the deferred commits');
+  assert.strictEqual(st.toSha, SHA2);
+  assert.strictEqual(w.status().deferredTo, null);
+});
+
+test('hour-guard-skipped commits are retried once the rate window clears', async () => {
+  let t = Date.now();
+  const store = fakeStore();
+  for (const m of [11, 12, 13, 14]) appendHistory(store.dir, { ts: new Date(t - m * 60000).toISOString(), reason: 'x', fromSha: SHA1, toSha: SHA1, result: 'restarting' });
+  const git = fakeGit();
+  const w = makeWatcher({ store, git });
+  w.now = () => t;
+  await drain(w);
+  git.setOrigin(SHA2);
+  await drain(w); // interval passes but 4 restarts/hour: deferred
+  assert.strictEqual(w.phase, 'idle');
+  assert.ok(!w.relaunched);
+  assert.ok(store.logs.some((l) => /restart guard/.test(l.text)));
+  assert.strictEqual(w.status().deferredTo, SHA2);
+  t += 50 * 60 * 1000; // all four restarts fall out of the 1h window
+  await drain(w);
+  assert.strictEqual(w.phase, 'restarting');
+  assert.strictEqual(w.relaunched, 1);
+  assert.strictEqual(readRestartState(w.store.dir).toSha, SHA2);
+});
+
 test('restartNow bypasses the guards', async () => {
   const store = fakeStore();
   appendHistory(store.dir, { ts: new Date().toISOString(), reason: 'x', fromSha: SHA1, toSha: SHA1, result: 'restarting' });
