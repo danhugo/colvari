@@ -1,5 +1,6 @@
 // Multi-project / multi-team management.
-// Layout: <root>/projects/<projectId>/{project.json, team-<teamId>.json, board.json, wiki.json, settings.json}
+// Layout: <root>/projects/<projectId>/{project.json, team-<teamId>.json, messages.json, settings.json,
+//          .squad/board/tasks/<taskId>.json, .squad/wiki/<slug>.md}
 // project.json: { id, name, createdAt, teams: [{ id, name }] }
 const fs = require('fs');
 const path = require('path');
@@ -83,6 +84,9 @@ class ProjectManager {
       const src = path.join(legacy, f + '.json'); if (!fs.existsSync(src)) continue;
       fs.copyFileSync(src, path.join(d, (f === 'team' ? 'team-' + teamId : f) + '.json'));
     }
+    // Legacy dirs written by the per-file store keep board/wiki under .squad/ — copy that tree too.
+    const sq = path.join(legacy, '.squad');
+    if (fs.existsSync(sq)) fs.cpSync(sq, path.join(d, '.squad'), { recursive: true });
     fs.writeFileSync(path.join(d, 'project.json'), JSON.stringify({ id: pid, name: 'Default', createdAt: new Date(0).toISOString(), migratedFrom: legacy, teams: [{ id: teamId, name: 'Main' }] }, null, 2));
     fs.writeFileSync(marker, pid);
     return pid;
