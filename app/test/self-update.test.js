@@ -57,12 +57,12 @@ function fakeNpm(opts = {}) {
 }
 
 // Watcher with fake deps and instant timing. `agents` counts down how many draining polls wait for.
-function makeWatcher({ store = fakeStore(), git, npm, agents = 0, wasRunning = false, relaunch, sleep } = {}) {
+function makeWatcher({ store = fakeStore(), git, npm, npmDir, agents = 0, wasRunning = false, relaunch, sleep } = {}) {
   const npmF = npm || fakeNpm();
   const gitF = git || fakeGit();
   let ticks = 0;
   const w = new UpdateWatcher({
-    store, repoDir: '/repo', pollMs: 3.6e6,
+    store, repoDir: '/repo', npmDir, pollMs: 3.6e6,
     minIntervalMs: 10 * 60 * 1000, maxRestartsPerHour: 3,
     git: gitF, npm: npmF,
     relaunch: relaunch || (() => { w.relaunched = (w.relaunched || 0) + 1; }),
@@ -297,4 +297,22 @@ test('drain: dispatchPaused keeps the run session alive; unpausing resumes and f
   assert.ok(s.listRuns().length === 1);
   assert.ok(s.readLogs().some((l) => /No more todo tasks. Finished./.test(l.text)));
   o.stop && o.stop();
+});
+
+// The app lives in app/ inside the repo: npm (build/test/lockfile) must target the package dir,
+// while git keeps operating on the repo root.
+test('subdir layout: lockfile pathspec and test worktree cwd are under app/', async () => {
+  const npm = fakeNpm();
+  const git = fakeGit({ lockChanged: true });
+  const w = makeWatcher({ git, npm, npmDir: '/repo/app' });
+  assert.strictEqual(w.rel, 'app');
+  await drain(w); // baseline: origin at HEAD, nothing to do
+  git.setOrigin(SHA2);
+  await drain(w);
+  assert.ok(w.relaunched === 1);
+  const diff = git.calls.find((c) => c.startsWith('diff --name-only'));
+  assert.match(diff, /-- app\/package-lock\.json$/, 'lockfile diff uses the repo-relative app/ path');
+  const wtTest = npm.calls.find(([a]) => a === 'test');
+  assert.ok(/squad-selfupdate/.test(wtTest[1]), 'npm test runs in the temp worktree');
+  assert.ok(wtTest[1].endsWith('/app'), 'npm test runs in the worktree\'s app/ subdir, got ' + wtTest[1]);
 });
