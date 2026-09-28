@@ -70,12 +70,12 @@ async function refresh() {
   } catch (e) {
     ctx = prevCtx; console.warn('refresh failed, keeping previous data', e); return;
   }
-  await loadRuns(); await loadLogs(ctx.p);
+  await loadRuns(); await loadLogs(ctx.p); await loadSelfUpdate();
   try { localStorage.setItem('ctx', JSON.stringify(ctx)); } catch {}
   renderAll();
 }
 const nodeName = (id) => (S.allNodes.find((n) => n.id === id) || {}).name || (id ? id : 'unassigned');
-function renderAll() { renderSidebar(); renderGraph(); renderPreflightBar(); renderNodeForm(); renderBoard(); renderWiki(); renderObs(); renderSettings(); renderHeader(); renderLimitMeter(); renderUsage(); renderOverview(); renderInbox(); renderGuide(); renderChat(); }
+function renderAll() { renderSidebar(); renderGraph(); renderPreflightBar(); renderNodeForm(); renderBoard(); renderWiki(); renderObs(); renderSettings(); renderHeader(); renderSelfUpdate(); renderLimitMeter(); renderUsage(); renderOverview(); renderInbox(); renderGuide(); renderChat(); }
 const fmtTok = (n) => { n = n || 0; return n >= 1e6 ? (n / 1e6).toFixed(2) + 'M' : n >= 1e4 ? (n / 1e3).toFixed(1) + 'k' : String(n); };
 const COST_NOTE = { subscription: 'Covered by subscription — not billed per token', other: 'API-equivalent (reported by Claude CLI)' };
 const VENDOR = { claude: 'Claude', codex: 'Codex', opencode: 'OpenCode' };
@@ -1173,6 +1173,10 @@ function renderSettings() {
     <label class="inline"><input type="checkbox" id="st-approval" ${s.requireApproval ? 'checked' : ''}> Require human approval for every agent's "done"</label>
     <label class="inline"><input type="checkbox" id="st-notify" ${s.notifications === false ? '' : 'checked'}> Desktop notifications (approval needed, budget reached, run finished)</label>
     <p><button id="st-save" class="primary">Save settings</button></p>
+    <hr><h3>App updates</h3>
+    <label class="inline"><input type="checkbox" id="st-autorestart" ${upd.enabled ? 'checked' : ''}> Auto-restart on new merged code</label>
+    <p class="muted">When new commits land on this app's base branch: pause the scheduler, wait for running agents to finish, test the new code, then relaunch and resume the run. Failed tests cancel the restart.</p>
+    <div id="upd-history"></div>
     <h3>Role presets (this project)</h3><p class="muted">Presets appear as role suggestions. A new agent whose role matches a preset gets its prompt, tools and permission mode.</p>
     <table id="presettable"><tr><th>Name</th><th>Permission</th><th>Allowed</th><th>Disallowed</th><th></th></tr>${(s.rolePresets || []).map((p) => `<tr><td>${esc(p.name)}</td><td>${esc(p.permissionMode || 'default')}</td><td>${esc(p.allowedTools.join(', '))}</td><td>${esc(p.disallowedTools.join(', '))}</td><td><button data-editp="${esc(p.name)}">Edit</button><button data-delp="${esc(p.name)}">Delete</button></td></tr>`).join('')}</table>
     <div id="presetform"><label>Name</label><input id="pr-name"><label>Default system prompt</label><textarea id="pr-prompt" rows="3"></textarea>
@@ -1187,6 +1191,71 @@ function renderSettings() {
   $('#st-save').onclick = async () => { await call('saveSettings', { claudePath: $('#st-claude').value.trim() || 'claude', maxConcurrency: +$('#st-conc').value || 2, maxRuns: +$('#st-runs').value || 30, permissionMode: $('#st-perm').value,
     budgetUsd: +$('#st-budgetusd').value || 0, budgetTokens: +$('#st-budgettok').value || 0, requireApproval: $('#st-approval').checked, notifications: $('#st-notify').checked, stuckMinutes: +$('#st-stuck').value || 5,
     autoCompactPct: Math.max(0, Math.min(95, +$('#st-autocompactpct').value || 0)) }); refresh(); };
+  renderUpdSettings();
+  $('#st-autorestart').onchange = act(async (ev) => {
+    const on = ev.target.checked;
+    try {
+      let r; try { r = await squad.call('setAutoRestart', ctx, on); } catch { r = await squad.call('setAutoRestart', on); }
+      upd = { ...normUpd(r), stub: false };
+    } catch { upd = { ...upd, enabled: on, stub: true }; } // backend not merged yet: keep a local stub so the control still responds
+    renderSelfUpdate(); renderUpdSettings();
+  });
+}
+
+// ---------- self-update: auto-restart on new merged code ----------
+// IPC contract (Devon, t_5e1b4a4b): getSelfUpdateStatus / setAutoRestart + a status push. Until it
+// lands, the UI runs on a local stub (marked as such) so the toggle, chip and history stay usable.
+const UPD_STATES = { pending: 'update pending', draining: 'waiting for agents', testing: 'testing new code', restarting: 'restarting', failed: 'update failed' };
+let upd = { state: 'idle', enabled: false, history: [], stub: true };
+const shortSha = (s) => String(s || '').slice(0, 7);
+// Defensive about the exact payload shape (Devon's task is still in flight): state/phase aliases,
+// from/to vs fromSha/toSha, history vs restarts, and per-row {ts,why,from,to,result|ok}.
+const normUpd = (d) => {
+  d = d || {};
+  const st = String(d.state || d.phase || 'idle').toLowerCase();
+  return {
+    state: st === 'idle' || UPD_STATES[st] ? st : 'idle',
+    enabled: !!(d.enabled ?? d.autoRestart),
+    reason: d.reason || '',
+    fromSha: shortSha(d.fromSha ?? d.from),
+    toSha: shortSha(d.toSha ?? d.to),
+    waiting: d.waitingOn || d.waiting || [],
+    history: (d.history || d.restarts || []).map((h) => ({
+      ts: h.ts || h.at || h.when,
+      why: h.why || h.reason || '',
+      from: shortSha(h.fromSha ?? h.from),
+      to: shortSha(h.toSha ?? h.to),
+      result: h.result || (h.ok === undefined ? 'ok' : h.ok ? 'ok' : 'failed'),
+    })),
+  };
+};
+async function loadSelfUpdate() {
+  try {
+    let d; try { d = await squad.call('getSelfUpdateStatus', ctx); } catch { d = await squad.call('getSelfUpdateStatus'); }
+    upd = { ...normUpd(d), stub: false };
+  } catch { upd = { ...upd, stub: true }; } // no backend yet: keep the last known (stub) state
+}
+function renderSelfUpdate() {
+  const c = $('#updst'); if (!c) return;
+  const live = upd.state !== 'idle' && UPD_STATES[upd.state];
+  c.classList.toggle('hidden', !live);
+  if (!live) return;
+  c.className = 'pill upd-' + upd.state;
+  c.textContent = UPD_STATES[upd.state];
+  const bits = [];
+  if (upd.reason) bits.push(upd.reason);
+  if (upd.fromSha || upd.toSha) bits.push(`${upd.fromSha || '?'} → ${upd.toSha || '?'}`);
+  if (upd.state === 'draining' && upd.waiting.length) bits.push(`waiting on ${upd.waiting.length} agent${upd.waiting.length > 1 ? 's' : ''}: ${upd.waiting.map((w) => nodeName(typeof w === 'string' ? w : w.name || w.id)).join(', ')}`);
+  if (upd.stub) bits.push('backend pending');
+  c.title = bits.join(' · ');
+}
+function renderUpdSettings() {
+  const t = $('#st-autorestart'); if (t) t.checked = !!upd.enabled;
+  const h = $('#upd-history'); if (!h) return;
+  const rows = upd.history || [];
+  h.innerHTML = (rows.length
+    ? `<table class="updhist"><tr><th>When</th><th>Why</th><th>From → To</th><th>Result</th></tr>${rows.map((r) => `<tr><td>${esc(r.ts ? new Date(r.ts).toLocaleString() : '?')}</td><td>${esc(r.why)}</td><td><code>${esc(r.from || '?')} → ${esc(r.to || '?')}</code></td><td><span class="updres ${r.result === 'failed' ? 'bad' : 'ok'}">${esc(r.result)}</span></td></tr>`).join('')}</table>`
+    : `<p class="muted">No restarts yet.${upd.stub ? ' Self-update backend not merged yet — this page is a local stub until then.' : ''}</p>`);
 }
 
 // ---------- overview ----------
@@ -1383,6 +1452,10 @@ $('#inbox-side').onclick = () => showTab('inbox');
 
 // ---------- live updates ----------
 let pending = null, pendingP = null;
+// Self-update status push: prefer the dedicated bridge method, fall back to either plausible channel name.
+const onUpdPush = (d) => { upd = { ...normUpd(d), stub: false }; renderSelfUpdate(); renderUpdSettings(); };
+if (squad.onSelfUpdateStatus) squad.onSelfUpdateStatus(onUpdPush);
+else { squad.on('selfUpdateStatus', onUpdPush); squad.on('self-update-status', onUpdPush); }
 squad.on('log', (l) => { logs.push(l); if (logs.length > 8000) logs.splice(0, 1000); renderLog(); renderLive(); });
 // In-app toast for orchestrator notifications (desktop notifications are shown by the main process).
 squad.on('notify', (n) => {
