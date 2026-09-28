@@ -111,6 +111,22 @@ test('happy path: pending -> draining -> testing -> restarting, state + history 
   assert.strictEqual(w.status().history[0].result, 'restarting');
 });
 
+// The orchestrator auto-merges to master, so by detection time local HEAD is usually already at
+// the new sha; fromSha must be the previously seen sha (what the app was running), not the new one.
+test('detection records the previous _seenSha as fromSha even when local is already merged', async () => {
+  const git = fakeGit();
+  const w = makeWatcher({ git });
+  await drain(w); // baseline: seen SHA1
+  git.setSha(SHA2); git.setOrigin(SHA2); // auto-merge landed locally before the next poll
+  await drain(w);
+  assert.strictEqual(w.phase, 'restarting');
+  const st = readRestartState(w.store.dir);
+  assert.strictEqual(st.fromSha, SHA1, 'fromSha is the previous _seenSha, not the already-merged local HEAD');
+  assert.strictEqual(st.toSha, SHA2);
+  assert.deepStrictEqual(readHistory(w.store.dir).slice(-1)[0], { ts: st.ts, reason: w.reason, fromSha: SHA1, toSha: SHA2, result: 'restarting' });
+  assert.ok(w.store.logs.some((l) => /\(aaaaaaa -> bbbbbbb\)/.test(l.text)), 'log shows old -> new');
+});
+
 test('dirty main checkout: abort, no restart, activity feed entry', async () => {
   const git = fakeGit({ dirty: true });
   const w = makeWatcher({ git });

@@ -130,7 +130,8 @@ class UpdateWatcher extends EventEmitter {
     if (req) { try { fs.unlinkSync(requestFile(this.store.dir)); } catch {} }
     const s = this.shas();
     if (!s) { this.emitStatus(); return; }
-    const baseline = this._seenSha === null;
+    const prevSeen = this._seenSha;
+    const baseline = prevSeen === null;
     if (baseline) this._seenSha = s.to;
     const isNew = !baseline && s.to !== this._seenSha;
     this._seenSha = s.to;
@@ -148,7 +149,10 @@ class UpdateWatcher extends EventEmitter {
       this._log('system', `self-update: restart guard (${this.maxRestartsPerHour}/hour) hit; skipping ${reason}.`);
       this.emitStatus(); return;
     }
-    this.fromSha = s.local; this.toSha = s.to; this.reason = reason;
+    // fromSha is what we ran before the update: the previously seen sha. By detection time the
+    // orchestrator's auto-merge has usually already landed the commits locally, so s.local is
+    // often already == to and would make log/history/rollback all point at the new sha.
+    this.fromSha = isNew && prevSeen ? prevSeen : s.local; this.toSha = s.to; this.reason = reason;
     await this._flow();
   }
 
