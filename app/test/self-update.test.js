@@ -227,13 +227,20 @@ test('request_self_update file is consumed and triggers the flow', async () => {
   assert.ok(!fs.existsSync(requestFile(w.store.dir)));
 });
 
-test('request_self_update MCP tool: PM-only, writes the request file the watcher consumes', () => {
+test('request_self_update MCP tool: PM-only, dev/dogfood-only, writes the request file the watcher consumes', () => {
   const store = fakeStore();
   store.getTeam = () => ({ nodes: [{ id: 'pm', name: 'Pia', role: 'PM' }, { id: 'dev', name: 'Devon', role: 'Dev' }], edges: [] });
-  makeTools(store, 'pm').request_self_update({ reason: 'ship it' });
-  assert.deepStrictEqual(JSON.parse(fs.readFileSync(requestFile(store.dir), 'utf8')), { reason: 'ship it', from: 'pm', ts: JSON.parse(fs.readFileSync(requestFile(store.dir), 'utf8')).ts });
-  assert.throws(() => makeTools(store, 'dev').request_self_update({ reason: 'x' }), /scope violation/, 'non-PM is rejected');
-  assert.strictEqual(JSON.parse(fs.readFileSync(requestFile(store.dir), 'utf8')).from, 'pm', 'rejected call did not overwrite the request');
+  // Outside dev mode (t_6703ba9c) the tool politely refuses and writes nothing.
+  delete process.env.AGENTS_SQUAD_DEV;
+  assert.deepStrictEqual(makeTools(store, 'pm').request_self_update({ reason: 'ship it' }), { requested: false, note: 'Self-update is disabled outside dev/dogfood mode.' });
+  assert.ok(!fs.existsSync(requestFile(store.dir)), 'no request file outside dev mode');
+  try {
+    process.env.AGENTS_SQUAD_DEV = '1';
+    makeTools(store, 'pm').request_self_update({ reason: 'ship it' });
+    assert.deepStrictEqual(JSON.parse(fs.readFileSync(requestFile(store.dir), 'utf8')), { reason: 'ship it', from: 'pm', ts: JSON.parse(fs.readFileSync(requestFile(store.dir), 'utf8')).ts });
+    assert.throws(() => makeTools(store, 'dev').request_self_update({ reason: 'x' }), /scope violation/, 'non-PM is rejected');
+    assert.strictEqual(JSON.parse(fs.readFileSync(requestFile(store.dir), 'utf8')).from, 'pm', 'rejected call did not overwrite the request');
+  } finally { delete process.env.AGENTS_SQUAD_DEV; }
 });
 
 test('boot: resume interrupted Run on first boot; markBootOk ends the fragile window', () => {

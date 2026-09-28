@@ -116,6 +116,8 @@ function makeTools(store, nodeId) {
       const t = me();
       const n = t.nodes.find((x) => x.id === nodeId);
       if (!n || String(n.role).toLowerCase() !== 'pm') throw new Error('scope violation: request_self_update is PM-only');
+      // Self-update is dev/dogfood-only (main.js gates the watcher on the same variable).
+      if (process.env.AGENTS_SQUAD_DEV !== '1') return { requested: false, note: 'Self-update is disabled outside dev/dogfood mode.' };
       fs.writeFileSync(SU.requestFile(store.dir), JSON.stringify({ reason: String(reason || '').slice(0, 500), from: nodeId, ts: new Date().toISOString() }));
       return { requested: true, note: 'Picked up on the next watcher poll if auto-restart is on; the result appears in the activity feed.' };
     },

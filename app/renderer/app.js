@@ -1317,10 +1317,10 @@ function renderSettings() {
     <label class="inline"><input type="checkbox" id="st-approval" ${s.requireApproval ? 'checked' : ''}> Require human approval for every agent's "done"</label>
     <label class="inline"><input type="checkbox" id="st-notify" ${s.notifications === false ? '' : 'checked'}> Desktop notifications (approval needed, budget reached, run finished)</label>
     <p><button id="st-save" class="primary">Save settings</button></p>
-    <hr><h3>App updates</h3>
+    ${upd.devMode === false ? '' : `<hr><h3>App updates</h3>
     <label class="inline"><input type="checkbox" id="st-autorestart" ${upd.enabled ? 'checked' : ''}> Auto-restart on new merged code</label>
     <p class="muted">When new commits land on this app's base branch: pause the scheduler, wait for running agents to finish, test the new code, then relaunch and resume the run. Failed tests cancel the restart.</p>
-    <div id="upd-history"></div>
+    <div id="upd-history"></div>`}
     <h3>Role presets (this project)</h3><p class="muted">Presets appear as role suggestions. A new agent whose role matches a preset gets its prompt, tools and permission mode.</p>
     <table id="presettable"><tr><th>Name</th><th>Permission</th><th>Allowed</th><th>Disallowed</th><th></th></tr>${(s.rolePresets || []).map((p) => `<tr><td>${esc(p.name)}</td><td>${esc(p.permissionMode || 'default')}</td><td>${esc(p.allowedTools.join(', '))}</td><td>${esc(p.disallowedTools.join(', '))}</td><td><button data-editp="${esc(p.name)}">Edit</button><button data-delp="${esc(p.name)}">Delete</button></td></tr>`).join('')}</table>
     <div id="presetform"><label>Name</label><input id="pr-name"><label>Default system prompt</label><textarea id="pr-prompt" rows="3"></textarea>
@@ -1337,7 +1337,8 @@ function renderSettings() {
     stallTimeoutMin: Math.max(1, +$('#st-stall').value || 10),
     autoCompactPct: Math.max(0, Math.min(95, +$('#st-autocompactpct').value || 0)) }); refresh(); };
   renderUpdSettings();
-  $('#st-autorestart').onchange = act(async (ev) => {
+  const stAr = $('#st-autorestart');
+  if (stAr) stAr.onchange = act(async (ev) => {
     const on = ev.target.checked;
     try {
       let r; try { r = await squad.call('setAutoRestart', ctx, on); } catch { r = await squad.call('setAutoRestart', on); }
@@ -1373,6 +1374,7 @@ const normUpd = (d) => {
   return {
     state: st === 'idle' || UPD_STATES[st] ? st : 'idle',
     enabled: !!(d.enabled ?? d.autoRestart),
+    devMode: d.devMode !== false, // absent (stub/older backend) means the gated-off UX isn't in play
     reason: d.reason || '',
     fromSha: shortSha(d.fromSha ?? d.from),
     toSha: shortSha(d.toSha ?? d.to),
@@ -1397,7 +1399,7 @@ async function loadSelfUpdate() {
 const updWaitingCount = (w) => (typeof w === 'number' ? w : Array.isArray(w) ? w.length : 0);
 function renderSelfUpdate() {
   const c = $('#updst'); if (!c) return;
-  const live = updIsLive();
+  const live = updIsLive() && upd.devMode !== false; // dev-only feature: no pill outside dev mode
   c.classList.toggle('hidden', !live);
   if (!live) { renderUpdVeil(false); return; }
   c.className = 'pill upd-' + upd.state;
@@ -1412,10 +1414,10 @@ function renderSelfUpdate() {
   renderUpdVeil(true);
 }
 
-// Full-window notice while a self-update runs. The watcher blocks the main process during
-// merge/build/test, so every click stalls and the pill can go stale — this is what tells the
-// human "updating, not hung, and the window will restart by itself" (pointer-events stay off).
-const UPD_STEPS = ['pending', 'draining', 'testing', 'restarting'];
+// Small corner notice while a self-update runs (t_6703ba9c): the old full-window veil covered the
+// screen and got in the way, so now it tucks under the header's right edge — still there while the
+// watcher blocks the main process during merge/build/test (so "updating, not hung" stays visible
+// and clicks pass through), but out of the content's way. Red on failure.
 const UPD_PHASE_LINE = {
   pending: 'New code detected; pausing new runs.',
   testing: 'Running the test suite on the new code.',
@@ -1427,18 +1429,14 @@ function renderUpdVeil(show) {
   if (!show) return;
   const failed = upd.state === 'failed';
   const n = updWaitingCount(upd.waiting);
-  const step = failed ? -1 : UPD_STEPS.indexOf(upd.state);
-  const steps = step < 0 ? '' : UPD_STEPS.map((s, i) =>
-    `<span class="uv-step${i < step ? ' done' : ''}${i === step ? ' now' : ''}">${UPD_STATES[s]}</span>`).join('<span class="uv-sep">→</span>');
   const phase = failed
-    ? esc(upd.lastError || 'Update failed; staying on the current code.')
+    ? (upd.lastError || 'Update failed; staying on the current code.')
     : (UPD_PHASE_LINE[upd.state] || (upd.state === 'draining' ? (n ? `Waiting for ${n} running agent${n === 1 ? '' : 's'} to finish.` : 'Waiting for running agents to finish.') : ''));
   v.innerHTML = `<div class="uv-card${failed ? ' failed' : ''}">
-    <div class="uv-title">⟳ Updating Agents Squad…</div>
-    ${steps ? `<div class="uv-steps">${steps}</div>` : ''}
-    ${phase ? `<div class="uv-phase">${phase}</div>` : ''}
+    <div class="uv-title">⟳ Updating · ${esc(UPD_STATES[upd.state] || upd.state)}</div>
+    ${phase ? `<div class="uv-phase">${esc(phase)}</div>` : ''}
     ${(upd.fromSha || upd.toSha) ? `<div class="uv-meta"><code>${esc(upd.fromSha || '?')} → ${esc(upd.toSha || '?')}</code>${upd.reason ? ` · ${esc(upd.reason)}` : ''}</div>` : ''}
-    ${failed ? '' : '<div class="uv-note">The app may stop responding briefly — that is the update, not a hang. It restarts itself; don’t close this window.</div>'}
+    ${failed ? '' : '<div class="uv-note">Briefly unresponsive — updating, not hung. It restarts itself; don’t close this window.</div>'}
   </div>`;
 }
 function renderUpdSettings() {
