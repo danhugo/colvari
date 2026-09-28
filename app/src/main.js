@@ -43,7 +43,9 @@ function watcherFor(pid) {
       relaunch: () => { app.relaunch(); app.exit(0); },
       procCount: () => (orchs.get(pid) || { procs: new Map() }).procs.size,
       runActive: () => (orchs.get(pid) || {}).running || false,
-      setPaused: (v) => { const o = orchs.get(pid); if (o) o.dispatchPaused = v; },
+      // Unpausing after an aborted update must re-tick: the drain held the run session open with
+      // nothing dispatched, so only this nudge resumes dispatching.
+      setPaused: (v) => { const o = orchs.get(pid); if (o) { o.dispatchPaused = v; if (!v) setImmediate(() => o.tick()); } },
     });
     w.on('log', (l) => send('log', { ...l, projectId: pid }));
     w.on('status', (st) => send('self-update-status', { projectId: pid, ...st }));
