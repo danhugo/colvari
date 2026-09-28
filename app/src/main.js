@@ -479,8 +479,10 @@ async function guiE2E() {
     const [pm1, dev] = nodes;
     // Stub subscription runs: 6 inside the 5h window (below a limit of 10 -> 60%, under the 80% warn line) plus
     // one stale run from 6h ago that must NOT count (proves the window "resets" rather than accumulating forever).
-    for (let i = 0; i < 6; i++) s.addRun({ id: 'lim-' + i, projectId: p, nodeId: pm1.id, agent: pm1.name, kind: 'agent', billingSource: 'subscription', startedAt: new Date(Date.now() - i * 1000).toISOString(), inputTokens: 10, outputTokens: 5 });
-    s.addRun({ id: 'lim-stale', projectId: p, nodeId: pm1.id, agent: pm1.name, kind: 'agent', billingSource: 'subscription', startedAt: new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString(), inputTokens: 10, outputTokens: 5 });
+    // runtime is set the way the orchestrator stamps real runs — usageProviders attributes runs to
+    // providers by it, so unstamped seeds would leave the provider honestly "unknown".
+    for (let i = 0; i < 6; i++) s.addRun({ id: 'lim-' + i, projectId: p, nodeId: pm1.id, agent: pm1.name, kind: 'agent', runtime: 'claude', billingSource: 'subscription', startedAt: new Date(Date.now() - i * 1000).toISOString(), inputTokens: 10, outputTokens: 5 });
+    s.addRun({ id: 'lim-stale', projectId: p, nodeId: pm1.id, agent: pm1.name, kind: 'agent', runtime: 'claude', billingSource: 'subscription', startedAt: new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString(), inputTokens: 10, outputTokens: 5 });
     const prevLim = s.getSettings().usageLimits; s.saveSettings({ usageLimits: { fiveHourLimit: 10, weeklyLimit: 0, tokenLimit: 0, costLimit: 0, warnPct: 80 } });
     await ex(`$('#tabs button[data-tab=usage]').click(); await refresh(); await w(500);`);
     const meterQ = `{ pct: $('#limitmeter .lm-fill')?.style.width, text: $('#limitmeter').textContent, warn: /near limit/.test($('#limitmeter').textContent), pause: /paused/.test($('#limitmeter').textContent) }`;
@@ -574,7 +576,8 @@ async function guiE2E() {
       expect('limits-providers: Claude-only meter stays calm below the warn line and counts down the reset', !/near limit|paused/.test(m.txt) && /↻/.test(m.txt), m.txt);
       await shot('limits-providers-claude-only');
       scenarios.push({ name: 'Claude only', id: pj.id, m });
-      o.subscriptionRateLimits = {};
+      // The stubs stay: the contract loop below re-reads each project's meter and asserts the very
+      // windows seeded here (clearing them made every provider flip to 'unknown' by then).
     }
     // Codex-only: nothing ever reports — the meter explains that per agent instead of inventing a %.
     {
@@ -585,10 +588,9 @@ async function guiE2E() {
       await ex(`await refresh(); await w(500);`);
       const m = await ex(`return ${grab}`);
       expect('limits-providers: Codex-only team (Codex reports nothing) shows no fabricated percentage', !m.hidden && !/\d+%/.test(m.txt), m.txt);
-      expect('limits-providers: Codex-only meter explains why there is no data, without warn/pause', /no limit data/.test(m.txt) && !/near limit|paused/.test(m.txt), m.txt);
+      expect('limits-providers: Codex-only meter explains why there is no data, without warn/pause', /no limit data|limits unknown/.test(m.txt) && !/near limit|paused/.test(m.txt), m.txt);
       await shot('limits-providers-codex-only');
       scenarios.push({ name: 'Codex only', id: pj.id, m });
-      o.subscriptionRateLimits = {};
     }
     // Mixed: only the Claude node reports — its numbers surface without being attributed to Codex.
     {
@@ -602,7 +604,6 @@ async function guiE2E() {
       expect('limits-providers: mixed team surfaces the Claude-reported 42% while Codex stays silent', !m.hidden && m.txt.includes('42%'), m.txt);
       await shot('limits-providers-mixed');
       scenarios.push({ name: 'mixed', id: pj.id, m });
-      o.subscriptionRateLimits = {};
     }
     // Feature gate for the chip contract: provider-keyed usageStatus (Devon's model) or [data-provider]
     // chips (Uma's UI). Skipped loudly until then; once active, a mismatch red-lines the case on purpose.
