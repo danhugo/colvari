@@ -863,6 +863,52 @@ async function guiE2E() {
     await shot('wake-board-cleared');
     console.log('[gui-e2e] wake', JSON.stringify({ board, team, ov, off }));
   };
+  // Subagent (Task/Agent tool) visibility: replay REAL captured CLI streams (test/fixtures/subagents-*.jsonl —
+  // claude 2.1.283 with two parallel Agent spawns + parent_tool_use_id child events, helpycode 0.3.5 with two
+  // task-tool parts) through the backend's own event parsers — no mocks, no model runs — then assert the
+  // renderer nests child activity under the parent with own tokens ('n/a' when the CLI reports none) and a
+  // per-agent count. Selector contract with Uma (t_d716779d): .sub-block / .sub-head / .sub-tokens / .subcount.
+  const subagentShots = async () => {
+    const { SubagentTracker } = require('./subagents');
+    const fx = (f) => fs.readFileSync(path.join(__dirname, '..', 'test', 'fixtures', f), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+    const CLAUDE = fx('subagents-claude.jsonl'), HC = fx('subagents-helpycode.jsonl');
+    await waitFor(`return !!document.querySelector('#tpl-select option')`); await ex(`await refresh();`);
+    const cur = await ex(`return { p: ctx.p, t: S.teamId }`);
+    const p = cur.p || pid(); const ts = pm.store(p, cur.t); const o = orchFor(p);
+    let nodes = ts.getTeam().nodes;
+    if (nodes.length < 2) { ts.addNode({ name: 'Pia', role: 'PM', x: 60, y: 60 }); ts.addNode({ name: 'Devon', role: 'Dev', x: 320, y: 160 }); nodes = ts.getTeam().nodes; }
+    const [n1, n2] = nodes;
+    // Replay through the backend's real parsers: claude stream-json on n1, helpycode profile events on n2.
+    const replay = (node, events, runtime) => {
+      const run = { sessionId: null, result: '', usage: U.newRun({ nodeId: node.id, agent: node.name }) };
+      run.subs = new SubagentTracker(node.id);
+      for (const ev of events) o.onEvent(node, JSON.stringify(ev), run, runtime);
+      return run;
+    };
+    replay(n1, CLAUDE, 'claude');
+    RT.RUNTIMES.stubsub = { id: 'stubsub', parseEvent: (ev) => RT.parseProfileEvent(ev, { label: 'Stub', eventMapping: {} }) };
+    try { replay(n2, HC, 'stubsub'); } finally { delete RT.RUNTIMES.stubsub; }
+    const [a1, a2] = [o.agent(n1.id), o.agent(n2.id)];
+    expect('subagents: backend replay -> 2 records per node (claude Agent, helpycode task)', a1.subagentCount === 2 && a2.subagentCount === 2, { n1: a1.subagentCount, n2: a2.subagentCount });
+    expect('subagents: claude tokens breakdown (2x 10in/4out), helpycode none (n/a)', JSON.stringify(a1.subagentTokens) === '{"inputTokens":20,"outputTokens":8}' && a2.subagents.every((r) => r.tokens === null), { a1: a1.subagentTokens });
+    await ex(`$('#tabs button[data-tab=obs]').click(); await refresh(); await w(600);`);
+    await shot('31-subagents-logs');
+    const blocks = await ex(`return [...document.querySelectorAll('#log .sub-block')].map((b) => ({ head: (b.querySelector('.sub-head')||{}).textContent || '', tokens: (b.querySelector('.sub-tokens')||{}).textContent || '', childRows: b.querySelectorAll('.logrow').length }))`);
+    expect('subagents: Logs nest a block per subagent (2 claude + 2 helpycode)', blocks.length === 4, blocks);
+    expect('subagents: block heads carry the subagent descriptions', ['Run alpha echo command', 'Run beta echo command'].every((d) => blocks.some((b) => b.head.includes(d))) && ['Run echo alpha command', 'Run echo beta command'].every((d) => blocks.some((b) => b.head.includes(d))), blocks.map((b) => b.head));
+    expect('subagents: own tokens shown, CLI-less usage renders n/a (not 0)', blocks.filter((b) => /Run (alpha|beta) echo/.test(b.head) && !/Run echo/.test(b.head)).every((b) => /\d/.test(b.tokens)) && blocks.filter((b) => /Run echo/.test(b.head)).every((b) => /n\/a/i.test(b.tokens)), blocks.map((b) => [b.head, b.tokens]));
+    const expand = await ex(`const b = [...document.querySelectorAll('#log .sub-block')].find((x) => (x.querySelector('.sub-head')||{}).textContent?.includes('Run alpha echo command')); if (!b) return { open: false, childText: false }; b.querySelector('.sub-head').click(); await w(300); return { open: !b.classList.contains('collapsed'), childText: b.textContent.includes('echo alpha-subagent-result') }`);
+    expect('subagents: expanding a block reveals its own child rows', expand.open && expand.childText, expand);
+    await shot('32-subagents-logs-expanded');
+    const counts = await ex(`$('#tabs button[data-tab=team]').click(); await w(300); return [...document.querySelectorAll('#graph .subcount')].map((c) => c.textContent)`);
+    expect('subagents: per-agent count badge shows 2 on both agent cards', counts.filter((c) => c.includes('2')).length === 2, counts);
+    for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`$('#tabs button[data-tab=team]').click(); await w(400);`); await shot(`33-subagents-team-${t}`); }
+    const chat = await ex(`$('#tabs button[data-tab=chat]').click(); await w(400); return { blocks: document.querySelectorAll('#chat-room .sub-block').length }`);
+    expect('subagents: Chat shows the nested blocks too', chat.blocks >= 4, chat);
+    require('electron').nativeTheme.themeSource = 'system';
+    await shot('34-subagents-chat');
+    console.log('[gui-e2e] subagents', JSON.stringify({ blocks, expand, counts, chat }));
+  };
   try {
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'helpycode') { await helpycodeShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'wikilogs') { await wikiLogsShots(); throw null; }
@@ -880,6 +926,7 @@ async function guiE2E() {
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'mainlogswiki') { await mainLogsWikiShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'critique') { await critiqueShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'wake') { await wakeShots(); throw null; }
+    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'subagents') { await subagentShots(); throw null; }
     // project/team management through the UI: create a project from the Startup template, then a Solo team, then switch back.
     // Wait until the template select is filled (the first refresh loads the templates) before choosing one.
     await ex(`$('#tabs button[data-tab=team]').click(); await w(300);`); // Chat is the default tab; the flow below clicks the graph
