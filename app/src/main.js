@@ -1,7 +1,7 @@
 const { app, BrowserWindow, ipcMain, Notification, nativeTheme } = require('electron');
 const path = require('path');
 const { Orchestrator } = require('./orchestrator');
-const { ProjectManager, TEMPLATES } = require('./projects');
+const { ProjectManager, TEMPLATES, isolateTestRoot } = require('./projects');
 const { pickChanged } = require('./store');
 const AC = require('./agent-config');
 const WT = require('./worktree');
@@ -21,6 +21,17 @@ const DEV_MODE = process.env.AGENTS_SQUAD_DEV ? process.env.AGENTS_SQUAD_DEV !==
 if (DEV_MODE) process.env.AGENTS_SQUAD_DEV = '1';
 let runtimesCache = null; // detected once per app start (binary + version)
 const runtimes = (settings) => (runtimesCache ||= RT.detectRuntimes(settings, { ...process.env, PATH: [process.env.PATH, require('os').homedir() + '/.local/bin', '/opt/homebrew/bin', '/usr/local/bin'].join(':') }));
+
+// Test instances (gui-e2e / smoke) must never touch real data and never linger: an inherited
+// AGENTS_SQUAD_HOME (the live app's root) loses to an explicit AGENTS_SQUAD_PROJECT, with neither
+// set a throwaway temp root is created, and the whole run is bounded by a force-exit watchdog.
+const TEST_MODE = !!(process.env.AGENTS_SQUAD_GUI_E2E || process.env.AGENTS_SQUAD_SMOKE);
+if (TEST_MODE) {
+  const testRoot = isolateTestRoot();
+  console.log(`[agents-squad] test instance pid=${process.pid} data root=${testRoot}`);
+  const timeoutMs = Number(process.env.AGENTS_SQUAD_TEST_TIMEOUT_MS) || 30 * 60 * 1000;
+  setTimeout(() => { console.error(`[agents-squad] test instance exceeded ${timeoutMs} ms — force exit (pid ${process.pid}, data root ${testRoot})`); app.exit(1); }, timeoutMs);
+}
 
 const pm = new ProjectManager();
 const orchs = new Map(); // projectId -> Orchestrator (projects run independently / concurrently)
