@@ -118,13 +118,14 @@ class Orchestrator extends EventEmitter {
     this.agents = {}; // nodeId -> {status, cost, inputTokens, outputTokens, runs, taskId}
     this.totalCost = 0;
     this.runs = 0;
-    // Seed from each node's persisted rate-limit snapshot (usage.js parseRateLimits, written by applyEvent's
+    // Seed from each node's persisted rate-limit snapshot (usage.js parseRateLimits, written by the
     // init/rate_limit_event handling below) so a restarted app shows the CLI's last-known 5h/weekly usage
     // immediately, instead of waiting for a fresh run to repopulate this in-memory map.
     this.subscriptionRateLimits = {};
-    // Only restore still-live snapshots: one whose resetsAt passed while the app was down describes a
-    // window that already reset, and must not pause dispatch (usage.js liveRateLimits).
-    try { for (const n of store.getTeam().nodes) { const rl = U.liveRateLimits(n.rateLimits); if (rl) this.subscriptionRateLimits[n.id] = rl; } } catch {}
+    // Only restore still-live snapshots that match the node's current runtime (usage.js nodeLiveRateLimits):
+    // one whose resetsAt passed while the app was down describes a window that already reset, and one captured
+    // by a runtime the node has since left must not pause or meter under the new provider.
+    try { for (const n of store.getTeam().nodes) { const rl = U.nodeLiveRateLimits(n); if (rl) this.subscriptionRateLimits[n.id] = rl; } } catch {}
     // Wake-on-message state: per-recipient debounce timers and per-pair ping-pong counters.
     this.userStopped = false;
     // Set by the UpdateWatcher while a self-update is pending/draining: no new dispatches (tasks or
@@ -277,8 +278,10 @@ class Orchestrator extends EventEmitter {
     const settings = this.store.getSettings();
     const status = U.usageStatus(this.store.listRuns(), settings.usageLimits);
     // Drop readings whose resetsAt passed since they were stored (usage.js liveRateLimits): a stale pct
-    // describes a window that already reset, and the freshest still-live reading is what counts.
-    const rlAll = Object.values(this.subscriptionRateLimits || {}).map((rl) => U.liveRateLimits(rl)).filter(Boolean);
+    // describes a window that already reset, and the freshest still-live reading is what counts. Readings
+    // captured by a runtime the node has since left don't count either (nodeLiveRateLimits).
+    const nodes = this.store.getTeam().nodes;
+    const rlAll = nodes.map((n) => U.nodeLiveRateLimits(n, this.subscriptionRateLimits)).filter(Boolean);
     const combinedRL = rlAll.reduce((acc, rl) => ({
       fiveHour: (!acc.fiveHour || (rl.fiveHour && rl.fiveHour.pct > acc.fiveHour.pct)) ? rl.fiveHour : acc.fiveHour,
       weekly: (!acc.weekly || (rl.weekly && rl.weekly.pct > acc.weekly.pct)) ? rl.weekly : acc.weekly,
@@ -1043,8 +1046,11 @@ class Orchestrator extends EventEmitter {
     } else if (ev.type === 'rate_limit_event') {
       // The claude CLI's real, live 5h/weekly usage % — a separate stream event (rate_limit_info.unifiedWindows),
       // not part of the system/init event below. This is the actual source for the top bar's "5h"/"weekly" meter.
-      const rl = U.parseRateLimits(ev);
-      if (rl) {
+      // Stamped with the reporting runtime so a node repointed to another runtime drops the old CLI's windows
+      // (usage.js nodeLiveRateLimits) instead of passing them off as the new provider's quota.
+      const rl0 = U.parseRateLimits(ev);
+      if (rl0) {
+        const rl = { ...rl0, runtime };
         (this.subscriptionRateLimits ||= {})[node.id] = rl; this.checkUsageLimits(node.id); this.changed();
         try { this.store.updateNode(node.id, { rateLimits: rl, rateLimitsAt: new Date().toISOString() }); } catch {}
       }
@@ -1052,8 +1058,9 @@ class Orchestrator extends EventEmitter {
       const mcpStatus = (ev.mcp_servers || []).map((s) => `${s.name}:${s.status}`).join(',');
       if (run && ev.session_id) run.sessionId = ev.session_id;
       if (run && run.usage) U.applyEvent(run.usage, ev);
-      const rl = U.parseRateLimits(ev);
-      if (rl) {
+      const rl0 = U.parseRateLimits(ev);
+      if (rl0) {
+        const rl = { ...rl0, runtime }; // stamped: see the rate_limit_event branch above
         (this.subscriptionRateLimits ||= {})[node.id] = rl; this.checkUsageLimits(node.id);
         try { this.store.updateNode(node.id, { rateLimits: rl, rateLimitsAt: new Date().toISOString() }); } catch {}
       }

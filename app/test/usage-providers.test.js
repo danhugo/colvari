@@ -142,7 +142,7 @@ test('providers: non-agent runs and api-billed runs never inflate subscription w
   assert.equal(prov(providers, 'codex').status, 'unknown');
 });
 
-test('providers: a custom runtime (helpycode) is its own provider; generic CLI windows make it known', () => {
+test('providers: a custom runtime (helpycode) is its own provider; its OWN stamped CLI windows make it known', () => {
   const h = node({ runtime: 'helpycode' });
   const quiet = U.usageProviders({ runs: [], limits: {}, nodes: [h], now: NOW });
   assert.equal(quiet[0].provider, 'helpycode');
@@ -151,7 +151,7 @@ test('providers: a custom runtime (helpycode) is its own provider; generic CLI w
     runs: [],
     limits: {},
     nodes: [h],
-    rateLimitsByNode: { [h.id]: { fiveHour: { pct: 0.5, resetsAt: inH(1) }, weekly: null } },
+    rateLimitsByNode: { [h.id]: { fiveHour: { pct: 0.5, resetsAt: inH(1) }, weekly: null, runtime: 'helpycode' } },
     now: NOW,
   });
   const p = reporting[0];
@@ -159,6 +159,60 @@ test('providers: a custom runtime (helpycode) is its own provider; generic CLI w
   assert.deepEqual(p.windows.map((w) => w.label), ['5h']); // only the window the CLI actually reported
   assert.equal(p.windows[0].pct, 0.5);
   assert.equal(p.windows[0].resetAt, inH(1));
+});
+
+test('providers: unstamped claude-dialect readings never pass as another provider quota (helpycode wk% regression)', () => {
+  // Live bug: helpycode nodes carried a stale, unstamped CLAUDE subscription reading (same weekly
+  // reset as the claude nodes), so the top bar showed "Helpycode Api wk 28%" — claude.ai data, not
+  // helpycode's. Unstamped readings predate the runtime stamp; only claude nodes may claim them.
+  const h = node({ runtime: 'helpycode' });
+  const staleClaudeReading = { fiveHour: { pct: 0.91, resetsAt: ago(36 * 3600 * 1000) }, weekly: { pct: 0.28, resetsAt: inH(96) } };
+  assert.equal(U.nodeLiveRateLimits(h, { [h.id]: staleClaudeReading }), null);
+  const providers = U.usageProviders({ runs: [], limits: {}, nodes: [h], rateLimitsByNode: { [h.id]: staleClaudeReading }, now: NOW });
+  assert.equal(providers[0].status, 'unknown');
+  assert.deepEqual(providers[0].windows, []);
+  // ...but the same unstamped reading on a claude node is the normal pre-stamp case: accepted
+  // (its stale 5h window is still dropped by freshness — only the live weekly survives).
+  const c = node({ runtime: 'claude' });
+  const got = U.nodeLiveRateLimits(c, { [c.id]: staleClaudeReading });
+  assert.equal(got.fiveHour, null);
+  assert.equal(got.weekly.pct, 0.28);
+});
+
+test('providers: nodes without a runtime are claude, not a second unknown provider (Unknown-chip duplication)', () => {
+  // Live bug: Pia/Rhea's node JSON had no runtime field but carried the claude CLI's windows, so
+  // usageProviders keyed them as "unknown" and the top bar rendered the same subscription data twice.
+  const rl = { fiveHour: { pct: 0.05, resetsAt: inH(1) }, weekly: { pct: 0.36, resetsAt: inH(72) } };
+  const runtimeless = node({ name: 'Pia', runtime: undefined });
+  const both = U.usageProviders({
+    runs: [], limits: {},
+    nodes: [node({ name: 'Cato' }), runtimeless],
+    rateLimitsByNode: { [runtimeless.id]: rl },
+    now: NOW,
+  });
+  assert.equal(both.length, 1); // one claude provider, no "unknown" duplicate
+  assert.equal(both[0].provider, 'claude');
+  assert.equal(both[0].status, 'ok');
+  assert.equal(both[0].windows.find((w) => w.label === 'weekly').pct, 0.36);
+  // A runtime-less node alone is still claude (the app-wide default), never an "unknown" provider.
+  const soloNode = node({ runtime: undefined });
+  const solo = U.usageProviders({ runs: [], limits: {}, nodes: [soloNode], rateLimitsByNode: { [soloNode.id]: rl }, now: NOW });
+  assert.equal(solo.length, 1);
+  assert.equal(solo[0].provider, 'claude');
+  assert.equal(solo[0].status, 'ok');
+});
+
+test('nodeLiveRateLimits: stamp must match the node runtime; stale windows stay dead', () => {
+  const inWindow = { fiveHour: { pct: 0.4, resetsAt: inH(1) }, weekly: { pct: 0.1, resetsAt: inH(72) } };
+  const c = node({ runtime: 'claude' }); const h = node({ runtime: 'helpycode' });
+  assert.deepEqual(U.nodeLiveRateLimits(c, { [c.id]: { ...inWindow, runtime: 'claude' } }).fiveHour.pct, 0.4);
+  assert.equal(U.nodeLiveRateLimits(h, { [h.id]: { ...inWindow, runtime: 'claude' } }), null); // claude reading on a helpycode node
+  assert.equal(U.nodeLiveRateLimits(c, { [c.id]: { ...inWindow, runtime: 'helpycode' } }), null); // and the reverse
+  const stale = { fiveHour: { pct: 0.97, resetsAt: ago(60 * 1000) }, weekly: null, runtime: 'claude' };
+  assert.equal(U.nodeLiveRateLimits(c, { [c.id]: stale }), null); // freshness still applies
+  // persisted node.rateLimits fallback works with and without a stamp
+  assert.deepEqual(U.nodeLiveRateLimits({ id: c.id, rateLimits: { ...inWindow, runtime: 'claude' } }).weekly.pct, 0.1);
+  assert.equal(U.nodeLiveRateLimits({ id: h.id, runtime: 'helpycode', rateLimits: { ...inWindow } }), null); // unstamped on non-claude
 });
 
 test('providers: empty team yields no entries', () => {

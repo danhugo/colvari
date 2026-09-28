@@ -297,7 +297,11 @@ class Store {
     return this.update(this.teamFile(), { nodes: [], edges: [] }, (t) => {
       const n = t.nodes.find((x) => x.id === nid); if (!n) throw new Error('no node');
       const roleChanged = p.role !== undefined && String(p.role).toLowerCase() !== String(n.role || '').toLowerCase();
+      // A rate-limit snapshot describes the runtime that reported it: switching runtimes invalidates it
+      // (it must not resurface as the new provider's quota), and the new CLI reports fresh on its next run.
+      const runtimeChanged = p.runtime !== undefined && String(p.runtime || '') !== String(n.runtime || '');
       Object.assign(n, p, { id: nid });
+      if (runtimeChanged) { delete n.rateLimits; delete n.rateLimitsAt; }
       if (roleChanged) Object.assign(n, normalizePatch(pick(applyPreset(n, presets), PRESET_FIELDS)));
       return n;
     });

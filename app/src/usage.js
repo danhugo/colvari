@@ -433,7 +433,26 @@ function liveRateLimits(rl) {
   const isLive = (w) => !!(w && !(w.resetsAt && new Date(w.resetsAt).getTime() <= Date.now()));
   const fiveHour = isLive(rl.fiveHour) ? rl.fiveHour : null;
   const weekly = isLive(rl.weekly) ? rl.weekly : null;
-  return (fiveHour || weekly) ? { fiveHour, weekly } : null;
+  return (fiveHour || weekly) ? { fiveHour, weekly, ...(rl.runtime ? { runtime: rl.runtime } : {}) } : null;
+}
+
+// A node's effective runtime id — the same default the whole app uses (getRuntime: falsy -> claude;
+// the orchestrator stamps runs `cfg.runtime || 'claude'`). A node JSON that predates the runtime
+// field (or was created without one) drives the claude CLI everywhere else, so the usage model must
+// not present it as a separate "unknown" provider.
+const effectiveRuntime = (n) => (n && n.runtime) || 'claude';
+// The live rate-limit reading for ONE node: liveRateLimits freshness plus a runtime match. Readings
+// are stamped with the runtime whose CLI reported them (claude-dialect init/rate_limit_event paths
+// only); a node repointed to another runtime (claude -> helpycode, say) must not keep advertising the
+// old CLI's subscription windows as the new provider's quota. Unstamped readings predate the stamp,
+// and back then the only writers were the claude-dialect paths — so they count for claude nodes and
+// are ignored for everyone else (that CLI re-reports on a later run, or the provider honestly stays
+// "limits unknown"). map is the orchestrator's in-memory per-node readings; node.rateLimits is the
+// persisted fallback.
+function nodeLiveRateLimits(node, map = {}) {
+  const rl = liveRateLimits((map || {})[node.id] || (node && node.rateLimits));
+  if (!rl) return null;
+  return (rl.runtime || 'claude') === effectiveRuntime(node) ? rl : null;
 }
 
 // Fold each node's CLI-reported subscription rate-limit % (from rlAll — one parseRateLimits() result per node,
@@ -531,10 +550,13 @@ function usageProviders({ runs = [], limits, nodes = [], rateLimitsByNode = {}, 
   const groups = new Map();
   for (const n of nodes || []) {
     if (!n) continue;
-    const provider = n.runtime || 'unknown';
+    // Effective runtime, not the raw field: a node without one runs claude everywhere else in the app
+    // (getRuntime, run stamping). Keying it as its own "unknown" provider made its claude-CLI windows
+    // render as a second, duplicate chip beside the real claude one.
+    const provider = effectiveRuntime(n);
     const g = groups.get(provider) || { nodes: [], rl: [] };
     g.nodes.push(n);
-    const rl = liveRateLimits(rateLimitsByNode[n.id] || n.rateLimits);
+    const rl = nodeLiveRateLimits(n, rateLimitsByNode);
     if (rl) g.rl.push(rl);
     groups.set(provider, g);
   }
@@ -602,5 +624,5 @@ function parseCompactBoundary(ev) {
 
 module.exports = { resultSnapshot, tokensForRun, BILLING_MODES, BILLING_SOURCES, normalizeBilling, applyBillingEnv, detectBilling, costNote, tokensFromResult, totalTokens, newRun, applyEvent, finishRun, summarize, total, modelStats, toCSV, CSV_COLS,
   canonModel, estimateCostUsd, resolveEntryCost, providerOf, buildLedger, usageLedger, ledgerEntriesOf,
-  LIMITS_DEFAULTS, normalizeLimits, authType, windowUsage, limitStatus, usageStatus, applyCliRateLimits, parseRateLimitWindow, parseRateLimits, liveRateLimits, subscriptionGuard, providerUsageStatus, usageProviders, GUARD_DEFAULT_PCT,
+  LIMITS_DEFAULTS, normalizeLimits, authType, windowUsage, limitStatus, usageStatus, applyCliRateLimits, parseRateLimitWindow, parseRateLimits, liveRateLimits, nodeLiveRateLimits, effectiveRuntime, subscriptionGuard, providerUsageStatus, usageProviders, GUARD_DEFAULT_PCT,
   CONTEXT_WINDOW_DEFAULT, CONTEXT_WINDOW_1M, contextWindowFor, contextFromAssistant, parseCompactBoundary };

@@ -1523,7 +1523,9 @@ const api = {
     // fall back to each node's persisted rateLimits snapshot (discoverCapabilities/orchestrator writes
     // node.rateLimits alongside the in-memory map) so a restart doesn't lose the last known real CLI %.
     const nodes = TS(c).getTeam().nodes;
-    const rlAll = nodes.map((n) => U.liveRateLimits(inMemory[n.id] || n.rateLimits)).filter(Boolean);
+    // nodeLiveRateLimits, not liveRateLimits alone: a reading captured by a runtime the node has since
+    // left (e.g. claude -> helpycode) must not meter or pause under the new provider.
+    const rlAll = nodes.map((n) => U.nodeLiveRateLimits(n, inMemory)).filter(Boolean);
     // Provider-keyed view (t_8f8ab37d): one entry per provider the team's agents actually run, each carrying
     // its own windows — Claude's CLI-reported 5h/weekly among them, others 'unknown' until their CLI reports.
     const providers = U.usageProviders({ runs, limits: settings.usageLimits, nodes, rateLimitsByNode: inMemory, warnPct });
@@ -1533,7 +1535,7 @@ const api = {
   // own CLI's init event — with an explicit reason when there is nothing to report yet.
   providerUsage: (c, nodeId) => {
     const s = ST(c); const node = TS(c).getTeam().nodes.find((n) => n.id === nodeId); if (!node) throw new Error('no agent ' + nodeId);
-    const rl = U.liveRateLimits((orchFor(c.p).subscriptionRateLimits || {})[nodeId] || node.rateLimits) || null;
+    const rl = U.nodeLiveRateLimits(node, orchFor(c.p).subscriptionRateLimits || {}) || null;
     const installed = runtimes(s.getSettings())[node.runtime] ? runtimes(s.getSettings())[node.runtime].installed : undefined;
     return U.providerUsageStatus(rl, { installed, billingMode: node.billingMode });
   },
@@ -1566,8 +1568,8 @@ const api = {
           capabilities = CAP.discoverCapabilities(rt, settings, { initEvent: init });
           patch.capabilities = capabilities; patch.capabilitiesProbedAt = capabilities.probedAt;
         }
-        const rl = rateLimit ? U.parseRateLimits(rateLimit) : null;
-        if (rl) { patch.rateLimits = rl; patch.rateLimitsAt = new Date().toISOString(); (orchFor(c.p).subscriptionRateLimits ||= {})[nodeId] = rl; }
+        const rl0 = rateLimit ? U.parseRateLimits(rateLimit) : null;
+        if (rl0) { const rl = { ...rl0, runtime: rt.id }; patch.rateLimits = rl; patch.rateLimitsAt = new Date().toISOString(); (orchFor(c.p).subscriptionRateLimits ||= {})[nodeId] = rl; }
       } catch {}
     }
     const kept = capabilities !== node.capabilities && CAP.mergeCapabilities(node.capabilities, capabilities) === node.capabilities;
