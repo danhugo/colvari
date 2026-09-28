@@ -205,7 +205,17 @@ class Orchestrator extends EventEmitter {
   memSig() { return JSON.stringify([this.running, this.runs, this.runCost, this.runTokens, this.totalCost, this.billedCost, this.subCost, this.budgetStop, this.usagePaused, this.usageStatus || null, this.procs.size, this.agents, this.subscriptionRateLimits]); }
   // Combined fingerprint for change-driven polling: in-memory state + every file the snapshot reads.
   versionSig() { return [this.memSig(), this.sig('runs'), this.sig('board'), this.sig('wiki'), this.teamsSigOf(), this.logSig()].join('|'); }
-  snapshot() { return { running: this.running, totalCost: this.totalCost, billedCost: this.billedCost || 0, subCost: this.subCost || 0, runs: this.runs, active: [...this.procs.keys()].map((id) => ({ nodeId: id, taskId: this.agent(id).taskId, cwd: this.cwds && this.cwds.get(id) || null })), runCost: this.runCost || 0, runTokens: this.runTokens || 0, budgetStop: this.budgetStop || null, agents: Object.fromEntries(Object.entries(this.agents).map(([k, a]) => [k, { ...a, pendingHuman: a.pendingHuman.length }])), tokens: this.tokens || { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 }, modelStats: this.modelStats(), timeline: this.timeline(), logs: this.logs(), wiki: this.wiki(), nodeTeams: this.nodeTeams() }; }
+  // IPC-safe agent view. a.currentRun carries the live run record, whose .subs is a SubagentTracker
+  // instance with a function field (.now) — one function anywhere in a state push / getAll payload
+  // fails the whole structured clone, Electron drops the message ("Failed to serialize arguments")
+  // and the UI silently never updates (t_72309c30: blank after restart because the resumed run armed
+  // this before the first renderer refresh). Project only what the renderer reads off a.run:
+  // stall (stall/recovery badges) and sessionId.
+  agentView(a) {
+    const { currentRun, ...rest } = a;
+    return { ...rest, pendingHuman: a.pendingHuman.length, ...(currentRun ? { run: { sessionId: currentRun.sessionId ?? null, stall: currentRun.stall || null } } : {}) };
+  }
+  snapshot() { return { running: this.running, totalCost: this.totalCost, billedCost: this.billedCost || 0, subCost: this.subCost || 0, runs: this.runs, active: [...this.procs.keys()].map((id) => ({ nodeId: id, taskId: this.agent(id).taskId, cwd: this.cwds && this.cwds.get(id) || null })), runCost: this.runCost || 0, runTokens: this.runTokens || 0, budgetStop: this.budgetStop || null, agents: Object.fromEntries(Object.entries(this.agents).map(([k, a]) => [k, this.agentView(a)])), tokens: this.tokens || { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 }, modelStats: this.modelStats(), timeline: this.timeline(), logs: this.logs(), wiki: this.wiki(), nodeTeams: this.nodeTeams() }; }
   // Renderer-facing snapshot: the UI reads only agents + run scalars, so the file-backed display parts
   // (modelStats/timeline/logs/wiki/nodeTeams) are pure IPC payload — ~1.4MB per change on a large
   // project. Kept out of getAll and state pushes; snapshot() stays whole for other consumers.
