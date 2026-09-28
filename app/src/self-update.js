@@ -1,9 +1,10 @@
 // Self-update: watch the app repo for new commits and restart the app safely.
 // State machine: idle -> pending (new commits on the base branch, or a request_self_update call,
-// with auto-restart on) -> draining (no new dispatches; wait for running agents to finish — no
-// timeout, interrupting mid-run would strand worktrees) -> testing (npm test in a throwaway
-// worktree at the new sha so a bad checkout never touches the live tree) -> restarting (persist
-// restart-state, relaunch). Any failure aborts back to idle and logs the reason.
+// with auto-restart on) -> draining (no new dispatches; wait for running agents to finish, at most
+// drainTimeoutMin minutes — a run that outlasts the grace is stopped and its task resumes after the
+// restart, so one long run cannot freeze the whole team's dispatch indefinitely) -> testing (npm
+// test in a throwaway worktree at the new sha so a bad checkout never touches the live tree) ->
+// restarting (persist restart-state, relaunch). Any failure aborts back to idle and logs the reason.
 // On boot, bootResume() resumes a Run interrupted by a restart, or rolls back to the previous sha
 // and disables auto-restart after repeated boot failures. All git/npm/relaunch steps are injectable
 // for tests.
@@ -65,11 +66,16 @@ class UpdateWatcher extends EventEmitter {
     this.procCount = opts.procCount || (() => 0);
     this.runActive = opts.runActive || (() => false);
     this.setPaused = opts.setPaused || (() => {});
+    // Stops whatever is still running when the drain deadline hits (the orchestrator's haltProcs:
+    // SIGTERM all agent processes; their tasks re-dispatch after the restart). Tests inject a stub.
+    this.haltProcs = opts.haltProcs || (() => Promise.resolve());
+    // Test/manual override for the drain grace; normally read from settings per drain (drainMs()).
+    this._drainTimeoutMs = opts.drainTimeoutMs ?? null;
     this.now = opts.now || (() => Date.now());
     this.sleep = opts.sleep || ((ms) => new Promise((r) => setTimeout(r, ms)));
     this.phase = 'idle';
     this.reason = null; this.fromSha = null; this.toSha = null;
-    this.waitingOn = 0; this.lastError = null; this.lastCheckAt = null;
+    this.waitingOn = 0; this.lastError = null; this.lastCheckAt = null; this.drainEndsAt = null;
     this._seenSha = null;
     this._deferred = null;
     this._busy = false;
@@ -87,10 +93,19 @@ class UpdateWatcher extends EventEmitter {
     this._log('error', `self-update aborted: ${why}`);
     appendHistory(this.store.dir, { ts: new Date().toISOString(), reason: this.reason, fromSha: this.fromSha, toSha: this.toSha, result: 'aborted: ' + why });
     this.lastError = why; this._busy = false;
+    this.waitingOn = 0; this.drainEndsAt = null;
     this.setPhase('idle');
   }
 
   autoRestart() { try { return !!this.store.getSettings().autoRestart; } catch { return false; } }
+  // How long draining may wait for running agents before they are stopped and the update proceeds.
+  // Setting drainTimeoutMin (default 5; 0 = wait forever, the old no-timeout behavior).
+  drainMs() {
+    if (this._drainTimeoutMs != null) return this._drainTimeoutMs;
+    const min = Number(this.store.getSettings().drainTimeoutMin);
+    if (min === 0) return Infinity;
+    return min > 0 ? min * 60000 : 5 * 60000;
+  }
   baseBranch() {
     if (this.branch) return this.branch;
     const r = this.git(['rev-parse', '--abbrev-ref', 'HEAD']);
@@ -112,6 +127,7 @@ class UpdateWatcher extends EventEmitter {
     return {
       phase: this.phase, reason: this.reason, fromSha: this.fromSha, toSha: this.toSha,
       waitingOn: this.waitingOn, lastError: this.lastError, lastCheckAt: this.lastCheckAt,
+      drainEndsAt: this.drainEndsAt, drainTimeoutMin: this.phase === 'draining' && isFinite(this.drainMs()) ? this.drainMs() / 60000 : null,
       lastSeenSha: this._seenSha, deferredTo: this._deferred ? this._deferred.sha : null,
       branch: this.baseBranch(), autoRestart: this.autoRestart(),
       lastRestartAt: this.lastRestartAt || null, restartsLastHour: this.restartsLastHour(),
@@ -186,16 +202,36 @@ class UpdateWatcher extends EventEmitter {
       appendHistory(this.store.dir, { ts: new Date().toISOString(), reason, fromSha: from, toSha: to, result: 'aborted: ' + why });
       this.lastError = why;
       this._busy = false;
+      this.waitingOn = 0; this.drainEndsAt = null;
       this.setPhase('idle');
     };
     try {
       this._busy = true;
       this.setPhase('pending');
+      // Fail fast, before pausing anyone: if the main checkout is dirty (a dev mid-edit) the update
+      // is going to abort, and better it costs the team nothing. Re-checked after the drain, since
+      // the checkout can dirty while we wait.
+      const dirtyPre = this.git(['status', '--porcelain']);
+      if (dirtyPre.code !== 0 || dirtyPre.out.trim()) return abort('main checkout has uncommitted changes; refusing to fast-forward');
       this._log('system', `self-update: ${reason} (${from.slice(0, 7)} -> ${to.slice(0, 7)}); pausing new runs.`);
       this.setPhase('draining');
-      // Wait for running agents to finish. Indefinite by design (no interrupt: it would leave
-      // half-done worktrees); the UI shows the count and can trigger a manual restart.
-      while (this.procCount() > 0) { this.waitingOn = this.procCount(); this.emitStatus(); await this.sleep(500); }
+      // Wait for running agents to finish — within the drain grace. The dispatch pause already
+      // freezes every idle agent, so one long run must not extend that freeze indefinitely: past
+      // the deadline whatever is still running is stopped (haltProcs) and its task re-dispatches
+      // after the restart (reconcileOrphanedTasks resets it to todo; wasRunning stays true so
+      // bootResume resumes the Run). Setting drainTimeoutMin = 0 restores wait-forever.
+      const drainMs = this.drainMs();
+      const deadline = isFinite(drainMs) ? this.now() + drainMs : null;
+      this.drainEndsAt = deadline != null ? new Date(deadline).toISOString() : null;
+      while (this.procCount() > 0) {
+        if (deadline != null && this.now() >= deadline) {
+          this._log('system', `self-update: drain grace (${Math.round(drainMs / 60000)}min) over with ${this.procCount()} run(s) still active; stopping them — their tasks resume after the restart.`);
+          await this.haltProcs();
+          break;
+        }
+        this.waitingOn = this.procCount(); this.emitStatus(); await this.sleep(500);
+      }
+      this.drainEndsAt = null;
       this.waitingOn = 0; this.emitStatus();
       const dirty = this.git(['status', '--porcelain']);
       if (dirty.code !== 0 || dirty.out.trim()) return abort('main checkout has uncommitted changes; refusing to fast-forward');
