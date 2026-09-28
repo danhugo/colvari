@@ -8,7 +8,10 @@ const U = require('./usage');
 const PF = require('./preflight');
 const RT = require('./runtimes');
 const CAP = require('./capabilities');
+const SU = require('./self-update');
 const { introspectRuntime: runIntrospectRuntime } = require('./introspector');
+// The app repo (main checkout): what the UpdateWatcher polls and fast-forwards.
+const APP_ROOT = path.join(__dirname, '..', '..');
 let runtimesCache = null; // detected once per app start (binary + version)
 const runtimes = (settings) => (runtimesCache ||= RT.detectRuntimes(settings, { ...process.env, PATH: [process.env.PATH, require('os').homedir() + '/.local/bin', '/opt/homebrew/bin', '/usr/local/bin'].join(':') }));
 
@@ -28,6 +31,25 @@ function orchFor(pid) {
     orchs.set(pid, o);
   }
   return o;
+}
+// Self-update: one UpdateWatcher per project (polls the repo, safe restart + resume; see self-update.js).
+const watchers = new Map(); // projectId -> UpdateWatcher
+function watcherFor(pid) {
+  let w = watchers.get(pid);
+  if (!w) {
+    const store = pm.store(pid);
+    w = new SU.UpdateWatcher({
+      store, repoDir: APP_ROOT,
+      relaunch: () => { app.relaunch(); app.exit(0); },
+      procCount: () => (orchs.get(pid) || { procs: new Map() }).procs.size,
+      runActive: () => (orchs.get(pid) || {}).running || false,
+      setPaused: (v) => { const o = orchs.get(pid); if (o) o.dispatchPaused = v; },
+    });
+    w.on('log', (l) => send('log', { ...l, projectId: pid }));
+    w.on('status', (st) => send('self-update-status', { projectId: pid, ...st }));
+    watchers.set(pid, w);
+  }
+  return w;
 }
 // Startup sweep: any node still showing "not probed yet" (added before capability probing existed, imported
 // from another machine, etc.) gets probed lazily — one setImmediate tick per node so a slow/missing CLI binary
@@ -1178,6 +1200,9 @@ const api = {
       status: inbox.some((i) => i.nodeId === n.id) ? 'needs-human' : (ag[n.id] || {}).status === 'working' || st[n.id] === 'busy' ? 'working' : 'idle' }])); },
   crossEdges: (c) => TS(c).incomingCrossEdges(), setViewport: (c, v) => TS(c).setViewport(v), getViewport: (c) => TS(c).getViewport(), setPositions: (c, pos) => TS(c).setPositions(pos),
   run: (c) => orchFor(c.p).start(), stop: (c) => orchFor(c.p).stop(),
+  getSelfUpdateStatus: (c) => watcherFor(c.p).status(),
+  setAutoRestart: (c, on) => { ST(c).saveSettings({ autoRestart: !!on }); return watcherFor(c.p).status(); },
+  restartSelfUpdate: (c) => { watcherFor(c.p).restartNow(); return watcherFor(c.p).status(); },
   getPrefs: () => getPrefs(), setPrefs: (_c, patch) => setPrefs(patch || {}),
 };
 nativeTheme.on('updated', () => { if (win && !win.isDestroyed()) win.setBackgroundColor(BG[nativeTheme.shouldUseDarkColors ? 'dark' : 'light']); send('theme', { dark: nativeTheme.shouldUseDarkColors }); });
@@ -1203,6 +1228,16 @@ app.whenReady().then(() => {
   createWindow();
   probeUnprobedAgents();
   pollInbox(true); setInterval(() => pollInbox(false), 1500);
+  // Self-update: resume a Run interrupted by a safe restart (or roll back a bad update that fails to
+  // boot). markBootOk ~15s in proves the new code booted, so a later crash is not a boot failure.
+  for (const p of pm.list()) {
+    try {
+      const r = SU.bootResume(pm.store(p.id), { repoDir: APP_ROOT });
+      watcherFor(p.id); // start polling for new commits right away
+      if (r.resume) setImmediate(() => orchFor(p.id).start());
+    } catch (e) { console.error('[self-update] boot resume failed:', e.message); }
+  }
+  setTimeout(() => { for (const p of pm.list()) { try { SU.markBootOk(pm.store(p.id)); } catch {} } }, 15000).unref();
   console.log('[agents-squad] ready, data root:', pm.root);
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });

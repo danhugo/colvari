@@ -119,6 +119,9 @@ class Orchestrator extends EventEmitter {
     try { for (const n of store.getTeam().nodes) { const rl = U.liveRateLimits(n.rateLimits); if (rl) this.subscriptionRateLimits[n.id] = rl; } } catch {}
     // Wake-on-message state: per-recipient debounce timers and per-pair ping-pong counters.
     this.userStopped = false;
+    // Set by the UpdateWatcher while a self-update is pending/draining: no new dispatches (tasks or
+    // wakes) until it is back to false, so the restart waits for agents instead of racing them.
+    this.dispatchPaused = false;
     this.wakeTimers = new Map(); // nodeId -> debounce timeout
     this.wakePairs = new Map(); // 'from>to' -> {count, since}
     this._wakeTimer = setInterval(() => this.sweepWakes(), WAKE.SWEEP_MS);
@@ -231,7 +234,7 @@ class Orchestrator extends EventEmitter {
   // messages as the prompt. The sender's send_message has already returned (it only writes to the
   // store); delivery happens here, in the background, debounced and loop-capped. ----
   sweepWakes() {
-    if (this.userStopped) { for (const t of this.wakeTimers.values()) clearTimeout(t); this.wakeTimers.clear(); return; }
+    if (this.userStopped || this.dispatchPaused) { for (const t of this.wakeTimers.values()) clearTimeout(t); this.wakeTimers.clear(); return; }
     try {
       const team = this.store.getTeam();
       for (const node of team.nodes) {
@@ -254,7 +257,7 @@ class Orchestrator extends EventEmitter {
   async dispatchWake(nodeId) {
     const team = this.store.getTeam();
     const node = team.nodes.find((n) => n.id === nodeId);
-    if (!node || this.userStopped || this.procs.has(nodeId)) return;
+    if (!node || this.userStopped || this.dispatchPaused || this.procs.has(nodeId)) return;
     const a = this.agent(nodeId);
     if (a.status === 'working' || a.budgetStop) return; // busy (or over budget): stay unread, the next sweep retries
     const settings = this.store.getSettings();
@@ -466,7 +469,8 @@ class Orchestrator extends EventEmitter {
     const all = this.store.listTasks();
     const todo = all.filter((t) => t.status === 'todo' && team.nodes.some((n) => n.id === t.assignee));
     // The subscription usage pause is about the Claude subscription: agents on other runtimes keep working.
-    const paused = (node) => this.usagePaused && (!node || (node.runtime || 'claude') === 'claude');
+    // dispatchPaused (UpdateWatcher) pauses every runtime: the restart waits for agents to finish.
+    const paused = (node) => this.dispatchPaused || (this.usagePaused && (!node || (node.runtime || 'claude') === 'claude'));
     const readyTodo = todo.map((t) => ({ task: t, node: team.nodes.find((n) => n.id === t.assignee) }))
       .filter(({ task, node }) => !C.isBlocked(task, all) && !this.agent(task.assignee).budgetStop && !paused(node));
     const readyReview = reviewReady.filter(({ task, node }) => !C.isBlocked(task, all) && !this.agent(node.id).budgetStop && !paused(node));
