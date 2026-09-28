@@ -45,6 +45,7 @@ const levelOf = (kind) => LEVELS[kind] || 'info';
 function logEntries(lines = [], nodeTeams = {}) {
   return lines.map((l) => ({
     ts: l.at, agentId: l.nodeId || null, level: levelOf(l.kind), text: l.text, taskId: l.taskId || null, task: l.task || '',
+    subagentId: l.subagentId || null, // set on events emitted inside a subagent (see subagents.js)
     teamId: (nodeTeams[l.nodeId] || {}).teamId || null, teamName: (nodeTeams[l.nodeId] || {}).teamName || null,
   }));
 }

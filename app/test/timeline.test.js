@@ -36,17 +36,17 @@ test('logEntries: maps log lines to {ts, agentId, level, text, taskId, task}', (
   ];
   const es = TL.logEntries(lines);
   assert.deepEqual(es, [
-    { ts: 1000, agentId: 'n1', level: 'info', text: 'started', taskId: null, task: '', teamId: null, teamName: null },
-    { ts: 1001, agentId: 'n1', level: 'error', text: 'boom', taskId: 't1', task: 'Do X', teamId: null, teamName: null },
-    { ts: 1002, agentId: 'n2', level: 'warn', text: 'warn text', taskId: null, task: '', teamId: null, teamName: null },
-    { ts: 1003, agentId: null, level: 'info', text: 'hello', taskId: null, task: '', teamId: null, teamName: null },
+    { ts: 1000, agentId: 'n1', level: 'info', text: 'started', taskId: null, task: '', subagentId: null, teamId: null, teamName: null },
+    { ts: 1001, agentId: 'n1', level: 'error', text: 'boom', taskId: 't1', task: 'Do X', subagentId: null, teamId: null, teamName: null },
+    { ts: 1002, agentId: 'n2', level: 'warn', text: 'warn text', taskId: null, task: '', subagentId: null, teamId: null, teamName: null },
+    { ts: 1003, agentId: null, level: 'info', text: 'hello', taskId: null, task: '', subagentId: null, teamId: null, teamName: null },
   ]);
 });
 
 test('logEntries: tags entries with teamId/teamName from the nodeTeams map', () => {
   const lines = [{ at: 1, nodeId: 'n1', kind: 'system', text: 'hi' }];
   const es = TL.logEntries(lines, { n1: { teamId: 'team-a', teamName: 'Alpha' } });
-  assert.deepEqual(es[0], { ts: 1, agentId: 'n1', level: 'info', text: 'hi', taskId: null, task: '', teamId: 'team-a', teamName: 'Alpha' });
+  assert.deepEqual(es[0], { ts: 1, agentId: 'n1', level: 'info', text: 'hi', taskId: null, task: '', subagentId: null, teamId: 'team-a', teamName: 'Alpha' });
 });
 
 test('timeline: lanes sorted needs-attention first (waiting_for_human, blocked, error), then normal', () => {
@@ -118,7 +118,7 @@ test('orchestrator.log attaches the agent\'s current taskId+task to persisted lo
   orch.log(null, 'system', 'no agent');
   const logs = orch.logs();
   const boom = logs.find((l) => l.text === 'boom');
-  assert.deepEqual(boom, { ts: boom.ts, agentId: 'n1', level: 'error', text: 'boom', taskId: 't1', task: 'Do X', teamId: null, teamName: null });
+  assert.deepEqual(boom, { ts: boom.ts, agentId: 'n1', level: 'error', text: 'boom', taskId: 't1', task: 'Do X', subagentId: null, teamId: null, teamName: null });
   assert.equal(logs.find((l) => l.text === 'no agent').taskId, null);
 
   fs.rmSync(dir, { recursive: true, force: true });
