@@ -484,6 +484,10 @@ class Orchestrator extends EventEmitter {
     }
     try { this.nudgeIdle(); } catch (e) { this.log(null, 'error', 'idle nudge: ' + e.message); }
     if (this.procs.size === 0) {
+      // UpdateWatcher is draining for a restart: hold the run session open (no dispatches while
+      // paused) so the watcher's wasRunning stays true and bootResume can restart the Run after the
+      // relaunch. An aborted update unpauses and re-ticks via main.js's setPaused callback.
+      if (this.dispatchPaused) return;
       // Before declaring a stop, sweep for in_progress tasks whose agent has no live session (e.g. its
       // process exited/crashed without updating status) and re-dispatch them instead of blocking forever.
       if (this.reconcileOrphanedTasks()) { setImmediate(() => this.tick()); return; }

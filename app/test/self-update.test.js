@@ -264,3 +264,37 @@ test('boot rollback refuses to reset a dirty checkout but still disables auto-re
   assert.strictEqual(fs.readFileSync(path.join(repo, 'f.txt'), 'utf8'), 'uncommitted work', 'uncommitted changes preserved');
   assert.strictEqual(String(run(['rev-parse', 'HEAD'])).trim(), head, 'HEAD untouched');
 });
+
+// Draining for a restart must hold the run session open: with dispatchPaused, an empty proc table
+// is not "no more work" — the watcher reads running as wasRunning and bootResume restarts the Run.
+// Before the fix, tick() ended the run the moment the last proc exited, so wasRunning was always
+// false and auto-resume was unreachable in the real wiring.
+test('drain: dispatchPaused keeps the run session alive; unpausing resumes and finishes it', async () => {
+  const { Store } = require('../src/store');
+  const { Orchestrator } = require('../src/orchestrator');
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'su-drain-'));
+  const fake = path.join(d, 'fake-claude.sh');
+  fs.writeFileSync(fake, '#!/bin/sh\necho \'{"type":"result","subtype":"success","session_id":"s1","total_cost_usd":0.001,"num_turns":1,"usage":{"input_tokens":10,"output_tokens":10}}\'\n');
+  fs.chmodSync(fake, 0o755);
+  const s = new Store(path.join(d, 'p'));
+  s.saveSettings({ claudePath: fake, maxRuns: 5 });
+  const a = s.addNode({ name: 'A', role: 'Dev' });
+  s.createTask({ title: 'drain me', assignee: a.id });
+  const o = new Orchestrator(s);
+  o.dispatchPaused = true; // watcher is draining: pause before the first dispatch
+  o.start();
+  await new Promise((r) => setTimeout(r, 100));
+  assert.strictEqual(o.running, true, 'run session must stay alive while the update drain holds it');
+  assert.strictEqual(s.listRuns().length, 0, 'no dispatch while paused');
+  assert.ok(!s.readLogs().some((l) => /No more todo|Finished/.test(l.text)), 'run must not be declared finished during the drain');
+
+  // The update aborts: unpause re-ticks, the task dispatches, the run runs to completion.
+  o.dispatchPaused = false;
+  o.tick();
+  const waitFor = async (fn) => { const t0 = Date.now(); while (!fn()) { if (Date.now() - t0 > 8000) throw new Error('timeout'); await new Promise((r) => setTimeout(r, 10)); } };
+  await waitFor(() => !o.running);
+  assert.strictEqual(s.getTask(s.listTasks()[0].id).status, 'done');
+  assert.ok(s.listRuns().length === 1);
+  assert.ok(s.readLogs().some((l) => /No more todo tasks. Finished./.test(l.text)));
+  o.stop && o.stop();
+});
