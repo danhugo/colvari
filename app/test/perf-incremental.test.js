@@ -77,7 +77,7 @@ function countingOrch(store) {
   return { orch, counts };
 }
 
-test('snapshot(): unchanged files are not re-read; changed runs re-read exactly twice', () => {
+test('snapshot(): unchanged files are not re-read; changed runs re-read exactly once', () => {
   const { orch, counts } = countingOrch(tmpStore());
   orch.agent('a');
   orch.snapshot();
@@ -86,7 +86,7 @@ test('snapshot(): unchanged files are not re-read; changed runs re-read exactly 
   assert.deepEqual(counts, afterFirst); // memo hit: zero re-reads
   orch.store.addRun({ id: 'r1', kind: 'agent', nodeId: 'a', startedAt: '2026-01-01T00:00:00Z', inputTokens: 1, outputTokens: 1 });
   orch.snapshot();
-  assert.equal(counts.listRuns, afterFirst.listRuns + 2); // modelStats + timeline recompute, nothing else
+  assert.equal(counts.listRuns, afterFirst.listRuns + 1); // one shared re-read serves modelStats + timeline + ledger (t_3318ff63)
   assert.equal(counts.listTasks, afterFirst.listTasks + 2);
   assert.equal(counts.readLogs, afterFirst.readLogs); // logs unaffected by a run append
 });

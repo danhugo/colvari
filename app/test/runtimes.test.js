@@ -21,7 +21,7 @@ test('codex event parsing (real event shapes from codex-cli 0.144.6)', () => {
   const m = RT.parseCodexEvent({ type: 'item.completed', item: { id: 'item_0', type: 'agent_message', text: 'PONG' } });
   assert.strictEqual(m.result, 'PONG'); assert.deepStrictEqual(m.logs, [['text', 'PONG']]);
   const t = RT.parseCodexEvent({ type: 'turn.completed', usage: { input_tokens: 14351, cached_input_tokens: 9984, output_tokens: 6, reasoning_output_tokens: 0 } });
-  assert.deepStrictEqual(t.tokens, { inputTokens: 14351, outputTokens: 6, cachedInputTokens: 9984 });
+  assert.deepStrictEqual(t.tokens, { inputTokens: 14351, outputTokens: 6, cacheReadTokens: 9984 }); // cached_input_tokens -> cacheReadTokens for the usage ledger
   assert.ok(RT.parseCodexEvent({ type: 'turn.failed', error: { message: 'bad model' } }).failed);
   assert.strictEqual(RT.parseCodexEvent({ type: 'error', message: 'x' }).logs[0][0], 'error');
 });

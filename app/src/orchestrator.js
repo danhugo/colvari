@@ -161,12 +161,15 @@ class Orchestrator extends EventEmitter {
   logSig() { try { return this.store.logsSig(); } catch { return ''; } }
   teamsSigOf() { try { return this.store.teamsSig(); } catch { return ''; } }
   agent(id) { return (this.agents[id] ||= { runCost: 0, runTokens: 0, pendingHuman: [], stopRequested: false, budgetStop: null, status: 'idle', iteration: 0, cost: 0, inputTokens: 0, outputTokens: 0, cacheTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, runs: 0, taskId: null, task: null, activity: null, model: '', runtime: '', billingSource: '', contextTokens: null, contextWindow: 0, contextPct: null, lastContextMessageId: null, subagents: [], subagentCount: 0, subagentTokens: { inputTokens: 0, outputTokens: 0 } }); }
+  // Persisted runs, memoized on the runs file signature: one read per change serves every
+  // file-derived aggregate (modelStats, timeline, ledger).
+  runsMemo() { return this._memoBy('runs', this.sig('runs'), () => { let rs = []; try { rs = this.store.listRuns(); } catch { rs = []; } return rs; }); }
   // modelStats: per-model aggregate across this project's persisted runs + tasks (see usage.js modelStats for the field shape).
-  modelStats() { return this._memoBy('modelStats', this.sig('runs') + '|' + this.sig('board'), () => { let rs = []; try { rs = this.store.listRuns(); } catch {} let ts = []; try { ts = this.store.listTasks(); } catch {} return U.modelStats(rs, ts); }); }
+  modelStats() { return this._memoBy('modelStats', this.sig('runs') + '|' + this.sig('board'), () => { let ts = []; try { ts = this.store.listTasks(); } catch {} return U.modelStats(this.runsMemo(), ts); }); }
   // nodeTeams: {nodeId: {teamId, teamName}} across all teams in the project, for tagging log/timeline entries.
   nodeTeams() { return this._memoBy('nodeTeams', this.teamsSigOf(), () => { try { return this.store.nodeTeamMap(); } catch { return {}; } }); }
   // timeline: per-run start/end per agent+task, lanes ordered needs-attention first (TL.timeline, see timeline.js).
-  timeline() { return this._memoBy('timeline', this.sig('runs') + '|' + this.sig('board') + '|' + this.teamsSigOf(), () => { let rs = []; try { rs = this.store.listRuns(); } catch {} let ts = []; try { ts = this.store.listTasks(); } catch {} return TL.timeline(rs, ts, this.nodeTeams()); }); }
+  timeline() { return this._memoBy('timeline', this.sig('runs') + '|' + this.sig('board') + '|' + this.teamsSigOf(), () => { let ts = []; try { ts = this.store.listTasks(); } catch {} return TL.timeline(this.runsMemo(), ts, this.nodeTeams()); }); }
   // logs: structured {ts, agentId, level, text} entries from the persisted orchestrator log.
   // The raw parse is cached incrementally (only newly appended bytes are read+parsed); the mapped
   // entries are memoized per (file sig, limit, teams sig).
@@ -212,18 +215,27 @@ class Orchestrator extends EventEmitter {
   // this before the first renderer refresh). Project only what the renderer reads off a.run:
   // stall (stall/recovery badges) and sessionId.
   agentView(a) {
-    const { currentRun, ...rest } = a;
+    // inputTokens/outputTokens/cacheReadTokens/cacheCreationTokens/cacheTokens are omitted: an agent
+    // mixes models across runs, so its flat token sums are cross-model totals the API no longer
+    // offers — per-key splits come from snapshot.ledger.byAgent instead (t_3318ff63).
+    const { currentRun, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens, cacheTokens, ...rest } = a;
     return { ...rest, pendingHuman: a.pendingHuman.length, ...(currentRun ? { run: { sessionId: currentRun.sessionId ?? null, stall: currentRun.stall || null } } : {}) };
   }
-  snapshot() { return { running: this.running, totalCost: this.totalCost, billedCost: this.billedCost || 0, subCost: this.subCost || 0, runs: this.runs, active: [...this.procs.keys()].map((id) => ({ nodeId: id, taskId: this.agent(id).taskId, cwd: this.cwds && this.cwds.get(id) || null })), runCost: this.runCost || 0, runTokens: this.runTokens || 0, budgetStop: this.budgetStop || null, agents: Object.fromEntries(Object.entries(this.agents).map(([k, a]) => [k, this.agentView(a)])), tokens: this.tokens || { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 }, modelStats: this.modelStats(), timeline: this.timeline(), logs: this.logs(), wiki: this.wiki(), nodeTeams: this.nodeTeams() }; }
+  // Per-key usage ledger over the persisted runs (see usage.js usageLedger): one row per
+  // {runtime, provider, model}, plus byAgent/byTask groupings. Memoized on the runs file signature.
+  ledger() { return this._memoBy('ledger', this.sig('runs'), () => U.usageLedger(this.runsMemo())); }
+  // When per-key usage tracking started (older runs are dropped on migration — store.migrateUsageLedger);
+  // null when the project predates the field or has no meta yet.
+  usageSince() { try { const m = this.store.meta(); return (m && m.usageTrackingSince) || null; } catch { return null; } }
+  snapshot() { return { running: this.running, totalCost: this.totalCost, billedCost: this.billedCost || 0, subCost: this.subCost || 0, runs: this.runs, active: [...this.procs.keys()].map((id) => ({ nodeId: id, taskId: this.agent(id).taskId, cwd: this.cwds && this.cwds.get(id) || null })), runCost: this.runCost || 0, budgetStop: this.budgetStop || null, agents: Object.fromEntries(Object.entries(this.agents).map(([k, a]) => [k, this.agentView(a)])), ledger: this.ledger(), usageSince: this.usageSince(), modelStats: this.modelStats(), timeline: this.timeline(), logs: this.logs(), wiki: this.wiki(), nodeTeams: this.nodeTeams() }; }
   // Renderer-facing snapshot: the UI reads only agents + run scalars, so the file-backed display parts
   // (modelStats/timeline/logs/wiki/nodeTeams) are pure IPC payload — ~1.4MB per change on a large
   // project. Kept out of getAll and state pushes; snapshot() stays whole for other consumers.
   snapshotSlim() { const s = this.snapshot(); for (const k of ['modelStats', 'timeline', 'logs', 'wiki', 'nodeTeams']) delete s[k]; return s; }
   // Account one finished run: agent counters, session totals, persisted history.
   record(rec) {
-    const a = this.agent(rec.nodeId); const t = (this.tokens ||= { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 });
-    for (const k of ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheCreationTokens']) { a[k] += rec[k]; t[k] += rec[k]; }
+    const a = this.agent(rec.nodeId);
+    for (const k of ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheCreationTokens']) a[k] += rec[k];
     a.cacheTokens = a.cacheReadTokens + a.cacheCreationTokens; a.cost += rec.reportedCostUsd; this.totalCost += rec.reportedCostUsd;
     if (rec.billingSource === 'subscription') this.subCost = (this.subCost || 0) + rec.reportedCostUsd; else this.billedCost = (this.billedCost || 0) + rec.reportedCostUsd;
     if (rec.kind === 'agent') { if (rec.model) a.model = rec.model; a.billingSource = rec.billingSource; }
@@ -617,6 +629,8 @@ class Orchestrator extends EventEmitter {
     return new Promise((resolve) => {
       const startedMs = Date.now();
       const usage = U.newRun({ projectId: this.store.meta() ? this.store.meta().id : null, nodeId: node.id, agent: node.name, ...meta });
+      usage.runtime = meta.runtime || node.runtime || 'unknown'; // ledger key part; the init event corrects it if the CLI reports its own
+      if (!usage.model && node.model) usage.model = node.model; // non-claude runtimes report no model in events; the node's config is the best known value
       if (usage.resumedFrom) usage.baseline = this.sessionBaseline(usage.resumedFrom);
       let rt; try { rt = RT.getRuntime(meta.runtime); } catch (e) { this.log(node.id, 'error', e.message + ' (run failed, no fallback)'); rt = { id: String(meta.runtime), label: String(meta.runtime), bin: () => '' }; args = null; }
       const child = args ? spawn(rt.bin(settings), args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] })
@@ -683,6 +697,7 @@ class Orchestrator extends EventEmitter {
       child.on('close', () => {
         const j = parseJudge(out);
         const rec = U.newRun({ projectId: this.store.meta() ? this.store.meta().id : null, nodeId: node.id, agent: node.name, ...meta, kind: 'check' });
+        rec.runtime = meta.runtime || node.runtime || 'unknown';
         if (j.raw) U.applyEvent(rec, { ...j.raw, type: 'result' }); else rec.reportedCostUsd = j.cost;
         if (!rec.model) rec.model = m.checkModel || '';
         this.record(U.finishRun(rec, { code: j.raw ? 0 : 1, env, billingMode: meta.billingMode, startedMs }));
@@ -864,7 +879,7 @@ class Orchestrator extends EventEmitter {
     const bill = U.applyBillingEnv(cfg, this.env(cfg));
     const a = this.agent(node.id); a.preflight = 'testing'; this.changed();
     this.log(node.id, 'system', `⚑ preflight ${node.name}: model=${cfg.model || 'default'} perms=${cfg.permissionMode || settings.permissionMode}`);
-    const usage = U.newRun({ projectId: this.store.meta() ? this.store.meta().id : null, nodeId: node.id, agent: node.name, kind: 'preflight', task: 'preflight', billingMode: cfg.billingMode || 'auto' });
+    const usage = U.newRun({ projectId: this.store.meta() ? this.store.meta().id : null, nodeId: node.id, agent: node.name, kind: 'preflight', task: 'preflight', runtime: node.runtime || 'unknown', billingMode: cfg.billingMode || 'auto' });
     const t0 = Date.now(); let r;
     try {
       r = await PF.runPreflight({ cfg, settings, mcp: this.mcpConfig(node), cwd, env: bill.env, onEvent: (ev) => U.applyEvent(usage, ev) });
@@ -913,7 +928,18 @@ class Orchestrator extends EventEmitter {
       if (run && run.subs && o.subagent) this.onSubagentSignal(node.id, run, o.subagent);
       if (run && o.sessionId) { run.sessionId = o.sessionId; if (run.usage) run.usage.sessionId = o.sessionId; }
       if (run && o.result !== undefined) run.result = o.result;
-      if (o.tokens) { if (run && run.usage) { run.usage.inputTokens = (run.usage.inputTokens || 0) + o.tokens.inputTokens; run.usage.outputTokens = (run.usage.outputTokens || 0) + o.tokens.outputTokens; run.usage.reportedCostUsd = (run.usage.reportedCostUsd || 0) + (o.cost || 0); this.changed(); } } // record() adds the run's totals to the agent counters at close; adding them here too would double-count
+      if (o.tokens && run && run.usage) {
+        const u = run.usage;
+        u.inputTokens = (u.inputTokens || 0) + (o.tokens.inputTokens || 0);
+        u.outputTokens = (u.outputTokens || 0) + (o.tokens.outputTokens || 0);
+        // cache reads reported per turn; cache writes are unknown for these runtimes (ledger keeps them null)
+        const fsn = (u.flatSeen ||= []);
+        if (o.tokens.inputTokens != null && !fsn.includes('inputTokens')) fsn.push('inputTokens');
+        if (o.tokens.outputTokens != null && !fsn.includes('outputTokens')) fsn.push('outputTokens');
+        if (o.tokens.cacheReadTokens != null) { u.cacheReadTokens = (u.cacheReadTokens || 0) + o.tokens.cacheReadTokens; if (!fsn.includes('cacheReadTokens')) fsn.push('cacheReadTokens'); }
+        u.reportedCostUsd = (u.reportedCostUsd || 0) + (o.cost || 0);
+        this.changed();
+      } // record() adds the run's totals to the agent counters at close; adding them here too would double-count
       return;
     }
     // Subagent scoping (claude stream-json): every event belonging to a spawned subagent carries the

@@ -1281,7 +1281,9 @@ const api = {
   listSessions: (c, nodeId) => ST(c).listSessions({ nodeId }), getSessionLog: (c, sessionId, opts) => ST(c).getSessionLog(sessionId, opts || {}),
   saveSettings: (c, s) => ST(c).saveSettings(s),
   listRuns: (c, f) => ST(c).listRuns(f || {}), clearRuns: (c) => ST(c).clearRuns(), usageCSV: (c, all) => U.toCSV(all ? pm.list().flatMap((p) => pm.store(p.id).listRuns()) : ST(c).listRuns()),
-  usageByProject: () => pm.list().map((p) => ({ id: p.id, name: p.name, ...U.total(pm.store(p.id).listRuns()) })),
+  // Per project: the usage ledger's $ totals and key count. Token amounts are only offered per
+  // {runtime, provider, model} key (usageLedger) — never as a cross-model sum.
+  usageByProject: () => pm.list().map((p) => { const l = U.usageLedger(pm.store(p.id).listRuns()); return { id: p.id, name: p.name, runs: l.rows.reduce((a, r) => a + r.runs, 0), keys: l.rows.length, costUsd: l.costUsd, costPartial: l.costPartial }; }),
   // Run-derived counts alone miss it when the CLI itself reports a higher subscription rate-limit %
   // (e.g. usage from other clients sharing the same subscription window), so fold in the CLI's own
   // reported utilization (usage.js parseRateLimits, fed by orchestrator's init-event handling) whenever
