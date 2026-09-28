@@ -11,6 +11,9 @@ npm test           # unit + integration tests with a fake claude CLI (includes a
 npm run e2e        # real claude CLI in a temp dir: preflight, PM -> Dev team, then haiku loop + workflow agents (costs about $0.50 API-equivalent)
 npm run gui-e2e    # drives the real UI (templates, agent panel, preflight, Run, usage, F6), asserts every check, exits 1 on failure;
                    # screenshots go to e2e-shots/. Uses a fresh temp project dir via AGENTS_SQUAD_PROJECT (set by the script).
+                   # Test instances (gui-e2e / smoke) never touch real data: an explicit AGENTS_SQUAD_PROJECT beats an inherited
+                   # AGENTS_SQUAD_HOME, with neither set a throwaway temp root is created, and the run is force-exited after 30 min
+                   # (AGENTS_SQUAD_TEST_TIMEOUT_MS overrides) so a hung instance cannot linger next to the live app.
 npm run smoke      # launches Electron, clicks through the UI, then exits
 npm run smoke:real # real-machine check (no fixtures): discovery against real $HOME + this project, one tiny real claude turn for real skills/commands/rate-limits
 ```
