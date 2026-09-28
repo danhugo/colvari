@@ -21,7 +21,7 @@ You need the `claude` CLI on your PATH and logged in.
 
 The left sidebar manages **projects**. Each project has its own board, wiki, settings and one or more **teams**, and each team is its own graph. You can create, rename, switch and delete projects and teams there. **+ Project** and **+ Team** use the selected template: Blank, Startup (PM -> Dev -> Reviewer), Solo or Research. Teams can also be duplicated and exported or imported as JSON (`format: "agents-squad-team"`).
 
-Data is stored in `~/.agents-squad/projects/<id>/`, which holds `project.json`, one `team-<teamId>.json` per team, and `board.json`, `wiki.json` and `settings.json`. The first time the app starts, an existing `~/.agents-squad/default` is copied into a project named "Default". The original is left in place and marked `.migrated`.
+Data is stored in `~/.agents-squad/projects/<id>/`, which holds `project.json`, one `team-<teamId>.json` per team, and `settings.json`. Board and wiki are files an agent can read directly with its own tools (`cat`, `grep`, `jq`): each task is one pretty-JSON file at `.squad/board/tasks/<taskId>.json`, and each wiki page is one markdown file at `.squad/wiki/<slug>.md`, both inside the project dir. Reads are unrestricted; writes go through the board MCP tools only (atomic tmp+rename under a cross-process lock). A project from an older version migrates on first open: the old single-file `board.json` / `wiki.json` are split into the per-task/per-page files and the originals are renamed to `*.bak`, never deleted. The first time the app starts, an existing `~/.agents-squad/default` is copied into a project named "Default". The original is left in place and marked `.migrated`.
 
 Each project has its own orchestrator, so different projects can run at the same time. The orchestrator and MCP server of a project see the union of all its teams. Node ids are unique, and edges only exist inside a team.
 
@@ -104,7 +104,7 @@ Live activity streams for every runtime: profile-driven CLIs (helpycode etc.) ge
 
 ```
 src/projects.js     project/team manager, templates, migration, export/import
-src/store.js        JSON store (team/board/wiki/settings.json), atomic writes + cross-process mkdir lock
+src/store.js        JSON store (team files, settings; board as .squad/board/tasks/<id>.json, wiki as .squad/wiki/<slug>.md), atomic writes + cross-process mkdir lock, migrates old board.json/wiki.json
 src/scope.js        edge-based permission rules
 src/board-tools.js  tool logic (shared by MCP server and tests)
 src/mcp-server.js   stdio MCP server (@modelcontextprotocol/sdk)
