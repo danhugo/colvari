@@ -1,6 +1,6 @@
 :root { --bg:var(--bg-app); --fg:var(--fg-primary); --muted:var(--fg-muted); --card:var(--bg-surface); --line:var(--border); --acc:var(--accent); --ok:var(--success); --warn:var(--warning-strong); --panel:var(--bg-raised); }
 * { box-sizing:border-box; } body { margin:0; font:13px -apple-system,system-ui,sans-serif; background:var(--bg); color:var(--fg); height:100vh; display:flex; flex-direction:column; }
-header { display:flex; align-items:center; gap:8px; padding:8px 12px; border-bottom:1px solid var(--line); background:var(--card); }
+header { display:flex; align-items:center; gap:6px; padding:8px 10px; border-bottom:1px solid var(--line); background:var(--card); }
 nav button { border:1px solid transparent; background:none; padding:6px 10px; text-decoration:none; display:inline-flex; align-items:center; gap:5px; }
 nav .navicon { width:14px; height:14px; flex:0 0 auto; stroke:currentColor; fill:none; stroke-width:1.6; stroke-linecap:round; stroke-linejoin:round; }
 .spacer { flex:1; } .pill { padding:3px 8px; border-radius:10px; border:1px solid var(--line); } .pill.on { background:var(--ok); color:var(--fg-on-accent); }
@@ -99,7 +99,7 @@ td.actions button { padding:2px 7px; font-size:12px; margin-right:4px; } #budget
 #helpdlg td { padding:3px 10px; }
 /* Header stays on one row whatever the pill contents: title, tabs and pills never wrap; the goal box absorbs the width. */
 header { flex-wrap:nowrap; min-width:0; } header > strong, header .pill, header button, #tabs { white-space:nowrap; flex-shrink:0; } #tabs { display:flex; }
-header #goal { flex:1 1 260px; min-width:140px; max-width:420px; } header .spacer { flex:0 1 12px; }
+header #goal { flex:1 1 260px; min-width:100px; max-width:420px; } header .spacer { flex:0 1 12px; }
 header .pill { font-variant-numeric:tabular-nums; } .pill.quiet { color:var(--muted); }
 .cap { display: inline-block; padding: 0 6px; border-radius: 8px; font-size: 11px; margin: 2px 0; }
 .cap.on { background: var(--success-soft); color: var(--success-text); } .cap.off { background: var(--danger-soft); color: var(--danger); }
@@ -186,7 +186,7 @@ header .pill { font-variant-numeric:tabular-nums; } .pill.quiet { color:var(--mu
 
 /* ===== Design-token layer (design/prototype.html + critique.md) ===== */
 body { font-family:var(--font-sans); font-size:var(--text-sm); line-height:var(--lh-body); -webkit-font-smoothing:antialiased; }
-header { background:var(--bg-surface); box-shadow:var(--shadow-sm); padding:var(--space-2) var(--space-4); }
+header { background:var(--bg-surface); box-shadow:var(--shadow-sm); padding:var(--space-2) 10px; }
 nav button { color:var(--fg-secondary); border-radius:var(--radius-sm); transition:color var(--dur-fast) var(--ease-out), background var(--dur-fast), border-color var(--dur-fast); }
 nav button:hover { background:var(--bg-hover); color:var(--fg-primary); }
 /* selected nav state: filled accent chip, not an underline — must read ≥3:1 against idle neighbours */
@@ -271,25 +271,37 @@ button:focus-visible, input:focus, select:focus, textarea:focus { outline:none; 
 .yt-item .spacer { flex:1; } .yt-item button { padding:2px 10px; } .yt-ans { width:180px; padding:3px 8px; }
 /* Top nav: primary tabs as segmented control; secondary tabs quiet; pills de-emphasised. */
 #tabs { gap:2px; background:var(--bg-hover); padding:2px; border-radius:var(--radius-sm); }
-nav button { padding:3px 10px; font-size:var(--text-sm); }
+nav button { padding:3px 8px; font-size:var(--text-sm); }
 nav button.sec { color:var(--fg-muted); padding:3px 7px; } .navsep { width:1px; background:var(--border-strong); margin:3px 4px; }
 header .pill { border:none; background:none; color:var(--fg-muted); font-size:var(--text-xs); padding:2px 4px; } header #runstate { background:var(--bg-hover); color:var(--fg-secondary); padding:2px 8px; } header #runstate.on { background:var(--success-soft); color:var(--success-text); }
 /* One line tall, always: the meter sits in the header, and a wrapping "no limit data: …" reason
    would grow the header mid-session, shifting the whole layout and eating in-flight clicks.
    The full reason stays reachable via the part's title tooltip. */
-.limitmeter { display:flex; align-items:center; gap:6px; font-size:var(--text-xs); min-width:0; overflow:hidden; }
+.limitmeter { display:flex; align-items:center; gap:6px; font-size:var(--text-xs); min-width:0; overflow:hidden; flex-shrink:0; }
+/* The meter never yields above 1350px: the goal input and spacer absorb tightness (goal bottoms out
+   at its 100px min first). Below that the window genuinely cannot fit everything, and the meter
+   clips at its right edge (chips never overlap: their own flex-shrink stays 0) instead of pushing
+   the Run/Stop buttons off-screen. */
+@media (max-width:1350px) { .limitmeter { flex-shrink:1; } }
+/* At working window widths the tab icons are pure padding — labels carry the tabs, and every
+   freed pixel goes to the meter chips. */
+@media (max-width:1500px) { header .navicon { display:none; } }
 .limitmeter.hidden { display:none; }
 .limitmeter .lm-flag { padding:2px 8px; border-radius:var(--radius-full); font-weight:var(--fw-semibold); white-space:nowrap; }
 .limitmeter .lm-flag.lm-warn { background:var(--warning-soft); color:var(--warning-text); } .limitmeter .lm-flag.lm-danger { background:var(--danger-soft); color:var(--danger); }
-.limitmeter .lm-part { display:flex; align-items:center; gap:5px; padding:2px 8px; border-radius:var(--radius-full); background:var(--bg-hover); color:var(--fg-secondary); white-space:nowrap; min-width:0; }
+/* Chips never shrink: a shrunken chip keeps its nowrap text at full width but paints it over the
+   neighbouring chip (the "42%Codex" garble) and ellipsises its small into "U…". If the header
+   genuinely runs out of room the meter clips at its own right edge instead — ugly, but honest. */
+.limitmeter .lm-part { display:flex; align-items:center; gap:5px; padding:2px 7px; border-radius:var(--radius-full); background:var(--bg-hover); color:var(--fg-secondary); white-space:nowrap; flex:0 0 auto; }
 .limitmeter .lm-part b { font-weight:var(--fw-semibold); }
 .limitmeter .lm-part.lm-warn { background:var(--warning-soft); color:var(--warning-text); } .limitmeter .lm-part.lm-danger { background:var(--danger-soft); color:var(--danger); }
-.limitmeter .lm-bar { width:34px; height:5px; border-radius:3px; background:var(--line); overflow:hidden; display:inline-block; flex-shrink:0; }
+.limitmeter .lm-bar { width:22px; height:5px; border-radius:3px; background:var(--line); overflow:hidden; display:inline-block; flex-shrink:0; }
 .limitmeter .lm-fill { display:block; height:100%; background:var(--accent); }
 .limitmeter .lm-warn .lm-fill { background:var(--warning); } .limitmeter .lm-danger .lm-fill { background:var(--danger); }
-.limitmeter .lm-part small { color:var(--fg-muted); font-variant-numeric:tabular-nums; overflow:hidden; text-overflow:ellipsis; }
-.limitmeter .lm-part.lm-pending { opacity:.6; }
-.limitmeter .lm-chip { gap:7px; }
+.limitmeter .lm-part small { color:var(--fg-muted); font-variant-numeric:tabular-nums; }
+.limitmeter .lm-part.lm-pending { opacity:.6; flex:0 1 auto; min-width:0; }
+.limitmeter .lm-part.lm-pending small { overflow:hidden; text-overflow:ellipsis; }
+.limitmeter .lm-chip { gap:5px; }
 .limitmeter .lm-chip .lm-win { display:flex; align-items:center; gap:4px; }
 .limitmeter .lm-chip .lm-win b { font-weight:var(--fw-semibold); }
 .limitmeter .lm-chip .lm-plan { text-transform:capitalize; opacity:.8; }

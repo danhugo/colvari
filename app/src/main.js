@@ -571,6 +571,22 @@ async function guiE2E() {
     fs.writeFileSync(cx, `#!/bin/sh\necho 'codex-cli 0.0.0'\n`); fs.chmodSync(cx, 0o755);
     const rl = (pct, hrs) => ({ pct, resetsAt: new Date(Date.now() + hrs * 3600000).toISOString() });
     const grab = `(async () => ({ txt: $('#limitmeter').textContent, hidden: $('#limitmeter').classList.contains('hidden'), chips: document.querySelectorAll('#limitmeter [data-provider]').length, st: await call('usageStatus') }))()`;
+    // Chip geometry: provider chips must lay out side by side (bounding rects never intersect) and the
+    // "· limits unknown" wording must be fully visible — never shrink-ellipsised ("Codex U… lim…") and
+    // never clipped by the meter's own overflow (regression for the 1400px header overlap).
+    const geom = `(async () => { const m = $('#limitmeter');
+      const chips = [...m.querySelectorAll('[data-provider]')].map((c) => { const r = c.getBoundingClientRect(); return { p: c.dataset.provider, l: Math.round(r.left), r: Math.round(r.right) }; });
+      let overlap = null;
+      for (let i = 0; i < chips.length && !overlap; i++) for (let j = i + 1; j < chips.length; j++) { const a = chips[i], b = chips[j]; if (a.l < b.r - 1 && b.l < a.r - 1) overlap = [a.p, b.p]; }
+      const unknown = [...m.querySelectorAll('.lm-unknown')].map((c) => { const s = c.querySelector('small'); return { p: c.dataset.provider, txt: c.textContent.trim(), cut: s ? s.scrollWidth > s.clientWidth : false }; });
+      return { chips, overlap, unknown, clipped: m.scrollWidth > m.clientWidth + 1 }; })()`;
+    const geomCheck = async (label) => {
+      const g = await ex(`return ${geom}`);
+      expect(`limits-providers: ${label} — chips lay side by side, bounding rects do not overlap`, g.chips.length >= 1 && !g.overlap, g);
+      expect(`limits-providers: ${label} — every chip fully visible, meter clips nothing`, !g.clipped, g);
+      if (g.unknown.length) expect(`limits-providers: ${label} — unknown wording legible ("· limits unknown", never ellipsised)`, g.unknown.every((u) => !u.cut && /· limits unknown/.test(u.txt)), g.unknown);
+      return g;
+    };
     const go = async (name) => { const pj = pm.create(name); await ex(`P = await call('listProjects'); renderSidebar(); await switchTo({ p: '${pj.id}' }); await w(700);`); return { pj, s: pm.store(pj.id), o: orchFor(pj.id) }; };
     const scenarios = [];
     // Claude-only: CLI-reported 42%/13% must show even though the local run count says 60%.
@@ -586,7 +602,7 @@ async function guiE2E() {
       expect('limits-providers: Claude-only team shows the CLI-reported 42%/13%, not the higher local 60% count', !m.hidden && m.txt.includes('42%') && m.txt.includes('13%') && !m.txt.includes('60%'), m);
       expect('limits-providers: Claude-only meter stays calm below the warn line and counts down the reset', !/near limit|paused/.test(m.txt) && /↻/.test(m.txt), m.txt);
       await shot('limits-providers-claude-only');
-      scenarios.push({ name: 'Claude only', id: pj.id, m });
+      scenarios.push({ name: 'Claude only', id: pj.id, m, g: await geomCheck('claude-only') });
       // The stubs stay: the contract loop below re-reads each project's meter and asserts the very
       // windows seeded here (clearing them made every provider flip to 'unknown' by then).
     }
@@ -601,7 +617,7 @@ async function guiE2E() {
       expect('limits-providers: Codex-only team (Codex reports nothing) shows no fabricated percentage', !m.hidden && !/\d+%/.test(m.txt), m.txt);
       expect('limits-providers: Codex-only meter explains why there is no data, without warn/pause', /no limit data|limits unknown/.test(m.txt) && !/near limit|paused/.test(m.txt), m.txt);
       await shot('limits-providers-codex-only');
-      scenarios.push({ name: 'Codex only', id: pj.id, m });
+      scenarios.push({ name: 'Codex only', id: pj.id, m, g: await geomCheck('codex-only') });
     }
     // Mixed: only the Claude node reports — its numbers surface without being attributed to Codex.
     {
@@ -614,7 +630,7 @@ async function guiE2E() {
       const m = await ex(`return ${grab}`);
       expect('limits-providers: mixed team surfaces the Claude-reported 42% while Codex stays silent', !m.hidden && m.txt.includes('42%'), m.txt);
       await shot('limits-providers-mixed');
-      scenarios.push({ name: 'mixed', id: pj.id, m });
+      scenarios.push({ name: 'mixed', id: pj.id, m, g: await geomCheck('mixed') });
     }
     // Feature gate for the chip contract: provider-keyed usageStatus (Devon's model) or [data-provider]
     // chips (Uma's UI). Skipped loudly until then; once active, a mismatch red-lines the case on purpose.
@@ -644,7 +660,7 @@ async function guiE2E() {
       }
     }
     await ex(`await switchTo(${JSON.stringify(prevCtx)}); await w(300);`);
-    console.log('[gui-e2e] limits-providers', JSON.stringify({ scenarios: scenarios.map((x) => ({ name: x.name, pct: (x.m.txt.match(/\d+%/g) || []).join(','), chips: x.m.chips, providerKeyed: !!(x.m.st && x.m.st.providers) })) }));
+    console.log('[gui-e2e] limits-providers', JSON.stringify({ scenarios: scenarios.map((x) => ({ name: x.name, pct: (x.m.txt.match(/\d+%/g) || []).join(','), chips: x.m.chips, providerKeyed: !!(x.m.st && x.m.st.providers), rects: x.g && x.g.chips, overlap: x.g && x.g.overlap, clipped: x.g && x.g.clipped })) }));
   };
   // Discovery panel regression: the recorded real init event (58 skills / 123 slash commands, incl.
   // goal+loop modes — test/fixtures/real-init-event.json) drives the Usage tab's #us-discovery panel the
