@@ -6,6 +6,7 @@ const { execFileSync } = require('child_process');
 const { buildClaudeArgs, normalizeNode, splitArgs } = require('./agent-config');
 const { buildProfileArgs, writePerRunMcpConfig, binConfigEnvKey, getPath } = require('./profile-runner');
 const { introspectRuntime, defaultExec, makeExec } = require('./introspector');
+const { isSubagentTool } = require('./subagents');
 
 // Derived-profile cache, stamped with the CLI's --version: a binary is introspected once per
 // version and reused until it changes (re-derived automatically after an upgrade). Two entries per
@@ -163,6 +164,40 @@ function parseProfileEvent(ev, profile) {
       const kind = st.status === 'error' || (Number.isFinite(exit) && exit !== 0) ? 'tool_error' : 'tool_result';
       out.logs.push([kind, `${name}: ${String(st.output ?? st.error ?? '').slice(0, 400)}`]);
     }
+    // Task/Agent tool: a subagent spawn. helpycode 0.3.5 (captured live) surfaces the whole spawn as ONE
+    // completed 'task' part — pending/running -> start, completed/error -> end; input carries
+    // {description, prompt, subagent_type}, and the answer "<task id=\"ses_…\" state=…>" holds the child
+    // session id (the child's own events never stream on this stdout, hence tokens stay null here).
+    if (isSubagentTool(name)) {
+      const done = st.status === 'completed' || st.status === 'error';
+      out.subagent = {
+        toolUseId: part.callID || part.id || name,
+        phase: done ? 'end' : 'start',
+        status: st.status === 'error' ? 'failed' : done ? 'completed' : 'running',
+        toolName: name,
+        type: String(name).toLowerCase(),
+        description: (st.input && (st.input.description || st.input.subagent_type)) || '',
+        prompt: (st.input && st.input.prompt) || '',
+        startedAt: (st.time && st.time.start) || ev.timestamp,
+        ...(done ? { endedAt: (st.time && st.time.end) || ev.timestamp } : {}),
+        childSessionId: (String(st.output || '').match(/<task id="([^"]+)"/) || [])[1] || undefined,
+      };
+    }
+    return out;
+  }
+  // opencode-style subtask part (unverified shape — start only; ends derive from a later part/event).
+  if (part.type === 'subtask') {
+    out.logs.push(['tool', `subtask ${String(part.description || part.prompt || '').slice(0, 280)}`]);
+    out.subagent = {
+      toolUseId: part.callID || part.id,
+      phase: 'start',
+      status: 'running',
+      toolName: 'subtask',
+      type: 'subtask',
+      description: part.description || '',
+      prompt: part.prompt || '',
+      startedAt: ev.timestamp,
+    };
     return out;
   }
   const text = getPath(ev, em.textPath);
