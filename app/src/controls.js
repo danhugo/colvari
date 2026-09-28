@@ -58,7 +58,7 @@ function gateStatus(status, node, settings, byHuman = false) {
 
 // ---- persisted logs ----
 const LOG_CAP = 5000;
-const logLine = (l) => JSON.stringify({ at: l.at || Date.now(), nodeId: l.nodeId || null, kind: l.kind, text: String(l.text ?? '').slice(0, 4000), taskId: l.taskId || null, task: l.task || null });
+const logLine = (l) => JSON.stringify({ at: l.at || Date.now(), nodeId: l.nodeId || null, kind: l.kind, text: String(l.text ?? '').slice(0, 4000), taskId: l.taskId || null, task: l.task || null, subagentId: l.subagentId || null });
 function parseLogs(text, limit = 2000) {
   const out = [];
   for (const line of String(text || '').split('\n')) { if (!line.trim()) continue; try { out.push(JSON.parse(line)); } catch {} }
