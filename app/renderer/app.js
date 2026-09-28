@@ -1211,7 +1211,7 @@ const logLevels = new Set(['info', 'warn', 'error']);
 const LOG_SEVERITY = { error: 'error', tool_error: 'error', stderr: 'warn' };
 const severityOf = (l) => l.level || LOG_SEVERITY[l.kind] || 'info';
 function renderLogLevelChips() {
-  $('#loglevels').innerHTML = ['info', 'warn', 'error'].map((lv) => `<button class="lvchip lv-${lv}${logLevels.has(lv) ? ' on' : ''}" data-lv="${lv}">${lv}</button>`).join('');
+  $('#loglevels').innerHTML = ['info', 'warn', 'error'].map((lv) => `<button class="lvchip lv-${lv}${logLevels.has(lv) ? ' on' : ''}" data-lv="${lv}" aria-pressed="${logLevels.has(lv)}"><span class="ck">✓</span>${lv}</button>`).join('');
   document.querySelectorAll('#loglevels [data-lv]').forEach((b) => b.onclick = () => { const lv = b.dataset.lv; logLevels.has(lv) ? logLevels.delete(lv) : logLevels.add(lv); renderLogLevelChips(); renderLog(); });
 }
 renderLogLevelChips();
