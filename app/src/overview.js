@@ -77,7 +77,8 @@
       if (!on || l.kind !== 'tool') continue;
       const n = toolName(l.text); const inp = toolInput(l.text);
       const arg = inp.status || inp.title || inp.file_path || inp.command || inp.pattern || inp.text || '';
-      items.push({ at: l.at, type: 'tool', who: task.assignee, summary: `${n}${arg ? ' · ' + String(arg).replace(/\s+/g, ' ').slice(0, 60) : ''}`, text: l.text });
+      // subagentId passes through untouched (t_c33656ba contract): the renderer nests these under their block
+      items.push({ at: l.at, type: 'tool', who: task.assignee, summary: `${n}${arg ? ' · ' + String(arg).replace(/\s+/g, ' ').slice(0, 60) : ''}`, text: l.text, subagentId: l.subagentId });
     }
     return items.sort((a, b) => a.at - b.at);
   }
@@ -92,7 +93,8 @@
       inp.projectId, inp.stuckMinutes ?? null, inp.selectedTask ?? '', inp.bucket ?? 0,
       (inp.nodes || []).map((n) => [n.id, n.x, n.y, n.name, n.role, n.runtime || '', n.model || '']),
       edges.map((e) => [e.id, e.from, e.to, e.type || 'assign']),
-      Object.entries(inp.agents || {}).map(([id, a]) => [id, a.status || '', a.taskId || null, a.iteration || 0, a.lastActivityAt || 0, a.lastError ? a.lastError.at : 0, a.activity ? [a.activity.trigger || '', a.activity.fromNodeId || '', a.activity.messageId || '', a.activity.startedAt || 0] : null, a.stall || null]),
+      Object.entries(inp.agents || {}).map(([id, a]) => [id, a.status || '', a.taskId || null, a.iteration || 0, a.lastActivityAt || 0, a.lastError ? a.lastError.at : 0, a.activity ? [a.activity.trigger || '', a.activity.fromNodeId || '', a.activity.messageId || '', a.activity.startedAt || 0] : null, a.stall || null,
+        ...(a.subagents || []).map((x) => ['sub', x.id, x.status || '', x.endedAt || 0, x.tokens ? (x.tokens.inputTokens || 0) + (x.tokens.outputTokens || 0) : 0])]),
       tasks.map((t) => [t.id, t.title, t.status, t.assignee, t.updatedAt]),
       messages.length, messages.length ? messages[messages.length - 1].at : null,
       logs.length, logs.length ? logs[0].at : null, logs.length ? logs[logs.length - 1].at : null,

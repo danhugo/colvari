@@ -587,6 +587,7 @@ function renderGraph() {
     const st = stallState(n.id);
     if (st) drawStallBadge(g, st, () => openWakeTask(st.taskId));
     else { const wk = wakeRun(n.id); if (wk) drawWakeBadge(g, wk, () => openWakeTask(wk.taskId)); }
+    drawSubBadge(g, S.orch.agents[n.id] || {});
     el('title', {}, g).textContent = `${n.name} (${n.role}) — ${live}`;
     if (typeof ns.contextPct === 'number' && live === 'working') {
       const pct = Math.max(0, Math.min(100, ns.contextPct * 100));
@@ -905,6 +906,21 @@ function drawStallBadge(g, st, onclick) {
   el('title', {}, bg).textContent = full;
   if (st.taskId && onclick) bg.onclick = onclick;
 }
+// Subagent chip on an agent card (Team graph + Overview): count + compact total tokens for the current
+// run's subagents. Per contract t_c33656ba the parent's own totals ALREADY include these — the badge is
+// a breakdown, never something to add on top. Hidden when the agent spawned nothing.
+function drawSubBadge(g, a) {
+  const b = Subagents.badge(a); if (!b.count) return;
+  const tot = b.tokens ? (b.tokens.inputTokens || 0) + (b.tokens.outputTokens || 0) : 0;
+  // totals() reports 0/0 when the CLI publishes no per-subagent usage — show count only, never "0 tok"
+  const txt = tot > 0 ? `🤖${b.count} ${fmtTok(tot)}` : `🤖${b.count}`;
+  const w = 14 + txt.length * 5.6;
+  const full = `${b.count} subagent${b.count === 1 ? '' : 's'}${b.tokens ? ` · ${b.tokens.inputTokens ?? 'n/a'} in / ${b.tokens.outputTokens ?? 'n/a'} out tok (included in this agent's totals)` : ' · token usage n/a'}`;
+  const bg = el('g', { class: 'subbadge', transform: `translate(${W - w - 8},${H - 18})` }, g);
+  el('rect', { width: w, height: 14, rx: 7 }, bg);
+  el('text', { x: w / 2, y: 10.5, 'text-anchor': 'middle' }, bg).textContent = txt;
+  el('title', {}, bg).textContent = full;
+}
 // A task stuck in_progress whose assignee has no live agent process: the orchestrator will reset/re-dispatch it,
 // but until then it needs to be visible so a stalled run isn't mistaken for one still working.
 function orphanedTasks() { const r = runningIds(); return S.tasks.filter((t) => t.status === 'in_progress' && t.assignee && !r.includes(t.assignee)); }
@@ -1071,6 +1087,32 @@ function logRow(l) {
   const task = l.task ? `<span class="logtask" ${l.taskId ? `data-tasklink="${esc(l.taskId)}" title="Open in task thread"` : ''}>${esc(l.task)}</span>` : '';
   return `<div class="logrow lv-${lvl}"><span class="logtime">${new Date(l.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span><span class="avatar sm" style="background:${w.color}" title="${esc(w.name)}">${esc(w.ini)}</span><span class="logagent" title="${esc(w.name)}">${esc(w.name)}</span>${task}<span class="loglevel lv-${lvl}">${esc(l.kind)}</span><span class="logtext">${esc(l.text)}</span></div>`;
 }
+// ---------- subagents (contract: t_c33656ba) ----------
+// Records live on the owning agent (S.orch.agents[id].subagents) for the current run and persist per
+// run in RUNS[i].subagents; a child log row carries subagentId. Unknown ids render a minimal block.
+function subRecOf(sid) {
+  for (const a of Object.values(S.orch.agents || {})) { const r = (a.subagents || []).find((x) => x.id === sid); if (r) return r; }
+  for (const r of RUNS) { const x = (r.subagents || []).find((y) => y.id === sid); if (x) return x; }
+  return null;
+}
+const subOpen = new Set(); // expanded subagent block ids (survives re-renders within the session)
+function subMetaTxt(rec) {
+  const dur = Subagents.durationMs(rec); const d = Subagents.fmtDuration(dur);
+  return `${d ? d + ' · ' : ''}${Subagents.tokensLabel(rec && rec.tokens)}`;
+}
+// Collapsible nested block for one subagent: description, status, duration, own tokens (+ its children).
+function subBlockHtml(it, depth = 0) {
+  const rec = subRecOf(it.rec.id) || it.rec || {}; const sid = rec.id;
+  const open = subOpen.has(sid);
+  const count = (function n(xs) { return xs.reduce((a, x) => a + (x.kind === 'sub' ? n(x.rows) : 1), 0); })(it.rows);
+  const head = `<span class="subcaret">${open ? '▾' : '▸'}</span><span class="subicon">🤖</span>` +
+    `<span class="subdesc">${esc(rec.description || rec.toolName || 'Subagent')}</span>` +
+    `<span class="substatus ss-${esc(rec.status || 'unknown')}" data-substatus="${esc(rec.status || 'unknown')}">${esc(rec.status || 'unknown')}</span>` +
+    `<span class="submeta">${esc(subMetaTxt(rec))}</span><span class="subcount">${count} event${count === 1 ? '' : 's'}</span>`;
+  const inner = it.rows.map((x) => x.kind === 'sub' ? subBlockHtml(x, depth + 1) : logRow(x.l)).join('');
+  return `<div class="subblock d${depth}${open ? ' open' : ''}" data-sub="${esc(sid)}"><div class="subhead" data-subtoggle="${esc(sid)}" title="${esc(rec.description || sid)} — ${esc(subMetaTxt(rec))}">${head}</div><div class="subrows"${open ? '' : ' hidden'}>${inner}</div></div>`;
+}
+function bindSubToggles(rerender) { document.querySelectorAll('[data-subtoggle]').forEach((d) => d.onclick = (e) => { e.stopPropagation(); const sid = d.dataset.subtoggle; subOpen.has(sid) ? subOpen.delete(sid) : subOpen.add(sid); rerender(); }); }
 // All severities shown by default; chips let you narrow the feed down to warn/error only.
 const logLevels = new Set(['info', 'warn', 'error']);
 const LOG_SEVERITY = { error: 'error', tool_error: 'error', stderr: 'warn' };
@@ -1093,8 +1135,10 @@ function renderLog() {
     if (hiddenInfo) rows = base;
   }
   const empty = teamIds && !all.length ? 'No messages for this team.' : (all.length ? 'No log lines match your filter.' : 'No activity yet — run the team to see agent logs here.');
-  box.innerHTML = rows.length ? (hiddenInfo ? `<p class="muted logempty">${hiddenInfo} info line(s) hidden by the level filter — showing all. <button id="log-showall" class="linklike">Show all</button></p>` : '') + rows.slice(-800).map(logRow).join('') : `<p class="muted logempty">${empty}</p>`;
+  box.innerHTML = rows.length ? (hiddenInfo ? `<p class="muted logempty">${hiddenInfo} info line(s) hidden by the level filter — showing all. <button id="log-showall" class="linklike">Show all</button></p>` : '') +
+    Subagents.nestRows(rows.slice(-800), subRecOf, null).map((x) => x.kind === 'sub' ? subBlockHtml(x) : logRow(x.l)).join('') : `<p class="muted logempty">${empty}</p>`;
   const sa = document.getElementById('log-showall'); if (sa) sa.onclick = () => { logLevels.add('info'); logLevels.add('warn'); logLevels.add('error'); renderLogLevelChips(); renderLog(); };
+  bindSubToggles(renderLog);
   document.querySelectorAll('#log [data-tasklink]').forEach((d) => d.onclick = () => { sel.task = d.dataset.tasklink; $('#ov-task').value = ''; showTab('overview'); });
   if (atBottom && $('#logauto').checked) box.scrollTop = box.scrollHeight;
 }
@@ -1394,6 +1438,7 @@ function renderOverview() {
     const st = stallState(n.id);
     if (st) drawStallBadge(g, st, () => openWakeTask(st.taskId));
     else if (live === 'working') { const wk = wakeRun(n.id); if (wk) drawWakeBadge(g, wk, () => openWakeTask(wk.taskId)); }
+    drawSubBadge(g, S.orch.agents[n.id] || {});
     const sg = el('g', { class: 'status s-' + live, transform: `translate(${W - 14},14)` }, g); el('circle', { r: 5 }, sg); el('title', {}, sg).textContent = live;
     el('title', {}, g).textContent = `${n.name} (${n.role}) — ${isStuck ? 'stuck' : live}`;
   }
@@ -1446,10 +1491,21 @@ function renderOverview() {
     const as = byId[t.assignee]; const ac = as ? agentColor(as.id) : 0;
     head.innerHTML = `<div class="ovth-title">${esc(t.title)}</div><div class="ovth-meta"><span class="ovth-status ${esc(t.status)}">${esc(t.status)}</span>${as ? `<span class="ovth-assignee"><span class="ovth-av" style="background:var(--agent-${ac})">${esc(initials(as.name))}</span>${esc(as.name)}</span>` : '<span class="muted">Unassigned</span>'}</div>`;
   }
-  const items = t ? Overview.taskThread(t, L, S.messages) : []; const cut = Math.max(0, items.length - 300); const shown = cut ? items.slice(-300) : items;
-  $('#ov-thread').innerHTML = !t ? '<p class="muted empty">No tasks yet.</p>' : (cut ? `<p class="muted empty">${cut} earlier entries hidden — open the task on the Board for the full history.</p>` : '') + (shown.map((it, k) => it.type === 'tool'
-    ? `<details data-k="${k}" ${open.has(String(k)) ? 'open' : ''}><summary class="chip">🔧 ${esc(it.summary)}</summary><pre>${esc(it.text)}</pre></details>`
-    : `<div class="comment ${it.type === 'message' ? 'msg' : ''}"><b>${esc(it.type === 'message' ? `${nodeName(it.who)} → ${nodeName(it.to)}` : it.who === 'human' || it.who === 'orchestrator' ? it.who : nodeName(it.who))}</b> <small class="muted">${new Date(it.at).toLocaleTimeString()}</small><br>${esc(it.text)}</div>`).join('') || '<p class="muted empty">Nothing yet.</p>');
+  // Collapsible nested block for a subagent's tool activity inside the task thread (native <details>,
+  // open state preserved via data-k like the tool chips).
+  const ovSubBlock = (it, depth) => {
+    const rec = subRecOf(it.rec.id) || it.rec || {}; const sid = rec.id; const key = `sub:${sid}`;
+    const isopen = open.has(key);
+    const inner = it.rows.map((x) => x.kind === 'sub' ? ovSubBlock(x, depth + 1) : x.l.type === 'tool'
+      ? `<details data-k="t:${esc(x.l.summary || x.l.at)}" ${open.has(`t:${x.l.summary || x.l.at}`) ? 'open' : ''}><summary class="chip">🔧 ${esc(x.l.summary)}</summary><pre>${esc(x.l.text)}</pre></details>`
+      : `<div class="comment"><small class="muted">${new Date(x.l.at).toLocaleTimeString()}</small><br>${esc(x.l.text)}</div>`).join('');
+    return `<details class="subthread d${depth}" data-k="${esc(key)}" data-sub="${esc(sid)}" ${isopen ? 'open' : ''}><summary><span class="subcaret">${isopen ? '▾' : '▸'}</span> 🤖 <b>${esc(rec.description || rec.toolName || 'Subagent')}</b> <span class="substatus ss-${esc(rec.status || 'unknown')}">${esc(rec.status || 'unknown')}</span> <span class="submeta">${esc(subMetaTxt(rec))}</span> <span class="subcount">${it.rows.length} event${it.rows.length === 1 ? '' : 's'}</span></summary><div class="subrows">${inner}</div></details>`;
+  };
+  // Task thread capped to the latest 300 entries before nesting; older history stays on the Board.
+  const threadItems = t ? Overview.taskThread(t, L, S.messages) : []; const cut = Math.max(0, threadItems.length - 300); const shown = cut ? threadItems.slice(-300) : threadItems;
+  $('#ov-thread').innerHTML = !t ? '<p class="muted empty">No tasks yet.</p>' : (cut ? `<p class="muted empty">${cut} earlier entries hidden — open the task on the Board for the full history.</p>` : '') + (Subagents.nestRows(shown, subRecOf, t.assignee).map((it, k) => it.kind === 'sub' ? ovSubBlock(it, 0) : it.l.type === 'tool'
+    ? `<details data-k="${k}" ${open.has(String(k)) ? 'open' : ''}><summary class="chip">🔧 ${esc(it.l.summary)}</summary><pre>${esc(it.l.text)}</pre></details>`
+    : `<div class="comment ${it.l.type === 'message' ? 'msg' : ''}"><b>${esc(it.l.type === 'message' ? `${nodeName(it.l.who)} → ${nodeName(it.l.to)}` : it.l.who === 'human' || it.l.who === 'orchestrator' ? it.l.who : nodeName(it.l.who))}</b> <small class="muted">${new Date(it.l.at).toLocaleTimeString()}</small><br>${esc(it.l.text)}</div>`).join('') || '<p class="muted empty">Nothing yet.</p>');
   ovLive = stuck.size > 0 || hot.size > 0 || Object.values(lanes).some((l) => l.runs.some((r) => r.live));
 }
 $('#ov-task').onchange = renderOverview;
@@ -1463,12 +1519,23 @@ function bubble(e) {
   const link = e.taskId && !CH.thread ? ` data-thread="${e.taskId}"` : ''; const tl = link ? `<span class="tlink">↳ ${esc(taskTitle(e.taskId).slice(0, 40))}</span>` : '';
   const rep = e.count > 1 ? `<span class="repeat" title="repeated ${e.count} times">×${e.count}</span>` : '';
   if (e.type === 'tool') return `<details class="cchip"><summary>🔧 ${esc(e.label)}</summary><pre>${esc(e.text)}${e.result != null ? '\n→ ' + esc(String(e.result).slice(0, 2000)) : ''}</pre></details>${tl ? `<span class="bubble linked"${link}>${tl}</span>` : ''}<br>`;
+  // One collapsible bubble per subagent (children folded in roomEvents, sub-subagents nested inside):
+  // summary header carries description/status/duration/tokens; expanded shows compact child lines.
+  if (e.type === 'subagent') {
+    const rec = subRecOf(e.subagentId) || {};
+    const dur = Subagents.fmtDuration(Subagents.durationMs(rec));
+    const meta = [dur, `tok: ${Subagents.tokensLabel(rec.tokens)}`].filter(Boolean).join(' · ');
+    const line = (x) => x.kind === 'tool' ? `<span class="sev-tool">🔧 ${esc(Chat.toolLabel(x.text))}</span>` : x.kind === 'tool_result' ? `<span class="sev-res">→ ${esc(String(x.text).slice(0, 160))}</span>` : esc(String(x.text).slice(0, 160));
+    const sevHtml = (ev2) => ev2.events.map((x) => `<div class="sev">${line(x)}</div>`).join('') + (ev2.total > ev2.events.length ? `<div class="sev muted">+ ${ev2.total - ev2.events.length} more event(s)</div>` : '');
+    const childHtml = (e2) => `<details class="cchip subagent child"><summary>↳ 🤖 ${esc((subRecOf(e2.subagentId) || e2).description || 'Subagent')} <span class="substatus ss-${esc((subRecOf(e2.subagentId) || {}).status || 'unknown')}">${esc((subRecOf(e2.subagentId) || {}).status || 'unknown')}</span> <span class="submeta">${esc([Subagents.fmtDuration(Subagents.durationMs(subRecOf(e2.subagentId) || {})), `tok: ${Subagents.tokensLabel((subRecOf(e2.subagentId) || {}).tokens)}`].filter(Boolean).join(' · '))}</span> <span class="subcount">${e2.total}</span></summary><div class="subevents">${sevHtml(e2)}${(e2.children || []).map(childHtml).join('')}</div></details>`;
+    return `<details class="cchip subagent"><summary>🤖 ${esc(rec.description || 'Subagent')} <span class="substatus ss-${esc(rec.status || 'unknown')}">${esc(rec.status || 'unknown')}</span> <span class="submeta">${esc(meta)}</span> <span class="subcount">${e.total}</span></summary><div class="subevents">${sevHtml(e)}${(e.children || []).map(childHtml).join('')}</div></details>${tl ? `<span class="bubble linked"${link}>${tl}</span>` : ''}<br>`;
+  }
   if (e.type === 'question') return `<div class="bubble question" data-iid="${e.inboxId}">❓ <b>Question for you</b>${tl}<br>${esc(e.text)}<br>${e.choices.map((c) => `<button class="primary ch-choice" data-v="${esc(c)}">${esc(c)}</button>`).join('')}<textarea class="ch-ans" rows="1" placeholder="Or type an answer"></textarea><button class="ch-send">Answer</button></div>`;
   const text = e.type === 'handoff' ? `📋 assigned “${e.text}” to @${who(e.to).name}` : e.type === 'message' ? `✉ @${who(e.to).name} ${e.text}` : e.type === 'comment' ? `💬 ${e.text}` : e.text;
   return `<div class="bubble ${e.type}${link ? ' linked' : ''}"${link}>${esc(text)}${tl}${rep}</div>`;
 }
 // Collapse consecutive identical messages (same type/target/text) from one author into one bubble + a ×N badge at the end.
-const collapseRepeats = (items) => items.reduce((out, it) => { const p = out[out.length - 1]; if (p && p.type === it.type && p.text === it.text && p.to === it.to && it.type !== 'tool' && it.type !== 'question') p.count = (p.count || 1) + 1; else out.push({ ...it }); return out; }, []);
+const collapseRepeats = (items) => items.reduce((out, it) => { const p = out[out.length - 1]; if (p && p.type === it.type && p.text === it.text && p.to === it.to && it.type !== 'tool' && it.type !== 'question' && it.type !== 'subagent') p.count = (p.count || 1) + 1; else out.push({ ...it }); return out; }, []);
 // Merge adjacent same-author groups (no repeated "You" headers); questions stay separate.
 const mergeGroups = (gs) => gs.reduce((out, g) => { const p = out[out.length - 1]; if (p && p.who === g.who && g.items[0].type !== 'question' && p.items[0].type !== 'question') p.items.push(...g.items); else out.push({ ...g, items: [...g.items] }); return out; }, []).map((g) => ({ ...g, items: collapseRepeats(g.items) }));
 const needsYou = () => new Set([...(S.inbox || []).map((i) => i.nodeId), ...CH.asks]);
@@ -1494,10 +1561,10 @@ function renderChat() {
   if (!$('#tab-chat.active')) return;
   const working = new Set(Object.keys(S.orch.agents || {}).filter((id) => S.orch.agents[id].status === 'working'));
   const L = projLogs();
-  const sig = Chat.feedKey({ projectId: ctx.p, thread: CH.thread, logs: L, tasks: S.tasks, messages: S.messages, inbox: S.inbox, nodes: S.allNodes, working });
+  const sig = Chat.feedKey({ projectId: ctx.p, thread: CH.thread, logs: L, tasks: S.tasks, messages: S.messages, inbox: S.inbox, nodes: S.allNodes, working, agents: S.orch.agents, runs: RUNS });
   if (sig === chatSig) return;
   chatSig = sig;
-  const ev = Chat.roomEvents(L, S.tasks, S.messages, S.inbox); // capped to the last Chat.MAX (500) events
+  const ev = Chat.roomEvents(L, S.tasks, S.messages, S.inbox, Chat.MAX, subRecOf); // capped to the last Chat.MAX (500) events
   CH.asks = ev.filter((e) => e.type === 'question').map((e) => e.who);
   $('#chat-typing').innerHTML = [...working].map((id) => `<span class="typing"><span class="spin"></span>${esc(who(id).name)} is working<span class="dots"></span></span>`).join(' · ');
   renderYourTurn(ev);

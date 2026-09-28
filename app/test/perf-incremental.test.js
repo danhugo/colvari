@@ -157,6 +157,8 @@ test('feedKey: same inputs -> same key; visible feed changes -> new key', () => 
     projectId: 'p1', thread: null,
     logs: [{ at: 1 }, { at: 9 }], tasks: [{ id: 't1', updatedAt: 'u', comments: [] }],
     messages: [{ at: 3 }], inbox: [{ id: 'i1' }], nodes: [{ id: 'a', name: 'A', role: 'Dev' }], working: new Set(),
+    agents: { a: { subagents: [{ id: 's1', status: 'running', tokens: { inputTokens: 5, outputTokens: 2 } }] } },
+    runs: [{ subagents: [{ id: 's1', status: 'running' }] }],
   });
   assert.equal(Chat.feedKey(base()), Chat.feedKey(base()));
   const diff = (mut) => assert.notEqual(Chat.feedKey(base()), Chat.feedKey(mut(base())));
@@ -169,4 +171,14 @@ test('feedKey: same inputs -> same key; visible feed changes -> new key', () => 
   diff((b) => ({ ...b, nodes: [{ id: 'a', name: 'Renamed', role: 'Dev' }] }));
   diff((b) => ({ ...b, working: new Set(['a']) }));
   diff((b) => ({ ...b, projectId: 'p2' }));
+  diff((b) => ({ ...b, agents: { a: { subagents: [{ id: 's1', status: 'done', tokens: { inputTokens: 5, outputTokens: 2 } }] } } })); // subagent status
+  diff((b) => ({ ...b, agents: { a: { subagents: [{ id: 's1', status: 'running', tokens: { inputTokens: 9, outputTokens: 2 } }] } } })); // subagent tokens
+  diff((b) => ({ ...b, runs: [{ subagents: [{ id: 's1', status: 'done' }] }] }));
+});
+
+test('overviewKey: subagent record changes produce a new key', () => {
+  const base = (sub) => ({ projectId: 'p', nodes: [], edges: [], agents: { a: { status: 'working', subagents: sub } }, tasks: [], messages: [], logs: [], stuckMinutes: 5, selectedTask: '', bucket: 0 });
+  const sub = [{ id: 's1', status: 'running', tokens: { inputTokens: 1, outputTokens: 1 } }];
+  assert.equal(O.overviewKey(base(sub)), O.overviewKey(base(sub.map((x) => ({ ...x })))));
+  assert.notEqual(O.overviewKey(base(sub)), O.overviewKey(base(sub.map((x) => ({ ...x, status: 'done' })))));
 });

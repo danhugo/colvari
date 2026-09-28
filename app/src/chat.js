@@ -15,18 +15,35 @@
   }
 
   // Room events, oldest first, capped to the last MAX. who = node id | 'human' | 'orchestrator'.
-  function roomEvents(logs, tasks, messages, inbox, max = MAX) {
+  // Child events carrying subagentId (t_c33656ba) are folded into ONE 'subagent' bubble at the
+  // position of the first child event — the room must not flood with subagent tool noise. When the
+  // caller passes a record lookup (recOf), nested subagents become children of their parent bubble.
+  function roomEvents(logs, tasks, messages, inbox, max = MAX, recOf = null) {
     const ev = []; const taskOf = {}; // nodeId -> task title of the current run, to link log bubbles to a thread
+    const sub = new Map(); // subagentId -> its single bubble event
     const byTitle = Object.fromEntries((tasks || []).map((t) => [t.title, t.id]));
     for (const l of (logs || []).slice().sort((a, b) => a.at - b.at)) {
       if (!l.nodeId) continue;
       const start = l.kind === 'system' && /^▶ .* starts "(.*?)"/.exec(l.text);
       if (start) { taskOf[l.nodeId] = byTitle[start[1]] || null; ev.push({ at: l.at, who: l.nodeId, type: 'action', text: `started working on “${start[1]}”`, taskId: taskOf[l.nodeId] }); continue; }
       const taskId = taskOf[l.nodeId] || null;
+      if (l.subagentId) {
+        let e = sub.get(l.subagentId);
+        if (!e) { e = { at: l.at, who: l.nodeId, type: 'subagent', subagentId: l.subagentId, taskId, events: [], total: 0 }; sub.set(l.subagentId, e); ev.push(e); }
+        e.total++;
+        if (e.events.length < 20) e.events.push({ kind: l.kind, text: String(l.text || '').slice(0, 300), at: l.at });
+        continue;
+      }
       if (l.kind === 'text' && String(l.text).trim()) ev.push({ at: l.at, who: l.nodeId, type: 'thought', text: l.text, taskId });
       else if (l.kind === 'tool') ev.push({ at: l.at, who: l.nodeId, type: 'tool', label: toolLabel(l.text), text: l.text, taskId });
       else if (l.kind === 'tool_result' || l.kind === 'tool_error') { const p = ev[ev.length - 1]; if (p && p.type === 'tool' && p.who === l.nodeId && p.result == null) p.result = l.text; }
       else if (l.kind === 'error') ev.push({ at: l.at, who: l.nodeId, type: 'error', text: l.text, taskId });
+    }
+    // Nest sub-subagents under their parent bubble (matched by records, never arrival order).
+    if (recOf) {
+      const nested = new Set();
+      for (const [sid, e] of sub) { const p = recOf(sid) && recOf(sid).parentAgentId; if (p && sub.has(p)) { (sub.get(p).children ||= []).push(e); nested.add(sid); } }
+      for (let i = ev.length - 1; i >= 0; i--) if (ev[i].type === 'subagent' && nested.has(ev[i].subagentId)) ev.splice(i, 1);
     }
     for (const m of messages || []) ev.push({ at: ms(m.at), who: m.from, to: m.to, type: 'message', text: m.text, taskId: m.taskId || null });
     for (const t of tasks || []) {
@@ -62,9 +79,11 @@
 
   // Signature of every input the room feed reads (pure, used by the renderer's 1s tick to skip the
   // expensive roomEvents walk + DOM rebuild when nothing changed). Task comments bump task.updatedAt,
-  // and logs are append/prepend/clear-only, so this catches every change the feed can show.
+  // logs are append/prepend/clear-only, and subagent bubbles render records from agents/runs
+  // (subRecOf), so all three sources are fingerprinted here.
   function feedKey(inp) {
     const logs = inp.logs || [], tasks = inp.tasks || [], messages = inp.messages || [], inbox = inp.inbox || [];
+    const subRecs = (holder) => (holder.subagents || []).map((x) => [x.id, x.status || '', x.endedAt || 0, x.tokens ? (x.tokens.inputTokens || 0) + (x.tokens.outputTokens || 0) : 0]);
     return JSON.stringify([
       inp.projectId, inp.thread || null,
       logs.length, logs.length ? logs[0].at : null, logs.length ? logs[logs.length - 1].at : null,
@@ -73,8 +92,11 @@
       inbox.map((i) => i.id),
       (inp.nodes || []).map((n) => [n.id, n.name, n.role]),
       [...(inp.working || [])].sort(),
+      ...Object.values(inp.agents || {}).flatMap(subRecs),
+      ...(inp.runs || []).flatMap(subRecs),
     ]);
   }
 
   return { avatarColor, initials, toolLabel, roomEvents, group, parseComposer, preview, mentionMatches, GROUP_MS, MAX, feedKey };
 });
+
