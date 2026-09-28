@@ -870,6 +870,28 @@ async function guiE2E() {
     // 3) Minimap hides once the view already fits the whole graph (fitView() above matches the graph bbox).
     const mmHidden = await ex(`const m = $('#minimap'); return !m || m.classList.contains('hidden') || getComputedStyle(m).display === 'none';`);
     expect('critique: minimap hidden once fit-to-view already fits the graph', mmHidden, { mmHidden });
+    // 3b) t_0c3b6126: edges are orthogonal elbows that never cross a node card, fit-to-view centres the
+    // whole graph (ghosts included), and every edge marker is the 8px arrowhead.
+    const orth = await ex(`const shr = (r, m) => ({ x: r.x + m, y: r.y + m, w: r.width - 2 * m, h: r.height - 2 * m });
+      const hit = (r, p) => p.x > r.x && p.x < r.x + r.w && p.y > r.y && p.y < r.y + r.h;
+      const cards = [...document.querySelectorAll('#graph .node .card')].map((c) => shr(c.getBoundingClientRect(), 3));
+      let cross = 0, diag = 0;
+      for (const p of document.querySelectorAll('#graph .edge')) {
+        if (p.getAttribute('d').includes('C')) diag++;
+        const ctm = p.getScreenCTM(), L = p.getTotalLength();
+        for (let t = 0; t <= L; t += 3) { const pt = p.getPointAtLength(t).matrixTransform(ctm); if (cards.some((r) => hit(r, pt))) { cross++; break; } }
+      }
+      const gr = document.querySelector('#graph').getBoundingClientRect();
+      const pts = [...document.querySelectorAll('#graph .node, #graph .ghost')].map((g) => { const m = g.transform.baseVal.consolidate().matrix; return [m.e, m.f]; });
+      const vp = document.querySelector('#graph > g.viewport').transform.baseVal.consolidate().matrix;
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+      for (const [x, y] of pts) { x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x + 184); y1 = Math.max(y1, y + 80); }
+      const arrows = [...document.querySelectorAll('#graph defs marker')].map((m) => m.markerWidth.baseVal.value).join(',');
+      return { diag, cross, nodes: pts.length, arrows, zoom: Math.round(vp.a * 100) / 100, dx: Math.round((x0 + x1) / 2 * vp.a + vp.e - gr.width / 2), dy: Math.round((y0 + y1) / 2 * vp.d + vp.f - gr.height / 2) };`);
+    expect('critique: edges are orthogonal elbows (no bezier diagonals)', orth.diag === 0, orth);
+    expect('critique: no edge passes through a node card', orth.cross === 0, orth);
+    expect('critique: fit-to-view centres the graph', Math.abs(orth.dx) <= 24 && Math.abs(orth.dy) <= 24, orth);
+    expect('critique: 8px arrowheads on every edge marker', orth.arrows === '8,8,8,8', orth);
     // 4) A second edge popover replaces the first instead of stacking a duplicate on top of it.
     const [a, b, c, d] = main.nodes;
     await ex(`window.alert = () => {}; edgePopover(200, 200, '${a.id}', '${b.id}'); await w(80); edgePopover(260, 260, '${c.id}', '${d.id}');`);

@@ -506,6 +506,7 @@ const W = 184, H = 80, SVGNS = 'http://www.w3.org/2000/svg';
 function el(tag, attrs, parent) { const e = document.createElementNS(SVGNS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); parent && parent.appendChild(e); return e; }
 let VP = { x: 20, y: 20, zoom: 1 }, vpTeam = null, vpSave = null, lastEdgeType = 'assign', linkDrag = null;
 const agentColor = (id) => { let h = 0; for (const c of String(id)) h = (h * 31 + c.charCodeAt(0)) >>> 0; return (h % 8) + 1; };
+const edgeSeed = (e) => { let h = 0; for (const c of String(e.id || '')) h = (h * 31 + c.charCodeAt(0)) >>> 0; return h; };
 const initials = (s) => String(s || '?').split(/\s+/).map((w) => w[0]).join('').slice(0, 2).toUpperCase();
 const nodeLive = (n) => ((S.nstat || {})[n.id] || {}).status || ((S.orch.agents[n.id] || {}).status === 'working' ? 'working' : 'idle');
 const applyVP = () => { const v = $('#graph > g.viewport'); if (v) v.setAttribute('transform', `translate(${VP.x},${VP.y}) scale(${VP.zoom})`); const gs = $('#graph'); if (gs) { gs.classList.toggle('lod-far', VP.zoom < 0.6); gs.style.setProperty('--nz', Math.max(1, 11 / (13 * VP.zoom)).toFixed(3)); } renderMinimap(); $('#zoomlvl') && ($('#zoomlvl').textContent = Math.round(VP.zoom * 100) + '%'); };
@@ -537,16 +538,73 @@ function ghostNodes() {
   return [...out.values()].map((g) => ({ ...g, ghost: true, name: nodeName(g.id), role: 'other team', x: g.side > 0 ? b.x + b.w + 120 : b.x - W - 120, y: b.y + (g.side > 0 ? r++ : l++) * (H + 40) }));
 }
 const allGraphNodes = () => [...S.team.nodes, ...ghostNodes()];
-function edgeGeom(a, b, off) { // cubic curve between node borders, shifted sideways by `off` for parallel edges
-  const ax = a.x + W / 2, ay = a.y + H / 2, bx = b.x + W / 2, by = b.y + H / 2, dx = bx - ax, dy = by - ay, len = Math.hypot(dx, dy) || 1;
-  const nx = -dy / len, ny = dx / len; const horiz = Math.abs(dx) * H > Math.abs(dy) * W;
-  const p1 = horiz ? [ax + Math.sign(dx) * W / 2, ay + off * 0.6] : [ax + off * 0.6, ay + Math.sign(dy) * H / 2];
-  const p2 = horiz ? [bx - Math.sign(dx) * W / 2, by + off * 0.6] : [bx + off * 0.6, by - Math.sign(dy) * H / 2];
-  const k = Math.max(40, (horiz ? Math.abs(p2[0] - p1[0]) : Math.abs(p2[1] - p1[1])) / 2);
-  const c1 = horiz ? [p1[0] + Math.sign(dx) * k + nx * off, p1[1] + ny * off] : [p1[0] + nx * off, p1[1] + Math.sign(dy) * k + ny * off];
-  const c2 = horiz ? [p2[0] - Math.sign(dx) * k + nx * off, p2[1] + ny * off] : [p2[0] + nx * off, p2[1] - Math.sign(dy) * k + ny * off];
-  const mid = [0.125 * p1[0] + 0.375 * c1[0] + 0.375 * c2[0] + 0.125 * p2[0], 0.125 * p1[1] + 0.375 * c1[1] + 0.375 * c2[1] + 0.125 * p2[1]];
-  return { d: `M${p1[0]},${p1[1]} C${c1[0]},${c1[1]} ${c2[0]},${c2[1]} ${p2[0]},${p2[1]}`, mid, n: [nx, ny] };
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+// ---------- orthogonal edge routing ----------
+// Edges are elbow (right-angle) paths, never diagonals: a horizontally-dominated pair exits through
+// the node sides and turns on a vertical rail between them; vertical pairs are the same transposed.
+// No segment may cross a node card: a blocked rail moves to the nearest free corridor, and when no
+// corridor exists between the two nodes the edge detours around both rows. `off` fans parallel edges
+// apart; `seed` spreads detours across corridors so shared bus segments don't stack.
+const segHit = (o, x0, y0, x1, y1) => Math.min(x0, x1) < o.x + o.w && Math.max(x0, x1) > o.x && Math.min(y0, y1) < o.y + o.h && Math.max(y0, y1) > o.y;
+const clearH = (obs, y, x0, x1) => !obs.some((o) => segHit(o, x0, y, x1, y));
+const clearV = (obs, x, y0, y1) => !obs.some((o) => segHit(o, x, y0, x, y1));
+const freeCors = (obs, lo, hi, mid0, clear) => { // centres of free bands (8px sampling), nearest to mid0 first
+  const cs = []; let run = null;
+  for (let p = Math.ceil(lo / 8) * 8; p <= hi; p += 8) { if (clear(p)) { run = run || [p, p]; run[1] = p; } else if (run) { cs.push((run[0] + run[1]) / 2); run = null; } }
+  if (run) cs.push((run[0] + run[1]) / 2);
+  return cs.sort((x, y) => Math.abs(x - mid0) - Math.abs(y - mid0));
+};
+function orthPath(pts, r = 8) { // polyline with rounded corners
+  let d = `M${pts[0][0]},${pts[0][1]}`;
+  for (let i = 1; i < pts.length - 1; i++) {
+    const [x, y] = pts[i], [px, py] = pts[i - 1], [qx, qy] = pts[i + 1];
+    const l1 = Math.hypot(x - px, y - py) || 1, l2 = Math.hypot(qx - x, qy - y) || 1, rr = Math.min(r, l1 / 2, l2 / 2);
+    d += ` L${(x - (x - px) / l1 * rr).toFixed(1)},${(y - (y - py) / l1 * rr).toFixed(1)} Q${x},${y} ${(x + (qx - x) / l2 * rr).toFixed(1)},${(y + (qy - y) / l2 * rr).toFixed(1)}`;
+  }
+  const [ex, ey] = pts[pts.length - 1]; return d + ` L${ex},${ey}`;
+}
+function edgeGeom(a, b, off, obs = [], seed = 0) {
+  const flip = Math.abs(b.y - a.y) * W >= Math.abs(b.x - a.x) * H; // vertical pair: solve transposed
+  const T = (n) => ({ x: n.y, y: n.x }), To = (o) => ({ x: o.y, y: o.x, w: o.h, h: o.w }), P = (p) => (flip ? [p[1], p[0]] : p);
+  const A = flip ? T(a) : a, B = flip ? T(b) : b, NW = flip ? H : W, NH = flip ? W : H;
+  const covers = (o, n) => o.x <= n.x && o.y <= n.y && o.x + o.w >= n.x + (flip ? H : W) && o.y + o.h >= n.y + (flip ? W : H);
+  const OBS = (flip ? obs.map(To) : obs).filter((o) => !covers(o, a) && !covers(o, b)); // endpoints may touch their own cards
+  const anchors = () => { // p1 exits a toward b, p2 enters b facing a — direction-aware side anchors
+    const sx = Math.sign(B.x - A.x) || 1;
+    return { sx, p1: [sx > 0 ? A.x + NW : A.x, A.y + NH / 2 + off * 0.6], p2: [sx > 0 ? B.x : B.x + NW, B.y + NH / 2 + off * 0.6] };
+  };
+  const solve = () => { // side exits + vertical rail between the nodes
+    const { p1, p2 } = anchors();
+    if (p1[1] === p2[1] && clearH(OBS, p1[1], p1[0], p2[0])) return { pts: [p1, p2], mid: [(p1[0] + p2[0]) / 2, p1[1]], n: [0, 1] };
+    const lo = Math.min(p1[0], p2[0]) + 14, hi = Math.max(p1[0], p2[0]) - 14, rail0 = clamp((p1[0] + p2[0]) / 2 + off, lo, hi);
+    const yLo = Math.min(p1[1], p2[1]), yHi = Math.max(p1[1], p2[1]);
+    const cands = lo <= hi ? [rail0, ...freeCors(OBS, lo, hi, rail0, (x) => clearV(OBS, x, yLo, yHi))] : [(p1[0] + p2[0]) / 2 + off];
+    const z = (rail) => ({ pts: [p1, [rail, p1[1]], [rail, p2[1]], p2], mid: [rail, (p1[1] + p2[1]) / 2], n: [0, 1] });
+    for (const rail of cands) if (clearV(OBS, rail, p1[1], p2[1]) && clearH(OBS, p1[1], p1[0], rail) && clearH(OBS, p2[1], rail, p2[0])) return z(rail);
+    return null;
+  };
+  const detour = () => { // 6-point route through the nearest corridor clear of both nodes' bands
+    const { sx, p1, p2 } = anchors();
+    const x0 = Math.min(p1[0], p2[0]) - 170, x1 = Math.max(p1[0], p2[0]) + 170;
+    const y0 = Math.min(A.y, B.y) - 100, y1 = Math.max(A.y + NH, B.y + NH) + 100;
+    const cors = freeCors(OBS, y0, y1, (p1[1] + p2[1]) / 2, (y) => clearH(OBS, y, x0, x1));
+    if (!cors.length) return null;
+    const k0 = cors.length > 1 ? seed % cors.length : 0; const order = cors.slice(k0).concat(cors.slice(0, k0));
+      for (const cor of order.slice(0, 4)) {
+        const r1s = [], r2s = [];
+        for (let k = 12; k <= 156; k += 16) { // legs walk away from the node along the travel direction
+          if (clearV(OBS, p1[0] + k * sx, Math.min(p1[1], cor), Math.max(p1[1], cor))) r1s.push(p1[0] + k * sx);
+          if (clearV(OBS, p2[0] - k * sx, Math.min(p2[1], cor), Math.max(p2[1], cor))) r2s.push(p2[0] - k * sx);
+        }
+      for (const r1 of r1s.slice(0, 3)) for (const r2 of r2s.slice(0, 3))
+        if ((r2 - r1) * sx > 28 && clearH(OBS, cor, r1, r2))
+          return { pts: [p1, [r1, p1[1]], [r1, cor], [r2, cor], [r2, p2[1]], p2], mid: [(r1 + r2) / 2, cor], n: [0, 1] };
+    }
+    return null;
+  };
+  const r = solve() || detour();
+  if (!r) { const p1 = [A.x + NW, A.y + NH / 2 + off * 0.6], p2 = [B.x, B.y + NH / 2 + off * 0.6], rail = (p1[0] + p2[0]) / 2 + off; return { d: orthPath([p1, [rail, p1[1]], [rail, p2[1]], p2].map(P)), mid: P([rail, (p1[1] + p2[1]) / 2]), n: flip ? [1, 0] : [0, 1] }; }
+  return { d: orthPath(r.pts.map(P)), mid: P(r.mid), n: flip ? [r.n[1], r.n[0]] : r.n };
 }
 const overlaps = (r, q) => r.x < q.x + q.w && q.x < r.x + r.w && r.y < q.y + q.h && q.y < r.y + r.h;
 function renderGraph() {
@@ -563,7 +621,7 @@ function renderGraph() {
     const a = byId[e.from], b = byId[e.to]; if (!a || !b) continue;
     const key = pk(e); const i = (pairI[key] = (pairI[key] ?? -1) + 1); const cnt = pairN[key];
     const sign = e.from < e.to ? 1 : -1; const off = (i - (cnt - 1) / 2) * 22 * sign;
-    const type = e.type || 'assign'; const cross = !!(e.crossTeam || a.ghost || b.ghost); const g = edgeGeom(a, b, off);
+    const type = e.type || 'assign'; const cross = !!(e.crossTeam || a.ghost || b.ghost); const g = edgeGeom(a, b, off, blocks, edgeSeed(e));
     const isSel = sel.edge === e.id;
     const L = cross ? xL : eL; const hit = el('path', { d: g.d, class: 'edgehit' }, L);
     el('path', { d: g.d, class: `edge edge-${type}` + (cross ? ' cross' : '') + (isSel ? ' sel' : ''), 'marker-end': `url(#arr-${isSel ? 'sel' : type})`, 'data-id': e.id }, L);
@@ -683,7 +741,7 @@ async function connect(from, to, type) { try { await call('addEdge', from, to, t
 function startLink(ev, n) {
   ev.stopPropagation(); ev.preventDefault(); hideMenus(); const vp = $('#graph > g.viewport');
   const tmp = el('path', { class: 'edge linking' }, vp); const sx = n.x + W, sy = n.y + H / 2; $('#graph').classList.add('linking');
-  const mv = (e) => { const [x, y] = toWorld(e.clientX, e.clientY); const k = Math.max(40, Math.abs(x - sx) / 2); tmp.setAttribute('d', `M${sx},${sy} C${sx + k},${sy} ${x - k},${y} ${x},${y}`);
+  const mv = (e) => { const [x, y] = toWorld(e.clientX, e.clientY); const mx = (sx + x) / 2; tmp.setAttribute('d', `M${sx},${sy} L${mx},${sy} L${mx},${y} L${x},${y}`);
     document.querySelectorAll('#graph .node.droptarget').forEach((d) => d.classList.remove('droptarget')); const t = e.target.closest && e.target.closest('#graph .node'); t && t.dataset.id !== n.id && t.classList.add('droptarget'); };
   const up = (e) => { window.removeEventListener('mousemove', mv); window.removeEventListener('mouseup', up); tmp.remove(); $('#graph').classList.remove('linking');
     const t = e.target.closest && e.target.closest('#graph .node'); document.querySelectorAll('#graph .node.droptarget').forEach((d) => d.classList.remove('droptarget'));
@@ -1612,12 +1670,13 @@ function renderOverview() {
   const svg = $('#ov-graph'); svg.innerHTML = ''; const byId = Object.fromEntries(ovNodes.map((n) => [n.id, n]));
   const defs = el('defs', {}, svg);
   for (const t of ['assign', 'message', 'review']) { const m = el('marker', { id: 'ovarr-' + t, viewBox: '0 0 10 10', refX: 9, refY: 5, markerWidth: 8, markerHeight: 8, markerUnits: 'userSpaceOnUse', orient: 'auto-start-reverse' }, defs); el('path', { d: 'M0,1 L9,5 L0,9 z', class: 'arrow arrow-' + t }, m); }
-  // Same curved geometry (and parallel-edge offsets) as the Team graph, so both views read alike.
+  // Same orthogonal geometry (and parallel-edge offsets) as the Team graph, so both views read alike.
   const pk = (e) => [e.from, e.to].sort().join('|'); const pairN = {}, pairI = {}; S.team.edges.forEach((e) => { pairN[pk(e)] = (pairN[pk(e)] || 0) + 1; });
+  const ovBlocks = ovNodes.map((n) => ({ x: n.x - 4, y: n.y - 4, w: W + 8, h: H + 8 }));
   for (const e of S.team.edges) {
     const a = byId[e.from], b = byId[e.to]; if (!a || !b) continue; const type = e.type || 'assign';
     const key = pk(e); const i = (pairI[key] = (pairI[key] ?? -1) + 1); const off = (i - (pairN[key] - 1) / 2) * 22 * (e.from < e.to ? 1 : -1);
-    el('path', { d: edgeGeom(a, b, off).d, class: `edge edge-${type}` + (hot.has(e.id) ? ' flash' : ''), 'marker-end': `url(#ovarr-${type})` }, svg);
+    el('path', { d: edgeGeom(a, b, off, ovBlocks, edgeSeed(e)).d, class: `edge edge-${type}` + (hot.has(e.id) ? ' flash' : ''), 'marker-end': `url(#ovarr-${type})` }, svg);
   }
   for (const n of ovNodes) {
     const live = (S.orch.agents[n.id] || {}).status === 'working' ? 'working' : nodeLive(n); const isStuck = stuck.has(n.id); const c = agentColor(n.id);
