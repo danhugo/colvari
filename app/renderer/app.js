@@ -444,6 +444,9 @@ function renderHeader() {
   } else { billed = o.billedCost || 0; sub = o.subCost || 0; }
   const c = $('#totalcost');
   c.textContent = billed > 0 ? `API-eq $${billed.toFixed(2)}` : sub > 0 ? 'subscription' : 'no cost yet';
+  // An empty placeholder pill is dead weight in an already tight header — hide it until it has
+  // something to say (the meter chips need every pixel at 1400px).
+  c.classList.toggle('hidden', !(billed > 0) && !(sub > 0));
   c.classList.toggle('quiet', !(billed > 0));
   c.title = (billed > 0 ? `API-equivalent $${billed.toFixed(4)} for API key / proxy / cloud runs — the same ledger the Usage tab shows (est = list-price estimate).` : 'No per-token billed runs this session.') + (sub > 0 ? ` Subscription runs: covered by subscription — not billed per token (API-equivalent $${sub.toFixed(4)}).` : '');
   // Ledger pill: usage is tracked per {runtime, provider, model} key and token sums across models
@@ -452,6 +455,7 @@ function renderHeader() {
   const nModels = new Set(led.rows.map((r) => r.model)).size;
   const nRuns = led.rows.reduce((a, r) => a + r.runs, 0);
   tt.textContent = led.rows.length ? `${nModels} model${nModels === 1 ? '' : 's'} · ${nRuns} run${nRuns === 1 ? '' : 's'}` : 'no usage yet';
+  tt.classList.toggle('hidden', !led.rows.length);
   tt.title = led.rows.length ? `Usage ledger, one row per runtime · provider · model (tokens are never summed across models):\n` +
     led.rows.map((r) => `${runtimeLabel(r.runtime)} / ${r.provider || '?'} / ${r.model}: ${r.runs} run(s) · ${r.costUsd != null ? '$' + r.costUsd.toFixed(4) + (r.costSource === 'estimated' ? ' (est)' : '') : 'cost —'}`).join('\n') : 'No usage recorded yet.';
 }
@@ -477,6 +481,9 @@ async function noLimitDataReason() {
 // 0%), and while runs are live, providers whose members are all idle render dimmed. Until usageStatus
 // carries a providers list, the classic 5h/weekly meter below renders instead.
 const prettyProvider = (id) => id.charAt(0).toUpperCase() + id.slice(1);
+// "weekly" is the only label too wide for a two-provider header — abbreviate on display only;
+// tooltips and titles keep the full label.
+const shortWindowLabel = (l) => (l === 'weekly' ? 'wk' : l);
 function normProviderWindow(w) {
   if (!w || typeof w !== 'object') return null;
   let pct = w.pct != null ? Number(w.pct) : (Number(w.limit) > 0 && w.used != null ? Number(w.used) / Number(w.limit) : null);
@@ -489,7 +496,7 @@ function normProviderEntry(e, i) {
   const windows = (Array.isArray(e.windows) ? e.windows : []).map(normProviderWindow).filter(Boolean);
   return {
     provider: String(e.provider || e.id || `provider ${i + 1}`),
-    plan: e.plan ? String(e.plan) : null,
+    plan: e.plan && String(e.plan).toLowerCase() !== 'unknown' ? String(e.plan) : null,
     unknown: !windows.some((w) => w.pct != null) || e.status === 'unknown',
     reason: e.reason ? String(e.reason) : null,
     windows,
@@ -505,17 +512,22 @@ function providerChipHtml(p, idle) {
   const head = `<b>${esc(prettyProvider(p.provider))}</b>${p.plan ? ` <small class="lm-plan">${esc(p.plan)}</small>` : ''}`;
   if (p.unknown) {
     const why = p.reason || 'the provider CLI reports no usage windows';
-    return `<span class="lm-part lm-chip lm-unknown${idle ? ' lm-idle' : ''}" data-provider="${esc(p.provider)}" title="${esc(prettyProvider(p.provider))}${p.plan ? ` · ${esc(p.plan)}` : ''} — limits unknown: ${esc(why)}">${head} <small>limits unknown</small></span>`;
+    return `<span class="lm-part lm-chip lm-unknown${idle ? ' lm-idle' : ''}" data-provider="${esc(p.provider)}" title="${esc(prettyProvider(p.provider))}${p.plan ? ` · ${esc(p.plan)}` : ''} — limits unknown: ${esc(why)}">${head} <small>· limits unknown</small></span>`;
   }
   const cls = p.pause ? 'lm-danger' : p.warn ? 'lm-warn' : 'lm-ok';
-  const win = (w) => {
+  // Space rule: only the first window carries the inline bar + reset countdown; further windows are
+  // label + % (their reset lives in the chip's title). Two fully-dressed windows cannot share the
+  // header with a second provider chip at 1400px — that squeeze is what garbled the chips before.
+  const win = (w, full) => {
     const pct = Math.min(100, Math.round(w.pct * 100)); const ms = resetIn(w);
     const resetTitle = ms > 0 ? ` · resets in ${fmtCountdown(ms)}` : '';
-    const resetChip = ms > 0 ? `<small>↻${fmtCountdown(ms)}</small>` : '';
-    return `<span class="lm-win" title="${esc(w.label)}: ${pct}% used${resetTitle}"><b>${esc(w.label)}</b> ${pct}%<i class="lm-bar"><i class="lm-fill" style="width:${pct}%"></i></i>${resetChip}</span>`;
+    const resetChip = full && ms > 0 ? `<small>↻${fmtCountdown(ms)}</small>` : '';
+    const bar = full ? `<i class="lm-bar"><i class="lm-fill" style="width:${pct}%"></i></i>` : '';
+    return `<span class="lm-win" title="${esc(w.label)}: ${pct}% used${resetTitle}"><b>${esc(shortWindowLabel(w.label))}</b> ${pct}%${bar}${resetChip}</span>`;
   };
-  const full = p.windows.map((w) => `${w.label}: ${Math.min(100, Math.round(w.pct * 100))}% used${resetIn(w) > 0 ? ` · resets in ${fmtCountdown(resetIn(w))}` : ''}`).join(' · ');
-  return `<span class="lm-part lm-chip ${cls}${idle ? ' lm-idle' : ''}" data-provider="${esc(p.provider)}" title="${esc(prettyProvider(p.provider))}${p.plan ? ` · ${esc(p.plan)}` : ''} — ${esc(full)}">${head} ${p.windows.filter((w) => w.pct != null).map(win).join('')}</span>`;
+  const full = p.windows.filter((w) => w.pct != null);
+  const all = full.map((w) => `${w.label}: ${Math.min(100, Math.round(w.pct * 100))}% used${resetIn(w) > 0 ? ` · resets in ${fmtCountdown(resetIn(w))}` : ''}`).join(' · ');
+  return `<span class="lm-part lm-chip ${cls}${idle ? ' lm-idle' : ''}" data-provider="${esc(p.provider)}" title="${esc(prettyProvider(p.provider))}${p.plan ? ` · ${esc(p.plan)}` : ''} — ${esc(all)}">${head} ${full.map((w, i) => win(w, i === 0)).join('')}</span>`;
 }
 async function renderLimitMeter() {
   let st; try { st = await call('usageStatus'); } catch { st = null; }
