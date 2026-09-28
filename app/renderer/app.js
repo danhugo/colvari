@@ -60,6 +60,9 @@ function pfDetail(n) {
 let lastV = null, lastVProject = null, runsChanged = true;
 const sameVersion = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 async function refresh() {
+  // Update in flight (see updFrozen near the self-update code): keep the last known-good snapshot
+  // on screen — fetch and swap nothing; just keep the veil/chip current (status pushes do too).
+  if (updFrozen()) { await loadSelfUpdate(); renderSelfUpdate(); return; }
   // Fetch into locals first; only swap the live P/S/ctx (and render) once everything required succeeds,
   // so a failed/partial IPC round-trip can't blank out a good previous render.
   const prevCtx = ctx;
@@ -1338,7 +1341,7 @@ function renderSettings() {
     const on = ev.target.checked;
     try {
       let r; try { r = await squad.call('setAutoRestart', ctx, on); } catch { r = await squad.call('setAutoRestart', on); }
-      upd = { ...normUpd(r), stub: false };
+      upd = { ...normUpd(r), stub: false }; trackUpd();
     } catch { upd = { ...upd, enabled: on, stub: true }; } // backend not merged yet: keep a local stub so the control still responds
     renderSelfUpdate(); renderUpdSettings();
   });
@@ -1349,6 +1352,18 @@ function renderSettings() {
 // lands, the UI runs on a local stub (marked as such) so the toggle, chip and history stay usable.
 const UPD_STATES = { pending: 'update pending', draining: 'waiting for agents', testing: 'testing new code', restarting: 'restarting', failed: 'update failed' };
 let upd = { state: 'idle', enabled: false, history: [], stub: true };
+// (t_9dea9325) While an update runs, this app can share its store with mixed-version processes:
+// once the watcher ff-merges, newly spawned children run the NEW code while the app still runs the
+// old — and a new-code store open can migrate files away mid-run (board.json was renamed to .bak
+// under the live app, whose old-code reads then silently returned an empty board, and the
+// change-driven layer swapped that emptiness onto the screen). While the veil is up — and for a
+// grace period after it hides, since children also spawn right after an aborted update — keep the
+// last known-good snapshot instead of trusting what a mid-update read returns.
+const UPD_FREEZE_GRACE_MS = 60 * 1000;
+let updLiveAt = 0;
+const updIsLive = () => upd.state !== 'idle' && !!UPD_STATES[upd.state];
+const updFrozen = () => updIsLive() || Date.now() - updLiveAt < UPD_FREEZE_GRACE_MS;
+const trackUpd = () => { if (updIsLive()) updLiveAt = Date.now(); };
 const shortSha = (s) => String(s || '').slice(0, 7);
 // Defensive about the exact payload shape (Devon's task is still in flight): state/phase aliases,
 // from/to vs fromSha/toSha, history vs restarts, and per-row {ts,why,from,to,result|ok}.
@@ -1375,14 +1390,14 @@ const normUpd = (d) => {
 async function loadSelfUpdate() {
   try {
     let d; try { d = await squad.call('getSelfUpdateStatus', ctx); } catch { d = await squad.call('getSelfUpdateStatus'); }
-    upd = { ...normUpd(d), stub: false };
+    upd = { ...normUpd(d), stub: false }; trackUpd();
   } catch { upd = { ...upd, stub: true }; } // no backend yet: keep the last known (stub) state
 }
 // waitingOn arrives as a count from the watcher; older shapes may pass a list of nodes.
 const updWaitingCount = (w) => (typeof w === 'number' ? w : Array.isArray(w) ? w.length : 0);
 function renderSelfUpdate() {
   const c = $('#updst'); if (!c) return;
-  const live = upd.state !== 'idle' && UPD_STATES[upd.state];
+  const live = updIsLive();
   c.classList.toggle('hidden', !live);
   if (!live) { renderUpdVeil(false); return; }
   c.className = 'pill upd-' + upd.state;
@@ -1688,7 +1703,7 @@ $('#inbox-side').onclick = () => showTab('inbox');
 // ---------- live updates ----------
 let pending = null, pendingP = null;
 // Self-update status push: prefer the dedicated bridge method, fall back to either plausible channel name.
-const onUpdPush = (d) => { upd = { ...normUpd(d), stub: false }; renderSelfUpdate(); renderUpdSettings(); };
+const onUpdPush = (d) => { upd = { ...normUpd(d), stub: false }; trackUpd(); renderSelfUpdate(); renderUpdSettings(); };
 if (squad.onSelfUpdateStatus) squad.onSelfUpdateStatus(onUpdPush);
 else { squad.on('selfUpdateStatus', onUpdPush); squad.on('self-update-status', onUpdPush); }
 squad.on('log', (l) => { logs.push(l); if (logs.length > 8000) logs.splice(0, 1000); renderLog(); renderLive(); });
