@@ -434,3 +434,49 @@ header .pill { border:none; background:none; color:var(--fg-muted); font-size:va
 .uv-phase { font-size:var(--text-sm); }
 .uv-meta { font-size:var(--text-xs); color:var(--fg-muted); } .uv-meta code { font-family:var(--font-mono); }
 .uv-note { font-size:var(--text-xs); color:var(--warning-text); background:var(--warning-soft); border-radius:var(--radius-xs); padding:5px 9px; }
+
+/* ---------- subagents: nested collapsible blocks in Logs/Overview/Chat + agent-card badge (t_d716779d) ---------- */
+/* Logs: a subagent call renders as one block (header + its child rows); nested subagents indent. */
+.subblock { border:1px solid var(--line); border-left:3px solid var(--acc); border-radius:var(--radius-sm, 6px); margin:3px 0; background:color-mix(in srgb, var(--acc) 3%, transparent); }
+.subblock .subblock { margin-left:14px; }
+.subhead { display:flex; align-items:center; gap:7px; padding:3px 8px; cursor:pointer; font-size:12px; user-select:none; }
+.subhead:hover { background:color-mix(in srgb, var(--acc) 6%, transparent); }
+.subcaret { color:var(--muted); width:10px; display:inline-block; }
+.subicon { font-size:11px; }
+.subdesc { font-weight:var(--fw-semibold); color:var(--fg); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:340px; }
+.submeta { color:var(--muted); font-size:11px; font-variant-numeric:tabular-nums; white-space:nowrap; }
+.subcount { color:var(--muted); font-size:11px; background:var(--bg-code); border:1px solid var(--line); border-radius:var(--radius-full); padding:0 7px; white-space:nowrap; }
+.substatus { font-size:10px; border-radius:var(--radius-full); padding:1px 7px; border:1px solid var(--line); color:var(--muted); text-transform:uppercase; letter-spacing:.4px; white-space:nowrap; }
+.substatus.ss-running { color:var(--warning-text); background:var(--warning-soft); border-color:transparent; }
+.substatus.ss-running::before { content:''; display:inline-block; width:6px; height:6px; margin-right:4px; border-radius:50%; background:var(--warning); animation:subpulse 1.2s ease-in-out infinite; }
+.substatus.ss-completed { color:var(--success-text); background:var(--success-soft); border-color:transparent; }
+.substatus.ss-failed { color:var(--danger); background:var(--danger-soft); border-color:transparent; }
+.substatus.ss-aborted { color:var(--fg-muted); background:var(--bg-code); border-color:transparent; text-decoration:line-through; }
+@keyframes subpulse { 0%,100% { opacity:.25; } 50% { opacity:1; } }
+.subrows { padding:1px 4px 4px 8px; }
+.subrows .logrow { font-size:11.5px; }
+.subrows .logtime, .subrows .logagent { display:none; } /* keep nested rows compact: the block header carries who/when */
+.subrows .subblock { background:var(--card); }
+
+/* Overview task thread variant: native <details> so open state survives the 1s re-render */
+#ov-thread .subthread, #ov-thread details.subthread { border:1px solid var(--line); border-left:3px solid var(--acc); border-radius:var(--radius-sm, 6px); margin:4px 0; background:color-mix(in srgb, var(--acc) 3%, transparent); }
+#ov-thread .subthread.d1 { margin-left:14px; background:var(--card); }
+#ov-thread .subthread > summary { list-style:none; cursor:pointer; display:flex; align-items:center; gap:6px; padding:4px 8px; font-size:12px; }
+#ov-thread .subthread > summary::-webkit-details-marker { display:none; }
+#ov-thread .subthread > summary:hover { background:color-mix(in srgb, var(--acc) 6%, transparent); }
+#ov-thread .subthread .subrows { padding:2px 6px 6px 10px; }
+#ov-thread .subthread .chip { margin:3px 0; }
+
+/* Chat: one compact collapsible chip per subagent — never a flood of child tool bubbles */
+.cchip.subagent > summary { display:inline-flex; align-items:center; gap:6px; color:var(--acc); }
+.cchip.subagent .subevents { background:var(--bg-code); border:1px solid var(--line); border-radius:var(--radius-sm, 6px); padding:5px 8px; margin:4px 0; max-width:720px; font-size:11.5px; }
+.cchip.subagent .sev { padding:1px 0; color:var(--fg-secondary); word-break:break-word; }
+.cchip.subagent .sev + .sev { border-top:1px dashed var(--line); }
+.cchip.subagent .sev-tool { color:var(--term-yellow); }
+
+/* Agent cards (Team graph + Overview): count + tokens chip, bottom-right inside the card */
+#graph .subbadge rect, #ov-graph .subbadge rect { fill:var(--bg-code); stroke:var(--border-strong); }
+#graph .subbadge text, #ov-graph .subbadge text { font-size:9px; fill:var(--fg-secondary); font-family:var(--font-mono); }
+.cchip.subagent.child { margin-left:14px; }
+.cchip.subagent.child > summary { color:var(--fg-secondary); }
+.cchip.subagent .sev-res { color:var(--term-green); }
