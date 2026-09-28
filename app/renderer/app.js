@@ -438,22 +438,24 @@ function renderHeader() {
   const o = S.orch; const par = o.running ? runningIds().length : 0;
   $('#runstate').textContent = o.running ? `running · ${par > 1 ? `${par} in parallel` : `${par || 1} agent`} · ${o.runs || 0} runs` : 'idle';
   $('#runstate').classList.toggle('on', !!o.running);
-  // Money pill: only runs billed per token (API key / proxy / cloud) show a $ figure; subscription-only sessions show a quiet "subscription" pill.
-  // Derived from the same per-run ledger the Usage tab shows so the pill can never contradict the
-  // tab's grand total (the orchestrator's session counters miss runs it did not dispatch — seeded,
-  // imported or resumed history); falls back to those counters only before any runs are loaded.
-  let billed = 0, sub = 0;
+  // Money pill: the app's single cost total — API-eq over ALL recorded runs, the same per-run ledger
+  // sum the Usage tab's grand total shows, so pill and tab can never disagree (t_b1115e48). The
+  // billed vs subscription split stays in the tooltip: subscription usage is covered by the plan,
+  // not billed per token, but its API-eq is part of the total for comparability across accounts.
+  let billed = 0, sub = 0, total = 0;
   if (RUNS.length) {
-    for (const r of RUNS) { const rc = runLedger(r).reduce((s2, e) => s2 + (e.costUsd || 0), 0);
-      if ((r.billingSource || 'auto') === 'subscription') sub += rc; else billed += rc; }
-  } else { billed = o.billedCost || 0; sub = o.subCost || 0; }
+    for (const r of RUNS) { const isSub = (r.billingSource || 'auto') === 'subscription';
+      for (const e of runLedger(r)) { const rc = e.costUsd || 0; total += rc; if (isSub) sub += rc; else billed += rc; } }
+  } else { billed = o.billedCost || 0; sub = o.subCost || 0; total = billed + sub; }
   const c = $('#totalcost');
-  c.textContent = billed > 0 ? `API-eq $${billed.toFixed(2)}` : sub > 0 ? 'subscription' : 'no cost yet';
+  c.textContent = total > 0 ? `API-eq $${total.toFixed(2)}` : 'no cost yet';
   // An empty placeholder pill is dead weight in an already tight header — hide it until it has
   // something to say (the meter chips need every pixel at 1400px).
-  c.classList.toggle('hidden', !(billed > 0) && !(sub > 0));
+  c.classList.toggle('hidden', !(total > 0));
   c.classList.toggle('quiet', !(billed > 0));
-  c.title = (billed > 0 ? `API-equivalent $${billed.toFixed(4)} for API key / proxy / cloud runs — the same ledger the Usage tab shows (est = list-price estimate).` : 'No per-token billed runs this session.') + (sub > 0 ? ` Subscription runs: covered by subscription — not billed per token (API-equivalent $${sub.toFixed(4)}).` : '');
+  c.title = total > 0
+    ? `API-eq (API-equivalent) $${total.toFixed(4)} — what all recorded usage would cost at API list prices; the same single total the Usage tab's grand total shows. Actually billed per token (API key / proxy / cloud): $${billed.toFixed(4)}. Covered by subscription, not billed per token: $${sub.toFixed(4)}. "est" marks list-price estimates for keys that report no cost themselves.`
+    : 'No recorded usage yet.';
   // Ledger pill: usage is tracked per {runtime, provider, model} key and token sums across models
   // are meaningless, so the pill shows the ledger's shape (distinct models · runs); hover for per-key rows.
   const led = (o.ledger && o.ledger.rows && o.ledger.rows.length) ? o.ledger : (RUNS.length ? ledgerFromRuns(RUNS) : { rows: [] }); const tt = $('#totaltokens');
@@ -1381,11 +1383,36 @@ function sumRuns(rs) {
 // columns exist ONLY per key and are never summed across models — cost is the only grand total,
 // and a key whose cost is unknown renders "—", never a guessed $0.
 function runLedger(r) {
-  if (Array.isArray(r.ledger) && r.ledger.length) return r.ledger;
+  // Billing is detected per run at finish (detectBilling); stamp it onto every entry so account
+  // grouping (t_b1115e48) can attribute each key to the account that actually paid for it.
+  const bill = { billingSource: r.billingSource || 'unknown', billingDetail: r.billingDetail || '', apiKeySource: r.apiKeySource || null };
+  if (Array.isArray(r.ledger) && r.ledger.length) return r.ledger.map((e) => (e.billingSource ? e : { ...bill, ...e }));
   if (!r || !(r.inputTokens || r.outputTokens || r.cacheReadTokens || r.cacheCreationTokens)) return [];
   const cost = r.reportedCostUsd > 0 ? r.reportedCostUsd : null;
-  return [{ runtime: r.runtime || 'unknown', provider: r.provider || '', model: r.model || (r.models && r.models[0]) || 'unknown',
+  return [{ ...bill, runtime: r.runtime || 'unknown', provider: r.provider || '', model: r.model || (r.models && r.models[0]) || 'unknown',
     inputTokens: r.inputTokens || 0, outputTokens: r.outputTokens || 0, cacheReadTokens: r.cacheReadTokens || 0, cacheCreationTokens: r.cacheCreationTokens || 0, costUsd: cost, costSource: cost != null ? 'reported' : 'unknown' }];
+}
+// One usage row per ACCOUNT (t_b1115e48): an account is where the money actually goes — billing
+// source + its detail (which login, API key or endpoint) — not the CLI's provider label, and the
+// literal "unknown" never surfaces as an account or provider name. A runtime-less legacy run folds
+// into the Claude subscription account only when its model is claude-* (they predate runtime
+// tracking but billing was still detected); anything else stays an explicit "Unattributed" row
+// instead of being silently folded into a guessed account (Cato, t_fd822d04 #2).
+function accountOf(e) {
+  let rt = e.runtime, src = e.billingSource;
+  const legacy = !rt || rt === 'unknown';
+  if (legacy && /^claude([-\s:]|$)/i.test(e.model || '')) { rt = 'claude'; if (!src || src === 'unknown') src = 'subscription'; }
+  const label = runtimeLabel(rt);
+  const bySrc = {
+    subscription: { name: `${label} subscription`, detail: e.billingDetail || 'subscription login (not billed per token)' },
+    api: { name: `${label} API key`, detail: e.billingDetail || e.apiKeySource || 'per-token API billing' },
+    proxy: { name: `${label} proxy`, detail: e.billingDetail || (e.provider && e.provider !== 'unknown' ? e.provider : 'proxy endpoint') },
+    bedrock: { name: `${label} on AWS Bedrock`, detail: e.billingDetail || 'AWS Bedrock' },
+    vertex: { name: `${label} on Google Vertex`, detail: e.billingDetail || 'Google Vertex AI' },
+  }[src] || (rt && rt !== 'unknown'
+    ? { name: `${label} — billing undetected`, detail: e.billingDetail || 'the run published no init event, so its billing channel could not be detected' }
+    : { name: 'Unattributed', detail: 'legacy run with no runtime and no billing info — shown separately, never folded into a guessed account' });
+  return { key: `${src || 'unknown'}¦${bySrc.detail}¦${rt || ''}`, name: bySrc.name, detail: bySrc.detail + (legacy ? ' · includes legacy runs recorded before runtimes were tracked' : ''), rt, legacy, billingSource: src || 'unknown' };
 }
 // Aggregate runs into ledger rows keyed {runtime, provider, model} — same shape as the backend
 // usageLedger (src/usage.js). Used for the filtered views; unfiltered renderUsage prefers the
@@ -1396,11 +1423,18 @@ function ledgerFromRuns(rs) {
     row.runs++; for (const k of F) if (e[k] != null) row[k] = (row[k] || 0) + e[k];
     if (e.costUsd != null) { row.costUsd = (row.costUsd || 0) + e.costUsd; row[e.costSource === 'estimated' ? 'estimated' : 'reported']++; } else row.unknown++;
     map.set(gk, row); };
-  const top = new Map(), byAgent = new Map(), byTask = new Map();
+  const top = new Map(), byAgent = new Map(), byTask = new Map(); const accts = new Map();
   for (const r of rs) for (const e of runLedger(r)) {
     add(top, `${e.runtime}¦${e.provider}¦${e.model}`, e);
     add(byAgent, `${r.agent || r.nodeId || 'unknown'}¦${e.runtime}¦${e.provider}¦${e.model}`, e);
     if (r.taskId) add(byTask, `${r.taskId}¦${e.runtime}¦${e.provider}¦${e.model}`, e);
+    // Account view (t_b1115e48): the same entries grouped by the account that paid, model keys
+    // nested. Folded legacy rows display (and merge) under their attributed runtime, so the same
+    // Claude subscription no longer splits into "claude" and "unknown" rows.
+    const a = accountOf(e);
+    const acc = accts.get(a.key) || { key: a.key, name: a.name, detail: a.detail, billingSource: a.billingSource, rows: new Map() };
+    add(acc.rows, `${a.rt}¦${e.provider}¦${e.model}`, a.legacy ? { ...e, runtime: a.rt } : e);
+    accts.set(a.key, acc);
   }
   const finish = (m) => [...m.values()].map(({ reported, estimated, unknown, ...row }) => ({ ...row,
     costSource: reported && estimated ? 'mixed' : estimated ? 'estimated' : reported ? 'reported' : 'unknown',
@@ -1408,7 +1442,17 @@ function ledgerFromRuns(rs) {
   const nest = (m) => { const o = {}; for (const row of finish(m)) { const i = row.key.indexOf('¦'); (o[row.key.slice(0, i)] ||= []).push({ ...row, key: row.key.slice(i + 1) }); } return o; };
   const rows = finish(top);
   const costUsd = rows.reduce((a, r) => a + (r.costUsd || 0), 0);
-  return { rows, byAgent: nest(byAgent), byTask: nest(byTask), costUsd, costPartial: rows.some((r) => r.costSource === 'unknown' || r.costPartial) };
+  // One aggregate per account: runs + raw cost sum of its keys' known costs (null when no key has a
+  // usable cost — missing $ is never rounded into a guessed zero), costSource mixed from the keys.
+  const accounts = [...accts.values()].map((a) => { const arows = finish(a.rows).sort((x, y) => (y.costUsd || 0) - (x.costUsd || 0) || String(x.model).localeCompare(String(y.model)));
+      const known = arows.filter((r) => r.costUsd != null); const rep = arows.filter((r) => r.costSource === 'reported' || r.costSource === 'mixed').length; const est = arows.filter((r) => r.costSource === 'estimated' || r.costSource === 'mixed').length;
+      return { key: a.key, name: a.name, detail: a.detail, billingSource: a.billingSource, rows: arows,
+        runtime: arows[0] && arows[0].runtime, runs: arows.reduce((s, r) => s + r.runs, 0),
+        costUsd: known.length ? known.reduce((s, r) => s + r.costUsd, 0) : null,
+        costSource: rep && est ? 'mixed' : est ? 'estimated' : rep ? 'reported' : 'unknown',
+        costPartial: arows.some((r) => r.costSource === 'unknown' || r.costPartial) }; })
+    .sort((x, y) => (y.costUsd || 0) - (x.costUsd || 0) || x.name.localeCompare(y.name));
+  return { rows, byAgent: nest(byAgent), byTask: nest(byTask), accounts, costUsd, costPartial: rows.some((r) => r.costSource === 'unknown' || r.costPartial) };
 }
 const rowTokTotal = (row) => (row.inputTokens || 0) + (row.outputTokens || 0) + (row.cacheReadTokens || 0) + (row.cacheCreationTokens || 0);
 const estTag = (t) => ` <span class="costnote est" title="${t}">est</span>`;
@@ -1424,16 +1468,23 @@ function runCostCell(r) {
   if (!known.length) return `<span class="costnote" title="${!es.length ? 'no usage reported for this run' : 'tokens recorded, but no cost reported or estimable'}">—</span>`;
   return `$${known.reduce((a, e) => a + e.costUsd, 0).toFixed(4)}${known.some((e) => e.costSource === 'estimated') ? estTag('estimated from list prices') : ''}${known.length < es.length ? ' <span class="costnote" title="some model keys of this run report no cost">partial</span>' : ''}`;
 }
-// The primary table: one row per ledger key, grouped runtime → provider → model (each runtime group
-// start gets a heavier top border). Token columns are strictly per key.
-function vendorTable(rows) {
-  let last = null;
-  return `<table><tr><th>Runtime</th><th>Provider</th><th>Model</th><th>Runs</th><th>In</th><th>Out</th><th>Cache read</th><th>Cache write</th><th>Total tok</th><th>Cost</th></tr>` +
-    rows.map((row) => { const g = row.runtime !== last ? ' class="us-gstart"' : ''; last = row.runtime;
-      return `<tr${g}><td>${esc(runtimeLabel(row.runtime))}</td><td>${esc(row.provider || '—')}</td><td title="${esc(row.model)}">${esc(row.model || '?')}</td><td class="num">${row.runs}</td><td class="num">${row.inputTokens}</td><td class="num">${row.outputTokens}</td><td class="num">${row.cacheReadTokens ?? '—'}</td><td class="num">${row.cacheCreationTokens ?? '—'}</td><td class="num"><b>${rowTokTotal(row)}</b></td><td>${ledgerCostCell(row)}</td></tr>`; }).join('') + '</table>';
+// The primary table (t_b1115e48): one row per ACCOUNT — where the money actually goes (billing
+// source + its detail) — with that account's model keys nested beneath it. Token columns stay
+// strictly per key on the nested rows; the account row carries only runs + cost (raw sum of its
+// keys' known costs, rounded once at display). Providers render "—", never the CLI's "unknown".
+function accountTable(accounts) {
+  const prov = (p) => (p && p !== 'unknown' ? esc(p) : '—');
+  const bill = (a) => a.billingSource && a.billingSource !== 'unknown' ? billTag(a.billingSource, a.detail)
+    : '<span class="costnote" title="billing source undetected — the run published no init event">undetected</span>';
+  return `<table><tr><th>Account</th><th>Billing</th><th>Runs</th><th>In</th><th>Out</th><th>Cache read</th><th>Cache write</th><th>Total tok</th><th>Cost</th></tr>` +
+    accounts.map((a) => `<tr class="us-acct"><td title="${esc(a.detail)}"><b>${esc(a.name)}</b></td><td>${bill(a)}</td><td class="num">${a.runs}</td><td colspan="5" class="us-acct-note">tokens stay per model key — see nested rows</td><td>${ledgerCostCell(a)}</td></tr>` +
+      a.rows.map((row) => `<tr class="us-acct-key"><td class="muted">↳ ${row.runtime && row.runtime !== 'unknown' ? esc(runtimeLabel(row.runtime)) : '—'} · ${prov(row.provider)} · <span title="${esc(row.model)}">${esc(row.model || '?')}</span></td><td></td><td class="num">${row.runs}</td><td class="num">${row.inputTokens}</td><td class="num">${row.outputTokens}</td><td class="num">${row.cacheReadTokens ?? '—'}</td><td class="num">${row.cacheCreationTokens ?? '—'}</td><td class="num"><b>${rowTokTotal(row)}</b></td><td>${ledgerCostCell(row)}</td></tr>`).join('')).join('') + '</table>';
 }
-// hero: last-14-days cost bars (reported vs estimated — token sums across models are not offered) + headline numbers
-function usageHero(rs, led) {
+// hero: last-14-days cost bars (reported vs estimated — token sums across models are not offered) + headline numbers.
+// o = { global, filtered }: the app-wide ledger total + whether a filter is active, so the grand total
+// can show its scope (the header pill always reads the app-wide number — same field, same sum).
+function usageHero(rs, led, o) {
+  const EQ = 'API-eq (API-equivalent): what this usage would cost at API list prices. Billed = what you are actually invoiced per token (API key / proxy / cloud). Subscription usage is covered by your plan — not billed per token — but its API-eq still counts here so every account stays comparable.';
   const DAYS = 14, day = 864e5, t0 = new Date(); t0.setHours(0, 0, 0, 0); const start = t0.getTime() - (DAYS - 1) * day;
   const b = Array.from({ length: DAYS }, (_, i) => ({ d: new Date(start + i * day), rep: 0, est: 0, runs: 0 }));
   for (const r of rs) { const i = Math.floor((new Date(r.startedAt).getTime() - start) / day); if (i < 0 || i >= DAYS) continue; b[i].runs++;
@@ -1444,12 +1495,13 @@ function usageHero(rs, led) {
   const bars = b.map((x, i) => { const hr = x.rep / max * 100, he = x.est / max * 100; if (!hr && !he) return `<g><title>${x.d.toLocaleDateString()} · no usage</title></g>`;
     return `<g><title>${x.d.toLocaleDateString()} · $${(x.rep + x.est).toFixed(2)} (${x.runs} run${x.runs === 1 ? '' : 's'})${x.est ? ' · includes estimates' : ''}</title><rect class="usb-est" x="${i * W + W * .15}" y="${100 - he - hr}" width="${W * .7}" height="${he}"/><rect class="usb-rep" x="${i * W + W * .15}" y="${100 - hr}" width="${W * .7}" height="${hr}"/></g>`; }).join('');
   const today = b[DAYS - 1];
+  const scope = o && o.filtered && o.global != null && Math.abs(o.global - led.costUsd) > 0.005 ? ` · all runs $${o.global.toFixed(2)} (the header pill)` : 'the app’s single cost total — same number as the header pill';
   return `<div class="us-hero"><div class="us-kpis">
-    <div><small>Cost, today</small><b>$${(today.rep + today.est).toFixed(2)}</b><small>${today.runs} run${today.runs === 1 ? '' : 's'} today</small></div>
-    <div><small>Cost, grand total</small><b>$${led.costUsd.toFixed(2)}</b><small>${led.costPartial ? 'partial — some keys report no cost' : 'the only total offered: tokens stay per model key'}</small></div>
+    <div><small>API-eq, today</small><b title="${esc(EQ)}">$${(today.rep + today.est).toFixed(2)}</b><small>${today.runs} run${today.runs === 1 ? '' : 's'} today</small></div>
+    <div><small>API-eq, grand total</small><b title="${esc(EQ)}">$${led.costUsd.toFixed(2)}</b><small>${led.costPartial ? 'partial — some keys report no cost · ' : ''}${scope}</small></div>
     <div><small>Avg cost / run</small><b>$${(rs.length ? led.costUsd / rs.length : 0).toFixed(2)}</b><small>across ${rs.length} recorded run${rs.length === 1 ? '' : 's'}</small></div>
     <div><small>Model keys</small><b>${led.rows.length}</b><small>runtime · provider · model combinations</small></div>
-  </div><div class="us-chart"><div class="us-chart-head"><small>Cost, last ${DAYS} days</small><span class="us-leg"><i class="usb-rep"></i>reported <i class="usb-est"></i>estimated</span></div>
+  </div><div class="us-chart"><div class="us-chart-head"><small>API-eq, last ${DAYS} days</small><span class="us-leg"><i class="usb-rep"></i>reported <i class="usb-est"></i>estimated</span></div>
   <svg viewBox="0 0 100 100" preserveAspectRatio="none">${bars}</svg><div class="us-axis"><small>${b[0].d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</small><small>today</small></div></div></div>`;
 }
 // ranked share bars, per model: token-based (a per-model total is legitimate — it never mixes models)
@@ -1506,8 +1558,13 @@ function renderUsage() {
   const rs = RUNS.filter((r) => (!fa.value || r.nodeId === fa.value) && (!fb || r.billingSource === fb));
   const s = sumRuns(rs);
   // Unfiltered views use the backend ledger (canonical model ids); filtered ones aggregate the same
-  // way client-side (ledgerFromRuns mirrors src/usage.js usageLedger).
+  // way client-side (ledgerFromRuns mirrors src/usage.js usageLedger). The backend ledger has no
+  // account split yet (it lands with the backend grouping task), so the By-account table always
+  // aggregates client-side from the same per-run entries — same entries, same cost totals.
   const led = (fa.value || fb) ? ledgerFromRuns(rs) : (S.orch.ledger || ledgerFromRuns(rs));
+  const filtered = !!(fa.value || fb);
+  const accounts = led.accounts || ledgerFromRuns(rs).accounts;
+  const globalCost = RUNS.reduce((a, r) => a + runLedger(r).reduce((s2, e) => s2 + (e.costUsd || 0), 0), 0);
   const agentName = (id) => { const r = RUNS.find((x) => x.nodeId === id); return S.allNodes.some((n) => n.id === id) ? nodeName(id) : (r && r.agent) || id; };
   const taskName = (id) => { const t = S.tasks.find((x) => x.id === id); const r = RUNS.find((x) => x.taskId === id); return (t && t.title) || (r && r.task) || id || '(none)'; };
   const mism = rs.filter((r) => r.billingMismatch).length;
@@ -1519,10 +1576,10 @@ function renderUsage() {
     .map((x) => ({ ...x, sub: `${x.models} model key${x.models === 1 ? '' : 's'}`, title: `${x.runs} run${x.runs === 1 ? '' : 's'} · cost only — tokens would cross models here` }));
   const agBars = Object.entries(led.byAgent).map(([name, rows2]) => { const top = rows2.slice().sort((a, b) => rowTokTotal(b) - rowTokTotal(a))[0];
     return { name, cost: rows2.some((r) => r.costUsd != null) ? rows2.reduce((a, r) => a + (r.costUsd || 0), 0) : null, sub: `${rows2.length} key${rows2.length === 1 ? '' : 's'} · top: ${top && top.model}`, title: `${name}: per-key rows under Detailed tables` }; });
-  $('#us-summary').innerHTML = usageHero(rs, led) + `
-  <div class="us-vendor"><small>The usage ledger — one row per runtime · provider · model. Token columns are strictly per key (never summed across models); cost is the only grand total. "—" marks keys whose cost is unknown, "est" marks list-price estimates.</small><h4>By vendor</h4>${led.rows.length ? vendorTable(led.rows) : '<p class="muted">No usage recorded yet.</p>'}</div>
+  $('#us-summary').innerHTML = usageHero(rs, led, { global: globalCost, filtered }) + `
+  <div class="us-vendor"><small>One row per account — where the money actually goes (billing source + its detail: which login, API key or endpoint) — with each account's model keys nested beneath. Token columns stay strictly per key (never summed across models); cost is the only grand total. "—" marks keys whose cost is unknown, "est" marks list-price estimates.</small><h4>By account</h4>${accounts.length ? accountTable(accounts) : '<p class="muted">No usage recorded yet.</p>'}</div>
   <div class="cards">
-    <div class="stat" id="us-cost"><small>Cost — the only grand total</small><b>$${led.costUsd.toFixed(4)}</b><small>$${s.billed.toFixed(4)} billed per token (API key / proxy / cloud) · $${s.sub.toFixed(4)} on ${rs.filter((r) => r.billingSource === 'subscription').length} subscription run(s), covered${led.costPartial ? '<br><span class="warn">Partial: some model keys report no cost — their $ is missing, not zero</span>' : ''}</small></div>
+    <div class="stat" id="us-cost"><small>API-eq — the only grand total</small><b>$${led.costUsd.toFixed(4)}</b><small>$${s.billed.toFixed(4)} billed per token (API key / proxy / cloud) · $${s.sub.toFixed(4)} on ${rs.filter((r) => r.billingSource === 'subscription').length} subscription run(s), covered${led.costPartial ? '<br><span class="warn">Partial: some model keys report no cost — their $ is missing, not zero</span>' : ''}</small></div>
     <div class="stat"><small>Runs</small><b>${s.runs}</b><small>${['agent', 'check', 'preflight'].map((k) => `${rs.filter((r) => (r.kind || 'agent') === k).length} ${k}`).join(' · ')} · ${s.numTurns} turns</small></div>
     <div class="stat"><small>Cost sources</small><b>${cs.reported} reported${cs.estimated ? ` · ${cs.estimated} est` : ''}</b><small>${cs.unknown ? `${cs.unknown} key${cs.unknown === 1 ? '' : 's'} with unknown cost render as —` : cs.estimated ? 'est = list-price estimate for keys that report no cost themselves' : 'every key reports its own cost'}</small></div>
     <div class="stat"><small>Tracking</small><b>${led.rows.length} model key${led.rows.length === 1 ? '' : 's'}</b><small>${S.orch.usageSince ? `since ${new Date(S.orch.usageSince).toLocaleDateString()} · ` : ''}tokens are never summed across models</small></div>

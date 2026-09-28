@@ -537,6 +537,11 @@ rect.usb-rep, i.usb-rep { fill:var(--accent); background:var(--accent); } rect.u
 .us-vendor > small { color:var(--fg-muted); font-size:var(--text-xs); display:block; margin-bottom:2px; }
 .us-vendor h4 { margin:4px 0; }
 .us-gstart td { border-top:2px solid var(--border-strong); }
+/* By-account table (t_b1115e48): account rows visually group their nested per-model-key rows */
+.us-acct td { border-top:2px solid var(--border-strong); background:var(--bg-hover); }
+.us-acct td:first-child { padding-left:8px; }
+.us-acct-note { color:var(--fg-muted); font-size:var(--text-xs); text-align:center; }
+.us-acct-key td { color:var(--fg-secondary); }
 .costnote.est { color:var(--warning-text); font-weight:600; }
 .usr-top { display:flex; justify-content:space-between; gap:8px; font-size:var(--text-sm, 13px); }
 .usr-name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; } .usr small { color:var(--fg-muted); }
