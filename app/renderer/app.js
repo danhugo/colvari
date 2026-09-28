@@ -1517,7 +1517,7 @@ function modelBars(rows) {
     sub: [...new Set(v.map((r) => runtimeLabel(r.runtime) + (r.provider ? ' · ' + r.provider : '')))].join(', ') })).sort((a, b) => b.tot - a.tot);
   const max = Math.max(1, ...list.map((x) => x.tot));
   return `<div class="us-card"><h4>By model</h4>${list.map((x) => `<div class="usr" title="${x.runs} run${x.runs === 1 ? '' : 's'} of this model · ${fmtTok(x.io)} in/out · ${fmtTok(x.cache)} cache — tokens are never summed across models">
-    <div class="usr-top"><span class="usr-name">${esc(x.name)}<small>${esc(x.sub)}</small></span><span class="usr-val"><b>${fmtTok(x.tot)}</b>${x.anyCost ? ` <small>$${x.cost.toFixed(2)}</small>` : ''}</span></div>
+    <div class="usr-top"><span class="usr-name">${esc(x.name)} <small>${esc(x.sub)}</small></span><span class="usr-val"><b>${fmtTok(x.tot)}</b>${x.anyCost ? ` <small>$${x.cost.toFixed(2)}</small>` : ''}</span></div>
     <i class="usr-bar"><i class="usr-io" style="width:${x.io / max * 100}%"></i><i class="usr-cache" style="width:${x.cache / max * 100}%"></i></i></div>`).join('') || '<p class="muted">No runs yet.</p>'}</div>`;
 }
 // cost-ranked share bars for grains where token sums would cross models (runtime, agent): $ is the only comparable total
@@ -1525,7 +1525,7 @@ function costBars(title, entries) {
   const list = entries.slice().sort((a, b) => (b.cost || 0) - (a.cost || 0));
   const max = Math.max(1, ...list.map((x) => x.cost || 0));
   return `<div class="us-card"><h4>${title}</h4>${list.map((x) => `<div class="usr" title="${esc(x.title)}">
-    <div class="usr-top"><span class="usr-name">${esc(x.name)}<small>${esc(x.sub)}</small></span><span class="usr-val"><b>${x.cost != null && x.cost > 0 ? '$' + x.cost.toFixed(2) : '—'}</b></span></div>
+    <div class="usr-top"><span class="usr-name">${esc(x.name)} <small>${esc(x.sub)}</small></span><span class="usr-val"><b>${x.cost != null && x.cost > 0 ? '$' + x.cost.toFixed(2) : '—'}</b></span></div>
     <i class="usr-bar"><i class="usr-usd" style="width:${(x.cost || 0) / max * 100}%"></i></i></div>`).join('') || '<p class="muted">No runs yet.</p>'}</div>`;
 }
 // folded detail tables: per key everywhere except billing source, which is cost-only (its token sums

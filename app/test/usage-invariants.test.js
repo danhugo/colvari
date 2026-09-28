@@ -13,7 +13,7 @@ const U = require('../src/usage');
 // The fixture reproduces the live bug trio: ONE Claude subscription seen as three rows
 // ("Claude · firstParty", "Claude · subscription", "unknown · firstParty · claude-opus-5-5").
 // Renderer-level per the update-veil-freeze pattern: extract the real renderer/app.js
-// implementations (ledgerFromRuns, runLedger, usageHero, vendorTable, modelTableBlock) and
+// implementations (ledgerFromRuns, runLedger, accountOf, usageHero, accountTable, modelTableBlock) and
 // exercise them in node — no Electron, no gui-e2e.
 const src = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'app.js'), 'utf8');
 const lines = src.split('\n');
@@ -31,14 +31,16 @@ function buildRenderer() {
     grabLine('runtimeLabel', /^const runtimeLabel = /),
     // S.config is unset in this harness: canCost -> true, matching the app default for claude/unknown.
     'const canCost = () => true;',
+    grabLine('billTag', /^const billTag = /),
     grabFn('runLedger'),
+    grabFn('accountOf'),
     grabFn('ledgerFromRuns'),
     grabLine('rowTokTotal', /^const rowTokTotal = /),
     grabFn('ledgerCostCell'),
-    grabFn('vendorTable'),
+    grabFn('accountTable'),
     grabFn('modelTableBlock'),
     grabFn('usageHero'),
-    'return { runLedger, ledgerFromRuns, rowTokTotal, ledgerCostCell, vendorTable, modelTableBlock, usageHero };',
+    'return { runLedger, ledgerFromRuns, rowTokTotal, ledgerCostCell, accountTable, modelTableBlock, usageHero };',
   ];
   // A grabbed function chunk runs to the next `function` keyword, so top-level consts between two
   // grabbed functions appear twice; drop re-declarations (col-0 const/function lines only).
@@ -82,25 +84,30 @@ test('renderer ledger: no duplicate rows — the 5-run fixture collapses to exac
   assert.equal(haiku.cacheReadTokens, null, 'cache stays unknown (null), never a fabricated 0');
 });
 
-test('renderer vendor table: every key renders exactly one <tr>, merged row shows the summed cost', () => {
+test('renderer account table: every account renders exactly one <tr>, every model key exactly once', () => {
   const led = R.ledgerFromRuns(allRuns());
-  const html = R.vendorTable(led.rows);
+  assert.equal(new Set(led.accounts.map((a) => a.key)).size, led.accounts.length, 'account keys are unique');
+  const html = R.accountTable(led.accounts);
+  assert.equal((html.match(/<tr class="us-acct">/g) || []).length, led.accounts.length, 'one row per account, never one per run');
   for (const model of ['claude-sonnet-4-5', 'claude-haiku-4-5', 'claude-opus-5-5', 'mistral-large']) {
     assert.equal((html.match(new RegExp(`>${model}<`, 'g')) || []).length, 1, `${model} renders once`);
   }
-  assert.ok(html.includes('$0.0290'), 'merged subscription row shows the summed $ (0.015 + 0.014)');
+  assert.ok(html.includes('$0.0290'), 'merged subscription key shows the summed $ (0.015 + 0.014)');
   assert.ok(html.includes('$0.0140') && html.includes('$0.0130'));
+  assert.ok(html.includes('—'), 'the unpriced mistral key renders an explicit em-dash, never a guessed $0');
 });
 
 test('header grand total == Σ row costs, summed raw and rounded ONCE (never per row)', () => {
   const led = R.ledgerFromRuns(allRuns());
   assert.ok(Math.abs(led.costUsd - GRAND) < 1e-9, 'ledger total is the raw sum');
   const hero = R.usageHero(allRuns(), led);
-  const m = hero.match(/Cost, grand total<\/small><b>\$([\d.]+)</);
+  const m = hero.match(/API-eq, grand total<\/small><b[^>]*>\$([\d.]+)</);
   assert.ok(m, 'hero carries the grand-total KPI');
   assert.equal(m[1], GRAND.toFixed(2), 'header shows the raw sum rounded once');
   const perRow = led.rows.reduce((a, r) => a + +(r.costUsd != null ? r.costUsd.toFixed(2) : 0), 0);
   assert.notEqual(perRow.toFixed(2), GRAND.toFixed(2), 'rounding per row first would drift — the header must not');
+  const perAccount = led.accounts.reduce((a, r) => a + (r.costUsd || 0), 0);
+  assert.ok(Math.abs(perAccount - GRAND) < 1e-9, 'Σ account rows (raw, unknown-cost ones excluded) == grand total');
   assert.ok(hero.includes('partial — some keys report no cost'), 'unknown-cost key flags the total as partial');
   assert.ok(hero.match(/<b>4<\/b>/), 'model-key count is 4, not 5 (runs, not rows)');
 });
