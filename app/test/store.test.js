@@ -105,6 +105,23 @@ test('changing an agent role to a preset fills its empty prompt, tools and permi
   assert.equal(s.getTeam().nodes.find((x) => x.id === n.id).systemPrompt, '', 'no refill without a role change');
 });
 
+test('switching a node runtime drops its rate-limit snapshot (readings are runtime-scoped)', () => {
+  const s = tmp();
+  const n = s.addNode({ name: 'A', role: 'Dev', runtime: 'claude' });
+  const rl = { fiveHour: { pct: 0.91, resetsAt: new Date(Date.now() + 3600000).toISOString() }, weekly: { pct: 0.28, resetsAt: new Date(Date.now() + 96 * 3600000).toISOString() }, runtime: 'claude' };
+  s.updateNode(n.id, { rateLimits: rl, rateLimitsAt: new Date().toISOString() });
+  assert.equal(s.getTeam().nodes.find((x) => x.id === n.id).rateLimits.weekly.pct, 0.28);
+  // claude -> helpycode: the claude CLI's windows must not resurface as helpycode quota
+  s.updateNode(n.id, { runtime: 'helpycode' });
+  const after = s.getTeam().nodes.find((x) => x.id === n.id);
+  assert.equal(after.rateLimits, undefined);
+  assert.equal(after.rateLimitsAt, undefined);
+  // an update that doesn't touch runtime keeps the reading
+  s.updateNode(n.id, { rateLimits: rl, rateLimitsAt: new Date().toISOString() });
+  s.updateNode(n.id, { name: 'A2' });
+  assert.equal(s.getTeam().nodes.find((x) => x.id === n.id).rateLimits.weekly.pct, 0.28);
+});
+
 test('human inbox: ask_human blocks until answered, approvals create items', async () => {
   const os = require('os'); const fs = require('fs'); const path = require('path');
   const { Store } = require('../src/store'); const { makeTools } = require('../src/board-tools');
