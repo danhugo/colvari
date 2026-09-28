@@ -12,9 +12,9 @@ const { Store } = require('../src/store');
 const { buildPrompt } = require('../src/orchestrator');
 
 const tmp = () => new Store(fs.mkdtempSync(path.join(os.tmpdir(), 'squad-board-')));
-const tasksDir = (s) => path.join(s.dir, '.squad', 'board', 'tasks');
+const tasksDir = (s) => path.join(s.dir || s, '.squad', 'board', 'tasks');
 const taskFile = (s, tid) => path.join(tasksDir(s), tid + '.json');
-const wikiDir = (s) => path.join(s.dir, '.squad', 'wiki');
+const wikiDir = (s) => path.join(s.dir || s, '.squad', 'wiki');
 const readJson = (f) => JSON.parse(fs.readFileSync(f, 'utf8'));
 const listFiles = (dir) => fs.readdirSync(dir).filter((f) => !f.startsWith('.'));
 

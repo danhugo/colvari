@@ -1,5 +1,10 @@
 // JSON-file store shared by the Electron main process and MCP server processes.
-// Layout: <dir>/team.json, board.json, wiki.json, settings.json
+// Layout: <dir>/team.json, messages.json, inbox.json, runs.json, settings.json, plus a readable
+// board/wiki tree agents can cat/grep/jq: <dir>/.squad/board/tasks/<id>.json (one pretty-JSON file
+// per task — the file IS the record) and <dir>/.squad/wiki/<slug>.md (one markdown file per page;
+// title/slug/author/sha live in the hidden .pages.json index, only content in the .md).
+// Private stores (messages, inbox, runs, settings, teams) deliberately stay OUTSIDE .squad/ so
+// direct reads of the board tree never expose DMs.
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -47,7 +52,19 @@ class Store {
   file(name) { return path.join(this.dir, name + '.json'); }
   logFile() { return path.join(this.dir, 'logs.jsonl'); }
   // Cheap change fingerprint for change-driven refreshes: 'size:mtimeMs' (or '' when absent).
-  sigFile(name) { try { const st = fs.statSync(this.file(name)); return st.size + ':' + st.mtimeMs; } catch { return ''; } }
+  // 'board' and 'wiki' are directories in the per-file layout; their sig is every file's stat.
+  sigFile(name) {
+    if (name === 'board' || name === 'wiki') return this._sectionSig(name);
+    try { const st = fs.statSync(this.file(name)); return st.size + ':' + st.mtimeMs; } catch { return ''; }
+  }
+  _sectionSig(name) {
+    const dir = name === 'board' ? this.tasksDir() : this.wikiDir();
+    let ents;
+    try { ents = fs.readdirSync(dir).filter((f) => !f.startsWith('.')).sort(); } catch { return ''; }
+    let sig = '';
+    for (const f of ents) { try { const st = fs.statSync(path.join(dir, f)); sig += '|' + f + ':' + st.size + ':' + st.mtimeMs; } catch {} }
+    return sig;
+  }
   logsSig() { try { const st = fs.statSync(this.logFile()); return st.size + ':' + st.mtimeMs; } catch { return ''; } }
   // Signature of every team file in the project (+ project.json, which lists them) — covers the
   // union-of-teams "allNodes" view. Not a substitute for a per-team sig (that's sigFile(teamFile())).
@@ -85,6 +102,153 @@ class Store {
   }
   update(name, dflt, fn) {
     return this.withLock(() => { const d = this.read(name, dflt); const r = fn(d); this.write(name, d); return r; });
+  }
+
+  // ---- board/wiki file layout (.squad/) ----
+  // tmp is created in the TARGET directory (rename is only atomic within one filesystem) and
+  // fsynced before rename, so a crash never leaves a truncated file at the real path.
+  _writeFileSync(file, data) {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const tmp = path.join(path.dirname(file), '.' + path.basename(file) + '.' + process.pid + '.tmp');
+    fs.writeFileSync(tmp, data);
+    const fd = fs.openSync(tmp, 'r+');
+    try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+    fs.renameSync(tmp, file);
+  }
+  _sha256(buf) { return crypto.createHash('sha256').update(buf).digest('hex'); }
+  tasksDir() { return path.join(this.dir, '.squad', 'board', 'tasks'); }
+  taskFile(tid) { return path.join(this.tasksDir(), tid + '.json'); }
+  wikiDir() { return path.join(this.dir, '.squad', 'wiki'); }
+  _wikiIndexPath() { return path.join(this.wikiDir(), '.pages.json'); }
+  _hashesFile() { return path.join(this.dir, '.squad', 'board', '.hashes.json'); }
+  _readHashes() { try { return JSON.parse(fs.readFileSync(this._hashesFile(), 'utf8')); } catch { return null; } }
+  _saveHashes(h) { this._writeFileSync(this._hashesFile(), JSON.stringify(h, null, 2)); }
+  // sha256 bookkeeping per task file: lets the next load detect (and log) out-of-band edits —
+  // hand edits would otherwise silently diverge from what the board tools handed out.
+  _recordHash(file, data) {
+    const h = this._readHashes() || {};
+    h[path.basename(file)] = this._sha256(data);
+    this._saveHashes(h);
+  }
+  // Callers hold the .lock (all writes happen inside _withTasks/_migrate/withLock).
+  _writeTask(t) {
+    const data = JSON.stringify(t, null, 2) + '\n';
+    this._writeFileSync(this.taskFile(t.id), data);
+    this._recordHash(t.id + '.json', data);
+  }
+  _unlinkTask(tid) {
+    try { fs.unlinkSync(this.taskFile(tid)); } catch {}
+    const h = this._readHashes();
+    if (h && h[tid + '.json']) { delete h[tid + '.json']; this._saveHashes(h); }
+  }
+  _taskFiles() { try { return fs.readdirSync(this.tasksDir()).filter((f) => !f.startsWith('.') && f.endsWith('.json')).sort(); } catch { return []; } }
+  // Readers race writers by design (agents cat/jq these files directly), so any single file may
+  // be missing or half-swapped: tolerate and skip instead of failing the whole listing.
+  _readTaskFile(f) { try { return JSON.parse(fs.readFileSync(path.join(this.tasksDir(), f), 'utf8')); } catch { return null; } }
+  // Read-modify-write over the whole task set under ONE lock hold. fn mutates the array in place
+  // (push/splice/field edits); tasks whose JSON changed are rewritten, removed ids unlinked.
+  _withTasks(fn) {
+    this._ensureBoard();
+    return this.withLock(() => {
+      const tasks = this._taskFiles().map((f) => this._readTaskFile(f)).filter(Boolean);
+      const before = new Map(tasks.map((t) => [t.id, JSON.stringify(t)]));
+      const r = fn(tasks);
+      for (const t of tasks) if (JSON.stringify(t) !== before.get(t.id)) this._writeTask(t);
+      const ids = new Set(tasks.map((t) => t.id));
+      for (const tid0 of before.keys()) if (!ids.has(tid0)) this._unlinkTask(tid0);
+      return r;
+    });
+  }
+  // One-time per process: heal an interrupted migration, then verify out-of-board edits.
+  // Lock is taken per step here; callers must NOT already hold it.
+  _ensureBoard() {
+    if (this._boardReady) return;
+    this._migrate();
+    this._verifyTaskIntegrity();
+    this._boardReady = true;
+  }
+  _ensureWiki() {
+    if (this._wikiReady) return;
+    this._migrate();
+    this._verifyWikiIntegrity();
+    this._wikiReady = true;
+  }
+  _migrate() {
+    if (this._migrated) return;
+    this._migrated = true;
+    this.withLock(() => { this._migrateBoard(); this._migrateWiki(); });
+  }
+  _migrateBoard() {
+    const old = this.read('board', null);
+    const oldTasks = old && Array.isArray(old.tasks) ? old.tasks.filter((t) => t && t.id) : null;
+    if (!oldTasks) return;
+    const have = new Set(this._taskFiles().map((f) => f.replace(/\.json$/, '')));
+    // New store wins: per-file records that already exist are kept, only the missing ones are
+    // (re)written — so an interrupted migration heals without duplicating or clobbering.
+    for (const t of oldTasks) if (!have.has(t.id)) this._writeTask(t);
+    // Retire the old file only when every old task has a file; otherwise leave it for the next open.
+    if (this._taskFiles().length < oldTasks.length) return;
+    const bak = this.file('board') + '.bak-' + new Date().toISOString().replace(/[:.]/g, '-');
+    try { fs.renameSync(this.file('board'), bak); } catch { return; }
+    this._snapshotTaskHashes();
+    this._logStore(`migrated board.json -> .squad/board/tasks/ (${oldTasks.length} tasks${have.size ? `, ${have.size} already on disk kept` : ''}); old file kept as ${path.basename(bak)}`);
+  }
+  _migrateWiki() {
+    const old = this.read('wiki', null);
+    const pages = old && old.pages && typeof old.pages === 'object' ? old.pages : null;
+    if (!pages) return;
+    const idx = this._readWikiIndex();
+    for (const [title, p] of Object.entries(pages)) if (!idx[title]) idx[title] = this._writeWikiPage(title, p.content || '', p.author || '', p.updatedAt || null);
+    this._saveWikiIndex(idx);
+    if (Object.keys(idx).length < Object.keys(pages).length) return;
+    const bak = this.file('wiki') + '.bak-' + new Date().toISOString().replace(/[:.]/g, '-');
+    try { fs.renameSync(this.file('wiki'), bak); } catch { return; }
+    this._logStore(`migrated wiki.json -> .squad/wiki/ (${Object.keys(pages).length} pages); old file kept as ${path.basename(bak)}`);
+  }
+  // Baseline the hash map from disk (migration just wrote everything; nothing to warn about).
+  _snapshotTaskHashes() {
+    const h = {};
+    for (const f of this._taskFiles()) { try { h[f] = this._sha256(fs.readFileSync(path.join(this.tasksDir(), f))); } catch {} }
+    try { this._saveHashes(h); } catch {}
+  }
+  _verifyTaskIntegrity() {
+    this.withLock(() => {
+      try {
+        const hashes = this._readHashes();
+        if (!hashes) { this._snapshotTaskHashes(); return; } // first open of a per-file store: adopt as baseline
+        const seen = new Set();
+        let changed = false;
+        for (const f of this._taskFiles()) {
+          seen.add(f);
+          let h = null;
+          try { h = this._sha256(fs.readFileSync(path.join(this.tasksDir(), f))); } catch { continue; }
+          if (hashes[f] && hashes[f] !== h) this._logStore(`out-of-band edit: .squad/board/tasks/${f} was modified outside the board tools; adopting the file as-is`);
+          else if (!hashes[f]) this._logStore(`out-of-band file: .squad/board/tasks/${f} appeared outside the board tools; adopting it as a task`);
+          if (hashes[f] !== h) { hashes[f] = h; changed = true; }
+        }
+        for (const f of Object.keys(hashes)) if (!seen.has(f)) { this._logStore(`out-of-band delete: .squad/board/tasks/${f} is gone`); delete hashes[f]; changed = true; }
+        if (changed) this._saveHashes(hashes);
+      } catch {}
+    });
+  }
+  _verifyWikiIntegrity() {
+    this.withLock(() => {
+      try {
+        const idx = this._readWikiIndex();
+        let changed = false;
+        for (const [title, e] of Object.entries(idx)) {
+          let h = null;
+          try { h = this._sha256(fs.readFileSync(path.join(this.wikiDir(), e.slug + '.md'))); } catch { continue; }
+          if (e.hash && e.hash !== h) this._logStore(`out-of-band edit: .squad/wiki/${e.slug}.md (wiki "${title}") was modified outside the board tools; adopting the file as-is`);
+          if (e.hash !== h) { e.hash = h; changed = true; }
+        }
+        if (changed) this._saveWikiIndex(idx);
+      } catch {}
+    });
+  }
+  _logStore(text) {
+    try { console.warn('[store] ' + text); } catch {}
+    try { this.appendLog({ at: Date.now(), nodeId: null, kind: 'store.integrity', text }); } catch {}
   }
 
   // ---- team ----
@@ -177,17 +341,19 @@ class Store {
 
   // ---- board ----
   listTasks(filter = {}) {
-    let ts = this.read('board', { tasks: [] }).tasks;
+    this._ensureBoard();
+    let ts = this._taskFiles().map((f) => this._readTaskFile(f)).filter(Boolean)
+      .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)) || String(a.id).localeCompare(String(b.id)));
     if (filter.status) ts = ts.filter((t) => t.status === filter.status);
     if (filter.assignee) ts = ts.filter((t) => t.assignee === filter.assignee);
     return ts;
   }
-  getTask(tid) { return this.listTasks().find((t) => t.id === tid); }
+  getTask(tid) { this._ensureBoard(); return this._readTaskFile(tid + '.json') || undefined; }
   createTask({ title, description = '', assignee = null, createdBy = 'human', parentId = null, blockedBy = [], priority }) {
     if (!title) throw new Error('title required');
     const now = new Date().toISOString();
     const task = { id: id('t'), title, description, assignee, status: 'todo', priority: C.normalizePriority(priority), createdBy, parentId, blockedBy: [], comments: [], createdAt: now, updatedAt: now };
-    this.update('board', { tasks: [] }, (b) => { task.blockedBy = C.validateDeps(task.id, blockedBy, b.tasks); b.tasks.push(task); });
+    this._withTasks((tasks) => { task.blockedBy = C.validateDeps(task.id, blockedBy, tasks); tasks.push(task); });
     return task;
   }
   updateTask(tid, patch) {
@@ -247,24 +413,24 @@ class Store {
     return [...roots].flatMap((root) => WT.unmergedSquadBranches(root));
   }
   _updateTask(tid, patch) {
-    return this.update('board', { tasks: [] }, (b) => {
-      const t = b.tasks.find((x) => x.id === tid); if (!t) throw new Error('no task ' + tid);
+    return this._withTasks((tasks) => {
+      const t = tasks.find((x) => x.id === tid); if (!t) throw new Error('no task ' + tid);
       if (patch.status && !STATUSES.includes(patch.status)) throw new Error('bad status ' + patch.status);
-      if (patch.blockedBy !== undefined) t.blockedBy = C.validateDeps(tid, patch.blockedBy, b.tasks);
+      if (patch.blockedBy !== undefined) t.blockedBy = C.validateDeps(tid, patch.blockedBy, tasks);
       if (patch.status && patch.status !== 'review') t.awaitingApproval = false;
       if (patch.priority !== undefined) t.priority = C.normalizePriority(patch.priority);
       for (const k of ['title', 'description', 'assignee', 'status', 'sessionId', 'iterations', 'awaitingApproval', 'reopenCount', 'worktreePath', 'worktreeBranch', 'isConflictResolution', 'conflictBranch', 'conflictRetries', 'parkedForHuman', 'stallRecoveries']) if (patch[k] !== undefined) t[k] = patch[k];
       t.updatedAt = new Date().toISOString();
       // Parent auto-complete: when the last open subtask is done, the parent moves to done.
       for (let c = t; c.status === 'done' && c.parentId;) {
-        const parent = b.tasks.find((x) => x.id === c.parentId);
-        if (!parent || parent.status === 'done' || b.tasks.some((x) => x.parentId === parent.id && x.status !== 'done')) break;
+        const parent = tasks.find((x) => x.id === c.parentId);
+        if (!parent || parent.status === 'done' || tasks.some((x) => x.parentId === parent.id && x.status !== 'done')) break;
         parent.status = 'done'; parent.awaitingApproval = false; parent.updatedAt = t.updatedAt; c = parent;
       }
       return t;
     });
   }
-  deleteTask(tid) { this.update('board', { tasks: [] }, (b) => { b.tasks = b.tasks.filter((t) => t.id !== tid); for (const t of b.tasks) if (t.blockedBy) t.blockedBy = t.blockedBy.filter((x) => x !== tid); }); }
+  deleteTask(tid) { this._withTasks((tasks) => { const i = tasks.findIndex((t) => t.id === tid); if (i >= 0) tasks.splice(i, 1); for (const t of tasks) if (t.blockedBy) t.blockedBy = t.blockedBy.filter((x) => x !== tid); }); }
   // Human approval gate: approve -> done, reject -> todo (with the note as a comment, so the agent reworks it).
   approveTask(tid, approve = true, note = '') {
     const t = this.getTask(tid); if (!t) throw new Error('no task ' + tid);
@@ -304,8 +470,8 @@ class Store {
     return this.getInboxItem(iid);
   }
   commentTask(tid, author, text) {
-    return this.update('board', { tasks: [] }, (b) => {
-      const t = b.tasks.find((x) => x.id === tid); if (!t) throw new Error('no task ' + tid);
+    return this._withTasks((tasks) => {
+      const t = tasks.find((x) => x.id === tid); if (!t) throw new Error('no task ' + tid);
       const c = { author, text, at: new Date().toISOString() }; t.comments.push(c); t.updatedAt = c.at; return c;
     });
   }
@@ -328,14 +494,71 @@ class Store {
     this.update('messages', { messages: [] }, (d) => { for (const m of d.messages) if (set.has(m.id)) m.read = true; });
   }
 
-  // ---- wiki ----
-  listWiki() { return this.read('wiki', { pages: {} }).pages; }
+  // ---- wiki (one readable .md per page; the index keeps title/slug/author/hash) ----
+  // Slug: flatten the title to a safe single path segment, plus a hash of the EXACT title so
+  // case-insensitive filesystems never merge two pages ('API Design' vs 'api design').
+  _wikiSlug(title) {
+    const base = String(title).replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^[-.]+|[-.]+$/g, '').slice(0, 64) || 'page';
+    return base + '-' + this._sha256(String(title)).slice(0, 8);
+  }
+  _readWikiIndex() { try { return JSON.parse(fs.readFileSync(this._wikiIndexPath(), 'utf8')) || {}; } catch { return {}; } }
+  _saveWikiIndex(idx) { fs.mkdirSync(this.wikiDir(), { recursive: true }); this._writeFileSync(this._wikiIndexPath(), JSON.stringify(idx, null, 2)); }
+  _wikiFiles() { try { return fs.readdirSync(this.wikiDir()).filter((f) => !f.startsWith('.') && f.endsWith('.md')).sort(); } catch { return []; } }
+  _writeWikiPage(title, content, author, updatedAt) {
+    fs.mkdirSync(this.wikiDir(), { recursive: true });
+    const data = String(content ?? '');
+    const slug = this._wikiSlug(title);
+    this._writeFileSync(path.join(this.wikiDir(), slug + '.md'), data);
+    return { slug, author: author || '', updatedAt: updatedAt || new Date().toISOString(), hash: this._sha256(data) };
+  }
+  listWiki() {
+    this._ensureWiki();
+    const idx = this._readWikiIndex();
+    // .md files with no index entry were dropped there out-of-band: adopt (never silently drop).
+    this.withLock(() => {
+      const known = new Set(Object.values(idx).map((e) => e.slug + '.md'));
+      let changed = false;
+      for (const f of this._wikiFiles()) {
+        if (known.has(f)) continue;
+        let content = '';
+        try { content = fs.readFileSync(path.join(this.wikiDir(), f), 'utf8'); } catch { continue; }
+        const title = f.replace(/\.md$/, '');
+        idx[title] = { slug: title, author: 'unknown', updatedAt: new Date().toISOString(), hash: this._sha256(content) };
+        this._logStore(`out-of-band file: .squad/wiki/${f} appeared outside the board tools; adopting it as wiki page "${title}"`);
+        changed = true;
+      }
+      if (changed) this._saveWikiIndex(idx);
+    });
+    const pages = {};
+    for (const [title, e] of Object.entries(idx)) {
+      let content = null;
+      try { content = fs.readFileSync(path.join(this.wikiDir(), e.slug + '.md'), 'utf8'); } catch {}
+      if (content === null) continue; // vanished mid-rename or deleted: skip, never crash a reader
+      pages[title] = { title, content, author: e.author || '', updatedAt: e.updatedAt || null };
+    }
+    return pages;
+  }
   readWiki(title) { return this.listWiki()[title] || null; }
   writeWiki(title, content, author = 'human') {
     if (!title) throw new Error('title required');
-    return this.update('wiki', { pages: {} }, (w) => { w.pages[title] = { title, content, author, updatedAt: new Date().toISOString() }; return w.pages[title]; });
+    this._ensureWiki();
+    return this.withLock(() => {
+      const idx = this._readWikiIndex();
+      idx[title] = this._writeWikiPage(title, content, author, new Date().toISOString());
+      this._saveWikiIndex(idx);
+      return { title, content, author, updatedAt: idx[title].updatedAt };
+    });
   }
-  deleteWiki(title) { this.update('wiki', { pages: {} }, (w) => { delete w.pages[title]; }); }
+  deleteWiki(title) {
+    this._ensureWiki();
+    this.withLock(() => {
+      const idx = this._readWikiIndex();
+      const e = idx[title];
+      delete idx[title];
+      this._saveWikiIndex(idx);
+      if (e) { try { fs.unlinkSync(path.join(this.wikiDir(), e.slug + '.md')); } catch {} }
+    });
+  }
   // Page list without body content, newest first: [{title, author, updatedAt}].
   listWikiSummaries() {
     return Object.values(this.listWiki())

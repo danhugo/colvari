@@ -76,6 +76,7 @@ function buildPrompt(team, node, task, extra = {}) {
     (task.blockedBy || []).length ? `This task depended on: ${task.blockedBy.join(', ')} (all done now; read their comments with list_tasks if useful).` : '',
     task.comments.length ? `Comments so far:\n${task.comments.map((c) => `- ${c.author}: ${c.text}`).join('\n')}` : '',
     '',
+    `Board files: every task is one pretty-JSON file at .squad/board/tasks/<id>.json and every wiki page one markdown file at .squad/wiki/<slug>.md${extra.boardDir ? ` — this project's store dir: ${extra.boardDir}` : ''}. Read them freely with cat/grep/jq; write only via the board tools — never create or edit these files directly. Private data (direct messages, inbox) is kept outside .squad/.`,
     `Coordinate ONLY through the "board" MCP tools (${tools.join(', ')}).`,
     tools.includes('update_task_status') && extra.deferDone ? `This task runs in loop mode (${extra.deferDone}). Do NOT call update_task_status with status="done" in this pass${tools.includes('comment_task') ? '; you may add a short comment on what you did' : ''}. The orchestrator repeats the task and you will be told when the final pass comes.` : '',
     tools.includes('update_task_status') && !extra.deferDone ? `When you have finished your part, ${tools.includes('comment_task') ? 'add a short comment summarising what you did and ' : ''}call update_task_status with taskId=${task.id} and status="done".` : '',
@@ -696,9 +697,9 @@ class Orchestrator extends EventEmitter {
     const unread = this.store.listMessages({ to: node.id }).filter((m) => !m.read).length;
     let cfg; let base = null; let baseDefer = null;
     try {
-      cfg = normalizeNode(applyPreset(node, presets)); base = buildPrompt(team, node, task, { presets, unread });
+      cfg = normalizeNode(applyPreset(node, presets)); base = buildPrompt(team, node, task, { presets, unread, boardDir: this.store.dir });
       const lm = normalizeMode(cfg); // loop mode: every pass but the last is told not to mark the task done
-      baseDefer = lm.mode === 'loop' && lm.loopCount > 1 ? buildPrompt(team, node, task, { presets, unread, deferDone: `${lm.loopCount} passes` }) : base;
+      baseDefer = lm.mode === 'loop' && lm.loopCount > 1 ? buildPrompt(team, node, task, { presets, unread, boardDir: this.store.dir, deferDone: `${lm.loopCount} passes` }) : base;
     } catch (e) { cfg = { env: {}, mode: 'single' }; this.log(node.id, 'error', 'bad agent settings: ' + e.message); }
     const m = normalizeMode(cfg);
     // Workflow mode: only the task text follows the slash command ($ARGUMENTS); the team context goes in --append-system-prompt.
