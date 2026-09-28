@@ -911,7 +911,9 @@ class Orchestrator extends EventEmitter {
     const bill = U.applyBillingEnv(cfg, this.env(cfg));
     const a = this.agent(node.id); a.preflight = 'testing'; this.changed();
     this.log(node.id, 'system', `⚑ preflight ${node.name}: model=${cfg.model || 'default'} perms=${cfg.permissionMode || settings.permissionMode}`);
-    const usage = U.newRun({ projectId: this.store.meta() ? this.store.meta().id : null, nodeId: node.id, agent: node.name, kind: 'preflight', task: 'preflight', runtime: node.runtime || 'unknown', billingMode: cfg.billingMode || 'auto' });
+    // runtime-less nodes run the claude CLI here (only falsy/claude runtimes reach this path) —
+    // stamp that, not 'unknown', so usage rows key the claude account instead of an unattributed one
+    const usage = U.newRun({ projectId: this.store.meta() ? this.store.meta().id : null, nodeId: node.id, agent: node.name, kind: 'preflight', task: 'preflight', runtime: node.runtime || 'claude', billingMode: cfg.billingMode || 'auto' });
     const t0 = Date.now(); let r;
     try {
       r = await PF.runPreflight({ cfg, settings, mcp: this.mcpConfig(node), cwd, env: bill.env, onEvent: (ev) => U.applyEvent(usage, ev) });

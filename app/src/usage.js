@@ -94,13 +94,25 @@ function resolveEntryCost(e) {
   if (est != null) { e.costUsd = est; e.costSource = 'estimated'; } else { e.costUsd = null; e.costSource = 'unknown'; }
   return e;
 }
-// Ledger key provider: the CLI's own modelUsage label (claude: "firstParty"), else the proxy host
+// Ledger key provider — the ACCOUNT a run's cost belongs to (t_f514cc2e), not the CLI's label
+// vocabulary. For subscription-billed runs every label means the same claude.ai login (modelUsage
+// says "firstParty", the channel fallback says "subscription"), so both collapse to 'subscription':
+// one account, one row. Otherwise: the CLI's own modelUsage label (claude API keys also report
+// "firstParty" — kept distinct from the subscription account on purpose), else the proxy host
 // (multi-vendor channels: the vendor is already prefixed in the model id), else the model id's org
-// prefix, else the billing channel.
+// prefix, else the billing channel. Two distinct logins on the same channel (two API keys on
+// "firstParty") can't be told apart from what CLIs report and share a row by design.
 function providerOf({ muProvider, providerHint, billingSource, proxyHost }) {
-  const CH = { subscription: 'subscription', api: 'api', proxy: 'proxy', bedrock: 'bedrock', vertex: 'vertex' };
+  if (billingSource === 'subscription') return 'subscription';
+  const CH = { api: 'api', proxy: 'proxy', bedrock: 'bedrock', vertex: 'vertex' };
   return muProvider || (billingSource === 'proxy' && proxyHost) || providerHint || CH[billingSource] || 'unknown';
 }
+
+// Runtime attribution for entries that predate the runtime stamp (from when claude was the only
+// runtime). A claude-* model id proves the claude CLI; anything else stays an explicit 'unknown'
+// (unattributed) row instead of being folded silently into a wrong account.
+const accountRuntime = (runtime, model) => (runtime && runtime !== 'unknown') ? runtime
+  : /^claude/i.test(String(model || '')) ? 'claude' : 'unknown';
 
 // Tokens + models from a result event. modelUsage (per model, includes sub-agents) wins over usage.
 function tokensFromResult(ev = {}) {
@@ -228,7 +240,9 @@ function applyEvent(run, ev) {
 // One run's ledger entries, from its accumulated per-model split (claude: real per-model tokens/cost
 // from modelUsage) or — for runtimes without per-model reporting (codex, profile CLIs) — a single
 // entry from the flat totals. costUsd starts as the raw reported value; resolveEntryCost decides
-// reported/estimated/unknown. Entries with no tokens at all are dropped.
+// reported/estimated/unknown. Entries with no tokens at all are dropped. Each entry also carries
+// `billed` — the part of its cost actually billed per token: $0 for subscription runs (covered by
+// the plan; the $0 is known, not missing), else the same value as costUsd, null when that is unknown.
 function buildLedger(run, { proxyHost = null } = {}) {
   const primary = canonModel(run.model || (run.models && run.models[0]) || '');
   const flat = () => {
@@ -245,13 +259,13 @@ function buildLedger(run, { proxyHost = null } = {}) {
     if (!(tokens.inputTokens + tokens.outputTokens + (tokens.cacheReadTokens || 0) + (tokens.cacheCreationTokens || 0))) continue;
     const c = canonModel(e.canonicalModel || rawModel);
     const hint = c.providerHint || (rawModel === primary.model ? primary.providerHint : null);
-    entries.push({ runtime: run.runtime || 'unknown', provider: providerOf({ muProvider: e.provider, providerHint: hint, billingSource: run.billingSource, proxyHost }), model: c.model, ...tokens, costUsd: e.costUsd });
+    entries.push({ runtime: accountRuntime(run.runtime, c.model), provider: providerOf({ muProvider: e.provider, providerHint: hint, billingSource: run.billingSource, proxyHost }), model: c.model, ...tokens, costUsd: e.costUsd });
   }
   // Whole-run cost with no per-model split (resumed-run fallbacks, CLIs without modelUsage cost):
   // attribute it to the primary model's entry rather than losing or splitting it.
   const main = entries.find((e) => e.model === primary.model) || entries[0];
   if (main && main.costUsd == null && run.reportedCostUsd > 0) { main.costUsd = run.reportedCostUsd; }
-  for (const e of entries) resolveEntryCost(e);
+  for (const e of entries) { resolveEntryCost(e); e.billed = run.billingSource === 'subscription' ? 0 : (e.costUsd != null ? e.costUsd : null); }
   return entries;
 }
 function finishRun(run, { code, env, billingMode, startedMs } = {}) {
@@ -310,46 +324,57 @@ function modelStats(runs = [], tasks = []) {
   return out;
 }
 
-// Usage ledger aggregate over persisted runs (t_3318ff63). One row per {runtime, provider, model}
-// key, plus the same per-key rows grouped per agent (run.agent name) and per task (run.taskId).
+// Usage ledger aggregate over persisted runs (t_3318ff63). One row per account
+// {runtime, provider, model} key — provider is the paying account (see providerOf), and legacy
+// runtime-less entries attribute to claude when their model id is claude-* (see accountRuntime) —
+// plus the same per-key rows grouped per agent (run.agent name) and per task (run.taskId).
 // Rows carry the four token types SEPARATELY — never a token total: cache fields stay null when no
-// contributing run reported them (unknown ≠ 0). Cost may be totalled; `costUsd` sums the known
-// contributions and `costPartial` flags that unknown-cost rows exist (their $ is missing, not zero).
+// contributing run reported them (unknown ≠ 0). Cost is defined once (t_f514cc2e): per row `apiEq`
+// is the API-equivalent $ (reported by the CLI or list-price estimated), null when unknown;
+// `billed` is the part actually billed per token — $0 for subscription rows (covered by the plan),
+// else the same value as apiEq. Totals are the raw (unrounded) sums of the per-row fields — never
+// recomputed from rounded rows; `costUsd` is kept as the original name for apiEq.
 // Shape:
 //   rows: [{ runtime, provider, model, runs, inputTokens, outputTokens, cacheReadTokens,
-//            cacheCreationTokens, costUsd, costSource: 'reported'|'estimated'|'mixed'|'unknown',
-//            costPartial }]
+//            cacheCreationTokens, costUsd, apiEq, billed,
+//            costSource: 'reported'|'estimated'|'mixed'|'unknown', costPartial }]
 //   byAgent: { [agent]: rows }   byTask: { [taskId]: { task, rows } }
-//   costUsd, costPartial          — $ totals across all keys (the only offered totals)
+//   costUsd, apiEq, billed, costPartial — $ totals across all keys (apiEq === costUsd)
 function usageLedger(runs = []) {
   const TOKEN_FIELDS = ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheCreationTokens'];
   const newRow = (e) => ({ runtime: e.runtime, provider: e.provider, model: e.model, runs: 0,
     inputTokens: 0, outputTokens: 0, cacheReadTokens: null, cacheCreationTokens: null,
-    costUsd: null, reported: 0, estimated: 0, unknown: 0 });
-  const add = (map, gk, e) => {
+    costUsd: null, billed: 0, reported: 0, estimated: 0, unknown: 0, billedUnknown: 0 });
+  const add = (map, gk, e, sub) => {
     let row = map.get(gk);
     if (!row) { row = { ...newRow(e), key: gk }; map.set(gk, row); }
     row.runs++;
     for (const k of TOKEN_FIELDS) if (e[k] != null) row[k] = (row[k] || 0) + e[k];
     if (e.costUsd != null) { row.costUsd = (row.costUsd || 0) + e.costUsd; row[e.costSource === 'estimated' ? 'estimated' : 'reported']++; }
     else row.unknown++;
+    if (!sub) { if (e.costUsd != null) row.billed += e.costUsd; else row.billedUnknown++; }
+    // subscription runs contribute a KNOWN $0 (covered by the plan), never an unknown
   };
-  const finish = (map) => [...map.values()].map(({ reported, estimated, unknown, ...row }) => ({
+  const finish = (map) => [...map.values()].map(({ reported, estimated, unknown, billedUnknown, ...row }) => ({
     ...row,
+    apiEq: row.costUsd,
+    billed: billedUnknown > 0 && row.billed === 0 ? null : row.billed, // all non-sub contributions unpriced -> unknown, not $0
     costSource: reported && estimated ? 'mixed' : estimated ? 'estimated' : reported ? 'reported' : 'unknown',
     costPartial: unknown > 0 && row.costUsd != null,
   })).sort((a, b) => (a.runtime + a.provider + a.model).localeCompare(b.runtime + b.provider + b.model));
   const top = new Map(), byAgent = new Map(), byTask = new Map();
   for (const r of runs) {
+    const sub = r.billingSource === 'subscription';
     for (const e0 of ledgerEntriesOf(r)) {
-      // canonicalize the model id at the aggregate layer too, so entries persisted before a
-      // canonicalization fix (dated suffixes, org prefixes) still collapse into one row
+      // canonicalize the account key at the aggregate layer too, so entries persisted before the
+      // normalization fixes (dated suffixes, org prefixes, runtime-less rows, firstParty-vs-
+      // subscription labels) still collapse into one row
       const model = canonModel(e0.model).model;
-      const e = model === e0.model ? e0 : { ...e0, model };
+      const e = { ...e0, model, runtime: accountRuntime(e0.runtime, model), provider: providerOf({ muProvider: e0.provider, billingSource: r.billingSource }) };
       const gk = `${e.runtime}¦${e.provider}¦${model}`;
-      add(top, gk, e);
-      add(byAgent, `${r.agent || r.nodeId || 'unknown'}¦${gk}`, e);
-      if (r.taskId) add(byTask, `${r.taskId}¦${gk}`, e);
+      add(top, gk, e, sub);
+      add(byAgent, `${r.agent || r.nodeId || 'unknown'}¦${gk}`, e, sub);
+      if (r.taskId) add(byTask, `${r.taskId}¦${gk}`, e, sub);
     }
   }
   const nest = (map) => {
@@ -359,8 +384,9 @@ function usageLedger(runs = []) {
   };
   const rows = finish(top);
   const costUsd = rows.reduce((a, r) => a + (r.costUsd || 0), 0);
+  const billed = rows.reduce((a, r) => a + (r.billed || 0), 0);
   const costPartial = rows.some((r) => r.costSource === 'unknown' || r.costPartial);
-  return { rows, byAgent: nest(byAgent), byTask: nest(byTask), costUsd, costPartial };
+  return { rows, byAgent: nest(byAgent), byTask: nest(byTask), costUsd, apiEq: costUsd, billed, costPartial };
 }
 // One run's ledger entries: the persisted split, or — for pre-ledger stragglers that escaped the
 // migration — a synthesized single entry from the flat totals (never crashes, never mis-splits).
@@ -368,8 +394,10 @@ function ledgerEntriesOf(r) {
   if (Array.isArray(r.ledger) && r.ledger.length) return r.ledger;
   if (!r || !(r.inputTokens || r.outputTokens || r.cacheReadTokens || r.cacheCreationTokens)) return [];
   const c = canonModel(r.model || (r.models && r.models[0]) || '');
-  return [resolveEntryCost({ runtime: r.runtime || 'unknown', provider: providerOf({ providerHint: c.providerHint, billingSource: r.billingSource, proxyHost: null }), model: c.model,
-    inputTokens: r.inputTokens || 0, outputTokens: r.outputTokens || 0, cacheReadTokens: r.cacheReadTokens || 0, cacheCreationTokens: r.cacheCreationTokens || 0, costUsd: r.reportedCostUsd > 0 ? r.reportedCostUsd : null })];
+  const e = resolveEntryCost({ runtime: accountRuntime(r.runtime, c.model), provider: providerOf({ providerHint: c.providerHint, billingSource: r.billingSource, proxyHost: null }), model: c.model,
+    inputTokens: r.inputTokens || 0, outputTokens: r.outputTokens || 0, cacheReadTokens: r.cacheReadTokens || 0, cacheCreationTokens: r.cacheCreationTokens || 0, costUsd: r.reportedCostUsd > 0 ? r.reportedCostUsd : null });
+  e.billed = r.billingSource === 'subscription' ? 0 : (e.costUsd != null ? e.costUsd : null);
+  return [e];
 }
 
 const CSV_COLS = ['startedAt', 'endedAt', 'durationMs', 'projectId', 'kind', 'agent', 'nodeId', 'task', 'taskId', 'model', 'models', 'inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheCreationTokens', 'totalTokens', 'numTurns', 'billingMode', 'billingSource', 'billingDetail', 'apiKeySource', 'reportedCostUsd', 'costNote', 'exitCode', 'sessionId'];
@@ -623,6 +651,6 @@ function parseCompactBoundary(ev) {
 }
 
 module.exports = { resultSnapshot, tokensForRun, BILLING_MODES, BILLING_SOURCES, normalizeBilling, applyBillingEnv, detectBilling, costNote, tokensFromResult, totalTokens, newRun, applyEvent, finishRun, summarize, total, modelStats, toCSV, CSV_COLS,
-  canonModel, estimateCostUsd, resolveEntryCost, providerOf, buildLedger, usageLedger, ledgerEntriesOf,
+  canonModel, estimateCostUsd, resolveEntryCost, providerOf, accountRuntime, buildLedger, usageLedger, ledgerEntriesOf,
   LIMITS_DEFAULTS, normalizeLimits, authType, windowUsage, limitStatus, usageStatus, applyCliRateLimits, parseRateLimitWindow, parseRateLimits, liveRateLimits, nodeLiveRateLimits, effectiveRuntime, subscriptionGuard, providerUsageStatus, usageProviders, GUARD_DEFAULT_PCT,
   CONTEXT_WINDOW_DEFAULT, CONTEXT_WINDOW_1M, contextWindowFor, contextFromAssistant, parseCompactBoundary };
