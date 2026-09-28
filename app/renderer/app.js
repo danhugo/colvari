@@ -571,7 +571,10 @@ function renderGraph() {
       el('title', {}, cbg).textContent = ns.lastCompact ? `Compacted ${fmtTok(ns.lastCompact.preTokens)}→${fmtTok(ns.lastCompact.postTokens)}` : 'Compacted';
     }
     // wake badge is gated by wakeRun itself, not `live`: nodeLive trusts the possibly stale nstat status
-    const wk = wakeRun(n.id); if (wk) drawWakeBadge(g, wk, () => openWakeTask(wk.taskId));
+    // stall badge outranks it: a stalled run must not read as one still working
+    const st = stallState(n.id);
+    if (st) drawStallBadge(g, st, () => openWakeTask(st.taskId));
+    else { const wk = wakeRun(n.id); if (wk) drawWakeBadge(g, wk, () => openWakeTask(wk.taskId)); }
     el('title', {}, g).textContent = `${n.name} (${n.role}) — ${live}`;
     if (typeof ns.contextPct === 'number' && live === 'working') {
       const pct = Math.max(0, Math.min(100, ns.contextPct * 100));
@@ -851,6 +854,45 @@ function drawWakeBadge(g, w, onclick) {
   if (w.taskId && onclick) bg.onclick = onclick;
 }
 const openWakeTask = (taskId) => { sel.task = taskId; showTab('board'); renderBoard(); };
+// Stall / recovery state (contract with Devon, t_10137e17): the supervisor logs run.stalled /
+// run.recovering / run.recovery_failed and (preferred) keeps a.stall = {state, attempt, max, taskId}
+// live on the agent. The selector prefers the live field and falls back to the newest matching log
+// event; stale fallbacks clear themselves, recovery_failed stays until the agent runs again.
+const STALL_KINDS = new Set(['run.stalled', 'run.recovering', 'run.recovery_failed']);
+const STALL_TTL_MS = 10 * 60000;
+function stallState(id) {
+  const a = S.orch.agents[id] || {};
+  const live = (a.stall && typeof a.stall === 'object' && a.stall.state) ? a.stall : (a.run && a.run.stall && typeof a.run.stall === 'object' && a.run.stall.state ? a.run.stall : null);
+  if (live) return { state: live.state, attempt: +live.attempt || 1, max: +live.max || 2, taskId: live.taskId || null };
+  let latest = null;
+  for (const l of logs) if (l.projectId === ctx.p && l.nodeId === id && STALL_KINDS.has(l.kind) && (!latest || l.at > latest.at)) latest = l;
+  if (!latest) return null;
+  const m = /\((\d+)\s*\/\s*(\d+)\)/.exec(latest.text || '');
+  if (latest.kind === 'run.recovery_failed') {
+    if (Date.now() - latest.at > 60 * 60000) return null;
+    for (const l of logs) if (l.projectId === ctx.p && l.nodeId === id && l.at > latest.at && !STALL_KINDS.has(l.kind)) return null; // ran again since — failure is history
+    return { state: 'recovery_failed', attempt: m ? +m[1] : 2, max: m ? +m[2] : 2, taskId: latest.taskId || null };
+  }
+  if (Date.now() - latest.at > STALL_TTL_MS) return null; // recovery either succeeded (progress resumed) or the supervisor will re-emit
+  return { state: latest.kind === 'run.recovering' ? 'recovering' : 'stalled', attempt: m ? +m[1] : 1, max: m ? +m[2] : 2, taskId: latest.taskId || null };
+}
+const stallLabel = (st) => st.state === 'recovery_failed' ? 'Recovery failed' : `Stalled — recovering (${st.attempt}/${st.max})`;
+// Board tag for the task a stalled/recovering agent is (or was last) working on.
+function stallTag(t) {
+  if (t.status !== 'in_progress' || !t.assignee) return '';
+  const st = stallState(t.assignee); if (!st || (st.taskId && st.taskId !== t.id)) return '';
+  return `<span class="tag stall${st.state === 'recovery_failed' ? ' fail' : ''}">${esc(stallLabel(st))}</span>`;
+}
+// Shared strip below the agent card (same slot as the wake badge, which it outranks: a stalled run
+// must not read as one still working). Amber while recovering, red once recovery failed.
+function drawStallBadge(g, st, onclick) {
+  const full = `${stallLabel(st)}${st.taskId ? ` — ${taskTitle(st.taskId)}` : ''}`;
+  const bg = el('g', { class: 'stallbadge' + (st.state === 'recovery_failed' ? ' fail' : '') + (st.taskId ? ' linked' : ''), transform: `translate(4,${H + 3})` }, g);
+  el('rect', { width: W - 8, height: 13, rx: 6 }, bg);
+  el('text', { x: (W - 8) / 2, y: 9.5, 'text-anchor': 'middle' }, bg).textContent = clipText(full, 30);
+  el('title', {}, bg).textContent = full;
+  if (st.taskId && onclick) bg.onclick = onclick;
+}
 // A task stuck in_progress whose assignee has no live agent process: the orchestrator will reset/re-dispatch it,
 // but until then it needs to be visible so a stalled run isn't mistaken for one still working.
 function orphanedTasks() { const r = runningIds(); return S.tasks.filter((t) => t.status === 'in_progress' && t.assignee && !r.includes(t.assignee)); }
@@ -894,7 +936,7 @@ function renderBoard() {
     S.tasks.filter((t) => t.status === st).slice().sort(byPriorityThenTitle).map((t) => { const bl = openBlockers(t); const w = (S.orch.agents[t.assignee] || {}); const live = (w.status === 'working' && w.taskId === t.id) || (!w.status && t.status === 'in_progress' && runningIds().includes(t.assignee));
       const ready = !bl.length && ['todo', 'backlog'].includes(t.status);
       const noWorker = t.status === 'in_progress' && t.assignee && !live;
-      return `<div class="card ${sel.task === t.id ? 'sel' : ''}${t.awaitingApproval ? ' approval' : ''}" data-id="${t.id}">${priorityBadge(t)} <b>${esc(t.title)}</b>${live ? '<span class="tag live">live</span>' : ''}${noWorker ? `<span class="tag noworker" title="in_progress but no live agent process for ${esc(nodeName(t.assignee))}">No worker</span>` : ''}${bl.length ? `<span class="tag blocked" title="waits for: ${esc(bl.map(taskTitle).join(', '))}">Blocked by ${esc(taskTitle(bl[0]).slice(0, 28))}${bl.length > 1 ? ` +${bl.length - 1}` : ''}</span>` : ready ? '<span class="tag ready">Ready</span>' : ''}${t.awaitingApproval ? '<span class="tag approval">needs approval</span>' : ''}<small>${esc(nodeName(t.assignee))} · ${t.comments.length} comments</small></div>`; }).join('')}</div>`).join('');
+      return `<div class="card ${sel.task === t.id ? 'sel' : ''}${t.awaitingApproval ? ' approval' : ''}" data-id="${t.id}">${priorityBadge(t)} <b>${esc(t.title)}</b>${live ? '<span class="tag live">live</span>' : ''}${noWorker ? `<span class="tag noworker" title="in_progress but no live agent process for ${esc(nodeName(t.assignee))}">No worker</span>` : ''}${stallTag(t)}${bl.length ? `<span class="tag blocked" title="waits for: ${esc(bl.map(taskTitle).join(', '))}">Blocked by ${esc(taskTitle(bl[0]).slice(0, 28))}${bl.length > 1 ? ` +${bl.length - 1}` : ''}</span>` : ready ? '<span class="tag ready">Ready</span>' : ''}${t.awaitingApproval ? '<span class="tag approval">needs approval</span>' : ''}<small>${esc(nodeName(t.assignee))} · ${t.comments.length} comments</small></div>`; }).join('')}</div>`).join('');
   document.querySelectorAll('.card').forEach((c) => c.onclick = () => { sel.task = c.dataset.id; renderBoard(); });
   const d = $('#taskdetail'); const t = S.tasks.find((x) => x.id === sel.task);
   if (!t) { d.innerHTML = '<p class="muted">Create a goal task, assign it to an agent (usually the PM), then press Run.</p>'; return; }
@@ -1169,6 +1211,7 @@ function renderSettings() {
     <label>Project budget per Run, $ <span class="muted">(stops all agents; 0 = none)</span></label><input id="st-budgetusd" type="number" min="0" step="0.01" value="${s.budgetUsd || 0}">
     <label>Project token budget per Run <span class="muted">(input + output; 0 = none)</span></label><input id="st-budgettok" type="number" min="0" step="1000" value="${s.budgetTokens || 0}">
     <label>Stuck warning after N minutes without output</label><input id="st-stuck" type="number" min="1" value="${s.stuckMinutes || 5}">
+    <label>Stall timeout — stop + auto-resume a silent run after N minutes <span class="muted">(max 2 recoveries, then the task is marked recovery failed)</span></label><input id="st-stall" type="number" min="1" value="${s.stallTimeoutMin ?? 10}">
     <label>Auto-compact at % <span class="muted">(context usage that triggers /compact; 0 = off)</span></label><input id="st-autocompactpct" type="number" min="0" max="95" value="${s.autoCompactPct ?? 40}">
     <label class="inline"><input type="checkbox" id="st-approval" ${s.requireApproval ? 'checked' : ''}> Require human approval for every agent's "done"</label>
     <label class="inline"><input type="checkbox" id="st-notify" ${s.notifications === false ? '' : 'checked'}> Desktop notifications (approval needed, budget reached, run finished)</label>
@@ -1190,6 +1233,7 @@ function renderSettings() {
   $('#pr-save').onclick = act(async () => { await call('savePreset', { name: $('#pr-name').value, systemPrompt: $('#pr-prompt').value, allowedTools: $('#pr-allowed').value, disallowedTools: $('#pr-disallowed').value, permissionMode: $('#pr-perm').value }); refresh(); });
   $('#st-save').onclick = async () => { await call('saveSettings', { claudePath: $('#st-claude').value.trim() || 'claude', maxConcurrency: +$('#st-conc').value || 2, maxRuns: +$('#st-runs').value || 30, permissionMode: $('#st-perm').value,
     budgetUsd: +$('#st-budgetusd').value || 0, budgetTokens: +$('#st-budgettok').value || 0, requireApproval: $('#st-approval').checked, notifications: $('#st-notify').checked, stuckMinutes: +$('#st-stuck').value || 5,
+    stallTimeoutMin: Math.max(1, +$('#st-stall').value || 10),
     autoCompactPct: Math.max(0, Math.min(95, +$('#st-autocompactpct').value || 0)) }); refresh(); };
   renderUpdSettings();
   $('#st-autorestart').onchange = act(async (ev) => {
@@ -1289,7 +1333,9 @@ function renderOverview() {
     el('text', { x: 47, y: 21, class: 'nname' }, g).textContent = clipText(n.name, 16);
     el('text', { x: 47, y: 36, class: 'nrole' }, g).textContent = isStuck ? '⚠ stuck' : `${clipText(n.role, 14)}${live === 'working' ? ' · working' : ''}`;
     el('text', { x: 47, y: 50, 'font-size': 10, opacity: 0.8, class: 'ov-vendor' }, g).textContent = clipText(`${VENDOR[n.runtime || 'claude'] || n.runtime} · ${n.model || 'default'}`, 26);
-    if (live === 'working') { const wk = wakeRun(n.id); if (wk) drawWakeBadge(g, wk, () => openWakeTask(wk.taskId)); }
+    const st = stallState(n.id);
+    if (st) drawStallBadge(g, st, () => openWakeTask(st.taskId));
+    else if (live === 'working') { const wk = wakeRun(n.id); if (wk) drawWakeBadge(g, wk, () => openWakeTask(wk.taskId)); }
     const sg = el('g', { class: 'status s-' + live, transform: `translate(${W - 14},14)` }, g); el('circle', { r: 5 }, sg); el('title', {}, sg).textContent = live;
     el('title', {}, g).textContent = `${n.name} (${n.role}) — ${isStuck ? 'stuck' : live}`;
   }
