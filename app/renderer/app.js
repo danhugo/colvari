@@ -422,6 +422,11 @@ $('#importfile').onchange = act(async (e) => {
 document.querySelectorAll('#tabs button').forEach((b) => b.onclick = () => {
   document.querySelectorAll('#tabs button').forEach((x) => x.classList.toggle('active', x === b));
   document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.id === 'tab-' + b.dataset.tab));
+  // Hidden heavy sections skip rendering (t_9315f18a); a freshly shown one must draw once even
+  // if nothing changed since it was last hidden. renderLog is not part of renderAll — call it here.
+  if (b.dataset.tab === 'board') boardSig = null; else if (b.dataset.tab === 'obs') { logSig = null; obsSig = null; } else if (b.dataset.tab === 'usage') usageSig = null;
+  renderAll();
+  if (b.dataset.tab === 'obs') renderLog();
 });
 
 // ---------- header ----------
@@ -980,7 +985,17 @@ const PRIORITIES = ['P0', 'P1', 'P2', 'P3'];
 const priorityOf = (t) => PRIORITIES.includes(t.priority) ? t.priority : 'P2';
 const priorityBadge = (t) => `<span class="tag prio prio-${priorityOf(t)}" title="Priority ${priorityOf(t)}">${priorityOf(t)}</span>`;
 const byPriorityThenTitle = (a, b) => PRIORITIES.indexOf(priorityOf(a)) - PRIORITIES.indexOf(priorityOf(b)) || a.title.localeCompare(b.title);
+// Skip-no-op renders (t_9315f18a): the storm profile showed every run push re-rendering ALL heavy
+// sections (503-card board, 200-row log window, 300-run usage table) even when their inputs were
+// unchanged, and even while their tab was hidden — p95 100ms frames at run cadence. Each gate is a
+// cheap fingerprint of exactly what its renderer reads; hidden tabs skip entirely and re-render on
+// activation (sig reset in the tab-click handler).
+let boardSig = null, logSig = null, obsSig = null, usageSig = null;
+const agentStamp = () => Object.entries(S.orch.agents || {}).map(([k, a]) => `${k}${a.status}${a.taskId || ''}${a.iteration || 0}${a.stall ? '!' : ''}${a.run && a.run.stall ? '!' : ''}`).join();
 function renderBoard() {
+  if (!$('#tab-board').classList.contains('active')) return;
+  const bkey = [S.v && S.v.board, sel.task, S.orch.running, Math.floor(Date.now() / 6e4), agentStamp()].join('|');
+  if (bkey === boardSig) return; boardSig = bkey;
   const sa = $('#nt-assignee'); const cur = sa.value;
   sa.innerHTML = S.allNodes.map((n) => `<option value="${n.id}">${esc(n.name)} (${n.role})</option>`).join('') || '<option value="">(add agents first)</option>';
   if (cur) sa.value = cur;
@@ -1084,6 +1099,9 @@ $('#wk-del').onclick = async () => { if (sel.page && confirm('Delete page?')) { 
 // ---------- observability ----------
 const logTeamNodes = () => sel.logTeam ? S.allNodes.filter((n) => n.teamId === sel.logTeam) : S.allNodes;
 function renderObs() {
+  if (!$('#tab-obs').classList.contains('active')) return;
+  const okey = [S.v && S.v.project, S.v && S.v.teams, S.v && S.v.settings, ctx.p, logs.length, (logs[logs.length - 1] || {}).at, S.tasks.length, sel.logTeam, S.orch.runCost, S.orch.runTokens, agentStamp()].join('|');
+  if (okey === obsSig) return; obsSig = okey;
   const teams = (S.project && S.project.teams) || [];
   const tf = $('#logteam'); tf.innerHTML = '<option value="">All teams</option>' + teams.map((t) => `<option value="${t.id}">${esc(t.name)}</option>`).join(''); tf.value = sel.logTeam;
   const nodes = logTeamNodes();
@@ -1156,6 +1174,9 @@ $('#log').addEventListener('scroll', () => { const box = $('#log');
   if (box.scrollTop < 80 && renderLog.total > logWin) { logWin += LOG_PAGE; renderLog(); }
   else if (box.scrollTop + box.clientHeight >= box.scrollHeight - 20 && logWin > LOG_PAGE) { logWin = LOG_PAGE; renderLog(); } });
 function renderLog() {
+  if (!$('#tab-obs').classList.contains('active')) return;
+  const lkey = [ctx.p, logs.length, (logs[logs.length - 1] || {}).at, logWin, $('#logfilter').value, $('#logsearch').value, [...logLevels].join(), sel.logTeam, logsLoaded.has(ctx.p)].join('|');
+  if (lkey === logSig) return; logSig = lkey;
   const f = $('#logfilter').value; const q = ($('#logsearch').value || '').trim().toLowerCase();
   const teamIds = sel.logTeam ? new Set(logTeamNodes().map((n) => n.id)) : null;
   const box = $('#log'); const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 20;
@@ -1225,6 +1246,9 @@ function barList(title, rs, keyFn, labelFn, subFn) {
     <i class="usr-bar"><i class="usr-io" style="width:${(x.inputTokens + x.outputTokens) / max * 100}%"></i><i class="usr-cache" style="width:${(x.cacheReadTokens + x.cacheCreationTokens) / max * 100}%"></i></i></div>`; }).join('') || '<p class="muted">No runs yet.</p>'}</div>`;
 }
 function renderUsage() {
+  if (!$('#tab-usage').classList.contains('active')) return;
+  const ukey = [S.v && S.v.runs, S.v && S.v.board, RUNS.length, $('#us-agent').value, $('#us-billing').value, S.allNodes.length].join('|');
+  if (ukey === usageSig) return; usageSig = ukey;
   const fa = $('#us-agent'); const cur = fa.value;
   fa.innerHTML = '<option value="">All</option>' + S.allNodes.map((n) => `<option value="${n.id}">${esc(n.name)}</option>`).join(''); fa.value = cur;
   const fb = $('#us-billing').value;
