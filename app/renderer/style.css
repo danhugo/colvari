@@ -290,6 +290,12 @@ header .pill { border:none; background:none; color:var(--fg-muted); font-size:va
 .limitmeter .lm-warn .lm-fill { background:var(--warning); } .limitmeter .lm-danger .lm-fill { background:var(--danger); }
 .limitmeter .lm-part small { color:var(--fg-muted); font-variant-numeric:tabular-nums; overflow:hidden; text-overflow:ellipsis; }
 .limitmeter .lm-part.lm-pending { opacity:.6; }
+.limitmeter .lm-chip { gap:7px; }
+.limitmeter .lm-chip .lm-win { display:flex; align-items:center; gap:4px; }
+.limitmeter .lm-chip .lm-win b { font-weight:var(--fw-semibold); }
+.limitmeter .lm-chip .lm-plan { text-transform:capitalize; opacity:.8; }
+.limitmeter .lm-chip.lm-unknown { background:transparent; border:1px dashed var(--line); }
+.limitmeter .lm-chip.lm-idle { opacity:.55; }
 .tlink { font-size:10.5px; opacity:.8; } .bubble { font-size:var(--text-sm); }
 
 /* Idle/busy by shape: idle = hollow ring, busy = spinning arc. */
