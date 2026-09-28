@@ -133,7 +133,8 @@ function parseCodexEvent(ev) {
     else out.logs.push(['tool', `${it.type} ${JSON.stringify(it).slice(0, 300)}`]);
   } else if (ev.type === 'turn.completed') {
     const u = ev.usage || {};
-    out.tokens = { inputTokens: u.input_tokens || 0, outputTokens: (u.output_tokens || 0) + (u.reasoning_output_tokens || 0), cachedInputTokens: u.cached_input_tokens || 0 };
+    // cached_input_tokens -> cacheReadTokens (absent -> null downstream: unknown, not 0; no CLI reports cache writes here)
+    out.tokens = { inputTokens: u.input_tokens || 0, outputTokens: (u.output_tokens || 0) + (u.reasoning_output_tokens || 0), ...(u.cached_input_tokens != null ? { cacheReadTokens: u.cached_input_tokens } : {}) };
     out.done = true; out.logs.push(['result', `codex turn completed: ${out.tokens.inputTokens} in / ${out.tokens.outputTokens} out`]);
   } else if (ev.type === 'turn.failed') { out.failed = true; out.logs.push(['error', (ev.error && ev.error.message) || 'turn failed']); }
   else if (ev.type === 'error') out.logs.push(['error', ev.message || '']);
@@ -212,7 +213,8 @@ function parseProfileEvent(ev, profile) {
   const cost = getPath(ev, em.costPath);
   if (ev.type === 'result' || input || output || typeof cost === 'number') {
     const reasoning = Number(getPath(ev, em.reasoningPath)) || 0;
-    out.tokens = { inputTokens: input, outputTokens: output + reasoning };
+    const cacheRaw = getPath(ev, em.cachePath); const cache = Number(cacheRaw);
+    out.tokens = { inputTokens: input, outputTokens: output + reasoning, ...(cacheRaw != null && Number.isFinite(cache) ? { cacheReadTokens: cache } : {}) };
     out.cost = Number(cost) || 0;
     out.done = ev.type !== 'step_finish' || part.reason === 'stop';
     out.logs.push([out.done ? 'result' : 'system', `${profile.label} ${out.done ? 'result' : 'step'}: ${input} in / ${output + reasoning} out`]);

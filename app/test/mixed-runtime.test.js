@@ -23,7 +23,10 @@ test('mixed claude+codex team: codex runs report tokens but never add to billedC
   await new Promise((res) => { o.once('done', res); o.start(); });
   const snap = o.snapshot();
   assert.strictEqual(snap.agents[x.id].runtime, 'codex'); assert.strictEqual(snap.agents[x.id].model, 'gpt-5.6-terra');
-  assert.strictEqual(snap.agents[x.id].cost, 0); assert.ok(snap.agents[x.id].inputTokens >= 100);
+  assert.strictEqual(snap.agents[x.id].cost, 0);
+  assert.equal(snap.agents[x.id].inputTokens, undefined); // flat per-agent token sums are no longer offered (t_3318ff63)
+  const codexRow = (snap.ledger.rows || []).find((r) => r.runtime === 'codex');
+  assert.ok(codexRow && codexRow.inputTokens >= 100, 'codex tokens land in the per-key ledger: ' + JSON.stringify(snap.ledger && snap.ledger.rows));
   const codexRuns = s.listRuns().filter((r) => r.nodeId === x.id);
   assert.ok(codexRuns.length && codexRuns.every((r) => !r.reportedCostUsd));
   assert.ok(Math.abs(snap.billedCost + snap.subCost - 0.25) < 1e-9, 'only the claude run is costed: ' + JSON.stringify(snap));
@@ -86,9 +89,11 @@ exit 1
   assert.ok(logs.some((e) => e.kind === 'system' && /HelpyCode step: 100 in \/ 25 out/.test(e.text)), 'intermediate step logged as a step: ' + JSON.stringify(logs));
   assert.ok(logs.some((e) => e.kind === 'result' && /HelpyCode result: 10 in \/ 2 out/.test(e.text)));
   const a = o.snapshot().agents[h.id];
-  assert.strictEqual(a.inputTokens, 110); assert.strictEqual(a.outputTokens, 27); // per-step usage summed once (record() at run end)
   assert.ok(Math.abs(a.cost - 0.0003) < 1e-9, 'reported step cost lands on the agent ledger: ' + a.cost);
   const run = s.listRuns().find((r) => r.nodeId === h.id && r.reportedCostUsd);
   assert.ok(run && Math.abs(run.reportedCostUsd - 0.0003) < 1e-9);
+  assert.strictEqual(run.inputTokens, 110); assert.strictEqual(run.outputTokens, 27); // per-step usage summed once (record() at run end)
   assert.strictEqual(run.sessionId, 'S-hc');
+  const hcRow = (o.snapshot().ledger.rows || []).find((r) => r.runtime === 'helpycode');
+  assert.ok(hcRow && hcRow.inputTokens === 110 && hcRow.costUsd > 0, 'helpycode usage lands in the per-key ledger: ' + JSON.stringify(o.snapshot().ledger.rows));
 });

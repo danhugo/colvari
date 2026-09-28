@@ -10,7 +10,6 @@ const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
 const C = require('./controls');
-const U = require('./usage');
 const TL = require('./timeline');
 const PRESET_FIELDS = ['systemPrompt', 'allowedTools', 'disallowedTools', 'permissionMode'];
 const pick = (o, ks) => Object.fromEntries(ks.map((k) => [k, o[k]]));
@@ -41,6 +40,28 @@ class Store {
     this.dir = dir;
     this.teamId = teamId;
     fs.mkdirSync(dir, { recursive: true });
+    this.migrateUsageLedger();
+  }
+  // Per-key usage ledger (t_3318ff63): runs recorded before the ledger existed carry flat totals
+  // that mix models — they cannot be split retroactively, so they are dropped (migrate by reset)
+  // and the project notes when per-key tracking started (project.usageTrackingSince, surfaced as
+  // "tracking since" in the UI). Guarded by a marker file: pm.store() constructs a Store per call,
+  // so the runs.json scan may run only once per project. Never throws on old/corrupt files.
+  migrateUsageLedger() {
+    const marker = path.join(this.dir, '.usage-ledger');
+    try {
+      if (fs.existsSync(marker)) return;
+      this.withLock(() => {
+        const d = this.read('runs', { runs: [] });
+        if ((d.runs || []).some((r) => !r || !Array.isArray(r.ledger))) {
+          d.runs = [];
+          this.write('runs', d);
+          const m = this.read('project', null);
+          if (m && !m.usageTrackingSince) { m.usageTrackingSince = new Date().toISOString(); this.write('project', m); }
+        }
+      });
+      fs.writeFileSync(marker, '');
+    } catch {}
   }
   forTeam(teamId) { return new Store(this.dir, teamId); }
   meta() { return this.read('project', null); }
@@ -623,13 +644,14 @@ class Store {
   clearLogs() { try { fs.unlinkSync(path.join(this.dir, 'logs.jsonl')); } catch {} }
 
   // ---- sessions: claude sessions grouped from persisted runs (see usage.js newRun) ----
-  // One entry per distinct sessionId, newest first: [{sessionId, nodeId, agent, taskId, task, startedAt, endedAt, model, models, runs, reportedCostUsd, totalTokens}].
+  // One entry per distinct sessionId, newest first: [{sessionId, nodeId, agent, taskId, task, startedAt, endedAt, model, models, runs, reportedCostUsd}].
+  // No token totals: a session mixes models, so its only offered sum is cost (per-key tokens live in the usage ledger).
   listSessions(filter = {}) {
     const rs = this.listRuns({ nodeId: filter.nodeId }).filter((r) => r.kind === 'agent' && r.sessionId);
     const byId = new Map();
     for (const r of rs) {
-      const s = byId.get(r.sessionId) || { sessionId: r.sessionId, nodeId: r.nodeId, agent: r.agent || '', taskId: r.taskId || null, task: r.task || '', startedAt: r.startedAt || null, endedAt: r.endedAt || null, models: [], runs: 0, reportedCostUsd: 0, totalTokens: 0 };
-      s.runs++; s.reportedCostUsd += r.reportedCostUsd || 0; s.totalTokens += U.totalTokens(r);
+      const s = byId.get(r.sessionId) || { sessionId: r.sessionId, nodeId: r.nodeId, agent: r.agent || '', taskId: r.taskId || null, task: r.task || '', startedAt: r.startedAt || null, endedAt: r.endedAt || null, models: [], runs: 0, reportedCostUsd: 0 };
+      s.runs++; s.reportedCostUsd += r.reportedCostUsd || 0;
       if (r.startedAt && (!s.startedAt || r.startedAt < s.startedAt)) s.startedAt = r.startedAt;
       if (r.endedAt && (!s.endedAt || r.endedAt > s.endedAt)) s.endedAt = r.endedAt;
       if (r.taskId) { s.taskId = r.taskId; s.task = r.task || s.task; } // last run's task wins

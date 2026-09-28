@@ -49,6 +49,59 @@ function costNote(source) {
 }
 
 const emptyTokens = () => ({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 });
+
+// ---- per-model usage ledger (t_3318ff63): usage is recorded under {runtime, provider, model}
+// keys; aggregates never sum tokens across keys (only $ totals are offered, flagged partial when
+// any contributing row has unknown cost). ----
+
+// Canonical ledger model id: dated build suffixes ("claude-haiku-4-5-20251001") and context-window
+// variants ("…[1m]") collapse into the base id; an org prefix ("zai/glm-5.2") moves into the
+// returned providerHint (used as the provider on direct multi-vendor channels). The CLI's own
+// canonicalModel (claude modelUsage) wins over this when present.
+function canonModel(m) {
+  let s = String(m || '').trim();
+  if (!s) return { model: 'unknown', providerHint: null };
+  s = s.replace(/\[1m\]$/i, '').replace(/-\d{8}$/, '');
+  const i = s.lastIndexOf('/');
+  if (i > 0 && i < s.length - 1) return { model: s.slice(i + 1), providerHint: s.slice(0, i) };
+  return { model: s || 'unknown', providerHint: null };
+}
+
+// Approximate list prices per 1M tokens (USD), used ONLY when a runtime reports no usable cost
+// (costSource: 'estimated'). Models outside the table get costUsd: null ('unknown') — never a
+// guessed $0, and never a $0 rewritten into a real-looking price.
+const PRICE_PER_MTOK = [
+  [/^claude-opus/, { input: 15, output: 75, cacheRead: 1.5, cacheWrite: 18.75 }],
+  [/^claude-sonnet/, { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 }],
+  [/^claude-haiku/, { input: 1, output: 5, cacheRead: 0.1, cacheWrite: 1.25 }],
+  [/^gpt-5/, { input: 1.25, output: 10, cacheRead: 0.125 }],
+  [/^glm-/, { input: 0.6, output: 2.2 }],
+];
+const priceFor = (model) => { const m = String(model || '').toLowerCase(); const hit = PRICE_PER_MTOK.find(([re]) => re.test(m)); return hit ? hit[1] : null; };
+function estimateCostUsd(model, t = {}) {
+  const p = priceFor(model); if (!p) return null;
+  return ((t.inputTokens || 0) * p.input + (t.outputTokens || 0) * p.output
+    + (t.cacheReadTokens || 0) * (p.cacheRead || 0) + (t.cacheCreationTokens || 0) * (p.cacheWrite || 0)) / 1e6;
+}
+// Resolve one ledger entry's cost from its raw value. Reported nonzero wins. A reported $0 with
+// tokens flowing is the LiteLLM-style "model missing from the proxy cost map" case: recompute from
+// the price table when the model is known ('estimated'), otherwise null ('unknown'). No cost at all
+// estimates the same way. Token-less entries stay costless.
+function resolveEntryCost(e) {
+  if (e.costUsd != null && e.costUsd > 0) { e.costSource = 'reported'; return e; }
+  const flow = (e.inputTokens || 0) + (e.outputTokens || 0) + (e.cacheReadTokens || 0) + (e.cacheCreationTokens || 0) > 0;
+  const est = flow ? estimateCostUsd(e.model, e) : null;
+  if (est != null) { e.costUsd = est; e.costSource = 'estimated'; } else { e.costUsd = null; e.costSource = 'unknown'; }
+  return e;
+}
+// Ledger key provider: the CLI's own modelUsage label (claude: "firstParty"), else the proxy host
+// (multi-vendor channels: the vendor is already prefixed in the model id), else the model id's org
+// prefix, else the billing channel.
+function providerOf({ muProvider, providerHint, billingSource, proxyHost }) {
+  const CH = { subscription: 'subscription', api: 'api', proxy: 'proxy', bedrock: 'bedrock', vertex: 'vertex' };
+  return muProvider || (billingSource === 'proxy' && proxyHost) || providerHint || CH[billingSource] || 'unknown';
+}
+
 // Tokens + models from a result event. modelUsage (per model, includes sub-agents) wins over usage.
 function tokensFromResult(ev = {}) {
   const t = emptyTokens(); const models = [];
@@ -71,33 +124,78 @@ const totalTokens = (r) => (r.inputTokens || 0) + (r.outputTokens || 0) + (r.cac
 // Mutable per-run record, filled from stream events.
 function newRun(fields = {}) {
   return { id: 'r_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), kind: 'agent', startedAt: new Date().toISOString(), endedAt: null, durationMs: 0,
-    projectId: null, nodeId: null, agent: '', taskId: null, task: '', model: '', models: [], apiKeySource: null, billingMode: 'auto', billingSource: 'unknown', billingDetail: '',
-    ...emptyTokens(), numTurns: 0, reportedCostUsd: 0, exitCode: null, isError: false, sessionId: null, ...fields };
+    projectId: null, nodeId: null, agent: '', taskId: null, task: '', model: '', models: [], runtime: 'unknown', provider: '', apiKeySource: null, billingMode: 'auto', billingSource: 'unknown', billingDetail: '',
+    ...emptyTokens(), ledger: [], numTurns: 0, reportedCostUsd: 0, exitCode: null, isError: false, sessionId: null, ...fields };
 }
+const TOK = ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheCreationTokens'];
 // Raw cumulative-capable snapshot of a result event: per-model tokens (from modelUsage) + total_cost_usd.
+// Each per-model entry keeps what the CLI itself reported: costUSD (null when absent), its provider label
+// and canonicalModel, and `seen` — the token fields the CLI actually reported (unreported ones must stay
+// unknown, i.e. null, in the ledger — never 0).
 function resultSnapshot(ev = {}) {
   const mu = ev.modelUsage && typeof ev.modelUsage === 'object' ? ev.modelUsage : null;
   const perModel = {};
-  if (mu) for (const [m, u] of Object.entries(mu)) perModel[m] = { inputTokens: +u.inputTokens || 0, outputTokens: +u.outputTokens || 0, cacheReadTokens: +u.cacheReadInputTokens || 0, cacheCreationTokens: +u.cacheCreationInputTokens || 0 };
+  if (mu) for (const [m, u] of Object.entries(mu)) {
+    const seen = TOK.filter((k) => u[{ inputTokens: 'inputTokens', outputTokens: 'outputTokens', cacheReadTokens: 'cacheReadInputTokens', cacheCreationTokens: 'cacheCreationInputTokens' }[k]] != null);
+    perModel[m] = {
+      inputTokens: +u.inputTokens || 0, outputTokens: +u.outputTokens || 0, cacheReadTokens: +u.cacheReadInputTokens || 0, cacheCreationTokens: +u.cacheCreationInputTokens || 0,
+      costUsd: typeof u.costUSD === 'number' ? u.costUSD : null, provider: u.provider || null, canonicalModel: u.canonicalModel || null, seen,
+    };
+  }
   return { perModel, costUsd: Number(ev.total_cost_usd) || 0 };
 }
-const TOK = ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheCreationTokens'];
+// Flat usage event -> one per-model entry (model id from the event or a fallback), with per-field
+// `seen` so unreported cache fields stay unknown rather than zero.
+function perModelFromUsage(u = {}, model) {
+  const src = { inputTokens: u.input_tokens, outputTokens: u.output_tokens, cacheReadTokens: u.cache_read_input_tokens, cacheCreationTokens: u.cache_creation_input_tokens };
+  return { [model || 'unknown']: {
+    inputTokens: +u.input_tokens || 0, outputTokens: +u.output_tokens || 0, cacheReadTokens: +u.cache_read_input_tokens || 0, cacheCreationTokens: +u.cache_creation_input_tokens || 0,
+    costUsd: null, provider: null, canonicalModel: null, seen: TOK.filter((k) => src[k] != null),
+  } };
+}
 // On `claude -p --resume`, result.modelUsage and total_cost_usd are cumulative for the whole session,
 // while result.usage covers only this call. Given the previous cumulative snapshot of the resumed session
 // (baseline), return this run's own share. Without a baseline, fall back to per-call usage (cost unknown -> 0,
 // flagged). If the numbers are not cumulative after all (any field shrinks), the raw values are used.
+// Alongside the flat tokens, perModel carries the per-key split the ledger is built from: one entry per
+// model with this run's own tokens, per-model cost delta (null when the baseline predates per-model costs),
+// and the CLI's provider/canonicalModel labels.
 function tokensForRun(ev, { resumed = false, baseline = null } = {}) {
   const raw = tokensFromResult(ev); const snap = resultSnapshot(ev);
-  if (!resumed) return { tokens: raw, costUsd: snap.costUsd, snapshot: snap, basis: 'raw' };
+  const rawPerModel = () => {
+    const pm = {};
+    for (const [m, e] of Object.entries(snap.perModel)) pm[m] = { ...e, seen: [...e.seen] };
+    return pm;
+  };
+  if (!resumed) return { tokens: raw, perModel: rawPerModel(), costUsd: snap.costUsd, snapshot: snap, basis: 'raw' };
   if (baseline && baseline.perModel) {
-    const d = emptyTokens(); let ok = snap.costUsd >= (baseline.costUsd || 0) - 1e-9;
-    for (const [m, u] of Object.entries(snap.perModel)) { const b = baseline.perModel[m] || emptyTokens(); for (const k of TOK) { const v = u[k] - (b[k] || 0); if (v < 0) ok = false; d[k] += v; } }
+    const d = emptyTokens(); const pm = {}; let ok = snap.costUsd >= (baseline.costUsd || 0) - 1e-9;
+    for (const [m, u] of Object.entries(snap.perModel)) {
+      const b = baseline.perModel[m] || emptyTokens();
+      const e = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, costUsd: null, provider: u.provider, canonicalModel: u.canonicalModel, seen: [...u.seen] };
+      for (const k of TOK) { const v = u[k] - (b[k] || 0); if (v < 0) ok = false; d[k] += v; e[k] = v; }
+      e.costUsd = b.costUsd != null && u.costUsd != null ? Math.max(0, u.costUsd - b.costUsd) : null;
+      pm[m] = e;
+    }
     for (const m of Object.keys(baseline.perModel)) if (!snap.perModel[m]) ok = false;
-    if (ok && Object.keys(snap.perModel).length) return { tokens: { ...d, models: raw.models }, costUsd: Math.max(0, snap.costUsd - (baseline.costUsd || 0)), snapshot: snap, basis: 'delta' };
-    if (!ok) return { tokens: raw, costUsd: snap.costUsd, snapshot: snap, basis: 'raw' };
+    if (ok && Object.keys(snap.perModel).length) return { tokens: { ...d, models: raw.models }, perModel: pm, costUsd: Math.max(0, snap.costUsd - (baseline.costUsd || 0)), snapshot: snap, basis: 'delta' };
+    if (!ok) return { tokens: raw, perModel: rawPerModel(), costUsd: snap.costUsd, snapshot: snap, basis: 'raw' };
   }
   const u = ev.usage || {};
-  return { tokens: { inputTokens: +u.input_tokens || 0, outputTokens: +u.output_tokens || 0, cacheReadTokens: +u.cache_read_input_tokens || 0, cacheCreationTokens: +u.cache_creation_input_tokens || 0, models: raw.models }, costUsd: 0, snapshot: snap, basis: 'usage-no-baseline' };
+  return { tokens: { inputTokens: +u.input_tokens || 0, outputTokens: +u.output_tokens || 0, cacheReadTokens: +u.cache_read_input_tokens || 0, cacheCreationTokens: +u.cache_creation_input_tokens || 0, models: raw.models }, perModel: perModelFromUsage(u, raw.models[0]), costUsd: 0, snapshot: snap, basis: 'usage-no-baseline' };
+}
+// Merge one result's per-model split into the run's accumulator: token fields add up (unreported
+// fields stay out of `seen`), costs add when both sides have values, labels take the latest report.
+function mergePerModel(run, perModel) {
+  if (!perModel) return;
+  const dst = (run.perModel ||= {});
+  for (const [m, e] of Object.entries(perModel)) {
+    const cur = (dst[m] ||= { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, costUsd: null, provider: null, canonicalModel: null, seen: [] });
+    for (const k of TOK) if (e[k] != null) { cur[k] += e[k]; if (!cur.seen.includes(k)) cur.seen.push(k); }
+    if (e.costUsd != null) cur.costUsd = (cur.costUsd || 0) + e.costUsd;
+    if (e.provider) cur.provider = e.provider;
+    if (e.canonicalModel) cur.canonicalModel = e.canonicalModel;
+  }
 }
 // Apply one parsed stream-json (or --output-format json) event to a run record.
 // run.resumedFrom / run.baseline (set by the orchestrator for --resume runs) make accounting per-run, not cumulative.
@@ -111,6 +209,12 @@ function applyEvent(run, ev) {
     const r = tokensForRun(ev, { resumed: !!run.resumedFrom, baseline: run.baseline });
     const t = r.tokens;
     run.inputTokens += t.inputTokens; run.outputTokens += t.outputTokens; run.cacheReadTokens += t.cacheReadTokens; run.cacheCreationTokens += t.cacheCreationTokens;
+    mergePerModel(run, r.perModel);
+    // which token fields this CLI reports on result.usage (flat, no modelUsage) — the ledger's flat
+    // fallback needs it to keep unreported fields unknown instead of 0
+    const u0 = ev.usage || {}; const fsn = (run.flatSeen ||= []);
+    for (const [k, f] of [['input_tokens', 'inputTokens'], ['output_tokens', 'outputTokens'], ['cache_read_input_tokens', 'cacheReadTokens'], ['cache_creation_input_tokens', 'cacheCreationTokens']])
+      if (u0[k] != null && !fsn.includes(f)) fsn.push(f);
     for (const m of t.models) if (!run.models.includes(m)) run.models.push(m);
     if (!run.model && t.models.length) run.model = t.models[0];
     run.numTurns += +ev.num_turns || 0; run.reportedCostUsd += r.costUsd;
@@ -121,6 +225,35 @@ function applyEvent(run, ev) {
   }
   return run;
 }
+// One run's ledger entries, from its accumulated per-model split (claude: real per-model tokens/cost
+// from modelUsage) or — for runtimes without per-model reporting (codex, profile CLIs) — a single
+// entry from the flat totals. costUsd starts as the raw reported value; resolveEntryCost decides
+// reported/estimated/unknown. Entries with no tokens at all are dropped.
+function buildLedger(run, { proxyHost = null } = {}) {
+  const primary = canonModel(run.model || (run.models && run.models[0]) || '');
+  const flat = () => {
+    const seen = run.flatSeen && run.flatSeen.length ? run.flatSeen : ['inputTokens', 'outputTokens'];
+    return { [primary.model]: { inputTokens: run.inputTokens || 0, outputTokens: run.outputTokens || 0, cacheReadTokens: run.cacheReadTokens || 0, cacheCreationTokens: run.cacheCreationTokens || 0, costUsd: null, provider: null, canonicalModel: null, seen } };
+  };
+  const pm = run.perModel && Object.keys(run.perModel).length ? run.perModel : flat();
+  const entries = [];
+  for (const [rawModel, e] of Object.entries(pm)) {
+    const seen = e.seen;
+    const tokens = { inputTokens: e.inputTokens || 0, outputTokens: e.outputTokens || 0,
+      cacheReadTokens: seen.includes('cacheReadTokens') ? e.cacheReadTokens || 0 : null,
+      cacheCreationTokens: seen.includes('cacheCreationTokens') ? e.cacheCreationTokens || 0 : null };
+    if (!(tokens.inputTokens + tokens.outputTokens + (tokens.cacheReadTokens || 0) + (tokens.cacheCreationTokens || 0))) continue;
+    const c = canonModel(e.canonicalModel || rawModel);
+    const hint = c.providerHint || (rawModel === primary.model ? primary.providerHint : null);
+    entries.push({ runtime: run.runtime || 'unknown', provider: providerOf({ muProvider: e.provider, providerHint: hint, billingSource: run.billingSource, proxyHost }), model: c.model, ...tokens, costUsd: e.costUsd });
+  }
+  // Whole-run cost with no per-model split (resumed-run fallbacks, CLIs without modelUsage cost):
+  // attribute it to the primary model's entry rather than losing or splitting it.
+  const main = entries.find((e) => e.model === primary.model) || entries[0];
+  if (main && main.costUsd == null && run.reportedCostUsd > 0) { main.costUsd = run.reportedCostUsd; }
+  for (const e of entries) resolveEntryCost(e);
+  return entries;
+}
 function finishRun(run, { code, env, billingMode, startedMs } = {}) {
   run.exitCode = code ?? null; run.endedAt = new Date().toISOString();
   if (startedMs) run.durationMs = Date.now() - startedMs;
@@ -128,6 +261,9 @@ function finishRun(run, { code, env, billingMode, startedMs } = {}) {
   const b = detectBilling(env || {}, run.apiKeySource);
   run.billingSource = b.source; run.billingDetail = b.detail;
   run.billingMismatch = !['auto', undefined].includes(run.billingMode) && b.source !== 'unknown' && b.source !== run.billingMode;
+  run.ledger = buildLedger(run, { proxyHost: env && env.ANTHROPIC_BASE_URL ? hostOf(env.ANTHROPIC_BASE_URL) : null });
+  if (run.ledger.length) run.provider = run.ledger[0].provider;
+  delete run.perModel; delete run.flatSeen; // internal accumulators; the ledger is the persisted split
   return run;
 }
 
@@ -172,6 +308,68 @@ function modelStats(runs = [], tasks = []) {
     if (t.reopenCount) bucket(m).reopened += t.reopenCount;
   }
   return out;
+}
+
+// Usage ledger aggregate over persisted runs (t_3318ff63). One row per {runtime, provider, model}
+// key, plus the same per-key rows grouped per agent (run.agent name) and per task (run.taskId).
+// Rows carry the four token types SEPARATELY — never a token total: cache fields stay null when no
+// contributing run reported them (unknown ≠ 0). Cost may be totalled; `costUsd` sums the known
+// contributions and `costPartial` flags that unknown-cost rows exist (their $ is missing, not zero).
+// Shape:
+//   rows: [{ runtime, provider, model, runs, inputTokens, outputTokens, cacheReadTokens,
+//            cacheCreationTokens, costUsd, costSource: 'reported'|'estimated'|'mixed'|'unknown',
+//            costPartial }]
+//   byAgent: { [agent]: rows }   byTask: { [taskId]: { task, rows } }
+//   costUsd, costPartial          — $ totals across all keys (the only offered totals)
+function usageLedger(runs = []) {
+  const TOKEN_FIELDS = ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheCreationTokens'];
+  const newRow = (e) => ({ runtime: e.runtime, provider: e.provider, model: e.model, runs: 0,
+    inputTokens: 0, outputTokens: 0, cacheReadTokens: null, cacheCreationTokens: null,
+    costUsd: null, reported: 0, estimated: 0, unknown: 0 });
+  const add = (map, gk, e) => {
+    let row = map.get(gk);
+    if (!row) { row = { ...newRow(e), key: gk }; map.set(gk, row); }
+    row.runs++;
+    for (const k of TOKEN_FIELDS) if (e[k] != null) row[k] = (row[k] || 0) + e[k];
+    if (e.costUsd != null) { row.costUsd = (row.costUsd || 0) + e.costUsd; row[e.costSource === 'estimated' ? 'estimated' : 'reported']++; }
+    else row.unknown++;
+  };
+  const finish = (map) => [...map.values()].map(({ reported, estimated, unknown, ...row }) => ({
+    ...row,
+    costSource: reported && estimated ? 'mixed' : estimated ? 'estimated' : reported ? 'reported' : 'unknown',
+    costPartial: unknown > 0 && row.costUsd != null,
+  })).sort((a, b) => (a.runtime + a.provider + a.model).localeCompare(b.runtime + b.provider + b.model));
+  const top = new Map(), byAgent = new Map(), byTask = new Map();
+  for (const r of runs) {
+    for (const e0 of ledgerEntriesOf(r)) {
+      // canonicalize the model id at the aggregate layer too, so entries persisted before a
+      // canonicalization fix (dated suffixes, org prefixes) still collapse into one row
+      const model = canonModel(e0.model).model;
+      const e = model === e0.model ? e0 : { ...e0, model };
+      const gk = `${e.runtime}¦${e.provider}¦${model}`;
+      add(top, gk, e);
+      add(byAgent, `${r.agent || r.nodeId || 'unknown'}¦${gk}`, e);
+      if (r.taskId) add(byTask, `${r.taskId}¦${gk}`, e);
+    }
+  }
+  const nest = (map) => {
+    const o = {};
+    for (const row of finish(map)) { const i = row.key.indexOf('¦'); const g = row.key.slice(0, i); const inner = { ...row, key: row.key.slice(i + 1) }; (o[g] ||= []).push(inner); }
+    return o;
+  };
+  const rows = finish(top);
+  const costUsd = rows.reduce((a, r) => a + (r.costUsd || 0), 0);
+  const costPartial = rows.some((r) => r.costSource === 'unknown' || r.costPartial);
+  return { rows, byAgent: nest(byAgent), byTask: nest(byTask), costUsd, costPartial };
+}
+// One run's ledger entries: the persisted split, or — for pre-ledger stragglers that escaped the
+// migration — a synthesized single entry from the flat totals (never crashes, never mis-splits).
+function ledgerEntriesOf(r) {
+  if (Array.isArray(r.ledger) && r.ledger.length) return r.ledger;
+  if (!r || !(r.inputTokens || r.outputTokens || r.cacheReadTokens || r.cacheCreationTokens)) return [];
+  const c = canonModel(r.model || (r.models && r.models[0]) || '');
+  return [resolveEntryCost({ runtime: r.runtime || 'unknown', provider: providerOf({ providerHint: c.providerHint, billingSource: r.billingSource, proxyHost: null }), model: c.model,
+    inputTokens: r.inputTokens || 0, outputTokens: r.outputTokens || 0, cacheReadTokens: r.cacheReadTokens || 0, cacheCreationTokens: r.cacheCreationTokens || 0, costUsd: r.reportedCostUsd > 0 ? r.reportedCostUsd : null })];
 }
 
 const CSV_COLS = ['startedAt', 'endedAt', 'durationMs', 'projectId', 'kind', 'agent', 'nodeId', 'task', 'taskId', 'model', 'models', 'inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheCreationTokens', 'totalTokens', 'numTurns', 'billingMode', 'billingSource', 'billingDetail', 'apiKeySource', 'reportedCostUsd', 'costNote', 'exitCode', 'sessionId'];
@@ -342,5 +540,6 @@ function parseCompactBoundary(ev) {
 }
 
 module.exports = { resultSnapshot, tokensForRun, BILLING_MODES, BILLING_SOURCES, normalizeBilling, applyBillingEnv, detectBilling, costNote, tokensFromResult, totalTokens, newRun, applyEvent, finishRun, summarize, total, modelStats, toCSV, CSV_COLS,
+  canonModel, estimateCostUsd, resolveEntryCost, providerOf, buildLedger, usageLedger, ledgerEntriesOf,
   LIMITS_DEFAULTS, normalizeLimits, authType, windowUsage, limitStatus, usageStatus, applyCliRateLimits, parseRateLimitWindow, parseRateLimits, liveRateLimits, subscriptionGuard, providerUsageStatus, GUARD_DEFAULT_PCT,
   CONTEXT_WINDOW_DEFAULT, CONTEXT_WINDOW_1M, contextWindowFor, contextFromAssistant, parseCompactBoundary };
