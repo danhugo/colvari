@@ -1264,6 +1264,7 @@ const normUpd = (d) => {
     fromSha: shortSha(d.fromSha ?? d.from),
     toSha: shortSha(d.toSha ?? d.to),
     waiting: d.waitingOn || d.waiting || [],
+    lastError: d.lastError || d.error || '',
     history: (d.history || d.restarts || []).map((h) => ({
       ts: h.ts || h.at || h.when,
       why: h.why || h.reason || '',
@@ -1279,19 +1280,53 @@ async function loadSelfUpdate() {
     upd = { ...normUpd(d), stub: false };
   } catch { upd = { ...upd, stub: true }; } // no backend yet: keep the last known (stub) state
 }
+// waitingOn arrives as a count from the watcher; older shapes may pass a list of nodes.
+const updWaitingCount = (w) => (typeof w === 'number' ? w : Array.isArray(w) ? w.length : 0);
 function renderSelfUpdate() {
   const c = $('#updst'); if (!c) return;
   const live = upd.state !== 'idle' && UPD_STATES[upd.state];
   c.classList.toggle('hidden', !live);
-  if (!live) return;
+  if (!live) { renderUpdVeil(false); return; }
   c.className = 'pill upd-' + upd.state;
-  c.textContent = UPD_STATES[upd.state];
+  const n = updWaitingCount(upd.waiting);
+  c.textContent = n ? `${UPD_STATES[upd.state]} · ${n}` : UPD_STATES[upd.state];
   const bits = [];
   if (upd.reason) bits.push(upd.reason);
   if (upd.fromSha || upd.toSha) bits.push(`${upd.fromSha || '?'} → ${upd.toSha || '?'}`);
-  if (upd.state === 'draining' && upd.waiting.length) bits.push(`waiting on ${upd.waiting.length} agent${upd.waiting.length > 1 ? 's' : ''}: ${upd.waiting.map((w) => nodeName(typeof w === 'string' ? w : w.name || w.id)).join(', ')}`);
+  if (upd.state === 'draining' && n) bits.push(`waiting on ${n} agent${n === 1 ? '' : 's'}`);
   if (upd.stub) bits.push('backend pending');
   c.title = bits.join(' · ');
+  renderUpdVeil(true);
+}
+
+// Full-window notice while a self-update runs. The watcher blocks the main process during
+// merge/build/test, so every click stalls and the pill can go stale — this is what tells the
+// human "updating, not hung, and the window will restart by itself" (pointer-events stay off).
+const UPD_STEPS = ['pending', 'draining', 'testing', 'restarting'];
+const UPD_PHASE_LINE = {
+  pending: 'New code detected; pausing new runs.',
+  testing: 'Running the test suite on the new code.',
+  restarting: 'Restarting now — the window will close and reopen by itself.',
+};
+function renderUpdVeil(show) {
+  const v = $('#updveil'); if (!v) return;
+  v.classList.toggle('hidden', !show);
+  if (!show) return;
+  const failed = upd.state === 'failed';
+  const n = updWaitingCount(upd.waiting);
+  const step = failed ? -1 : UPD_STEPS.indexOf(upd.state);
+  const steps = step < 0 ? '' : UPD_STEPS.map((s, i) =>
+    `<span class="uv-step${i < step ? ' done' : ''}${i === step ? ' now' : ''}">${UPD_STATES[s]}</span>`).join('<span class="uv-sep">→</span>');
+  const phase = failed
+    ? esc(upd.lastError || 'Update failed; staying on the current code.')
+    : (UPD_PHASE_LINE[upd.state] || (upd.state === 'draining' ? (n ? `Waiting for ${n} running agent${n === 1 ? '' : 's'} to finish.` : 'Waiting for running agents to finish.') : ''));
+  v.innerHTML = `<div class="uv-card${failed ? ' failed' : ''}">
+    <div class="uv-title">⟳ Updating Agents Squad…</div>
+    ${steps ? `<div class="uv-steps">${steps}</div>` : ''}
+    ${phase ? `<div class="uv-phase">${phase}</div>` : ''}
+    ${(upd.fromSha || upd.toSha) ? `<div class="uv-meta"><code>${esc(upd.fromSha || '?')} → ${esc(upd.toSha || '?')}</code>${upd.reason ? ` · ${esc(upd.reason)}` : ''}</div>` : ''}
+    ${failed ? '' : '<div class="uv-note">The app may stop responding briefly — that is the update, not a hang. It restarts itself; don’t close this window.</div>'}
+  </div>`;
 }
 function renderUpdSettings() {
   const t = $('#st-autorestart'); if (t) t.checked = !!upd.enabled;
