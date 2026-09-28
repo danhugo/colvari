@@ -164,3 +164,40 @@ test('providers: a custom runtime (helpycode) is its own provider; generic CLI w
 test('providers: empty team yields no entries', () => {
   assert.deepEqual(U.usageProviders({ runs: [agentRun()], limits: {}, nodes: [], now: NOW }), []);
 });
+
+test('providers: legacy runs without a runtime stamp count for the team\'s single provider', () => {
+  const providers = U.usageProviders({
+    runs: [agentRun({ runtime: undefined, startedAt: ago(30 * 1000) })], // pre-runtime persisted data
+    limits: { fiveHourLimit: 10, warnPct: 80 },
+    nodes: [node()],
+    now: NOW,
+  });
+  const claude = providers[0];
+  assert.equal(claude.provider, 'claude');
+  assert.equal(claude.status, 'ok'); // the legacy run is real usage — not 'unknown'
+  assert.equal(claude.windows.find((w) => w.label === '5h').used, 1);
+  assert.equal(claude.plan, 'subscription');
+});
+
+test('providers: multi-provider teams never guess a legacy run\'s provider', () => {
+  const providers = U.usageProviders({
+    runs: [agentRun({ runtime: undefined })],
+    limits: { fiveHourLimit: 10, warnPct: 80 },
+    nodes: [node(), node({ runtime: 'codex' })],
+    now: NOW,
+  });
+  assert.deepEqual(prov(providers, 'claude').windows, []);
+  assert.deepEqual(prov(providers, 'codex').windows, []);
+  assert.equal(prov(providers, 'claude').status, 'unknown');
+});
+
+test('providers: runtime-less runs stay uncounted when their runtime matches no agent but the team has one provider anyway', () => {
+  // a probe run (kind != 'agent') must never inflate windows, even on a single-provider team
+  const providers = U.usageProviders({
+    runs: [agentRun({ kind: 'probe', runtime: undefined })],
+    limits: { fiveHourLimit: 10, warnPct: 80 },
+    nodes: [node()],
+    now: NOW,
+  });
+  assert.equal(providers[0].status, 'unknown');
+});
