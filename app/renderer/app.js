@@ -365,7 +365,7 @@ function ask(title, value = '') {
     d.returnValue = ''; d.showModal(); $('#ask-input').select();
   });
 }
-const act = (fn) => async () => { try { await fn(); } catch (e) { alert(String(e.message || e).replace(/^Error invoking remote method 'api': (Error: )?/, '')); } };
+const act = (fn) => async (ev) => { try { await fn(ev); } catch (e) { alert(String(e.message || e).replace(/^Error invoking remote method 'api': (Error: )?/, '')); } };
 const curTeam = () => (S.project.teams.find((t) => t.id === ctx.t) || {});
 $('#newproject').onclick = act(async () => { const n = await ask('Project name', 'New project'); if (!n) return; const p = await call('createProject', n, $('#tpl-select').value); switchTo({ p: p.id }); });
 $('#renproject').onclick = act(async () => { const n = await ask('Rename project', S.project.name); if (n) { await call('renameProject', ctx.p, n); refresh(); } });
