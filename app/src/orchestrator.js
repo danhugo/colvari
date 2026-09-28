@@ -33,6 +33,12 @@ function stimeToMs(s) {
 // per window). Exported so tests can shorten the timings.
 const WAKE = { SWEEP_MS: 1000, DEBOUNCE_MS: 1500, MAX_PER_PAIR: 3, PAIR_WINDOW_MS: 10 * 60 * 1000 };
 
+// The run's board MCP server is a long-lived stdio helper the CLI spawns for the whole session
+// (mcpConfig: <exec> src/mcp-server.js --project <dir> --node <id>). It idles between calls, so its
+// being alive says nothing about run progress — leave its whole subtree out of the stall liveness
+// scan, or a hung CLI that owns one is never recovered.
+const isBoardHelper = (r) => !!r.command && /mcp-server\.js/.test(r.command) && r.command.includes('--project') && r.command.includes('--node');
+
 // Stall watchdog: how often a working agent is checked for silence, how long a SIGTERM'd stalled run
 // gets to exit before SIGKILL, and the max automatic stop+resume recoveries per task (persisted there).
 const STALL = { SWEEP_MS: 5000, SIGKILL_GRACE_MS: 8000, MAX_RECOVERIES: 2 };
@@ -350,7 +356,9 @@ class Orchestrator extends EventEmitter {
   // Liveness beyond emitted events: a live (non-zombie) descendant of the run's CLI process counts as
   // alive — a long silent tool call (build, sleep, network) keeps a grandchild process running even
   // though no events stream. So does the CLI's own CPU time advancing between sweeps. Unknowable
-  // (ps unavailable, slot placeholder without a pid) counts as alive: never stall on a hunch.
+  // (ps unavailable, slot placeholder without a pid) counts as alive: never stall on a hunch. The
+  // board MCP helper subtree is excluded (isBoardHelper): it idles for the whole session and would
+  // otherwise keep a hung CLI "alive" forever.
   runAlive(nodeId, child) {
     if (!child || !child.pid) return true;
     if (child.exitCode != null) return false; // already exited; the close event just hasn't fired
@@ -365,7 +373,7 @@ class Orchestrator extends EventEmitter {
     const queue = [child.pid]; const seen = new Set(queue);
     while (queue.length) {
       for (const r of kids.get(queue.pop()) || []) {
-        if (seen.has(r.pid)) continue;
+        if (seen.has(r.pid) || isBoardHelper(r)) continue; // skipped node's subtree stays unreachable
         seen.add(r.pid); queue.push(r.pid);
         if (r.state !== 'Z') return true;
       }
@@ -373,12 +381,12 @@ class Orchestrator extends EventEmitter {
     return false;
   }
 
-  // [{pid, ppid, state, cpuMs}] for every process, or null when ps is unavailable.
+  // [{pid, ppid, state, cpuMs, command}] for every process, or null when ps is unavailable.
   procTable() {
     try {
-      const out = require('child_process').execFileSync('ps', ['-axo', 'pid=,ppid=,state=,time='], { timeout: 4000 }).toString();
+      const out = require('child_process').execFileSync('ps', ['-axo', 'pid=,ppid=,state=,time=,command='], { timeout: 4000 }).toString();
       return out.split('\n').map((l) => l.trim().split(/\s+/)).filter((p) => p.length >= 3)
-        .map((p) => ({ pid: Number(p[0]), ppid: Number(p[1]), state: p[2], cpuMs: stimeToMs(p[3]) }));
+        .map((p) => ({ pid: Number(p[0]), ppid: Number(p[1]), state: p[2], cpuMs: stimeToMs(p[3]), command: p.slice(4).join(' ') }));
     } catch { return null; }
   }
   changed() { this.emit('state', this.snapshot()); }
