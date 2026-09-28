@@ -51,12 +51,16 @@ class UpdateWatcher extends EventEmitter {
     super();
     this.store = opts.store;
     this.repoDir = opts.repoDir || process.cwd();
+    // Package dir for npm (build/test/ci) when the app lives in a subdir of the git repo.
+    this.npmDir = opts.npmDir || this.repoDir;
     this.pollMs = opts.pollMs || 60 * 1000;
     // Restart guards (a team merges constantly: without these every merge would restart the app).
     this.minIntervalMs = opts.minIntervalMs ?? 10 * 60 * 1000;
     this.maxRestartsPerHour = opts.maxRestartsPerHour ?? 3;
     this.git = opts.git || defaultGit(this.repoDir);
-    this.npm = opts.npm || defaultNpm(this.repoDir);
+    this.npm = opts.npm || defaultNpm(this.npmDir);
+    // Lockfile/worktree paths are repo-relative; npm's lives under the package dir.
+    this.rel = path.relative(this.repoDir, this.npmDir) || '.';
     this.relaunch = opts.relaunch || (() => { const { app } = require('electron'); app.relaunch(); app.exit(0); });
     this.procCount = opts.procCount || (() => 0);
     this.runActive = opts.runActive || (() => false);
@@ -173,8 +177,8 @@ class UpdateWatcher extends EventEmitter {
         if (ff.code !== 0) return abort('fast-forward failed: ' + ff.out.slice(0, 300));
         this._seenSha = to;
       }
-      if (from === to ? this.git(['diff', '--name-only', to + '^', to, '--', 'package-lock.json']).out.trim()
-        : this.git(['diff', '--name-only', from, to, '--', 'package-lock.json']).out.trim()) {
+      if (from === to ? this.git(['diff', '--name-only', to + '^', to, '--', path.join(this.rel, 'package-lock.json')]).out.trim()
+        : this.git(['diff', '--name-only', from, to, '--', path.join(this.rel, 'package-lock.json')]).out.trim()) {
         this._log('system', 'self-update: package-lock.json changed; running npm ci.');
         const ci = this.npm(['ci']);
         if (ci.code !== 0) return abort('npm ci failed: ' + ci.out.slice(0, 300));
@@ -186,11 +190,11 @@ class UpdateWatcher extends EventEmitter {
       const wadd = this.git(['worktree', 'add', '--detach', wt, to]);
       if (wadd.code !== 0) { try { fs.rmSync(wt, { recursive: true, force: true }); } catch {} return abort('could not create test worktree: ' + wadd.out.slice(0, 300)); }
       try {
-        try { fs.symlinkSync(path.join(this.repoDir, 'node_modules'), path.join(wt, 'node_modules'), 'dir'); } catch {}
-        const t = this.npm(['test'], wt);
+        try { fs.symlinkSync(path.join(this.npmDir, 'node_modules'), path.join(wt, this.rel, 'node_modules'), 'dir'); } catch {}
+        const t = this.npm(['test'], path.join(wt, this.rel));
         if (t.code !== 0) return abort('tests failed on new code: ' + t.out.slice(-500));
       } finally {
-        try { fs.unlinkSync(path.join(wt, 'node_modules')); } catch {}
+        try { fs.unlinkSync(path.join(wt, this.rel, 'node_modules')); } catch {}
         this.git(['worktree', 'remove', '--force', wt]);
         try { fs.rmSync(wt, { recursive: true, force: true }); } catch {}
       }

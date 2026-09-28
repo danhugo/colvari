@@ -39,7 +39,8 @@ function watcherFor(pid) {
   if (!w) {
     const store = pm.store(pid);
     w = new SU.UpdateWatcher({
-      store, repoDir: APP_ROOT,
+      // git runs at the repo root; npm (build/test) in the package dir (app/).
+      store, repoDir: APP_ROOT, npmDir: path.join(__dirname, '..'),
       relaunch: () => { app.relaunch(); app.exit(0); },
       procCount: () => (orchs.get(pid) || { procs: new Map() }).procs.size,
       runActive: () => (orchs.get(pid) || {}).running || false,
