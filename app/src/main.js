@@ -479,8 +479,10 @@ async function guiE2E() {
     const [pm1, dev] = nodes;
     // Stub subscription runs: 6 inside the 5h window (below a limit of 10 -> 60%, under the 80% warn line) plus
     // one stale run from 6h ago that must NOT count (proves the window "resets" rather than accumulating forever).
-    for (let i = 0; i < 6; i++) s.addRun({ id: 'lim-' + i, projectId: p, nodeId: pm1.id, agent: pm1.name, kind: 'agent', billingSource: 'subscription', startedAt: new Date(Date.now() - i * 1000).toISOString(), inputTokens: 10, outputTokens: 5 });
-    s.addRun({ id: 'lim-stale', projectId: p, nodeId: pm1.id, agent: pm1.name, kind: 'agent', billingSource: 'subscription', startedAt: new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString(), inputTokens: 10, outputTokens: 5 });
+    // runtime is set the way the orchestrator stamps real runs — usageProviders attributes runs to
+    // providers by it, so unstamped seeds would leave the provider honestly "unknown".
+    for (let i = 0; i < 6; i++) s.addRun({ id: 'lim-' + i, projectId: p, nodeId: pm1.id, agent: pm1.name, kind: 'agent', runtime: 'claude', billingSource: 'subscription', startedAt: new Date(Date.now() - i * 1000).toISOString(), inputTokens: 10, outputTokens: 5 });
+    s.addRun({ id: 'lim-stale', projectId: p, nodeId: pm1.id, agent: pm1.name, kind: 'agent', runtime: 'claude', billingSource: 'subscription', startedAt: new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString(), inputTokens: 10, outputTokens: 5 });
     const prevLim = s.getSettings().usageLimits; s.saveSettings({ usageLimits: { fiveHourLimit: 10, weeklyLimit: 0, tokenLimit: 0, costLimit: 0, warnPct: 80 } });
     await ex(`$('#tabs button[data-tab=usage]').click(); await refresh(); await w(500);`);
     const meterQ = `{ pct: $('#limitmeter .lm-fill')?.style.width, text: $('#limitmeter').textContent, warn: /near limit/.test($('#limitmeter').textContent), pause: /paused/.test($('#limitmeter').textContent) }`;
@@ -574,7 +576,8 @@ async function guiE2E() {
       expect('limits-providers: Claude-only meter stays calm below the warn line and counts down the reset', !/near limit|paused/.test(m.txt) && /↻/.test(m.txt), m.txt);
       await shot('limits-providers-claude-only');
       scenarios.push({ name: 'Claude only', id: pj.id, m });
-      o.subscriptionRateLimits = {};
+      // The stubs stay: the contract loop below re-reads each project's meter and asserts the very
+      // windows seeded here (clearing them made every provider flip to 'unknown' by then).
     }
     // Codex-only: nothing ever reports — the meter explains that per agent instead of inventing a %.
     {
@@ -585,10 +588,9 @@ async function guiE2E() {
       await ex(`await refresh(); await w(500);`);
       const m = await ex(`return ${grab}`);
       expect('limits-providers: Codex-only team (Codex reports nothing) shows no fabricated percentage', !m.hidden && !/\d+%/.test(m.txt), m.txt);
-      expect('limits-providers: Codex-only meter explains why there is no data, without warn/pause', /no limit data/.test(m.txt) && !/near limit|paused/.test(m.txt), m.txt);
+      expect('limits-providers: Codex-only meter explains why there is no data, without warn/pause', /no limit data|limits unknown/.test(m.txt) && !/near limit|paused/.test(m.txt), m.txt);
       await shot('limits-providers-codex-only');
       scenarios.push({ name: 'Codex only', id: pj.id, m });
-      o.subscriptionRateLimits = {};
     }
     // Mixed: only the Claude node reports — its numbers surface without being attributed to Codex.
     {
@@ -602,7 +604,6 @@ async function guiE2E() {
       expect('limits-providers: mixed team surfaces the Claude-reported 42% while Codex stays silent', !m.hidden && m.txt.includes('42%'), m.txt);
       await shot('limits-providers-mixed');
       scenarios.push({ name: 'mixed', id: pj.id, m });
-      o.subscriptionRateLimits = {};
     }
     // Feature gate for the chip contract: provider-keyed usageStatus (Devon's model) or [data-provider]
     // chips (Uma's UI). Skipped loudly until then; once active, a mismatch red-lines the case on purpose.
@@ -698,7 +699,9 @@ async function guiE2E() {
     const ranked = seeds.slice().sort((a, b) => tot(b) - tot(a));
     for (const theme of ['light', 'dark']) {
       require('electron').nativeTheme.themeSource = theme;
-      await ex(`$('#tabs button[data-tab=usage]').click(); await refresh(); await w(500); $('#us-summary details').open = true; await w(200);`);
+      await ex(`$('#tabs button[data-tab=usage]').click(); await refresh(); await w(500);
+        const g = $('#g-close'); if (g) g.click(); // the Get-started card must not cover the evidence
+        $('#us-summary details').open = true; await w(200);`);
       const brk = await ex(`const c = document.querySelectorAll('#us-summary .us-breakdowns .us-card')[0]; return [...c.querySelectorAll('.usr')].map((n) => [n.querySelector('.usr-name').childNodes[0].textContent.trim(), n.querySelector('.usr-val b').textContent])`);
       expect('usage: By-model breakdown has a separate ranked row per model', JSON.stringify(brk.map((r) => r[0])) === JSON.stringify(ranked.map((x) => x.model)), brk);
       expect('usage: breakdown row tokens are that model own total, not a cross-model sum', JSON.stringify(brk.map((r) => r[1])) === JSON.stringify(ranked.map((x) => fmtTok(tot(x)))), brk);
@@ -715,7 +718,15 @@ async function guiE2E() {
       // Per-run history: one row per run with its own model and cost.
       const hist = await ex(`return [...document.querySelectorAll('#us-runs tr')].slice(1).map((tr) => [...tr.cells].map((td) => td.textContent.trim()))`);
       expect('usage: run history shows one row per run with its model and cost', hist.length === seeds.length && hist.every((c) => seeds.some((x) => c[4] === x.model && (c[12].includes('$' + x.reportedCostUsd.toFixed(4)) || c[12] === '—'))), hist.map((c) => [c[4], c[12]]));
+      // Header pills read the same per-run ledger as this tab: they must agree with the grand total
+      // instead of drifting (the old session-counter pill said "no cost yet" while the tab showed $0.07).
+      const pill = await ex(`return { cost: $('#totalcost').textContent, tok: $('#totaltokens').textContent }`);
+      expect('usage: header money pill matches the tab grand total (2dp)', pill.cost.includes('$' + costTotal.toFixed(2)), pill);
+      expect('usage: header ledger pill counts the seeded model keys', pill.tok.includes(`${seeds.length} models`), pill);
       await shot(`usage-permodel-${theme}`);
+      // Prove the per-model table visually: it lives below the fold — scroll it into view and shoot it.
+      await ex(`const h = [...document.querySelectorAll('#us-summary details h4')].find((x) => x.textContent === 'By model'); if (h) h.scrollIntoView({ block: 'center' }); await w(250);`);
+      await shot(`usage-permodel-bymodel-${theme}`);
     }
     require('electron').nativeTheme.themeSource = 'system';
     const csv = (await api.usageCSV({ p: up.id })).trim().split('\n');
