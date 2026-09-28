@@ -14,6 +14,19 @@ const DATA_FILES = ['team', 'board', 'wiki', 'settings', 'messages'];
 
 function defaultRoot() { return process.env.AGENTS_SQUAD_HOME || process.env.AGENTS_SQUAD_PROJECT || path.join(os.homedir(), '.agents-squad'); }
 
+// Data root for test instances (gui-e2e / smoke, called from main.js before any store opens).
+// AGENTS_SQUAD_HOME is the live app's root and leaks in from ambient shells, so in test mode an
+// explicit AGENTS_SQUAD_PROJECT wins over it; with neither set a throwaway temp root is created
+// instead of falling through to the real ~/.agents-squad. The dir is pre-created because some
+// drivers assume an existing AGENTS_SQUAD_PROJECT.
+function isolateTestRoot(env = process.env, tmp = os.tmpdir()) {
+  if (env.AGENTS_SQUAD_PROJECT) return env.AGENTS_SQUAD_PROJECT;
+  delete env.AGENTS_SQUAD_HOME;
+  const root = fs.mkdtempSync(path.join(tmp, 'agents-squad-e2e-'));
+  env.AGENTS_SQUAD_PROJECT = root;
+  return root;
+}
+
 // Team templates: nodes are given by key, edges reference keys.
 const TEMPLATES = {
   blank: { label: 'Blank', nodes: [], edges: [] },
@@ -142,4 +155,4 @@ class ProjectManager {
   }
 }
 
-module.exports = { ProjectManager, TEMPLATES, instantiate, defaultRoot };
+module.exports = { ProjectManager, TEMPLATES, instantiate, defaultRoot, isolateTestRoot };
