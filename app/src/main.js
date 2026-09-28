@@ -698,7 +698,9 @@ async function guiE2E() {
     const ranked = seeds.slice().sort((a, b) => tot(b) - tot(a));
     for (const theme of ['light', 'dark']) {
       require('electron').nativeTheme.themeSource = theme;
-      await ex(`$('#tabs button[data-tab=usage]').click(); await refresh(); await w(500); $('#us-summary details').open = true; await w(200);`);
+      await ex(`$('#tabs button[data-tab=usage]').click(); await refresh(); await w(500);
+        const g = $('#g-close'); if (g) g.click(); // the Get-started card must not cover the evidence
+        $('#us-summary details').open = true; await w(200);`);
       const brk = await ex(`const c = document.querySelectorAll('#us-summary .us-breakdowns .us-card')[0]; return [...c.querySelectorAll('.usr')].map((n) => [n.querySelector('.usr-name').childNodes[0].textContent.trim(), n.querySelector('.usr-val b').textContent])`);
       expect('usage: By-model breakdown has a separate ranked row per model', JSON.stringify(brk.map((r) => r[0])) === JSON.stringify(ranked.map((x) => x.model)), brk);
       expect('usage: breakdown row tokens are that model own total, not a cross-model sum', JSON.stringify(brk.map((r) => r[1])) === JSON.stringify(ranked.map((x) => fmtTok(tot(x)))), brk);
@@ -715,7 +717,15 @@ async function guiE2E() {
       // Per-run history: one row per run with its own model and cost.
       const hist = await ex(`return [...document.querySelectorAll('#us-runs tr')].slice(1).map((tr) => [...tr.cells].map((td) => td.textContent.trim()))`);
       expect('usage: run history shows one row per run with its model and cost', hist.length === seeds.length && hist.every((c) => seeds.some((x) => c[4] === x.model && (c[12].includes('$' + x.reportedCostUsd.toFixed(4)) || c[12] === '—'))), hist.map((c) => [c[4], c[12]]));
+      // Header pills read the same per-run ledger as this tab: they must agree with the grand total
+      // instead of drifting (the old session-counter pill said "no cost yet" while the tab showed $0.07).
+      const pill = await ex(`return { cost: $('#totalcost').textContent, tok: $('#totaltokens').textContent }`);
+      expect('usage: header money pill matches the tab grand total (2dp)', pill.cost.includes('$' + costTotal.toFixed(2)), pill);
+      expect('usage: header ledger pill counts the seeded model keys', pill.tok.includes(`${seeds.length} models`), pill);
       await shot(`usage-permodel-${theme}`);
+      // Prove the per-model table visually: it lives below the fold — scroll it into view and shoot it.
+      await ex(`const h = [...document.querySelectorAll('#us-summary details h4')].find((x) => x.textContent === 'By model'); if (h) h.scrollIntoView({ block: 'center' }); await w(250);`);
+      await shot(`usage-permodel-bymodel-${theme}`);
     }
     require('electron').nativeTheme.themeSource = 'system';
     const csv = (await api.usageCSV({ p: up.id })).trim().split('\n');

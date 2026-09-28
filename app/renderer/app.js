@@ -434,13 +434,21 @@ function renderHeader() {
   $('#runstate').textContent = o.running ? `running · ${par > 1 ? `${par} in parallel` : `${par || 1} agent`} · ${o.runs || 0} runs` : 'idle';
   $('#runstate').classList.toggle('on', !!o.running);
   // Money pill: only runs billed per token (API key / proxy / cloud) show a $ figure; subscription-only sessions show a quiet "subscription" pill.
-  const c = $('#totalcost'); const billed = o.billedCost || 0; const sub = o.subCost || 0;
+  // Derived from the same per-run ledger the Usage tab shows so the pill can never contradict the
+  // tab's grand total (the orchestrator's session counters miss runs it did not dispatch — seeded,
+  // imported or resumed history); falls back to those counters only before any runs are loaded.
+  let billed = 0, sub = 0;
+  if (RUNS.length) {
+    for (const r of RUNS) { const rc = runLedger(r).reduce((s2, e) => s2 + (e.costUsd || 0), 0);
+      if ((r.billingSource || 'auto') === 'subscription') sub += rc; else billed += rc; }
+  } else { billed = o.billedCost || 0; sub = o.subCost || 0; }
+  const c = $('#totalcost');
   c.textContent = billed > 0 ? `API-eq $${billed.toFixed(2)}` : sub > 0 ? 'subscription' : 'no cost yet';
   c.classList.toggle('quiet', !(billed > 0));
-  c.title = (billed > 0 ? `API-equivalent $${billed.toFixed(4)} for API key / proxy / cloud runs (reported by Claude CLI).` : 'No per-token billed runs this session.') + (sub > 0 ? ` Subscription runs: covered by subscription — not billed per token (API-equivalent $${sub.toFixed(4)}).` : '');
+  c.title = (billed > 0 ? `API-equivalent $${billed.toFixed(4)} for API key / proxy / cloud runs — the same ledger the Usage tab shows (est = list-price estimate).` : 'No per-token billed runs this session.') + (sub > 0 ? ` Subscription runs: covered by subscription — not billed per token (API-equivalent $${sub.toFixed(4)}).` : '');
   // Ledger pill: usage is tracked per {runtime, provider, model} key and token sums across models
   // are meaningless, so the pill shows the ledger's shape (distinct models · runs); hover for per-key rows.
-  const led = o.ledger || { rows: [] }; const tt = $('#totaltokens');
+  const led = (o.ledger && o.ledger.rows && o.ledger.rows.length) ? o.ledger : (RUNS.length ? ledgerFromRuns(RUNS) : { rows: [] }); const tt = $('#totaltokens');
   const nModels = new Set(led.rows.map((r) => r.model)).size;
   const nRuns = led.rows.reduce((a, r) => a + r.runs, 0);
   tt.textContent = led.rows.length ? `${nModels} model${nModels === 1 ? '' : 's'} · ${nRuns} run${nRuns === 1 ? '' : 's'}` : 'no usage yet';
@@ -1378,7 +1386,9 @@ function usageHero(rs, led) {
   const b = Array.from({ length: DAYS }, (_, i) => ({ d: new Date(start + i * day), rep: 0, est: 0, runs: 0 }));
   for (const r of rs) { const i = Math.floor((new Date(r.startedAt).getTime() - start) / day); if (i < 0 || i >= DAYS) continue; b[i].runs++;
     for (const e of runLedger(r)) if (e.costUsd != null) (e.costSource === 'estimated' ? b[i].est += e.costUsd : b[i].rep += e.costUsd); }
-  const max = Math.max(1, ...b.map((x) => x.rep + x.est)); const W = 100 / DAYS;
+  // Scale floor is $0.01, not $1: with a $1 floor a $0.07 day renders as a ~7% sliver that reads
+  // as "no usage" — the chart is a relative daily-cost view; absolute $ lives in the tooltips/KPIs.
+  const max = Math.max(0.01, ...b.map((x) => x.rep + x.est)); const W = 100 / DAYS;
   const bars = b.map((x, i) => { const hr = x.rep / max * 100, he = x.est / max * 100; if (!hr && !he) return `<g><title>${x.d.toLocaleDateString()} · no usage</title></g>`;
     return `<g><title>${x.d.toLocaleDateString()} · $${(x.rep + x.est).toFixed(2)} (${x.runs} run${x.runs === 1 ? '' : 's'})${x.est ? ' · includes estimates' : ''}</title><rect class="usb-est" x="${i * W + W * .15}" y="${100 - he - hr}" width="${W * .7}" height="${he}"/><rect class="usb-rep" x="${i * W + W * .15}" y="${100 - hr}" width="${W * .7}" height="${hr}"/></g>`; }).join('');
   const today = b[DAYS - 1];
