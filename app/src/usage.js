@@ -515,6 +515,61 @@ function providerUsageStatus(rateLimits, ctx = {}) {
   return { available: true, reason: null, fiveHour: rateLimits.fiveHour || null, weekly: rateLimits.weekly || null };
 }
 
+// Provider-keyed usage limits (t_8f8ab37d): one entry per provider the team's agents actually run, shaped
+// { provider, plan, status, reason, windows[{label,used,limit,pct,warn,pause,resetAt}] }. A provider is the
+// runtime's CLI vendor (claude, codex, a custom runtime like helpycode) — Claude's 5h/weekly windows are one
+// adapter here, not the model itself. Windows come from two sources per provider: the provider's own CLIs'
+// self-reported utilization (live parseRateLimits readings only — a stale one describes a window that already
+// reset) and the project's configured budget over that provider's windowed subscription runs. A provider whose
+// CLIs reported nothing and that has no windowed usage is status 'unknown' with an explicit reason and no
+// windows — never a fabricated 0%; a configured budget alone also doesn't make a silent provider "known".
+const PROVIDER_WINDOW_LABELS = ['5h', 'weekly'];
+const PROVIDER_WINDOW_KEYS = { '5h': 'fiveHour', weekly: 'weekly' }; // parseRateLimits reading keys per window label
+const PROVIDER_UNKNOWN_REASON = 'no usage reported yet by the CLI (run this agent once to get real usage)';
+function usageProviders({ runs = [], limits, nodes = [], rateLimitsByNode = {}, warnPct = 80, now = Date.now() } = {}) {
+  const l = normalizeLimits(limits);
+  const groups = new Map();
+  for (const n of nodes || []) {
+    if (!n) continue;
+    const provider = n.runtime || 'unknown';
+    const g = groups.get(provider) || { nodes: [], rl: [] };
+    g.nodes.push(n);
+    const rl = liveRateLimits(rateLimitsByNode[n.id] || n.rateLimits);
+    if (rl) g.rl.push(rl);
+    groups.set(provider, g);
+  }
+  const providers = [];
+  for (const [provider, g] of groups) {
+    const pRuns = runs.filter((r) => r.kind === 'agent' && (r.runtime || 'unknown') === provider);
+    // plan: how this provider's agents are billed — actual run billing wins, then a node's configured mode.
+    const billed = new Set(pRuns.map((r) => authType(r.billingSource)));
+    const plan = billed.has('subscription') ? 'subscription' : billed.has('api') ? 'api'
+      : (g.nodes.find((n) => n.billingMode === 'subscription' || n.billingMode === 'api') || {}).billingMode || 'unknown';
+    const subRuns = pRuns.filter((r) => authType(r.billingSource) === 'subscription');
+    const cliOf = (label) => g.rl.map((rl) => rl[PROVIDER_WINDOW_KEYS[label]]).filter(Boolean).sort((a, b) => b.pct - a.pct)[0] || null;
+    const runOf = (label) => windowUsage(subRuns, label === '5h' ? FIVE_HOURS_MS : WEEK_MS, now);
+    const hasData = PROVIDER_WINDOW_LABELS.some((label) => cliOf(label) || runOf(label).used > 0);
+    if (!hasData) { providers.push({ provider, plan, status: 'unknown', reason: PROVIDER_UNKNOWN_REASON, windows: [] }); continue; }
+    const windows = [];
+    for (const label of PROVIDER_WINDOW_LABELS) {
+      const cli = cliOf(label), u = runOf(label), lim = label === '5h' ? l.fiveHourLimit : l.weeklyLimit;
+      if (!cli && !lim && u.used === 0) continue; // nothing backs this window: omit it rather than show an empty row
+      const pct = cli ? cli.pct : lim ? u.used / lim : null;
+      windows.push({
+        label,
+        used: u.used,
+        limit: lim,
+        ...(pct != null ? { pct } : {}),
+        warn: cli ? cli.pct * 100 >= warnPct : lim ? u.used / lim * 100 >= warnPct : false,
+        pause: cli ? cli.pct >= 1 : lim ? u.used >= lim : false,
+        resetAt: (cli && cli.resetsAt) || u.resetsAt || null,
+      });
+    }
+    providers.push({ provider, plan, status: 'ok', reason: null, windows });
+  }
+  return providers;
+}
+
 // Context-window usage: the CLI resends the whole conversation as input on every turn, so the LAST assistant
 // message's own (uncombined) usage is the live context size — never sum across turns like tokensFromResult does.
 // 200k is the standard window; "[1m]" model ids (e.g. "claude-sonnet-5[1m]") get the 1M beta context window.
@@ -541,5 +596,5 @@ function parseCompactBoundary(ev) {
 
 module.exports = { resultSnapshot, tokensForRun, BILLING_MODES, BILLING_SOURCES, normalizeBilling, applyBillingEnv, detectBilling, costNote, tokensFromResult, totalTokens, newRun, applyEvent, finishRun, summarize, total, modelStats, toCSV, CSV_COLS,
   canonModel, estimateCostUsd, resolveEntryCost, providerOf, buildLedger, usageLedger, ledgerEntriesOf,
-  LIMITS_DEFAULTS, normalizeLimits, authType, windowUsage, limitStatus, usageStatus, applyCliRateLimits, parseRateLimitWindow, parseRateLimits, liveRateLimits, subscriptionGuard, providerUsageStatus, GUARD_DEFAULT_PCT,
+  LIMITS_DEFAULTS, normalizeLimits, authType, windowUsage, limitStatus, usageStatus, applyCliRateLimits, parseRateLimitWindow, parseRateLimits, liveRateLimits, subscriptionGuard, providerUsageStatus, usageProviders, GUARD_DEFAULT_PCT,
   CONTEXT_WINDOW_DEFAULT, CONTEXT_WINDOW_1M, contextWindowFor, contextFromAssistant, parseCompactBoundary };
