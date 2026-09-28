@@ -354,20 +354,38 @@ async function refreshCaps(n) {
 }
 
 // ---------- projects & teams sidebar ----------
+// The sidebar re-renders on every refresh (every 2s during a run, plus debounced state pushes).
+// Per-item onclick bindings died with each rebuild, so a click straddling a rebuild was swallowed.
+// Handlers are therefore delegated to the static list containers, and a render whose inputs did not
+// change leaves the DOM — and any in-flight click — untouched.
+$('#projectlist').onclick = (e) => { const d = e.target.closest('[data-pid]'); if (d) switchTo({ p: d.dataset.pid }); };
+$('#teamlist').onclick = (e) => { const d = e.target.closest('[data-tid]'); if (d) switchTo({ p: ctx.p, t: d.dataset.tid }); };
+let sidebarSig = null;
 function renderSidebar() {
-  $('#projectlist').innerHTML = P.projects.map((p) => `<div data-pid="${p.id}" class="${p.id === ctx.p ? 'sel' : ''}">${esc(p.name)}${p.running ? '<span class="dot" title="running"></span>' : ''}</div>`).join('');
-  document.querySelectorAll('#projectlist div').forEach((d) => d.onclick = () => switchTo({ p: d.dataset.pid }));
   const teams = (S.project && S.project.teams) || [];
+  const sig = JSON.stringify([P.projects.map((p) => [p.id, p.name, !!p.running]), teams.map((t) => [t.id, t.name]), ctx.p, ctx.t]);
+  if (sig === sidebarSig) return;
+  sidebarSig = sig;
+  $('#projectlist').innerHTML = P.projects.map((p) => `<div data-pid="${p.id}" class="${p.id === ctx.p ? 'sel' : ''}">${esc(p.name)}${p.running ? '<span class="dot" title="running"></span>' : ''}</div>`).join('');
   $('#teamlist').innerHTML = teams.map((t) => `<div data-tid="${t.id}" class="${t.id === ctx.t ? 'sel' : ''}">${esc(t.name)}</div>`).join('');
-  document.querySelectorAll('#teamlist div').forEach((d) => d.onclick = () => switchTo({ p: ctx.p, t: d.dataset.tid }));
   const ts = $('#tpl-select'); const cur = ts.value;
   ts.innerHTML = Object.entries(P.templates).map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join(''); if (cur) ts.value = cur;
 }
 function switchTo(c) {
-  if (c.p !== ctx.p) { sel = { node: null, edge: null, task: null, page: null }; wikiEdit = false; $('#wk-title').value = ''; $('#wk-content').value = ''; }
+  if (c.p !== ctx.p) { sel = { node: null, edge: null, task: null, page: null, logTeam: '' }; wikiEdit = false; $('#wk-title').value = ''; $('#wk-content').value = ''; }
   else sel = { ...sel, node: null, edge: null };
   connectFrom = null; connectMode = false; $('#connect').classList.remove('on');
-  ctx = c; refresh().then(renderLog);
+  ctx = c;
+  // The sidebar selection drives every team-scoped tab: sync the Logs tab's own team filter so
+  // switching teams here is visible there too (the dropdown can still narrow it afterwards).
+  if (c.t && sel.logTeam !== c.t) { sel.logTeam = c.t; $('#logfilter').value = ''; }
+  // refresh() mutates ctx (ctx.t = s.teamId) and ctx IS c, so the "was this a project switch?"
+  // intent must be captured before the await — c.t is unreliable by the time the .then runs.
+  const projectSwitch = !c.t;
+  refresh().then(() => {
+    if (projectSwitch && sel.logTeam !== (ctx.t || '')) { sel.logTeam = ctx.t || ''; $('#logfilter').value = ''; } // follow the auto-picked team
+    renderObs(); renderLog();
+  });
 }
 // Electron has no window.prompt, so use a small <dialog>.
 function ask(title, value = '') {
