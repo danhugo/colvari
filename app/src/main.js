@@ -561,6 +561,61 @@ async function guiE2E() {
     s.saveSettings({ usageLimits: prevLim });
     console.log('[gui-e2e] discovery', JSON.stringify({ panel, skillsCount: capabilities.skills.length, commandsCount: capabilities.slashCommands.length }));
   };
+  // Per-model usage accounting (t_14533d6d): seeded runs for three different models (fixtures only, no CLI
+  // runs) must show as separate per-model rows carrying exactly that model's own tokens — never a merged or
+  // cross-model-summed token figure — while cost is the only number with a grand total across models.
+  // On the API side, modelStats() must expose exactly one bucket per model, each holding only its own
+  // tokens/cost. When Uma's per-model Usage rework (t_f8032a7d) changes this view, these are the invariants
+  // it has to keep: one row per model, per-model token cells exact, single cost grand total.
+  const usagePerModelShots = async () => {
+    const up = pm.create('Usage per model'); const s = pm.store(up.id); const o = orchFor(up.id);
+    const now = Date.now();
+    const seeds = [
+      { model: 'claude-opus-4-5', runtime: 'claude', inputTokens: 1100, outputTokens: 220, cacheReadTokens: 330, cacheCreationTokens: 44, reportedCostUsd: 0.0123 },
+      { model: 'claude-sonnet-5', runtime: 'claude', inputTokens: 12000, outputTokens: 3400, cacheReadTokens: 5600, cacheCreationTokens: 700, reportedCostUsd: 0.0456 },
+      { model: 'glm-5.3-flash', runtime: 'helpycode', inputTokens: 500, outputTokens: 150, cacheReadTokens: 60, cacheCreationTokens: 0, reportedCostUsd: 0.0079 },
+    ];
+    seeds.forEach((x, i) => s.addRun({ id: 'usage-seed-' + i, projectId: up.id, nodeId: 'n_seed' + i, agent: 'Seed ' + (i + 1), kind: 'agent',
+      startedAt: new Date(now - (seeds.length - i) * 60000).toISOString(), endedAt: new Date(now - (seeds.length - 1 - i) * 60000).toISOString(),
+      durationMs: 60000, taskId: null, task: '', model: x.model, models: [x.model], runtime: x.runtime,
+      apiKeySource: 'ANTHROPIC_API_KEY', billingMode: 'auto', billingSource: 'api', billingDetail: 'ANTHROPIC_API_KEY',
+      inputTokens: x.inputTokens, outputTokens: x.outputTokens, cacheReadTokens: x.cacheReadTokens, cacheCreationTokens: x.cacheCreationTokens,
+      numTurns: 2, reportedCostUsd: x.reportedCostUsd, exitCode: 0, isError: false, sessionId: 'usage-seed-' + i }));
+    const tot = (x) => x.inputTokens + x.outputTokens + x.cacheReadTokens + x.cacheCreationTokens;
+    // API level: one bucket per model, each carrying only its own tokens and cost — no cross-model token sum.
+    const ms = o.modelStats();
+    expect('usage: modelStats has exactly one bucket per model', JSON.stringify(Object.keys(ms).sort()) === JSON.stringify(seeds.map((x) => x.model).sort()), Object.keys(ms));
+    expect('usage: modelStats buckets hold only their own model tokens/cost', seeds.every((x) => ms[x.model] && ms[x.model].runs === 1 && ms[x.model].tokens === tot(x) && Math.abs(ms[x.model].costUsd - x.reportedCostUsd) < 1e-9), ms);
+    await ex(`await switchTo({ p: '${up.id}' }); await w(500);`);
+    const fmtTok = (n) => { n = n || 0; return n >= 1e6 ? (n / 1e6).toFixed(2) + 'M' : n >= 1e4 ? (n / 1e3).toFixed(1) + 'k' : String(n); };
+    const costTotal = seeds.reduce((a, x) => a + x.reportedCostUsd, 0);
+    const ranked = seeds.slice().sort((a, b) => tot(b) - tot(a));
+    for (const theme of ['light', 'dark']) {
+      require('electron').nativeTheme.themeSource = theme;
+      await ex(`$('#tabs button[data-tab=usage]').click(); await refresh(); await w(500); $('#us-summary details').open = true; await w(200);`);
+      const brk = await ex(`const c = document.querySelectorAll('#us-summary .us-breakdowns .us-card')[0]; return [...c.querySelectorAll('.usr')].map((n) => [n.querySelector('.usr-name').childNodes[0].textContent.trim(), n.querySelector('.usr-val b').textContent])`);
+      expect('usage: By-model breakdown has a separate ranked row per model', JSON.stringify(brk.map((r) => r[0])) === JSON.stringify(ranked.map((x) => x.model)), brk);
+      expect('usage: breakdown row tokens are that model own total, not a cross-model sum', JSON.stringify(brk.map((r) => r[1])) === JSON.stringify(ranked.map((x) => fmtTok(tot(x)))), brk);
+      // Detailed By-model table: exact raw per-model cells, no extra merged/total row.
+      const tbl = await ex(`const h = [...document.querySelectorAll('#us-summary details h4')].find((x) => x.textContent === 'By model'); return h ? [...h.nextElementSibling.querySelectorAll('tr')].map((tr) => [...tr.cells].map((td) => td.textContent.trim())) : null`);
+      const byModel = Object.fromEntries((tbl || []).filter((c) => c[0]).map((c) => [c[0], c]));
+      expect('usage: By-model table has exactly one row per model (no merged/total row)', (tbl || []).filter((c) => c[0]).length === seeds.length && seeds.every((x) => byModel[x.model]), (tbl || []).map((c) => c[0]));
+      expect('usage: By-model table cells are exact per-model tokens', seeds.every((x) => { const c = byModel[x.model] || []; return c[1] === '1' && c[2] === String(x.inputTokens) && c[3] === String(x.outputTokens) && c[4] === String(x.cacheReadTokens) && c[5] === String(x.cacheCreationTokens) && c[6] === String(tot(x)); }), byModel);
+      expect('usage: By-model table row cost is that model own', seeds.every((x) => ((byModel[x.model] || [])[7] || '').includes('$' + x.reportedCostUsd.toFixed(4))), byModel);
+      // Cost is the only grand total: #us-cost equals the sum across models; tokens stay per-model above.
+      const cost = await ex(`return { total: $('#us-cost b') ? $('#us-cost b').textContent : null, kpis: document.querySelector('.us-kpis').textContent }`);
+      expect('usage: cost grand total equals the sum of per-model costs', cost.total === '$' + costTotal.toFixed(4), cost);
+      expect('usage: hero cost KPI matches the grand total (2dp)', cost.kpis.includes('$' + costTotal.toFixed(2)), cost.kpis);
+      // Per-run history: one row per run with its own model and cost.
+      const hist = await ex(`return [...document.querySelectorAll('#us-runs tr')].slice(1).map((tr) => [...tr.cells].map((td) => td.textContent.trim()))`);
+      expect('usage: run history shows one row per run with its model and cost', hist.length === seeds.length && hist.every((c) => seeds.some((x) => c[4] === x.model && (c[12].includes('$' + x.reportedCostUsd.toFixed(4)) || c[12] === '—'))), hist.map((c) => [c[4], c[12]]));
+      await shot(`usage-permodel-${theme}`);
+    }
+    require('electron').nativeTheme.themeSource = 'system';
+    const csv = (await api.usageCSV({ p: up.id })).trim().split('\n');
+    expect('usage: CSV has one line per run plus the header, model named', csv.length === seeds.length + 1 && seeds.every((x) => csv.some((l) => l.includes(x.model))), csv.length);
+    console.log('[gui-e2e] usage-permodel', JSON.stringify({ models: seeds.map((x) => x.model), costTotal: '$' + costTotal.toFixed(4) }));
+  };
   // Existing-data scenario: a project that predates capability probing, usage limits and reasoning-effort
   // fields (nodes added straight through the store, like a real legacy project.json). Nothing here should
   // crash or silently no-op: probing still works on demand, the limit meter still shows up once the CLI's
@@ -984,6 +1039,7 @@ async function guiE2E() {
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'mixed') { await mixedShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'limits') { await limitsShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'discovery') { await discoveryPanelShots(); throw null; }
+    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'usage') { await usagePerModelShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'existingdata') { await existingDataShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'polish') { await polishShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'mainlogswiki') { await mainLogsWikiShots(); throw null; }
@@ -1182,6 +1238,7 @@ async function guiE2E() {
     if (!process.env.SKIP_CRITIQUE) await critiqueShots();
     if (!process.env.SKIP_LIMITS) await limitsShots();
     if (!process.env.SKIP_DISCOVERY) await discoveryPanelShots();
+    if (!process.env.SKIP_USAGEPM) await usagePerModelShots();
     nativeTheme.themeSource = 'system';
     const tasks = store.listTasks();
     console.log('[gui-e2e]', JSON.stringify({ edges: store.getTeam().edges.length, tasks: tasks.map((t) => [t.title, t.status, t.iterations || 0, !!t.sessionId]), cost: orch.snapshot().totalCost }));
