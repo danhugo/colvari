@@ -472,7 +472,7 @@ $('#run').onclick = async () => {
 $('#stop').onclick = async () => { await call('stop'); refresh(); };
 
 // ---------- team graph (design-tool editor: pan/zoom, drag-to-connect, minimap, auto-layout, context menu) ----------
-const W = 184, H = 66, SVGNS = 'http://www.w3.org/2000/svg';
+const W = 184, H = 80, SVGNS = 'http://www.w3.org/2000/svg';
 function el(tag, attrs, parent) { const e = document.createElementNS(SVGNS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); parent && parent.appendChild(e); return e; }
 let VP = { x: 20, y: 20, zoom: 1 }, vpTeam = null, vpSave = null, lastEdgeType = 'assign', linkDrag = null;
 const agentColor = (id) => { let h = 0; for (const c of String(id)) h = (h * 31 + c.charCodeAt(0)) >>> 0; return (h % 8) + 1; };
@@ -557,12 +557,18 @@ function renderGraph() {
     el('text', { x: 52, y: 23, class: 'nname' }, g).textContent = clipText(n.name, Math.max(6, Math.round(16 / Math.max(1, 11 / (13 * VP.zoom)))));
     el('text', { x: 52, y: 38, class: 'nrole' }, g).textContent = clipText(n.role, 20);
     const rtId = ns.runtime || n.runtime || 'claude';
-    let cx = 12; for (const chip of [runtimeLabel(rtId), ns.model || n.model || 'default'].filter(Boolean)) { const t = clipText(chip, 14); const w = 10 + t.length * 5.6; const cg = el('g', { class: 'chip', transform: `translate(${cx},46)` }, g); el('rect', { width: w, height: 14, rx: 7 }, cg); el('text', { x: w / 2, y: 10.5, 'text-anchor': 'middle' }, cg).textContent = t; cx += w + 4; }
-    if (rtId !== 'claude') { const a = S.orch.agents[n.id] || {}; const t = clipText(`${fmtTok(a.inputTokens)}/${fmtTok(a.outputTokens)} tok`, 20); const w = 10 + t.length * 5.6; const cg = el('g', { class: 'chip chip-usage', title: 'usage: input/output tokens', transform: `translate(${cx},46)` }, g); el('rect', { width: w, height: 14, rx: 7 }, cg); el('text', { x: w / 2, y: 10.5, 'text-anchor': 'middle' }, cg).textContent = t; el('title', {}, cg).textContent = `${runtimeLabel(rtId)} usage: ${fmtTok(a.inputTokens)} in / ${fmtTok(a.outputTokens)} out`; cx += w + 4; }
+    // Chip row wraps to a second line when it would run into the card edge or the subagent badge
+    // (row 1 reserves the badge's corner; the badge itself sits in row 1's band, right-aligned).
+    const sub = Subagents.badge(S.orch.agents[n.id] || {});
+    const sb = sub.count ? subBadgeInfo(sub) : null;
+    let cx = 12, cy = 46;
+    const putChip = (text, max, cls, title) => { const t = clipText(text, max); const w = 10 + t.length * 5.6; const lim = cy === 46 && sb ? W - sb.w - 12 : W - 10; if (cx + w > lim && cx > 12) { cx = 12; cy = 62; } const cg = el('g', { class: cls, transform: `translate(${cx},${cy})` }, g); if (title) el('title', {}, cg).textContent = title; el('rect', { width: w, height: 14, rx: 7 }, cg); el('text', { x: w / 2, y: 10.5, 'text-anchor': 'middle' }, cg).textContent = t; cx += w + 4; };
+    for (const chip of [runtimeLabel(rtId), ns.model || n.model || 'default'].filter(Boolean)) putChip(chip, 14, 'chip');
+    if (rtId !== 'claude') { const a = S.orch.agents[n.id] || {}; putChip(`${fmtTok(a.inputTokens)}/${fmtTok(a.outputTokens)} tok`, 20, 'chip chip-usage', `${runtimeLabel(rtId)} usage: ${fmtTok(a.inputTokens)} in / ${fmtTok(a.outputTokens)} out`); }
     const effort = n.effort || 'low';
-    for (const chip of [`E:${effort}`, n.autoCompact ? `AC:${n.autoCompact}` : null].filter(Boolean)) { const t = clipText(chip, 14); const w = 10 + t.length * 5.6; const isDefaultEffort = chip === `E:${effort}` && !n.effort; const cg = el('g', { class: 'chip chip-em' + (isDefaultEffort ? ' chip-default' : ''), transform: `translate(${cx},46)` }, g); el('title', {}, cg).textContent = chip.startsWith('E:') ? `Reasoning effort: ${effort}${isDefaultEffort ? ' (default)' : ''}` : `Auto-compact window: ${n.autoCompact}`; el('rect', { width: w, height: 14, rx: 7 }, cg); el('text', { x: w / 2, y: 10.5, 'text-anchor': 'middle' }, cg).textContent = t; cx += w + 4; }
+    for (const chip of [`E:${effort}`, n.autoCompact ? `AC:${n.autoCompact}` : null].filter(Boolean)) { const isDefaultEffort = chip === `E:${effort}` && !n.effort; putChip(chip, 14, 'chip chip-em' + (isDefaultEffort ? ' chip-default' : ''), chip.startsWith('E:') ? `Reasoning effort: ${effort}${isDefaultEffort ? ' (default)' : ''}` : `Auto-compact window: ${n.autoCompact}`); }
     const capsSt = !n.capabilities ? 'none' : (n.capabilities.error || n.capabilities.ok === false) ? 'error' : 'ok';
-    const cb = el('g', { class: 'capsdot caps-' + capsSt, transform: `translate(10,${H - 8})` }, g); el('circle', { r: 4 }, cb);
+    const cb = el('g', { class: 'capsdot caps-' + capsSt, transform: `translate(7,${H - 8})` }, g); el('circle', { r: 4 }, cb);
     el('title', {}, cb).textContent = capsSt === 'none' ? 'Capabilities not probed yet' : capsSt === 'error' ? 'Capability probe failed' : `Capabilities probed${n.capabilitiesProbedAt ? ' ' + new Date(n.capabilitiesProbedAt).toLocaleString() : ''}`;
     const sg = el('g', { class: 'status s-' + live, transform: `translate(${W - 16},16)` }, g); el('circle', { r: 5 }, sg); el('title', {}, sg).textContent = live;
     const pres = el('g', { class: 'pres ' + presence(n.id), transform: `translate(${W - 16},16)` }, g); el('circle', { r: 8 }, pres);
@@ -587,7 +593,7 @@ function renderGraph() {
     const st = stallState(n.id);
     if (st) drawStallBadge(g, st, () => openWakeTask(st.taskId));
     else { const wk = wakeRun(n.id); if (wk) drawWakeBadge(g, wk, () => openWakeTask(wk.taskId)); }
-    drawSubBadge(g, S.orch.agents[n.id] || {});
+    drawSubBadge(g, S.orch.agents[n.id] || {}, 46);
     el('title', {}, g).textContent = `${n.name} (${n.role}) — ${live}`;
     if (typeof ns.contextPct === 'number' && live === 'working') {
       const pct = Math.max(0, Math.min(100, ns.contextPct * 100));
@@ -908,18 +914,21 @@ function drawStallBadge(g, st, onclick) {
 }
 // Subagent chip on an agent card (Team graph + Overview): count + compact total tokens for the current
 // run's subagents. Per contract t_c33656ba the parent's own totals ALREADY include these — the badge is
-// a breakdown, never something to add on top. Hidden when the agent spawned nothing.
-function drawSubBadge(g, a) {
-  const b = Subagents.badge(a); if (!b.count) return;
+// a breakdown, never something to add on top. Hidden when the agent spawned nothing. y places it in the
+// card: the Team chip row passes its row-1 band (46), Overview keeps the bottom strip (H-18).
+function subBadgeInfo(b) {
   const tot = b.tokens ? (b.tokens.inputTokens || 0) + (b.tokens.outputTokens || 0) : 0;
-  // totals() reports 0/0 when the CLI publishes no per-subagent usage — show count only, never "0 tok"
+  // totals() reports 0/0 when the CLI publishes no per-subagent usage — count only, "n/a" never "0 tok"
   const txt = tot > 0 ? `🤖${b.count} ${fmtTok(tot)}` : `🤖${b.count}`;
-  const w = 14 + txt.length * 5.6;
-  const full = `${b.count} subagent${b.count === 1 ? '' : 's'}${b.tokens ? ` · ${b.tokens.inputTokens ?? 'n/a'} in / ${b.tokens.outputTokens ?? 'n/a'} out tok (included in this agent's totals)` : ' · token usage n/a'}`;
-  const bg = el('g', { class: 'subbadge', transform: `translate(${W - w - 8},${H - 18})` }, g);
-  el('rect', { width: w, height: 14, rx: 7 }, bg);
-  el('text', { x: w / 2, y: 10.5, 'text-anchor': 'middle' }, bg).textContent = txt;
-  el('title', {}, bg).textContent = full;
+  return { txt, w: 14 + txt.length * 5.6, full: `${b.count} subagent${b.count === 1 ? '' : 's'}${tot > 0 ? ` · ${b.tokens.inputTokens} in / ${b.tokens.outputTokens} out tok (included in this agent's totals)` : ' · token usage n/a'}` };
+}
+function drawSubBadge(g, a, y = H - 18) {
+  const b = Subagents.badge(a); if (!b.count) return;
+  const i = subBadgeInfo(b);
+  const bg = el('g', { class: 'subbadge', transform: `translate(${W - i.w - 8},${y})` }, g);
+  el('rect', { width: i.w, height: 14, rx: 7 }, bg);
+  el('text', { x: i.w / 2, y: 10.5, 'text-anchor': 'middle' }, bg).textContent = i.txt;
+  el('title', {}, bg).textContent = i.full;
 }
 // A task stuck in_progress whose assignee has no live agent process: the orchestrator will reset/re-dispatch it,
 // but until then it needs to be visible so a stalled run isn't mistaken for one still working.

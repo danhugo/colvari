@@ -457,6 +457,19 @@ header .pill { border:none; background:none; color:var(--fg-muted); font-size:va
 .subrows .logrow { font-size:11.5px; }
 .subrows .logtime, .subrows .logagent { display:none; } /* keep nested rows compact: the block header carries who/when */
 .subrows .subblock { background:var(--card); }
+/* The log pane keeps the dark terminal background in both themes, so the default --fg/--muted text
+   (dark in light theme) is unreadable there — switch subblock chrome to the term palette. */
+.loglist .subblock { border-color:rgba(255,255,255,.14); background:rgba(255,255,255,.04); }
+.loglist .subblock .subblock { background:rgba(255,255,255,.07); }
+.loglist .subhead:hover { background:rgba(255,255,255,.06); }
+.loglist .subdesc { color:var(--term-fg); }
+.loglist .submeta, .loglist .subcount { color:var(--term-dim); }
+.loglist .subcount { background:rgba(255,255,255,.06); border-color:rgba(255,255,255,.14); }
+.loglist .substatus { color:var(--term-dim); background:rgba(255,255,255,.06); border-color:transparent; }
+.loglist .substatus.ss-running { color:var(--term-yellow); background:rgba(229,192,123,.12); }
+.loglist .substatus.ss-completed { color:var(--term-green); background:rgba(152,195,121,.12); }
+.loglist .substatus.ss-failed { color:var(--term-red); background:rgba(239,107,115,.12); }
+.loglist .substatus.ss-aborted { color:var(--term-dim); background:rgba(255,255,255,.05); }
 
 /* Overview task thread variant: native <details> so open state survives the 1s re-render */
 #ov-thread .subthread, #ov-thread details.subthread { border:1px solid var(--line); border-left:3px solid var(--acc); border-radius:var(--radius-sm, 6px); margin:4px 0; background:color-mix(in srgb, var(--acc) 3%, transparent); }
