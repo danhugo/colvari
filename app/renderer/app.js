@@ -899,8 +899,9 @@ function drawStallBadge(g, st, onclick) {
 // a breakdown, never something to add on top. Hidden when the agent spawned nothing.
 function drawSubBadge(g, a) {
   const b = Subagents.badge(a); if (!b.count) return;
-  const tot = b.tokens && (b.tokens.inputTokens != null || b.tokens.outputTokens != null) ? fmtTok((b.tokens.inputTokens || 0) + (b.tokens.outputTokens || 0)) : null;
-  const txt = tot ? `🤖${b.count} ${tot}` : `🤖${b.count}`;
+  const tot = b.tokens ? (b.tokens.inputTokens || 0) + (b.tokens.outputTokens || 0) : 0;
+  // totals() reports 0/0 when the CLI publishes no per-subagent usage — show count only, never "0 tok"
+  const txt = tot > 0 ? `🤖${b.count} ${fmtTok(tot)}` : `🤖${b.count}`;
   const w = 14 + txt.length * 5.6;
   const full = `${b.count} subagent${b.count === 1 ? '' : 's'}${b.tokens ? ` · ${b.tokens.inputTokens ?? 'n/a'} in / ${b.tokens.outputTokens ?? 'n/a'} out tok (included in this agent's totals)` : ' · token usage n/a'}`;
   const bg = el('g', { class: 'subbadge', transform: `translate(${W - w - 8},${H - 18})` }, g);

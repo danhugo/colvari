@@ -15,6 +15,7 @@ const IDLE = require('./idle');
 const WT = require('./worktree');
 const RT = require('./runtimes');
 const CAP = require('./capabilities');
+const { SubagentTracker, isSubagentTool } = require('./subagents');
 
 const MCP_SERVER = path.join(__dirname, 'mcp-server.js');
 
@@ -139,7 +140,7 @@ class Orchestrator extends EventEmitter {
     this._stallTimer = setInterval(() => this.sweepStalls(), STALL.SWEEP_MS);
     if (this._stallTimer.unref) this._stallTimer.unref();
   }
-  agent(id) { return (this.agents[id] ||= { runCost: 0, runTokens: 0, pendingHuman: [], stopRequested: false, budgetStop: null, status: 'idle', iteration: 0, cost: 0, inputTokens: 0, outputTokens: 0, cacheTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, runs: 0, taskId: null, task: null, activity: null, model: '', runtime: '', billingSource: '', contextTokens: null, contextWindow: 0, contextPct: null, lastContextMessageId: null }); }
+  agent(id) { return (this.agents[id] ||= { runCost: 0, runTokens: 0, pendingHuman: [], stopRequested: false, budgetStop: null, status: 'idle', iteration: 0, cost: 0, inputTokens: 0, outputTokens: 0, cacheTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, runs: 0, taskId: null, task: null, activity: null, model: '', runtime: '', billingSource: '', contextTokens: null, contextWindow: 0, contextPct: null, lastContextMessageId: null, subagents: [], subagentCount: 0, subagentTokens: { inputTokens: 0, outputTokens: 0 } }); }
   // modelStats: per-model aggregate across this project's persisted runs + tasks (see usage.js modelStats for the field shape).
   modelStats() { let rs = []; try { rs = this.store.listRuns(); } catch {} let ts = []; try { ts = this.store.listTasks(); } catch {} return U.modelStats(rs, ts); }
   // nodeTeams: {nodeId: {teamId, teamName}} across all teams in the project, for tagging log/timeline entries.
@@ -166,9 +167,9 @@ class Orchestrator extends EventEmitter {
     }
     this.emit('run', rec);
   }
-  log(nodeId, kind, text) {
+  log(nodeId, kind, text, extra = null) {
     const a = nodeId && this.agents[nodeId];
-    const l = { nodeId, kind, text, at: Date.now(), taskId: (a && a.taskId) || null, task: (a && a.task) || null, level: TL.levelOf(kind) };
+    const l = { nodeId, kind, text, at: Date.now(), taskId: (a && a.taskId) || null, task: (a && a.task) || null, level: TL.levelOf(kind), ...(extra && typeof extra === 'object' ? extra : {}) };
     try { this.store.appendLog(l); } catch {}
     this.emit('log', l);
     // Keep the latest error reason on the agent so the UI can show why it failed (and push it now, not at next run end).
@@ -548,6 +549,9 @@ class Orchestrator extends EventEmitter {
       // Identity + liveness for the stall watchdog: any stdout/stderr byte refreshes a.lastActivityAt,
       // and `run` is the handle the watchdog claims (.stalled) to own this run's recovery.
       const run = { sessionId: null, result: '', usage };
+      // Subagent (Task/Agent tool) records for this run; reset the live agent-side totals it feeds.
+      run.subs = new SubagentTracker(node.id);
+      a.subagents = []; a.subagentCount = 0; a.subagentTokens = { inputTokens: 0, outputTokens: 0 };
       a.currentRun = run; a.lastActivityAt = Date.now();
       let buf = '';
       child.stdout.on('data', (d) => {
@@ -561,6 +565,12 @@ class Orchestrator extends EventEmitter {
         run.done = true;
         if (a.currentRun === run) a.currentRun = null;
         if (buf.trim()) this.onEvent(node, buf.trim(), run, rt.id);
+        if (run.subs && run.subs.records.length) {
+          // Anything still 'running' can never finish once the CLI is gone: abort before persisting.
+          for (const rec of run.subs.close()) this.emit('subagent', { nodeId: node.id, record: { ...rec } });
+          usage.subagents = run.subs.snapshot(); // per-run history: listRuns()[i].subagents rebuilds after a restart
+          this.syncSubs(node.id, run);
+        }
         delete usage.baseline;
         if (usage.sessionId && usage.cumulative) (this.sessionCum ||= new Map()).set(usage.sessionId, usage.cumulative);
         if (args) this.record(U.finishRun(usage, { code, env, billingMode: meta.billingMode, startedMs }));
@@ -778,6 +788,27 @@ class Orchestrator extends EventEmitter {
     return r;
   }
 
+  // Mirror the run's subagent tracker into live agent state for the snapshot (renderer reads
+  // a.subagents / a.subagentCount / a.subagentTokens). Records are copies, not live references.
+  syncSubs(nodeId, run) {
+    if (!run || !run.subs) return;
+    const a = this.agent(nodeId);
+    a.subagents = run.subs.snapshot();
+    a.subagentCount = a.subagents.length;
+    a.subagentTokens = run.subs.totals();
+    this.changed();
+  }
+  // Apply one subagent signal from a runtime parser ({toolUseId, phase, status, toolName, description,
+  // prompt, startedAt, endedAt, childSessionId}): create/complete the record, mirror state, notify.
+  onSubagentSignal(nodeId, run, s) {
+    const subs = run.subs;
+    let rec = subs.start(s);
+    if (s.phase === 'end') rec = subs.end(s.toolUseId, { status: s.status, endedAt: s.endedAt });
+    if (s.childSessionId && !rec.childSessionId) rec.childSessionId = s.childSessionId;
+    this.syncSubs(nodeId, run);
+    this.emit('subagent', { nodeId, record: { ...rec } });
+  }
+
   onEvent(node, line, run, runtime = 'claude') {
     let ev; try { ev = JSON.parse(line); } catch { return this.log(node.id, 'raw', line); }
     const a = this.agent(node.id);
@@ -789,14 +820,23 @@ class Orchestrator extends EventEmitter {
     if (rt && rt.parseEvent) {
       const o = rt.parseEvent(ev, this.store.getSettings());
       for (const [k, t] of o.logs) if (String(t).trim()) this.log(node.id, k, t);
+      if (run && run.subs && o.subagent) this.onSubagentSignal(node.id, run, o.subagent);
       if (run && o.sessionId) { run.sessionId = o.sessionId; if (run.usage) run.usage.sessionId = o.sessionId; }
       if (run && o.result !== undefined) run.result = o.result;
       if (o.tokens) { if (run && run.usage) { run.usage.inputTokens = (run.usage.inputTokens || 0) + o.tokens.inputTokens; run.usage.outputTokens = (run.usage.outputTokens || 0) + o.tokens.outputTokens; run.usage.reportedCostUsd = (run.usage.reportedCostUsd || 0) + (o.cost || 0); this.changed(); } } // record() adds the run's totals to the agent counters at close; adding them here too would double-count
       return;
     }
+    // Subagent scoping (claude stream-json): every event belonging to a spawned subagent carries the
+    // tool_use id of the Agent/Task call that started it. The tool_use itself is the start, its
+    // tool_result (a parent-level user event) the end; children are matched by id, never arrival order
+    // (parallel subagents interleave in the stream).
+    const subs = run && run.subs;
+    const parentTag = ev.parent_tool_use_id && subs ? subs.tagFor(ev.parent_tool_use_id) : null;
+    const subTag = parentTag ? { subagentId: parentTag.id } : null;
     if (ev.type === 'assistant' && ev.message?.content) {
       // Stream-json can repeat the same message id across deltas; only the first sighting is a new turn.
-      const ctx = U.contextFromAssistant(ev);
+      // Child (subagent) turns are excluded: their usage describes the subagent's context, not this agent's.
+      const ctx = !ev.parent_tool_use_id ? U.contextFromAssistant(ev) : null;
       if (ctx && ctx.messageId !== a.lastContextMessageId) {
         a.lastContextMessageId = ctx.messageId;
         a.contextWindow = U.contextWindowFor(ctx.model || a.model);
@@ -804,9 +844,27 @@ class Orchestrator extends EventEmitter {
         a.contextPct = a.contextWindow ? ctx.contextTokens / a.contextWindow : null;
         this.changed();
       }
+      // Per-subagent token breakdown from the child turns' own message usage (deduped by message id).
+      if (parentTag && ev.message.usage) {
+        subs.addTokens(ev.parent_tool_use_id, { inputTokens: ev.message.usage.input_tokens, outputTokens: ev.message.usage.output_tokens }, ev.message.id);
+        this.syncSubs(node.id, run);
+      }
       for (const c of ev.message.content) {
-        if (c.type === 'text' && c.text.trim()) this.log(node.id, 'text', c.text);
-        else if (c.type === 'tool_use') this.log(node.id, 'tool', `${c.name} ${JSON.stringify(c.input).slice(0, 300)}`);
+        if (c.type === 'text' && c.text.trim()) this.log(node.id, 'text', c.text, subTag);
+        else if (c.type === 'tool_use') {
+          if (subs && isSubagentTool(c.name)) {
+            const rec = subs.start({
+              toolUseId: c.id,
+              parentToolUseId: ev.parent_tool_use_id || null,
+              toolName: c.name,
+              description: (c.input && (c.input.description || c.input.subagent_type)) || '',
+              prompt: (c.input && c.input.prompt) || '',
+            });
+            this.syncSubs(node.id, run);
+            this.emit('subagent', { nodeId: node.id, record: { ...rec } });
+          }
+          this.log(node.id, 'tool', `${c.name} ${JSON.stringify(c.input).slice(0, 300)}`, subTag);
+        }
       }
     } else if (ev.type === 'system' && ev.subtype === 'compact_boundary') {
       const cb = U.parseCompactBoundary(ev);
@@ -819,8 +877,14 @@ class Orchestrator extends EventEmitter {
       }
     } else if (ev.type === 'user' && ev.message?.content) {
       for (const c of ev.message.content) if (c.type === 'tool_result') {
+        // A parent-level result for a tracked Agent/Task tool_use ends that subagent (is_error -> failed).
+        if (!parentTag && subs && subs.record(c.tool_use_id)) {
+          const rec = subs.end(c.tool_use_id, { status: c.is_error ? 'failed' : 'completed' });
+          this.syncSubs(node.id, run);
+          this.emit('subagent', { nodeId: node.id, record: { ...rec } });
+        }
         const txt = Array.isArray(c.content) ? c.content.map((x) => x.text || '').join('') : String(c.content ?? '');
-        this.log(node.id, c.is_error ? 'tool_error' : 'tool_result', txt.slice(0, 400));
+        this.log(node.id, c.is_error ? 'tool_error' : 'tool_result', txt.slice(0, 400), subTag);
       }
     } else if (ev.type === 'result') {
       if (run) { run.result = typeof ev.result === 'string' ? ev.result : ''; if (ev.session_id) run.sessionId = ev.session_id; }
