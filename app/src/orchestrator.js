@@ -18,10 +18,24 @@ const CAP = require('./capabilities');
 
 const MCP_SERVER = path.join(__dirname, 'mcp-server.js');
 
+// 'ps -o time=' CPU time, e.g. '12:05.44' (MM:SS.cc) or '1:02:03' (H:MM:SS) -> ms.
+function stimeToMs(s) {
+  const seg = String(s || '').trim().split(':');
+  if (!seg[seg.length - 1]) return null;
+  const last = seg.pop().split('.');
+  const secs = Number(last[0]) + Number('0.' + (last[1] || '0'));
+  const mins = Number(seg.pop() || 0), hrs = Number(seg.pop() || 0);
+  return Math.round(((hrs * 60 + mins) * 60 + secs) * 1000);
+}
+
 // Wake-on-message: how often the orchestrator looks for unread agent->agent messages, how long a burst
 // may coalesce into one dispatch, and the ping-pong guard (max auto-wakes per sender->recipient pair
 // per window). Exported so tests can shorten the timings.
 const WAKE = { SWEEP_MS: 1000, DEBOUNCE_MS: 1500, MAX_PER_PAIR: 3, PAIR_WINDOW_MS: 10 * 60 * 1000 };
+
+// Stall watchdog: how often a working agent is checked for silence, how long a SIGTERM'd stalled run
+// gets to exit before SIGKILL, and the max automatic stop+resume recoveries per task (persisted there).
+const STALL = { SWEEP_MS: 5000, SIGKILL_GRACE_MS: 8000, MAX_RECOVERIES: 2 };
 
 function buildPrompt(team, node, task, extra = {}) {
   node = { ...normalizeNode(applyPreset(node, extra.presets)), id: node.id };
@@ -67,6 +81,12 @@ function humanPrompt(text, base = null) {
   return [base, `Message from the human operator (answer or act on it, then continue your task):\n${text}`].filter(Boolean).join('\n\n');
 }
 
+// Short 'continue' prompt for a stalled run resumed in the same session (the session already holds
+// the full task context; this only tells the agent the previous attempt was stopped and why).
+function stallPrompt(task) {
+  return `Your previous run for this task (id=${task.id}) stalled (no activity for the configured stall timeout) and was stopped automatically. Continue the task from where you left off and finish it as originally instructed.`;
+}
+
 // Prompt for a wake run: an idle agent dispatched purely to handle unread teammate messages.
 function wakePrompt(team, node, msgs) {
   const nm = (id) => { const n = team.nodes.find((x) => x.id === id); return n ? `${n.name} (${n.role}, id=${n.id})` : id; };
@@ -103,6 +123,12 @@ class Orchestrator extends EventEmitter {
     this.wakePairs = new Map(); // 'from>to' -> {count, since}
     this._wakeTimer = setInterval(() => this.sweepWakes(), WAKE.SWEEP_MS);
     if (this._wakeTimer.unref) this._wakeTimer.unref();
+    // Stall watchdog state: last seen cumulative CPU time of each run's CLI process (nodeId -> {pid, cpuMs}),
+    // and the pending SIGKILL grace timers for stalled runs that ignore SIGTERM.
+    this._stallCpu = new Map();
+    this._stallKill = new Map();
+    this._stallTimer = setInterval(() => this.sweepStalls(), STALL.SWEEP_MS);
+    if (this._stallTimer.unref) this._stallTimer.unref();
   }
   agent(id) { return (this.agents[id] ||= { runCost: 0, runTokens: 0, pendingHuman: [], stopRequested: false, budgetStop: null, status: 'idle', iteration: 0, cost: 0, inputTokens: 0, outputTokens: 0, cacheTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, runs: 0, taskId: null, task: null, activity: null, model: '', runtime: '', billingSource: '', contextTokens: null, contextWindow: 0, contextPct: null, lastContextMessageId: null }); }
   // modelStats: per-model aggregate across this project's persisted runs + tasks (see usage.js modelStats for the field shape).
@@ -282,6 +308,76 @@ class Orchestrator extends EventEmitter {
     this.changed();
     if (this.running) setImmediate(() => this.tick());
   }
+
+  // ---- stall watchdog: a run that has emitted nothing AND has no live child/descendant process for
+  // stallTimeoutMin (setting, default 10) is stalled. It is stopped; runTask (the r.stalled branch)
+  // then resumes the same session with a short continue prompt, max 2 recoveries per task. Manual
+  // interrupts (stopAgent, a queued human message) always take precedence and are never recovered over. ----
+  sweepStalls() {
+    if (!this.running || this.userStopped) return;
+    const timeoutMin = Number(this.store.getSettings().stallTimeoutMin ?? 10);
+    if (!(timeoutMin > 0)) return;
+    const now = Date.now();
+    for (const [nodeId, child] of [...this.procs]) {
+      const a = this.agents[nodeId];
+      const run = a && a.currentRun;
+      if (!a || a.status !== 'working' || !a.taskId || !run || run.done || run.stalled) continue;
+      if (a.stopRequested || a.pendingHuman.length) continue;
+      if (now - (a.lastActivityAt || 0) < timeoutMin * 60000) continue;
+      if (this.runAlive(nodeId, child)) continue;
+      // One-way claim on the run object: whichever sweep flips .stalled owns the recovery, so a tick
+      // racing a manual stop or a queued message can never double-fire (compare-and-set on the run).
+      run.stalled = true;
+      a.stall = { state: 'stalled' };
+      const idleMin = Math.round((now - (a.lastActivityAt || 0)) / 60000);
+      this.log(nodeId, 'error', `stall: no events and no live child process for ${idleMin} min; stopping the run to recover`);
+      this.emit('run.stalled', { nodeId, taskId: a.taskId, idleMin });
+      try { child.kill('SIGTERM'); } catch {}
+      this._stallKill.set(nodeId, setTimeout(() => {
+        this._stallKill.delete(nodeId);
+        if (this.procs.get(nodeId) === child && a.currentRun === run && !run.done) {
+          try { child.kill('SIGKILL'); } catch {}
+          this.log(nodeId, 'error', 'stall: run ignored SIGTERM; sent SIGKILL');
+        }
+      }, STALL.SIGKILL_GRACE_MS));
+      this.changed();
+    }
+  }
+
+  // Liveness beyond emitted events: a live (non-zombie) descendant of the run's CLI process counts as
+  // alive — a long silent tool call (build, sleep, network) keeps a grandchild process running even
+  // though no events stream. So does the CLI's own CPU time advancing between sweeps. Unknowable
+  // (ps unavailable, slot placeholder without a pid) counts as alive: never stall on a hunch.
+  runAlive(nodeId, child) {
+    if (!child || !child.pid) return true;
+    if (child.exitCode != null) return false; // already exited; the close event just hasn't fired
+    const rows = this.procTable();
+    if (!rows) return true;
+    const me = rows.find((r) => r.pid === child.pid);
+    const prev = this._stallCpu.get(nodeId);
+    this._stallCpu.set(nodeId, { pid: child.pid, cpuMs: me ? me.cpuMs : null });
+    if (me && prev && prev.pid === child.pid && prev.cpuMs != null && me.cpuMs > prev.cpuMs) return true;
+    const kids = new Map();
+    for (const r of rows) { if (!kids.has(r.ppid)) kids.set(r.ppid, []); kids.get(r.ppid).push(r); }
+    const queue = [child.pid]; const seen = new Set(queue);
+    while (queue.length) {
+      for (const r of kids.get(queue.pop()) || []) {
+        if (seen.has(r.pid)) continue;
+        seen.add(r.pid); queue.push(r.pid);
+        if (r.state !== 'Z') return true;
+      }
+    }
+    return false;
+  }
+
+  // [{pid, ppid, state, cpuMs}] for every process, or null when ps is unavailable.
+  procTable() {
+    try {
+      const out = require('child_process').execFileSync('ps', ['-axo', 'pid=,ppid=,state=,time='], { timeout: 4000 }).toString();
+      return out.split('\n').map((l) => l.trim().split(/\s+/)).filter((p) => p.length >= 3)
+        .map((p) => ({ pid: Number(p[0]), ppid: Number(p[1]), state: p[2], cpuMs: stimeToMs(p[3]) }));
+    } catch { return null; }
+  }
   changed() { this.emit('state', this.snapshot()); }
 
   start() {
@@ -430,15 +526,22 @@ class Orchestrator extends EventEmitter {
         : Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter(), kill() {} });
       if (!args) setImmediate(() => child.emit('close', 1));
       this.procs.set(node.id, child);
+      const a = this.agent(node.id);
+      // Identity + liveness for the stall watchdog: any stdout/stderr byte refreshes a.lastActivityAt,
+      // and `run` is the handle the watchdog claims (.stalled) to own this run's recovery.
       const run = { sessionId: null, result: '', usage };
+      a.currentRun = run; a.lastActivityAt = Date.now();
       let buf = '';
       child.stdout.on('data', (d) => {
+        a.lastActivityAt = Date.now();
         buf += d; let i;
         while ((i = buf.indexOf('\n')) >= 0) { const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1); if (line) this.onEvent(node, line, run, rt.id); }
       });
-      child.stderr.on('data', (d) => this.log(node.id, 'stderr', String(d).trim()));
+      child.stderr.on('data', (d) => { a.lastActivityAt = Date.now(); this.log(node.id, 'stderr', String(d).trim()); });
       child.on('error', (e) => this.log(node.id, 'error', e.code === 'ENOENT' ? `${rt.label} binary not found: "${rt.bin(settings)}". Install it or set its path in Settings (run failed, no fallback).` : 'spawn failed: ' + e.message));
       child.on('close', (code) => {
+        run.done = true;
+        if (a.currentRun === run) a.currentRun = null;
         if (buf.trim()) this.onEvent(node, buf.trim(), run, rt.id);
         delete usage.baseline;
         if (usage.sessionId && usage.cumulative) (this.sessionCum ||= new Map()).set(usage.sessionId, usage.cumulative);
@@ -529,21 +632,53 @@ class Orchestrator extends EventEmitter {
     a.runtime = meta.runtime; a.model = cfg.model || '';
     let resume = task.sessionId || (m.continueSession ? this.lastSession(node.id) : null);
     this.log(node.id, 'system', `▶ ${node.name} starts "${task.title}" in ${cwd} [mode=${m.mode}${resume ? ', resume ' + resume : ''}]`);
-    let code = 1; let judge = null; let i = 0; let reason = ''; let human = null;
+    let code = 1; let judge = null; let i = 0; let reason = ''; let human = null; let recover = false;
     a.stopRequested = false; a.pendingHuman = [];
     for (;;) {
       a.iteration = i + 1; this.changed();
       let args = null;
       if (base !== null) {
         const b = m.mode === 'loop' && !isLastLoop(m, i) ? baseDefer : base;
-        const prompt = human ? humanPrompt(human, resume || wf ? null : b) : iterationPrompt(m, b, i, { reason: judge && judge.reason, task: wf ? (this.store.getTask(task.id) || task) : null });
+        const prompt = human ? humanPrompt(human, resume || wf ? null : b) : recover ? stallPrompt(task) : iterationPrompt(m, b, i, { reason: judge && judge.reason, task: wf ? (this.store.getTask(task.id) || task) : null });
         try { args = RT.getRuntime(cfg.runtime).buildArgs(runCfg, prompt, settings, mcp, { resume, cwd, env }); }
         catch (e) { this.log(node.id, 'error', 'bad agent settings: ' + e.message); }
       }
       if (i > 0) this.log(node.id, 'system', `↻ ${node.name} iteration ${i + 1} (${m.mode})`);
       const r = await this.spawnRun(node, args, cwd, env, settings, { ...meta, iteration: i + 1, resumedFrom: args && resume ? resume : null });
-      code = r.code; i++; human = null;
+      code = r.code; i++; human = null; recover = false;
       if (r.sessionId) { resume = r.sessionId; this.store.updateTask(task.id, { sessionId: r.sessionId, iterations: i }); }
+      // A run that got through (exit 0) is real progress: the stall counter resets (persisted on the task,
+      // so it survives app restarts — otherwise a restart would re-arm the recovery budget).
+      if (code === 0) { const tp = this.store.getTask(task.id); if (tp && tp.stallRecoveries) this.store.updateTask(task.id, { stallRecoveries: 0 }); }
+      // Stalled run confirmed exited (the watchdog killed it after the run.stalled claim): resume the
+      // same session with a continue prompt, at most STALL.MAX_RECOVERIES times per task (persisted
+      // counter), then park the task for a human. Only when the orchestrator is still running and no
+      // manual stop interleaved.
+      if (r.stalled && code !== 0 && this.running && !a.stopRequested) {
+        const ts = this.store.getTask(task.id);
+        const attempt = ((ts && ts.stallRecoveries) || 0) + 1;
+        if (attempt > STALL.MAX_RECOVERIES) {
+          this.store.updateTask(task.id, { stallRecoveries: attempt, status: 'waiting_for_human' });
+          this.store.commentTask(task.id, 'orchestrator', `Run stalled ${attempt} time(s); the ${STALL.MAX_RECOVERIES} automatic stop+resume recoveries are used up. Parked for a human.`);
+          this.emit('run.recovery_failed', { nodeId: node.id, taskId: task.id, attempt: attempt - 1, final: true });
+          this.log(node.id, 'error', `stall recovery failed: ${attempt - 1} automatic resume(s) already used; parked for a human`);
+          reason = `stalled after ${attempt - 1} recovery attempt(s)`; break;
+        }
+        if (!resume) {
+          // No session id to resume: never silently retry fresh (would lose the session's context).
+          this.store.updateTask(task.id, { stallRecoveries: attempt, status: 'waiting_for_human' });
+          this.store.commentTask(task.id, 'orchestrator', 'Run stalled; automatic recovery failed because the run reported no session id to resume. Parked for a human.');
+          this.emit('run.recovery_failed', { nodeId: node.id, taskId: task.id, attempt, final: true, reason: 'no session' });
+          this.log(node.id, 'error', 'stall recovery failed: no session id was reported, the same session cannot be resumed');
+          reason = 'stalled: no session to resume'; break;
+        }
+        this.store.updateTask(task.id, { stallRecoveries: attempt, status: 'in_progress' });
+        a.stall = { attempt, max: STALL.MAX_RECOVERIES };
+        this.log(node.id, 'system', `↻ stall recovery ${attempt}/${STALL.MAX_RECOVERIES}: resuming the same session with a continue prompt`);
+        this.emit('run.recovering', { nodeId: node.id, taskId: task.id, attempt, max: STALL.MAX_RECOVERIES });
+        recover = true;
+        continue;
+      }
       const msgs = a.pendingHuman.splice(0);
       if (msgs.length && this.running && !a.stopRequested) {
         try { this.store.markMessagesRead(msgs.map((x) => x.id)); } catch {}
@@ -565,7 +700,7 @@ class Orchestrator extends EventEmitter {
     }
     this.procs.delete(node.id); this.cwds.delete(node.id);
     const stoppedWhy = a.stopRequested; a.stopRequested = false;
-    a.status = 'idle'; a.taskId = null; a.task = null; a.iteration = 0;
+    a.status = 'idle'; a.taskId = null; a.task = null; a.iteration = 0; a.stall = null;
     const t = this.store.getTask(task.id);
     const gate = (st) => C.gateStatus(st, node, this.store.getSettings());
     if (m.mode === 'goal' && t && judge && !judge.met && t.status === 'done') {
@@ -628,6 +763,8 @@ class Orchestrator extends EventEmitter {
   onEvent(node, line, run, runtime = 'claude') {
     let ev; try { ev = JSON.parse(line); } catch { return this.log(node.id, 'raw', line); }
     const a = this.agent(node.id);
+    // A parsed event is liveness for the stall watchdog (a stalled run's late events don't count).
+    if (run && !run.stalled) a.lastActivityAt = Date.now();
     // Runtimes that declare a parseEvent hook (codex, profile-driven CLIs) parse their own events;
     // no per-CLI branch here. Claude's stream-json stays handled inline below.
     const rt = (() => { try { return RT.getRuntime(runtime); } catch { return null; } })();
@@ -716,4 +853,4 @@ class Orchestrator extends EventEmitter {
     }
   }
 }
-module.exports = { Orchestrator, buildPrompt, humanPrompt, wakePrompt, WAKE };
+module.exports = { Orchestrator, buildPrompt, humanPrompt, wakePrompt, stallPrompt, WAKE, STALL };

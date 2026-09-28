@@ -22,6 +22,9 @@ function orchFor(pid) {
     o.on('state', (s) => send('state', { ...s, projectId: pid }));
     o.on('notify', (n) => { send('notify', { ...n, projectId: pid }); notify(n, pid); });
     o.on('woken_by_message', (w) => send('woken_by_message', { ...w, projectId: pid }));
+    o.on('run.stalled', (e) => send('run-stalled', { ...e, projectId: pid }));
+    o.on('run.recovering', (e) => send('run-recovering', { ...e, projectId: pid }));
+    o.on('run.recovery_failed', (e) => send('run-recovery-failed', { ...e, projectId: pid }));
     orchs.set(pid, o);
   }
   return o;
