@@ -18,7 +18,7 @@ test('usage ledger keeps runtime/provider/model keys and token types separate', 
   const l = U.usageLedger([a, b]);
   assert.equal(l.rows.length, 2);
   assert.deepEqual(l.rows.map((x) => [x.runtime, x.provider, x.model]), [['claude', 'firstParty', 'claude-sonnet-4-5'], ['codex', 'unknown', 'gpt-5']]);
-  assert.deepEqual(l.rows[0], { runtime: 'claude', provider: 'firstParty', model: 'claude-sonnet-4-5', key: 'claude¦firstParty¦claude-sonnet-4-5', runs: 1, inputTokens: 100, outputTokens: 20, cacheReadTokens: 30, cacheCreationTokens: 4, costUsd: 0.12, costSource: 'reported', costPartial: false });
+  assert.deepEqual(l.rows[0], { runtime: 'claude', provider: 'firstParty', model: 'claude-sonnet-4-5', key: 'claude¦firstParty¦claude-sonnet-4-5', runs: 1, inputTokens: 100, outputTokens: 20, cacheReadTokens: 30, cacheCreationTokens: 4, costUsd: 0.12, apiEq: 0.12, billed: 0.12, costSource: 'reported', costPartial: false });
   assert.equal(l.rows[1].cacheCreationTokens, null); // codex reports no cache writes: unknown, not 0
   assert.equal(Object.hasOwn(l.rows[0], 'totalTokens'), false);
   assert.equal(Object.hasOwn(l, 'tokens'), false);
@@ -88,4 +88,75 @@ test('orchestrator snapshot exposes the ledger, never cross-model token totals',
   assert.equal(snap.agents[a.id].inputTokens, undefined); assert.equal(snap.agents[a.id].cacheTokens, undefined);
   assert.deepEqual(snap.ledger.rows, []); assert.ok('usageSince' in snap);
   assert.doesNotThrow(() => JSON.stringify(snap)); // must survive the renderer state push
+});
+
+// ---- account-keyed rows (t_f514cc2e): firstParty==subscription for claude, legacy runtime-less
+// runs attribute to claude, one cost definition (apiEq vs billed) ----
+
+const entryOf = (over = {}) => ({ runtime: 'claude', provider: 'subscription', model: 'claude-opus-5-5', inputTokens: 10, outputTokens: 2, cacheReadTokens: null, cacheCreationTokens: null, costUsd: 0.02, costSource: 'reported', billed: 0, ...over });
+const runOf = (over = {}) => ({ kind: 'agent', billingSource: 'subscription', model: 'claude-opus-5-5', inputTokens: 10, outputTokens: 2, reportedCostUsd: 0.02, ledger: [entryOf()], ...over });
+const approx = (a, b) => Math.abs(a - b) < 1e-9;
+
+test('subscription-billed claude runs key one account: the CLI label firstParty collapses to subscription', () => {
+  const r = U.newRun({ runtime: 'claude' });
+  U.applyEvent(r, { type: 'system', subtype: 'init', model: 'claude-opus-5-5', apiKeySource: 'none' });
+  U.applyEvent(r, { type: 'result', total_cost_usd: 0.2, modelUsage: { 'claude-opus-5-5': { inputTokens: 100, outputTokens: 20, cacheReadInputTokens: 3, cacheCreationInputTokens: 1, costUSD: 0.2, provider: 'firstParty', canonicalModel: 'claude-opus-5-5' } } });
+  const x = U.finishRun(r, { code: 0, env: {} });
+  assert.equal(x.billingSource, 'subscription');
+  assert.deepEqual(x.ledger.map((e) => [e.runtime, e.provider, e.model, e.billed]), [['claude', 'subscription', 'claude-opus-5-5', 0]]);
+});
+
+test('the three observed claude-subscription row shapes collapse into one account row', () => {
+  // t_4e6295b9 live shapes: modelUsage label, channel fallback, legacy preflight without a runtime stamp
+  const runs = [
+    runOf({ ledger: [entryOf({ provider: 'firstParty', costUsd: 0.2 })], reportedCostUsd: 0.2 }),
+    runOf({ ledger: [entryOf({ provider: 'subscription', costUsd: 0.1 })], reportedCostUsd: 0.1 }),
+    { ...runOf({ runtime: 'unknown' }), kind: 'preflight', ledger: [entryOf({ runtime: 'unknown', provider: 'firstParty', costUsd: 0.02 })] },
+  ];
+  const l = U.usageLedger(runs);
+  assert.equal(l.rows.length, 1);
+  assert.deepEqual([l.rows[0].runtime, l.rows[0].provider, l.rows[0].model], ['claude', 'subscription', 'claude-opus-5-5']);
+  assert.equal(l.rows[0].runs, 3);
+  assert.ok(approx(l.rows[0].apiEq, 0.32), 'API-equivalent value still reported per row: ' + l.rows[0].apiEq);
+  assert.equal(l.rows[0].billed, 0); // covered by the plan: a KNOWN $0, not a missing $
+  assert.ok(approx(l.costUsd, 0.32) && approx(l.apiEq, 0.32));
+  assert.equal(l.billed, 0);
+});
+
+test('legacy runtime-less runs with a non-claude model stay an explicit unattributed row', () => {
+  const other = { kind: 'agent', runtime: 'unknown', billingSource: 'unknown', model: 'mistral-large', inputTokens: 10, outputTokens: 2,
+    ledger: [{ runtime: 'unknown', provider: 'zai', model: 'mistral-large', inputTokens: 10, outputTokens: 2, cacheReadTokens: null, cacheCreationTokens: null, costUsd: null, costSource: 'unknown' }] };
+  const l = U.usageLedger([runOf(), other]);
+  assert.deepEqual(l.rows.map((x) => [x.runtime, x.provider, x.model]), [['claude', 'subscription', 'claude-opus-5-5'], ['unknown', 'zai', 'mistral-large']]);
+  assert.equal(l.rows[1].apiEq, null);
+  assert.equal(l.rows[1].billed, null); // unpriced non-subscription $: unknown, not 0
+});
+
+test('API-key claude runs keep their firstParty account — never merged into the subscription row', () => {
+  const api = { kind: 'agent', runtime: 'claude', billingSource: 'api', model: 'claude-opus-5-5', inputTokens: 10, outputTokens: 2, reportedCostUsd: 0.5,
+    ledger: [entryOf({ provider: 'firstParty', costUsd: 0.5, billed: 0.5 })] };
+  const l = U.usageLedger([runOf({ ledger: [entryOf({ costUsd: 0.2 })], reportedCostUsd: 0.2 }), api]);
+  assert.deepEqual(l.rows.map((x) => [x.provider, x.runs, x.apiEq, x.billed]), [['firstParty', 1, 0.5, 0.5], ['subscription', 1, 0.2, 0]]);
+  assert.ok(approx(l.apiEq, 0.7) && approx(l.costUsd, 0.7));
+  assert.ok(approx(l.billed, 0.5));
+});
+
+test('totals are the raw sums of the per-row fields (round once, at display)', () => {
+  const mk = (model) => ({ kind: 'agent', runtime: 'claude', billingSource: 'api', model, inputTokens: 10, outputTokens: 1,
+    ledger: [{ runtime: 'claude', provider: 'firstParty', model, inputTokens: 10, outputTokens: 1, cacheReadTokens: null, cacheCreationTokens: null, costUsd: 0.00345, costSource: 'reported', billed: 0.00345 }] });
+  const l = U.usageLedger([mk('claude-haiku-4-5'), mk('claude-sonnet-5')]);
+  assert.ok(l.rows.every((r) => r.apiEq === 0.00345 && r.billed === 0.00345), 'per-row values stay unrounded');
+  assert.ok(approx(l.apiEq, 0.0069), 'totals are raw sums: ' + l.apiEq);
+  assert.ok(Math.abs(l.apiEq - 0.007) > 1e-4, 'not the sum of per-row 4-decimal roundings');
+  assert.equal(l.billed, l.apiEq);
+});
+
+test('totals equal the sum of the rows (the header invariant), billed and apiEq alike', () => {
+  const hc = { kind: 'agent', runtime: 'helpycode', billingSource: 'unknown', model: 'glm-5.3-flash', inputTokens: 100, outputTokens: 20,
+    ledger: [{ runtime: 'helpycode', provider: 'elice/z-ai', model: 'glm-5.3-flash', inputTokens: 100, outputTokens: 20, cacheReadTokens: null, cacheCreationTokens: null, costUsd: 0.2710154, costSource: 'estimated', billed: 0.2710154 }] };
+  const l = U.usageLedger([runOf({ ledger: [entryOf({ costUsd: 0.2 })], reportedCostUsd: 0.2 }), hc]);
+  assert.equal(l.costUsd, l.rows.reduce((a, r) => a + (r.costUsd || 0), 0));
+  assert.equal(l.apiEq, l.rows.reduce((a, r) => a + (r.apiEq || 0), 0));
+  assert.equal(l.billed, l.rows.reduce((a, r) => a + (r.billed || 0), 0));
+  assert.ok(approx(l.billed, 0.2710154)); // only the per-token-billed account contributes
 });
