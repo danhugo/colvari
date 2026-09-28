@@ -401,3 +401,12 @@ header .pill { border:none; background:none; color:var(--fg-muted); font-size:va
 #graph .wakerunbadge rect, #ov-graph .wakerunbadge rect { fill:var(--accent-soft); stroke:var(--accent); }
 #graph .wakerunbadge text, #ov-graph .wakerunbadge text { fill:var(--accent-text); font-size:9px; font-weight:var(--fw-semibold); }
 #graph .wakerunbadge.linked, #ov-graph .wakerunbadge.linked { cursor:pointer; }
+
+/* self-update: header status chip + restart history (t_506c0cb0) */
+.pill.upd-pending, .pill.upd-draining { color:var(--warn); border-color:var(--warn); }
+.pill.upd-testing { color:var(--acc); border-color:var(--acc); }
+.pill.upd-restarting { background:var(--ok); color:var(--fg-on-accent); border-color:var(--ok); }
+.pill.upd-failed { background:var(--danger); color:var(--fg-on-accent); border-color:var(--danger); }
+.updhist { width:100%; margin:6px 0; } .updhist td, .updhist th { padding:3px 6px; font-size:12px; }
+.updhist code { font-family:var(--font-mono); font-size:11px; }
+.updres.ok { color:var(--ok); } .updres.bad { color:var(--danger); font-weight:600; }
