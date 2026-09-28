@@ -12,7 +12,7 @@
   <div id="limitmeter" class="limitmeter hidden" title="Usage limits"></div>
   <span id="updst" class="pill hidden"></span>
   <span id="runstate" class="pill">idle</span>
-  <span id="totaltokens" class="pill" title="Measured tokens this session (in / out / cache read / cache write)">0 tok</span>
+  <span id="totaltokens" class="pill" title="Usage ledger, per runtime · provider · model (hover for per-key rows)">no usage yet</span>
   <span id="totalcost" class="pill" title="API-equivalent (reported by Claude CLI). Not what you pay on a Pro/Max subscription.">API-eq $0.0000</span>
   <input id="goal" placeholder="Goal for the team (e.g. Create hello.txt with hello world)"><button id="run" class="primary">Run</button><button id="stop">Stop</button><button id="help" title="Keyboard shortcuts (?)">?</button>
 </header>
@@ -73,7 +73,7 @@
   </section>
   <section id="tab-usage" class="tab">
     <div class="toolbar"><label>Agent <select id="us-agent"><option value="">All</option></select></label><label>Billing <select id="us-billing"><option value="">All</option><option>subscription</option><option>api</option><option>proxy</option><option>bedrock</option><option>vertex</option><option>unknown</option></select></label>
-      <button id="us-export" class="primary">Export CSV</button><button id="us-exportall">Export CSV (all projects)</button><button id="us-clear">Clear history</button><span class="muted">Tokens are measured from the claude stream-json output. Costs are only what the Claude CLI reports.</span></div>
+      <button id="us-export" class="primary">Export CSV</button><button id="us-exportall">Export CSV (all projects)</button><button id="us-clear">Clear history</button><span class="muted">Usage is tracked per runtime · provider · model in the ledger — token columns are per key and never summed across models; cost is the only grand total. Costs are the CLI-reported figure or a list-price estimate (marked est).</span></div>
     <div id="us-summary"></div>
     <div id="us-discovery"></div>
     <div id="us-limits"></div>

@@ -511,9 +511,16 @@ header .pill { border:none; background:none; color:var(--fg-muted); font-size:va
 .us-chart-head, .us-axis { display:flex; justify-content:space-between; color:var(--fg-muted); font-size:var(--text-xs); }
 .us-leg i { display:inline-block; width:8px; height:8px; border-radius:2px; margin:0 3px 0 8px; }
 rect.usb-io, i.usb-io, .usr-io { fill:var(--accent); background:var(--accent); } rect.usb-cache, i.usb-cache, .usr-cache { fill:var(--border-strong); background:var(--border-strong); }
+rect.usb-rep, i.usb-rep { fill:var(--accent); background:var(--accent); } rect.usb-est, i.usb-est { fill:var(--border-strong); background:var(--border-strong); }
+.usr-usd { display:block; background:var(--accent); }
 .us-chart g:hover rect { opacity:.75; }
 .us-breakdowns { display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:12px; margin-bottom:12px; }
 .us-card h4 { margin:0 0 8px; } .usr { margin:0 0 8px; }
+.us-vendor { margin:4px 0 12px; }
+.us-vendor > small { color:var(--fg-muted); font-size:var(--text-xs); display:block; margin-bottom:2px; }
+.us-vendor h4 { margin:4px 0; }
+.us-gstart td { border-top:2px solid var(--border-strong); }
+.costnote.est { color:var(--warning-text); font-weight:600; }
 .usr-top { display:flex; justify-content:space-between; gap:8px; font-size:var(--text-sm, 13px); }
 .usr-name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; } .usr small { color:var(--fg-muted); }
 .usr-val { font-variant-numeric:tabular-nums; white-space:nowrap; }

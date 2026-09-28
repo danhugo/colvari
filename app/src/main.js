@@ -54,9 +54,14 @@ function watcherFor(pid) {
       relaunch: () => { app.relaunch(); app.exit(0); },
       procCount: () => (orchs.get(pid) || { procs: new Map() }).procs.size,
       runActive: () => (orchs.get(pid) || {}).running || false,
+      // Drain deadline hit: stop the still-running agents so the restart can proceed; their tasks
+      // re-dispatch after the relaunch (reconcileOrphanedTasks), the Run resumes via wasRunning.
+      haltProcs: () => (orchs.get(pid) || { haltProcs: () => Promise.resolve() }).haltProcs(),
       // Unpausing after an aborted update must re-tick: the drain held the run session open with
-      // nothing dispatched, so only this nudge resumes dispatching.
-      setPaused: (v) => { const o = orchs.get(pid); if (o) { o.dispatchPaused = v; if (!v) setImmediate(() => o.tick()); } },
+      // nothing dispatched, so only this nudge resumes dispatching. A drain-deadline cut sets
+      // drainCutoff while killing the runs; if the update then aborts, the flag must go with the
+      // pause or every subsequent run would break instantly at its first iteration.
+      setPaused: (v) => { const o = orchs.get(pid); if (o) { o.dispatchPaused = v; if (!v) { o.drainCutoff = false; setImmediate(() => o.tick()); } } },
     });
     w.on('log', (l) => send('log', { ...l, projectId: pid }));
     w.on('status', (st) => send('self-update-status', { projectId: pid, ...st }));
@@ -448,7 +453,15 @@ async function guiE2E() {
     expect('mixed: overview nodes show vendor · model', ov.join() === 'Claude · opus,Codex · gpt-5.6-terra,Claude · haiku', ov);
     for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`$('#tabs button[data-tab=usage]').click(); await refresh(); await w(600);`); await shot(`30-mixed-usage-${t}`); }
     const us = await ex(`return [...document.querySelectorAll('#us-summary h4')].find((h) => h.textContent === 'By vendor').nextElementSibling.innerText`);
-    expect('mixed: usage By vendor splits Codex (cost —) and Claude ($)', /Codex[^\n]*107[^\n]*—/.test(us) && /Claude[^\n]*\$0\.0/.test(us), us);
+    // Per-key usage ledger (t_f8032a7d): the By-vendor table is the visible runtime>provider>model
+    // table (inside <details> innerText is empty — unrendered content). Each row is one key, so the
+    // codex line carries its own per-key token total (100 in + 7 out + 40 cached reads = 147; the
+    // old "107" predates cached_input_tokens counting as cache-read) and its cost stays "—";
+    // claude keys report real $.
+    const codexRow = us.split('\n').find((l) => l.startsWith('Codex'));
+    // The ledger prices models the CLI leaves uncosted from a small list-price table, so codex shows
+    // an estimate ("est") or "—" — never a bare $0; claude keys carry the CLI's own $.
+    expect('mixed: usage By vendor splits per-model Codex and Claude rows; claude reports $, codex est or — but never $0', !!codexRow && /\d/.test(codexRow) && !/\$0\.0000/.test(codexRow) && (/est\s*$/.test(codexRow) || /—\s*$/.test(codexRow)) && /Claude[^\n]*\$0\.0/.test(us), us);
     require('electron').nativeTheme.themeSource = 'system';
     const st = [plan, impl, rev].map((t) => s.getTask(t.id).status); expect('mixed: all three tasks done', st.every((x) => x === 'done'), st);
     const rt = [plan, impl, rev].map((t) => (s.listRuns().find((r) => r.taskId === t.id && r.kind === 'agent') || {}).runtime);

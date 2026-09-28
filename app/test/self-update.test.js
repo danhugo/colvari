@@ -39,7 +39,7 @@ function fakeGit(opts = {}) {
     if (a.startsWith('reset --hard')) { if (opts.resetFails) return { code: 1, out: 'nope' }; sha = args[2]; return { code: 0, out: '' }; }
     return { code: 0, out: '' };
   };
-  g.calls = calls; g.sha = () => sha; g.setSha = (s) => { sha = s; }; g.setOrigin = (s) => { opts.origin = s; };
+  g.calls = calls; g.sha = () => sha; g.setSha = (s) => { sha = s; }; g.setOrigin = (s) => { opts.origin = s; }; g.setDirty = (v) => { opts.dirty = v; };
   return g;
 }
 
@@ -57,7 +57,7 @@ function fakeNpm(opts = {}) {
 }
 
 // Watcher with fake deps and instant timing. `agents` counts down how many draining polls wait for.
-function makeWatcher({ store = fakeStore(), git, npm, npmDir, agents = 0, wasRunning = false, relaunch, sleep } = {}) {
+function makeWatcher({ store = fakeStore(), git, npm, npmDir, agents = 0, wasRunning = false, relaunch, sleep, haltProcs, drainTimeoutMs } = {}) {
   const npmF = npm || fakeNpm();
   const gitF = git || fakeGit();
   let ticks = 0;
@@ -69,6 +69,8 @@ function makeWatcher({ store = fakeStore(), git, npm, npmDir, agents = 0, wasRun
     procCount: () => Math.max(0, agents - ticks++),
     runActive: () => wasRunning,
     sleep: sleep || (() => new Promise((r) => setTimeout(r, 1))),
+    haltProcs: haltProcs || (() => Promise.resolve()),
+    drainTimeoutMs,
   });
   w.gitF = gitF; w.npmF = npmF;
   return w;
@@ -165,9 +167,10 @@ test('build failure: abort before testing, no restart', async () => {
   assert.ok(!npm.calls.some(([a]) => a === 'test'), 'tests are not run when the build already failed');
 });
 
-test('restart during wait: draining waits for running agents (no timeout) then proceeds', async () => {
+test('restart during wait: draining waits for running agents (within the grace) then proceeds', async () => {
   const git = fakeGit();
-  const w = makeWatcher({ git, agents: 2, sleep: () => new Promise((r) => setTimeout(r, 30)) });
+  let halted = 0;
+  const w = makeWatcher({ git, agents: 2, sleep: () => new Promise((r) => setTimeout(r, 30)), haltProcs: async () => { halted++; } });
   await drain(w);
   git.setOrigin(SHA2);
   const p = w.tick();
@@ -178,6 +181,63 @@ test('restart during wait: draining waits for running agents (no timeout) then p
   await p; await new Promise((r) => setTimeout(r, 30));
   assert.strictEqual(w.phase, 'restarting');
   assert.strictEqual(w.relaunched, 1);
+  assert.strictEqual(halted, 0, 'runs that finish inside the grace are never halted');
+});
+
+// One long run used to freeze the whole team: dispatch is paused during the drain, so a 12+ minute
+// run left 13 todo tasks waiting behind it indefinitely. The drain now has a grace deadline
+// (drainTimeoutMin, default 5): past it the stragglers are halted and the update proceeds — their
+// tasks resume after the restart (reconcileOrphanedTasks + session resume), wasRunning stays true.
+test('drain grace: runs outlasting the deadline are halted and the update proceeds', async () => {
+  let t = Date.now();
+  let halted = 0;
+  const git = fakeGit();
+  const w = makeWatcher({ git, agents: 1e9, wasRunning: true, sleep: async () => { t += 60 * 1000; }, haltProcs: async () => { halted++; } });
+  w.now = () => t;
+  await drain(w); // baseline
+  git.setOrigin(SHA2);
+  await drain(w); // 5 one-minute drain polls hit the 5min default grace
+  assert.strictEqual(w.phase, 'restarting');
+  assert.strictEqual(halted, 1, 'the stragglers were stopped at the deadline');
+  assert.strictEqual(w.relaunched, 1);
+  assert.ok(w.store.logs.some((l) => /drain grace \(5min\) over with \d+ run\(s\) still active/.test(l.text)), 'the cut is logged');
+  assert.strictEqual(readRestartState(w.store.dir).wasRunning, true, 'the Run still resumes after the restart');
+});
+
+test('drainTimeoutMin 0 restores wait-forever: no halt however long the runs take', async () => {
+  let t = Date.now();
+  let halted = 0;
+  const store = fakeStore();
+  store.settings.drainTimeoutMin = 0;
+  const git = fakeGit();
+  const w = makeWatcher({ store, git, agents: 3, sleep: async () => { t += 60 * 60 * 1000; }, haltProcs: async () => { halted++; } });
+  w.now = () => t;
+  await drain(w);
+  git.setOrigin(SHA2);
+  await drain(w); // three hours of drain polls: no cut, runs finish on their own
+  assert.strictEqual(w.phase, 'restarting');
+  assert.strictEqual(w.relaunched, 1);
+  assert.strictEqual(halted, 0);
+});
+
+test('dirty main checkout aborts before draining: no drain pause, no halt', async () => {
+  const git = fakeGit({ dirty: true });
+  const pauses = [];
+  const phases = [];
+  const w = makeWatcher({ git, agents: 1e9 });
+  w.setPaused = (v) => pauses.push(v);
+  w.on('status', (st) => phases.push(st.phase));
+  await drain(w); // baseline (not dirty yet)
+  git.setOrigin(SHA2);
+  git.setDirty(true); // a dev starts editing before this poll
+  await drain(w);
+  assert.strictEqual(w.phase, 'idle');
+  assert.ok(!w.relaunched);
+  assert.ok(!phases.includes('draining'), 'no drain wait before the dirty abort');
+  // Entering pending pauses dispatch (as always) and the abort immediately unpauses: the doomed
+  // update never reaches the long draining pause.
+  assert.deepStrictEqual(pauses, [true, false]);
+  assert.match(w.status().lastError, /uncommitted changes/);
 });
 
 test('restart guards: min interval and max restarts per hour skip the update', async () => {
@@ -441,5 +501,42 @@ test('drain: a run whose bookkeeping crashes releases its slot; drain completes;
   assert.match(w.status().lastError, /tests failed/);
   await waitFor(() => !o.running, 'run resumed after the abort');
   assert.strictEqual(s.getTask(s.listTasks()[0].id).status, 'done', 'the interrupted task finished after dispatch resumed');
+  o.stop && o.stop();
+});
+
+// The drain grace cut, end to end: a long run is halted (haltProcs) for the restart. Unlike a crash,
+// the task must stay in_progress — not review/parkedForHuman — so the post-restart reconcile
+// re-dispatches it, and the Run session stays alive so wasRunning resumes it.
+test('drain cutoff: haltProcs stops a long run, the task stays re-dispatchable and resumes', async () => {
+  const { Store } = require('../src/store');
+  const { Orchestrator } = require('../src/orchestrator');
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'su-cutoff-'));
+  const fake = path.join(d, 'fake-claude.sh');
+  fs.writeFileSync(fake, '#!/bin/sh\nsleep 30\n');
+  fs.chmodSync(fake, 0o755);
+  const s = new Store(path.join(d, 'p'));
+  s.saveSettings({ claudePath: fake, maxRuns: 5 });
+  const a = s.addNode({ name: 'A', role: 'Dev' });
+  s.createTask({ title: 'long runner', assignee: a.id });
+  const o = new Orchestrator(s);
+  const waitFor = async (fn, what) => { const t0 = Date.now(); while (!fn()) { if (Date.now() - t0 > 8000) throw new Error('timeout: ' + what); await new Promise((r) => setTimeout(r, 10)); } };
+  o.start();
+  await waitFor(() => o.procs.size === 1, 'task dispatched');
+  o.dispatchPaused = true; // the watcher is draining
+  const task = s.listTasks()[0];
+  await o.haltProcs(300);
+  assert.strictEqual(o.procs.size, 0, 'the long run was stopped');
+  assert.strictEqual(o.running, true, 'the Run session is held so wasRunning stays true');
+  const after = s.getTask(task.id);
+  assert.strictEqual(after.status, 'in_progress', 'a cut task is restart-interrupted, not crashed');
+  assert.strictEqual(after.parkedForHuman, undefined, 'never parked for a human');
+
+  // The update completes (or aborts): unpausing — main.js also clears drainCutoff — reconciles the
+  // cut task back to todo and re-dispatches it; with a fast fake it runs to done.
+  fs.writeFileSync(fake, '#!/bin/sh\necho \'{"type":"result","subtype":"success","session_id":"s2","total_cost_usd":0.001,"num_turns":1,"usage":{"input_tokens":10,"output_tokens":10}}\'\n');
+  o.dispatchPaused = false; o.drainCutoff = false; o.tick();
+  await waitFor(() => !o.running, 're-dispatched run finished');
+  assert.strictEqual(s.getTask(task.id).status, 'done');
+  assert.ok(s.readLogs().some((l) => /reset to todo/.test(l.text)), 'the reconcile sweep logged the reset');
   o.stop && o.stop();
 });
