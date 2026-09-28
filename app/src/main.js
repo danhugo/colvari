@@ -463,16 +463,16 @@ async function guiE2E() {
     const ov = await ex(`return [...document.querySelectorAll('#ov-graph .ov-vendor')].map((t) => t.textContent)`);
     expect('mixed: overview nodes show vendor · model', ov.join() === 'Claude · opus,Codex · gpt-5.6-terra,Claude · haiku', ov);
     for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`$('#tabs button[data-tab=usage]').click(); await refresh(); await w(600);`); await shot(`30-mixed-usage-${t}`); }
-    const us = await ex(`return [...document.querySelectorAll('#us-summary h4')].find((h) => h.textContent === 'By vendor').nextElementSibling.innerText`);
-    // Per-key usage ledger (t_f8032a7d): the By-vendor table is the visible runtime>provider>model
-    // table (inside <details> innerText is empty — unrendered content). Each row is one key, so the
-    // codex line carries its own per-key token total (100 in + 7 out + 40 cached reads = 147; the
-    // old "107" predates cached_input_tokens counting as cache-read) and its cost stays "—";
-    // claude keys report real $.
+    const us = await ex(`return [...document.querySelectorAll('#us-summary h4')].find((h) => h.textContent === 'By account').nextElementSibling.innerText`);
+    // Per-key usage ledger (t_f8032a7d), re-grouped per account (t_b1115e48): the By-account table is
+    // the visible account>runtime>provider>model table (inside <details> innerText is empty —
+    // unrendered content). Each nested row is one key, so the codex line carries its own per-key
+    // token total (100 in + 7 out + 40 cached reads = 147; the old "107" predates cached_input_tokens
+    // counting as cache-read) and its cost stays "—"; claude keys report real $.
     const codexRow = us.split('\n').find((l) => l.startsWith('Codex'));
     // The ledger prices models the CLI leaves uncosted from a small list-price table, so codex shows
     // an estimate ("est") or "—" — never a bare $0; claude keys carry the CLI's own $.
-    expect('mixed: usage By vendor splits per-model Codex and Claude rows; claude reports $, codex est or — but never $0', !!codexRow && /\d/.test(codexRow) && !/\$0\.0000/.test(codexRow) && (/est\s*$/.test(codexRow) || /—\s*$/.test(codexRow)) && /Claude[^\n]*\$0\.0/.test(us), us);
+    expect('mixed: usage By account splits per-model Codex and Claude rows; claude reports $, codex est or — but never $0', !!codexRow && /\d/.test(codexRow) && !/\$0\.0000/.test(codexRow) && (/est\s*$/.test(codexRow) || /—\s*$/.test(codexRow)) && /Claude[^\n]*\$0\.0/.test(us), us);
     require('electron').nativeTheme.themeSource = 'system';
     const st = [plan, impl, rev].map((t) => s.getTask(t.id).status); expect('mixed: all three tasks done', st.every((x) => x === 'done'), st);
     const rt = [plan, impl, rev].map((t) => (s.listRuns().find((r) => r.taskId === t.id && r.kind === 'agent') || {}).runtime);
