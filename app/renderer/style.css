@@ -275,17 +275,20 @@ button:focus-visible, input:focus, select:focus, textarea:focus { outline:none; 
 nav button { padding:3px 10px; font-size:var(--text-sm); } nav button.active { background:var(--bg-surface); border-bottom:none; border-radius:var(--radius-xs); box-shadow:var(--shadow-sm); color:var(--fg-primary); }
 nav button.sec { color:var(--fg-muted); padding:3px 7px; } .navsep { width:1px; background:var(--border-strong); margin:3px 4px; }
 header .pill { border:none; background:none; color:var(--fg-muted); font-size:var(--text-xs); padding:2px 4px; } header #runstate { background:var(--bg-hover); color:var(--fg-secondary); padding:2px 8px; } header #runstate.on { background:var(--success-soft); color:var(--success-text); }
-.limitmeter { display:flex; align-items:center; gap:6px; font-size:var(--text-xs); }
+/* One line tall, always: the meter sits in the header, and a wrapping "no limit data: …" reason
+   would grow the header mid-session, shifting the whole layout and eating in-flight clicks.
+   The full reason stays reachable via the part's title tooltip. */
+.limitmeter { display:flex; align-items:center; gap:6px; font-size:var(--text-xs); min-width:0; overflow:hidden; }
 .limitmeter.hidden { display:none; }
-.limitmeter .lm-flag { padding:2px 8px; border-radius:var(--radius-full); font-weight:var(--fw-semibold); }
+.limitmeter .lm-flag { padding:2px 8px; border-radius:var(--radius-full); font-weight:var(--fw-semibold); white-space:nowrap; }
 .limitmeter .lm-flag.lm-warn { background:var(--warning-soft); color:var(--warning-text); } .limitmeter .lm-flag.lm-danger { background:var(--danger-soft); color:var(--danger); }
-.limitmeter .lm-part { display:flex; align-items:center; gap:5px; padding:2px 8px; border-radius:var(--radius-full); background:var(--bg-hover); color:var(--fg-secondary); }
+.limitmeter .lm-part { display:flex; align-items:center; gap:5px; padding:2px 8px; border-radius:var(--radius-full); background:var(--bg-hover); color:var(--fg-secondary); white-space:nowrap; min-width:0; }
 .limitmeter .lm-part b { font-weight:var(--fw-semibold); }
 .limitmeter .lm-part.lm-warn { background:var(--warning-soft); color:var(--warning-text); } .limitmeter .lm-part.lm-danger { background:var(--danger-soft); color:var(--danger); }
-.limitmeter .lm-bar { width:34px; height:5px; border-radius:3px; background:var(--line); overflow:hidden; display:inline-block; }
+.limitmeter .lm-bar { width:34px; height:5px; border-radius:3px; background:var(--line); overflow:hidden; display:inline-block; flex-shrink:0; }
 .limitmeter .lm-fill { display:block; height:100%; background:var(--accent); }
 .limitmeter .lm-warn .lm-fill { background:var(--warning); } .limitmeter .lm-danger .lm-fill { background:var(--danger); }
-.limitmeter .lm-part small { color:var(--fg-muted); font-variant-numeric:tabular-nums; }
+.limitmeter .lm-part small { color:var(--fg-muted); font-variant-numeric:tabular-nums; overflow:hidden; text-overflow:ellipsis; }
 .limitmeter .lm-part.lm-pending { opacity:.6; }
 .tlink { font-size:10.5px; opacity:.8; } .bubble { font-size:var(--text-sm); }
 
