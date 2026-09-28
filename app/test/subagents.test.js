@@ -218,6 +218,31 @@ test('log persistence and logEntries keep subagentId', () => {
   assert.equal(entries[1].subagentId, null);
 });
 
+test('combined module: tracker + renderer helpers share one export (Subagents.* in the browser)', () => {
+  const M = require('../src/subagents');
+  for (const k of ['SubagentTracker', 'isSubagentTool', 'subagentId', 'rootOf', 'innerRootOf', 'nestRows', 'durationMs', 'tokensLabel', 'fmtDuration', 'badge']) assert.ok(M[k], k);
+  assert.equal(M.tokensLabel(null), 'n/a'); // no usage reported -> n/a, never 0
+  assert.equal(M.tokensLabel({ inputTokens: 10, outputTokens: 4 }), '10 / 4 tok');
+  assert.deepEqual(M.badge({ subagents: [], subagentCount: 2, subagentTokens: { inputTokens: 20, outputTokens: 8 } }), { count: 2, tokens: { inputTokens: 20, outputTokens: 8 }, label: '🤖 2' });
+  // nestRows groups interleaved child rows under their own records by parentAgentId, not arrival order.
+  const recs = [
+    { id: 'sa_A', agentId: 'n1', parentAgentId: 'n1', depth: 0 },
+    { id: 'sa_B', agentId: 'n1', parentAgentId: 'n1', depth: 0 },
+  ];
+  const recOf = (id) => recs.find((r) => r.id === id) || null;
+  const rows = [
+    { subagentId: 'sa_A', text: 'a1' },
+    { subagentId: 'sa_B', text: 'b1' },
+    { subagentId: 'sa_A', text: 'a2' },
+    { text: 'parent' },
+  ];
+  const tree = M.nestRows(rows, recOf, 'n1');
+  assert.deepEqual(tree.map((x) => x.kind), ['sub', 'sub', 'row']);
+  assert.deepEqual(tree[0].rows.map((x) => x.l.text), ['a1', 'a2']);
+  assert.deepEqual(tree[1].rows.map((x) => x.l.text), ['b1']);
+  assert.equal(tree[2].l.text, 'parent');
+});
+
 test('snapshot exposes per-agent subagent totals without double counting', () => {
   const { n, o } = setup();
   const run = fakeRun(n);
