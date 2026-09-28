@@ -1487,7 +1487,8 @@ const api = {
   // it's more constraining than the local run count.
   usageStatus: (c) => {
     const s = ST(c); const settings = s.getSettings();
-    const status = U.usageStatus(s.listRuns(), settings.usageLimits);
+    const runs = s.listRuns();
+    const status = U.usageStatus(runs, settings.usageLimits);
     const warnPct = (settings.usageLimits && settings.usageLimits.warnPct) || 80;
     const inMemory = orchFor(c.p).subscriptionRateLimits || {};
     // The in-memory map is only populated after a run/probe this session, so it's empty right after a restart —
@@ -1495,7 +1496,10 @@ const api = {
     // node.rateLimits alongside the in-memory map) so a restart doesn't lose the last known real CLI %.
     const nodes = TS(c).getTeam().nodes;
     const rlAll = nodes.map((n) => U.liveRateLimits(inMemory[n.id] || n.rateLimits)).filter(Boolean);
-    return U.applyCliRateLimits(status, rlAll, warnPct);
+    // Provider-keyed view (t_8f8ab37d): one entry per provider the team's agents actually run, each carrying
+    // its own windows — Claude's CLI-reported 5h/weekly among them, others 'unknown' until their CLI reports.
+    const providers = U.usageProviders({ runs, limits: settings.usageLimits, nodes, rateLimitsByNode: inMemory, warnPct });
+    return { ...U.applyCliRateLimits(status, rlAll, warnPct), providers };
   },
   // Real per-provider subscription usage (5h/weekly used % + reset time) for one agent, as self-reported by its
   // own CLI's init event — with an explicit reason when there is nothing to report yet.

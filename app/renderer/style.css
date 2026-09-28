@@ -1,7 +1,8 @@
 :root { --bg:var(--bg-app); --fg:var(--fg-primary); --muted:var(--fg-muted); --card:var(--bg-surface); --line:var(--border); --acc:var(--accent); --ok:var(--success); --warn:var(--warning-strong); --panel:var(--bg-raised); }
 * { box-sizing:border-box; } body { margin:0; font:13px -apple-system,system-ui,sans-serif; background:var(--bg); color:var(--fg); height:100vh; display:flex; flex-direction:column; }
 header { display:flex; align-items:center; gap:8px; padding:8px 12px; border-bottom:1px solid var(--line); background:var(--card); }
-nav button { border:none; background:none; padding:6px 10px; text-decoration:none; } nav button.active { color:var(--acc); }
+nav button { border:1px solid transparent; background:none; padding:6px 10px; text-decoration:none; display:inline-flex; align-items:center; gap:5px; }
+nav .navicon { width:14px; height:14px; flex:0 0 auto; stroke:currentColor; fill:none; stroke-width:1.6; stroke-linecap:round; stroke-linejoin:round; }
 .spacer { flex:1; } .pill { padding:3px 8px; border-radius:10px; border:1px solid var(--line); } .pill.on { background:var(--ok); color:var(--fg-on-accent); }
 button, input, select, textarea { font:inherit; color:var(--fg); background:var(--card); border:1px solid var(--line); border-radius:6px; padding:5px 9px; }
 button { cursor:pointer; } button.primary { background:var(--acc); color:var(--fg-on-accent); border-color:var(--acc); } button.on { outline:2px solid var(--acc); }
@@ -37,11 +38,6 @@ main { flex:1; overflow:hidden; } .tab { display:none; height:100%; padding:10px
 .logtask { flex:0 0 auto; max-width:160px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--fg-muted); }
 .logtask[data-tasklink] { cursor:pointer; text-decoration:underline dotted; }
 .logtask[data-tasklink]:hover { color:var(--acc); }
-.lvchips { display:flex; gap:4px; }
-.lvchip { padding:2px 8px; border-radius:999px; border:1px solid var(--line); background:transparent; color:var(--fg-muted); font-size:11px; text-transform:uppercase; letter-spacing:.03em; cursor:pointer; }
-.lvchip.on.lv-info { background:color-mix(in srgb, var(--term-blue) 18%, transparent); color:var(--term-blue); border-color:var(--term-blue); }
-.lvchip.on.lv-warn { background:color-mix(in srgb, var(--warning) 18%, transparent); color:var(--warning); border-color:var(--warning); }
-.lvchip.on.lv-error { background:color-mix(in srgb, var(--term-red) 18%, transparent); color:var(--term-red); border-color:var(--term-red); }
 .loglevel { flex:0 0 auto; text-transform:uppercase; font-size:10px; letter-spacing:.03em; padding:0 5px; border-radius:4px; background:color-mix(in srgb, currentColor 18%, transparent); }
 .logtext { flex:1; min-width:0; white-space:pre-wrap; word-break:break-word; }
 .logrow.lv-error, .loglevel.lv-error { color:var(--term-red); } .logrow.lv-tool, .loglevel.lv-tool { color:var(--term-yellow); }
@@ -191,8 +187,11 @@ header .pill { font-variant-numeric:tabular-nums; } .pill.quiet { color:var(--mu
 /* ===== Design-token layer (design/prototype.html + critique.md) ===== */
 body { font-family:var(--font-sans); font-size:var(--text-sm); line-height:var(--lh-body); -webkit-font-smoothing:antialiased; }
 header { background:var(--bg-surface); box-shadow:var(--shadow-sm); padding:var(--space-2) var(--space-4); }
-nav button { color:var(--fg-secondary); border-radius:var(--radius-sm); transition:color var(--dur-fast) var(--ease-out), background var(--dur-fast); }
-nav button:hover { background:var(--bg-hover); color:var(--fg-primary); } nav button.active { color:var(--accent-text); border-radius:var(--radius-sm) var(--radius-sm) 0 0; }
+nav button { color:var(--fg-secondary); border-radius:var(--radius-sm); transition:color var(--dur-fast) var(--ease-out), background var(--dur-fast), border-color var(--dur-fast); }
+nav button:hover { background:var(--bg-hover); color:var(--fg-primary); }
+/* selected nav state: filled accent chip, not an underline — must read ≥3:1 against idle neighbours */
+nav button.active { color:var(--accent-text); background:var(--accent-soft); border-color:var(--accent); font-weight:var(--fw-medium); }
+nav button.active:hover { background:var(--accent-soft); }
 button, input, select, textarea { border-radius:var(--radius-sm); transition:border-color var(--dur-fast), background var(--dur-fast), box-shadow var(--dur-fast); }
 button:hover { background:var(--bg-hover); } button.primary:hover { background:color-mix(in srgb, var(--accent) 88%, black); }
 button:focus-visible, input:focus, select:focus, textarea:focus { outline:none; border-color:var(--accent); box-shadow:var(--ring); }
@@ -272,7 +271,7 @@ button:focus-visible, input:focus, select:focus, textarea:focus { outline:none; 
 .yt-item .spacer { flex:1; } .yt-item button { padding:2px 10px; } .yt-ans { width:180px; padding:3px 8px; }
 /* Top nav: primary tabs as segmented control; secondary tabs quiet; pills de-emphasised. */
 #tabs { gap:2px; background:var(--bg-hover); padding:2px; border-radius:var(--radius-sm); }
-nav button { padding:3px 10px; font-size:var(--text-sm); } nav button.active { background:var(--bg-surface); border-bottom:none; border-radius:var(--radius-xs); box-shadow:var(--shadow-sm); color:var(--fg-primary); }
+nav button { padding:3px 10px; font-size:var(--text-sm); }
 nav button.sec { color:var(--fg-muted); padding:3px 7px; } .navsep { width:1px; background:var(--border-strong); margin:3px 4px; }
 header .pill { border:none; background:none; color:var(--fg-muted); font-size:var(--text-xs); padding:2px 4px; } header #runstate { background:var(--bg-hover); color:var(--fg-secondary); padding:2px 8px; } header #runstate.on { background:var(--success-soft); color:var(--success-text); }
 /* One line tall, always: the meter sits in the header, and a wrapping "no limit data: …" reason
