@@ -463,9 +463,64 @@ async function noLimitDataReason() {
   try { const pu = await call('providerUsage', node.id); if (pu && pu.reason) return pu.reason; } catch {}
   return 'no usage reported yet by the CLI (run this agent once to get real usage)';
 }
+// Per-provider usage chips (provider-keyed model in usageStatus): one compact pill per provider the
+// team actually uses, labeled by that provider — no vendor's wording unless that vendor is in use.
+// A provider whose CLI reports no usage windows gets an honest "limits unknown" (never a fabricated
+// 0%), and while runs are live, providers whose members are all idle render dimmed. Until usageStatus
+// carries a providers list, the classic 5h/weekly meter below renders instead.
+const prettyProvider = (id) => id.charAt(0).toUpperCase() + id.slice(1);
+function normProviderWindow(w) {
+  if (!w || typeof w !== 'object') return null;
+  let pct = w.pct != null ? Number(w.pct) : (Number(w.limit) > 0 && w.used != null ? Number(w.used) / Number(w.limit) : null);
+  if (pct != null && (!Number.isFinite(pct) || pct < 0)) pct = null;
+  else if (pct > 1) pct /= 100; // some windows report 0-100 instead of 0-1
+  return { label: String(w.label || '?'), pct, resetsAt: w.resetAt || w.resetsAt || null, warn: !!w.warn, pause: !!w.pause };
+}
+function normProviderEntry(e, i) {
+  if (!e || typeof e !== 'object') return null;
+  const windows = (Array.isArray(e.windows) ? e.windows : []).map(normProviderWindow).filter(Boolean);
+  return {
+    provider: String(e.provider || e.id || `provider ${i + 1}`),
+    plan: e.plan ? String(e.plan) : null,
+    unknown: !windows.some((w) => w.pct != null) || e.status === 'unknown',
+    reason: e.reason ? String(e.reason) : null,
+    windows,
+    warn: windows.some((w) => w.warn),
+    pause: windows.some((w) => w.pause),
+  };
+}
+function providerIsIdle(p) {
+  const nodes = S.team.nodes.filter((n) => { const rt = String(n.runtime || '').toLowerCase(); return rt === p.provider || rt.includes(p.provider); });
+  return runningIds().length > 0 && nodes.length > 0 && nodes.every((n) => presence(n.id) === 'idle');
+}
+function providerChipHtml(p, idle) {
+  const head = `<b>${esc(prettyProvider(p.provider))}</b>${p.plan ? ` <small class="lm-plan">${esc(p.plan)}</small>` : ''}`;
+  if (p.unknown) {
+    const why = p.reason || 'the provider CLI reports no usage windows';
+    return `<span class="lm-part lm-chip lm-unknown${idle ? ' lm-idle' : ''}" data-provider="${esc(p.provider)}" title="${esc(prettyProvider(p.provider))}${p.plan ? ` · ${esc(p.plan)}` : ''} — limits unknown: ${esc(why)}">${head} <small>limits unknown</small></span>`;
+  }
+  const cls = p.pause ? 'lm-danger' : p.warn ? 'lm-warn' : 'lm-ok';
+  const win = (w) => {
+    const pct = Math.min(100, Math.round(w.pct * 100)); const ms = resetIn(w);
+    const resetTitle = ms > 0 ? ` · resets in ${fmtCountdown(ms)}` : '';
+    const resetChip = ms > 0 ? `<small>↻${fmtCountdown(ms)}</small>` : '';
+    return `<span class="lm-win" title="${esc(w.label)}: ${pct}% used${resetTitle}"><b>${esc(w.label)}</b> ${pct}%<i class="lm-bar"><i class="lm-fill" style="width:${pct}%"></i></i>${resetChip}</span>`;
+  };
+  const full = p.windows.map((w) => `${w.label}: ${Math.min(100, Math.round(w.pct * 100))}% used${resetIn(w) > 0 ? ` · resets in ${fmtCountdown(resetIn(w))}` : ''}`).join(' · ');
+  return `<span class="lm-part lm-chip ${cls}${idle ? ' lm-idle' : ''}" data-provider="${esc(p.provider)}" title="${esc(prettyProvider(p.provider))}${p.plan ? ` · ${esc(p.plan)}` : ''} — ${esc(full)}">${head} ${p.windows.filter((w) => w.pct != null).map(win).join('')}</span>`;
+}
 async function renderLimitMeter() {
   let st; try { st = await call('usageStatus'); } catch { st = null; }
   const m = $('#limitmeter');
+  // Provider-keyed path: one chip per provider as the core reports them (array or object form).
+  const rawProvs = st && st.providers ? (Array.isArray(st.providers) ? st.providers : Object.entries(st.providers).map(([k, v]) => (v && typeof v === 'object' && !Array.isArray(v) ? { provider: k, ...v } : { provider: k }))) : null;
+  const provs = rawProvs ? rawProvs.map(normProviderEntry).filter(Boolean) : [];
+  if (provs.length) {
+    m.classList.remove('hidden');
+    m.innerHTML = (st.pause ? '<span class="lm-flag lm-danger">paused</span>' : st.warn ? '<span class="lm-flag lm-warn">near limit</span>' : '') +
+      provs.map((p) => providerChipHtml(p, providerIsIdle(p))).join('');
+    return;
+  }
   const isSubscriptionUser = S.team.nodes.some((n) => (n.billingMode || 'auto') !== 'api' && (n.billingMode || 'auto') !== 'proxy');
   if (!st || (!st.fiveHour.limit && !st.weekly.limit)) {
     if (!isSubscriptionUser) { m.classList.add('hidden'); m.innerHTML = ''; return; }
