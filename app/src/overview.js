@@ -77,7 +77,8 @@
       if (!on || l.kind !== 'tool') continue;
       const n = toolName(l.text); const inp = toolInput(l.text);
       const arg = inp.status || inp.title || inp.file_path || inp.command || inp.pattern || inp.text || '';
-      items.push({ at: l.at, type: 'tool', who: task.assignee, summary: `${n}${arg ? ' · ' + String(arg).replace(/\s+/g, ' ').slice(0, 60) : ''}`, text: l.text });
+      // subagentId passes through untouched (t_c33656ba contract): the renderer nests these under their block
+      items.push({ at: l.at, type: 'tool', who: task.assignee, summary: `${n}${arg ? ' · ' + String(arg).replace(/\s+/g, ' ').slice(0, 60) : ''}`, text: l.text, subagentId: l.subagentId });
     }
     return items.sort((a, b) => a.at - b.at);
   }
