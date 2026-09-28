@@ -867,7 +867,9 @@ async function guiE2E() {
   // claude 2.1.283 with two parallel Agent spawns + parent_tool_use_id child events, helpycode 0.3.5 with two
   // task-tool parts) through the backend's own event parsers — no mocks, no model runs — then assert the
   // renderer nests child activity under the parent with own tokens ('n/a' when the CLI reports none) and a
-  // per-agent count. Selector contract with Uma (t_d716779d): .sub-block / .sub-head / .sub-tokens / .subcount.
+  // per-agent count. Selector contract with Uma (t_d716779d): .subblock/.subhead/.subdesc/.submeta/
+  // .subrows (collapsed by default, [data-subtoggle]) in Logs, .subbadge on Team+Overview graphs,
+  // details.cchip.subagent in Chat; tokens label "N / M tok", "n/a" when the CLI reports none.
   const subagentShots = async () => {
     const { SubagentTracker } = require('./subagents');
     const fx = (f) => fs.readFileSync(path.join(__dirname, '..', 'test', 'fixtures', f), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
@@ -893,21 +895,25 @@ async function guiE2E() {
     expect('subagents: claude tokens breakdown (2x 10in/4out), helpycode none (n/a)', JSON.stringify(a1.subagentTokens) === '{"inputTokens":20,"outputTokens":8}' && a2.subagents.every((r) => r.tokens === null), { a1: a1.subagentTokens });
     await ex(`$('#tabs button[data-tab=obs]').click(); await refresh(); await w(600);`);
     await shot('31-subagents-logs');
-    const blocks = await ex(`return [...document.querySelectorAll('#log .sub-block')].map((b) => ({ head: (b.querySelector('.sub-head')||{}).textContent || '', tokens: (b.querySelector('.sub-tokens')||{}).textContent || '', childRows: b.querySelectorAll('.logrow').length }))`);
-    expect('subagents: Logs nest a block per subagent (2 claude + 2 helpycode)', blocks.length === 4, blocks);
-    expect('subagents: block heads carry the subagent descriptions', ['Run alpha echo command', 'Run beta echo command'].every((d) => blocks.some((b) => b.head.includes(d))) && ['Run echo alpha command', 'Run echo beta command'].every((d) => blocks.some((b) => b.head.includes(d))), blocks.map((b) => b.head));
-    expect('subagents: own tokens shown, CLI-less usage renders n/a (not 0)', blocks.filter((b) => /Run (alpha|beta) echo/.test(b.head) && !/Run echo/.test(b.head)).every((b) => /\d/.test(b.tokens)) && blocks.filter((b) => /Run echo/.test(b.head)).every((b) => /n\/a/i.test(b.tokens)), blocks.map((b) => [b.head, b.tokens]));
-    const expand = await ex(`const b = [...document.querySelectorAll('#log .sub-block')].find((x) => (x.querySelector('.sub-head')||{}).textContent?.includes('Run alpha echo command')); if (!b) return { open: false, childText: false }; b.querySelector('.sub-head').click(); await w(300); return { open: !b.classList.contains('collapsed'), childText: b.textContent.includes('echo alpha-subagent-result') }`);
-    expect('subagents: expanding a block reveals its own child rows', expand.open && expand.childText, expand);
+    const blocks = await ex(`return [...document.querySelectorAll('#log .subblock[data-sub]')].map((b) => ({ desc: (b.querySelector('.subdesc')||{}).textContent || '', status: (b.querySelector('.substatus')||{}).dataset ? b.querySelector('.substatus').dataset.substatus : '', meta: (b.querySelector('.submeta')||{}).textContent || '', open: b.classList.contains('open') }))`);
+    expect('subagents: Logs nest one collapsed block per subagent (2 claude + 2 helpycode)', blocks.length === 4 && blocks.every((b) => !b.open), blocks);
+    expect('subagents: block heads carry the descriptions + completed status', ['Run alpha echo command', 'Run beta echo command', 'Run echo alpha command', 'Run echo beta command'].every((d) => blocks.some((b) => b.desc === d)) && blocks.every((b) => b.status === 'completed'), blocks.map((b) => [b.desc, b.status]));
+    expect('subagents: own tokens in the block meta, CLI-less usage shows n/a (never 0)', blocks.filter((b) => /Run (alpha|beta) echo command/.test(b.desc)).every((b) => /10 \/ 4 tok/.test(b.meta)) && blocks.filter((b) => /Run echo (alpha|beta) command/.test(b.desc)).every((b) => /n\/a/.test(b.meta)), blocks.map((b) => [b.desc, b.meta]));
+    // Toggling re-renders the list, so re-query the block by its data-sub id after the click.
+    const expand = await ex(`const all = [...document.querySelectorAll('#log .subblock[data-sub]')]; const alpha = all.find((x) => (x.querySelector('.subdesc')||{}).textContent === 'Run alpha echo command'); if (!alpha) return { found: false, collapsed: false }; const sid = alpha.dataset.sub; const collapsed = all.every((x) => !x.classList.contains('open')); alpha.querySelector('[data-subtoggle]').click(); await w(400); const b = document.querySelector('#log .subblock[data-sub="' + sid + '"]'); return { found: true, collapsed, open: !!b && b.classList.contains('open') && !b.querySelector('.subrows').hidden, childText: !!b && b.textContent.includes('echo alpha-subagent-result') }`);
+    expect('subagents: blocks collapsed by default; expanding reveals the child rows', expand.found && expand.collapsed && expand.open && expand.childText, expand);
     await shot('32-subagents-logs-expanded');
-    const counts = await ex(`$('#tabs button[data-tab=team]').click(); await w(300); return [...document.querySelectorAll('#graph .subcount')].map((c) => c.textContent)`);
-    expect('subagents: per-agent count badge shows 2 on both agent cards', counts.filter((c) => c.includes('2')).length === 2, counts);
     for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`$('#tabs button[data-tab=team]').click(); await w(400);`); await shot(`33-subagents-team-${t}`); }
-    const chat = await ex(`$('#tabs button[data-tab=chat]').click(); await w(400); return { blocks: document.querySelectorAll('#chat-room .sub-block').length }`);
-    expect('subagents: Chat shows the nested blocks too', chat.blocks >= 4, chat);
+    const counts = await ex(`return [...document.querySelectorAll('#graph .subbadge')].map((b) => ({ txt: b.querySelector('text') ? b.querySelector('text').textContent : '', full: b.querySelector('title') ? b.querySelector('title').textContent : '' }))`);
+    expect('subagents: per-agent count badge (2) on both cards, claude totals as a breakdown of the parent', counts.length === 2 && counts.every((c) => /2/.test(c.txt)) && counts.some((c) => /2 subagents · 20 in \/ 8 out tok/.test(c.full)), counts);
+    const ovb = await ex(`$('#tabs button[data-tab=overview]').click(); await w(400); return [...document.querySelectorAll('#ov-graph .subbadge')].map((b) => b.querySelector('text') ? b.querySelector('text').textContent : '')`);
+    expect('subagents: Overview shows the count badges too', ovb.length >= 1, ovb);
+    const chat = await ex(`await refresh(); CH.key = ''; renderChat(); await w(400); return [...document.querySelectorAll('#chat-room details.cchip.subagent')].map((d) => d.querySelector('summary') ? d.querySelector('summary').textContent : '')`);
+    expect('subagents: Chat shows a nested subagent chip per spawn with tokens / n-a', chat.length >= 4 && chat.some((s) => /10 \/ 4 tok/.test(s)) && chat.some((s) => /n\/a/.test(s)), chat);
     require('electron').nativeTheme.themeSource = 'system';
+    await ex(`$('#tabs button[data-tab=chat]').click(); await w(300);`);
     await shot('34-subagents-chat');
-    console.log('[gui-e2e] subagents', JSON.stringify({ blocks, expand, counts, chat }));
+    console.log('[gui-e2e] subagents', JSON.stringify({ blocks, expand, counts, ovb, chat }));
   };
   try {
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'helpycode') { await helpycodeShots(); throw null; }
