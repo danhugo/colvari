@@ -912,6 +912,7 @@ async function guiE2E() {
     expect('subagents: per-agent count badge (2) on both cards, claude totals as a breakdown of the parent', counts.length === 2 && counts.every((c) => /2/.test(c.txt)) && counts.some((c) => /2 subagents · 20 in \/ 8 out tok/.test(c.full)), counts);
     const ovb = await ex(`$('#ov-task').value = '${tsk.id}'; $('#tabs button[data-tab=overview]').click(); await w(400); return [...document.querySelectorAll('#ov-graph .subbadge')].map((b) => b.querySelector('text') ? b.querySelector('text').textContent : '')`);
     expect('subagents: Overview shows the count badges too', ovb.length >= 1, ovb);
+    for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`$('#tabs button[data-tab=overview]').click(); await w(400);`); await shot(`35-subagents-overview-${t}`); }
     const chat = await ex(`$('#tabs button[data-tab=chat]').click(); await w(300); await refresh(); CH.key = ''; renderChat(); await w(400); return [...document.querySelectorAll('#chat-room details.cchip.subagent')].map((d) => d.querySelector('summary') ? d.querySelector('summary').textContent : '')`);
     expect('subagents: Chat shows a nested subagent chip per spawn with its own tokens', chat.length >= 2 && chat.every((s) => /10 \/ 4 tok/.test(s)), chat);
     require('electron').nativeTheme.themeSource = 'system';
