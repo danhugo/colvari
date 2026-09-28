@@ -485,6 +485,8 @@ async function noLimitDataReason() {
 // A provider whose CLI reports no usage windows gets an honest "limits unknown" (never a fabricated
 // 0%), and while runs are live, providers whose members are all idle render dimmed. Until usageStatus
 // carries a providers list, the classic 5h/weekly meter below renders instead.
+// Backstop (t_c2ca9fe9): entries with a missing or "unknown" provider, entries with nothing real to
+// show, and same-provider duplicates never render. Source-side attribution is usageProviders (src/usage.js).
 const prettyProvider = (id) => id.charAt(0).toUpperCase() + id.slice(1);
 // "weekly" is the only label too wide for a two-provider header — abbreviate on display only;
 // tooltips and titles keep the full label.
@@ -496,14 +498,22 @@ function normProviderWindow(w) {
   else if (pct > 1) pct /= 100; // some windows report 0-100 instead of 0-1
   return { label: String(w.label || '?'), pct, resetsAt: w.resetAt || w.resetsAt || null, warn: !!w.warn, pause: !!w.pause };
 }
-function normProviderEntry(e, i) {
+function normProviderEntry(e) {
   if (!e || typeof e !== 'object') return null;
+  // A chip must name a real provider: drop entries with no provider/id and "unknown" placeholders
+  // (a runtime-less node or unstamped run groups under a literal "unknown" — rendering that chip
+  // misattributes whatever numbers it carries). Also drop entries with nothing real to show.
+  const provider = String(e.provider != null ? e.provider : (e.id != null ? e.id : '')).trim();
+  if (!provider || provider.toLowerCase() === 'unknown') return null;
   const windows = (Array.isArray(e.windows) ? e.windows : []).map(normProviderWindow).filter(Boolean);
+  const plan = e.plan && String(e.plan).toLowerCase() !== 'unknown' ? String(e.plan) : null;
+  const reason = e.reason ? String(e.reason) : null;
+  if (!windows.some((w) => w.pct != null) && !plan && !reason) return null;
   return {
-    provider: String(e.provider || e.id || `provider ${i + 1}`),
-    plan: e.plan && String(e.plan).toLowerCase() !== 'unknown' ? String(e.plan) : null,
+    provider,
+    plan,
     unknown: !windows.some((w) => w.pct != null) || e.status === 'unknown',
-    reason: e.reason ? String(e.reason) : null,
+    reason,
     windows,
     warn: windows.some((w) => w.warn),
     pause: windows.some((w) => w.pause),
@@ -540,10 +550,19 @@ async function renderLimitMeter() {
   // Provider-keyed path: one chip per provider as the core reports them (array or object form).
   const rawProvs = st && st.providers ? (Array.isArray(st.providers) ? st.providers : Object.entries(st.providers).map(([k, v]) => (v && typeof v === 'object' && !Array.isArray(v) ? { provider: k, ...v } : { provider: k }))) : null;
   const provs = rawProvs ? rawProvs.map(normProviderEntry).filter(Boolean) : [];
-  if (provs.length) {
+  // Never render the same provider twice (case-insensitive): keep the first entry that carries a
+  // real % window, else the first.
+  const hasRealPct = (p) => p.windows.some((w) => w.pct != null);
+  const uniq = [];
+  for (const p of provs) {
+    const i = uniq.findIndex((q) => q.provider.toLowerCase() === p.provider.toLowerCase());
+    if (i < 0) uniq.push(p);
+    else if (!hasRealPct(uniq[i]) && hasRealPct(p)) uniq[i] = p;
+  }
+  if (uniq.length) {
     m.classList.remove('hidden');
     m.innerHTML = (st.pause ? '<span class="lm-flag lm-danger">paused</span>' : st.warn ? '<span class="lm-flag lm-warn">near limit</span>' : '') +
-      provs.map((p) => providerChipHtml(p, providerIsIdle(p))).join('');
+      uniq.map((p) => providerChipHtml(p, providerIsIdle(p))).join('');
     return;
   }
   const isSubscriptionUser = S.team.nodes.some((n) => (n.billingMode || 'auto') !== 'api' && (n.billingMode || 'auto') !== 'proxy');
