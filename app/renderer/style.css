@@ -365,8 +365,10 @@ header .pill { border:none; background:none; color:var(--fg-muted); font-size:va
 /* sidebar sections */
 #sidebar .sb-sec { display:flex; flex-direction:column; gap:var(--space-2); padding:var(--space-2) 0 var(--space-3); border-bottom:1px solid var(--line); }
 #sidebar .sb-sec:last-child { border-bottom:0; }
-#sidebar .sb-actions { display:flex; gap:4px; } #sidebar .sb-actions button { flex:1 1 0; min-width:0; } #sidebar .sb-actions button.danger { flex:0 0 28px; }
-#sidebar .sb-actions button { height:26px; padding:0 6px; font-size:12px; white-space:nowrap; display:inline-flex; align-items:center; justify-content:center; gap:3px; }
+#sidebar .sb-head { display:flex; align-items:center; justify-content:space-between; gap:4px; min-width:0; } #sidebar .sb-head h4 { margin:0; flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+#sidebar .sb-actions { display:flex; gap:1px; flex:0 0 auto; }
+#sidebar .sb-actions button { width:22px; height:22px; padding:0; font-size:12px; line-height:1; display:inline-flex; align-items:center; justify-content:center; background:transparent; border-color:transparent; color:var(--fg-muted); }
+#sidebar .sb-actions button:hover { background:var(--bg-hover); color:var(--fg); }
 #sidebar .sb-actions button.danger:hover { color:#fff; background:var(--danger, #d64545); border-color:transparent; }
 #sidebar select { width:100%; }
 /* graph LOD: keep names legible when zoomed out */
