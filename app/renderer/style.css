@@ -48,6 +48,9 @@ main { flex:1; overflow:hidden; } .tab { display:none; height:100%; padding:10px
 .logrow.lv-info, .loglevel.lv-info { color:var(--term-blue); } .logrow.lv-ok, .loglevel.lv-ok { color:var(--term-green); }
 .logrow.lv-muted, .loglevel.lv-muted { color:var(--term-dim); } .logrow.lv-text, .loglevel.lv-text { color:var(--term-fg); }
 .logempty { padding:24px 4px; text-align:center; }
+/* Windowing (t_fb193107): bar prepended above the chat/log window; click (or scroll up) loads older. */
+.olderbar { display:block; width:calc(100% - 8px); margin:2px 4px 6px; padding:6px 0; text-align:center; background:var(--card); border:1px dashed var(--line); border-radius:6px; cursor:pointer; color:var(--muted); font-size:12px; }
+.olderbar:hover { color:var(--accent); border-color:var(--accent); }
 table { border-collapse:collapse; background:var(--card); } td, th { border:1px solid var(--line); padding:5px 10px; text-align:left; } .st-working { color:var(--ok); font-weight:600; }
 #body { flex:1; display:flex; min-height:0; } #body main { flex:1; min-width:0; }
 #sidebar { width:230px; border-right:1px solid var(--line); background:var(--card); padding:8px; overflow:auto; display:flex; flex-direction:column; gap:6px; }

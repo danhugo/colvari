@@ -97,6 +97,18 @@
     ]);
   }
 
-  return { avatarColor, initials, toolLabel, roomEvents, group, parseComposer, preview, mentionMatches, GROUP_MS, MAX, feedKey };
+  // Windowing (t_fb193107): the room renders only the last `win` events; scrolling near the top
+  // prepends the next older page (grow `win` by PAGE) while the scroll anchor keeps the viewport
+  // on the same content. Pure so renderer and tests share one implementation.
+  const PAGE = 100;
+  function pageOf(events, win) {
+    const start = Math.max(0, events.length - Math.max(1, win | 0));
+    return { items: events.slice(start), hidden: start };
+  }
+  // After a re-render that added `newHeight - prevHeight` px above the viewport, the scrollTop that
+  // keeps the previously-visible content in place. Clamped at 0 (content shrank / scrolled past top).
+  const anchorScroll = (prevTop, prevHeight, newHeight) => Math.max(0, newHeight - prevHeight + prevTop);
+
+  return { avatarColor, initials, toolLabel, roomEvents, group, parseComposer, preview, mentionMatches, GROUP_MS, MAX, PAGE, pageOf, anchorScroll, feedKey };
 });
 

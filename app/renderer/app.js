@@ -1131,10 +1131,19 @@ function renderLogLevelChips() {
   document.querySelectorAll('#loglevels [data-lv]').forEach((b) => b.onclick = () => { const lv = b.dataset.lv; logLevels.has(lv) ? logLevels.delete(lv) : logLevels.add(lv); renderLogLevelChips(); renderLog(); });
 }
 renderLogLevelChips();
+// Windowing (t_fb193107): like the chat room, the log list renders only the last LOG_PAGE matching
+// lines; scroll-up (or the older-bar) prepends the next page, anchored. Returning to the bottom
+// (the live tail) shrinks the window again so streaming keeps the DOM bounded.
+const LOG_PAGE = 200;
+let logWin = LOG_PAGE;
+$('#log').addEventListener('scroll', () => { const box = $('#log');
+  if (box.scrollTop < 80 && renderLog.total > logWin) { logWin += LOG_PAGE; renderLog(); }
+  else if (box.scrollTop + box.clientHeight >= box.scrollHeight - 20 && logWin > LOG_PAGE) { logWin = LOG_PAGE; renderLog(); } });
 function renderLog() {
   const f = $('#logfilter').value; const q = ($('#logsearch').value || '').trim().toLowerCase();
   const teamIds = sel.logTeam ? new Set(logTeamNodes().map((n) => n.id)) : null;
   const box = $('#log'); const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 20;
+  const prevH = box.scrollHeight, prevTop = box.scrollTop;
   const all = logs.filter((l) => l.projectId === ctx.p && (!teamIds || teamIds.has(l.nodeId)));
   const base = all.filter((l) => (!f || l.nodeId === f) && (!q || l.text.toLowerCase().includes(q)));
   let rows = base.filter((l) => logLevels.has(severityOf(l)));
@@ -1143,13 +1152,18 @@ function renderLog() {
     hiddenInfo = base.filter((l) => !logLevels.has(severityOf(l))).length;
     if (hiddenInfo) rows = base;
   }
+  renderLog.total = rows.length;
+  const page = Chat.pageOf(rows, logWin);
   const empty = teamIds && !all.length ? 'No messages for this team.' : (all.length ? 'No log lines match your filter.' : 'No activity yet — run the team to see agent logs here.');
-  box.innerHTML = rows.length ? (hiddenInfo ? `<p class="muted logempty">${hiddenInfo} info line(s) hidden by the level filter — showing all. <button id="log-showall" class="linklike">Show all</button></p>` : '') +
-    Subagents.nestRows(rows.slice(-800), subRecOf, null).map((x) => x.kind === 'sub' ? subBlockHtml(x) : logRow(x.l)).join('') : `<p class="muted logempty">${empty}</p>`;
+  const older = page.hidden ? `<button id="log-older" class="olderbar linklike">↑ ${page.hidden} earlier line${page.hidden === 1 ? '' : 's'} — scroll up or click to load</button>` : '';
+  box.innerHTML = rows.length ? (hiddenInfo ? `<p class="muted logempty">${hiddenInfo} info line(s) hidden by the level filter — showing all. <button id="log-showall" class="linklike">Show all</button></p>` : '') + older +
+    Subagents.nestRows(page.items, subRecOf, null).map((x) => x.kind === 'sub' ? subBlockHtml(x) : logRow(x.l)).join('') : `<p class="muted logempty">${empty}</p>`;
   const sa = document.getElementById('log-showall'); if (sa) sa.onclick = () => { logLevels.add('info'); logLevels.add('warn'); logLevels.add('error'); renderLogLevelChips(); renderLog(); };
+  const ob = document.getElementById('log-older'); if (ob) ob.onclick = () => { logWin += LOG_PAGE; renderLog(); };
   bindSubToggles(renderLog);
   document.querySelectorAll('#log [data-tasklink]').forEach((d) => d.onclick = () => { sel.task = d.dataset.tasklink; $('#ov-task').value = ''; showTab('overview'); });
   if (atBottom && $('#logauto').checked) box.scrollTop = box.scrollHeight;
+  else box.scrollTop = Chat.anchorScroll(prevTop, prevH, box.scrollHeight);
 }
 $('#logteam').onchange = () => { sel.logTeam = $('#logteam').value; $('#logfilter').value = ''; renderObs(); renderLog(); };
 $('#logfilter').onchange = renderLog;
@@ -1562,7 +1576,12 @@ function renderYourTurn(ev) {
 // "↓ N new" pill: only shown when the user has scrolled up and new messages arrived below the fold.
 function updateNewPill() { const btn = $('#chat-newpill'); const n = CH.pendingNew || 0; btn.classList.toggle('hidden', n <= 0); if (n > 0) btn.querySelector('span').textContent = n; }
 $('#chat-newpill').onclick = () => { const room = $('#chat-room'); room.scrollTop = room.scrollHeight; CH.pendingNew = 0; updateNewPill(); };
-$('#chat-room').addEventListener('scroll', () => { const room = $('#chat-room'); if (room.scrollHeight - room.scrollTop - room.clientHeight < 40) { CH.pendingNew = 0; updateNewPill(); } });
+// Windowing (t_fb193107): only the last Chat.PAGE events are in the DOM; scrolling near the top
+// prepends the next older page (anchored, no jump), and returning to the bottom shrinks again.
+const chatGrow = () => { CH.win = (CH.win || Chat.PAGE) + Chat.PAGE; chatSig = null; renderChat(); };
+$('#chat-room').addEventListener('scroll', () => { const room = $('#chat-room');
+  if (room.scrollHeight - room.scrollTop - room.clientHeight < 40) { CH.pendingNew = 0; if ((CH.win || Chat.PAGE) > Chat.PAGE) { CH.win = Chat.PAGE; chatSig = null; renderChat(); } updateNewPill(); }
+  else if (room.scrollTop < 80 && CH.ev && CH.ev.length > (CH.win || Chat.PAGE)) chatGrow(); });
 // Skip-no-op renders (t_9d92c3d3): the feed signature is checked BEFORE the expensive roomEvents walk,
 // so an unchanged room costs no DOM work at all. chatSig is reset to force a redraw (tab switch, send).
 let chatSig = null;
@@ -1574,13 +1593,22 @@ function renderChat() {
   if (sig === chatSig) return;
   chatSig = sig;
   const ev = Chat.roomEvents(L, S.tasks, S.messages, S.inbox, Chat.MAX, subRecOf); // capped to the last Chat.MAX (500) events
+  CH.ev = ev;
   CH.asks = ev.filter((e) => e.type === 'question').map((e) => e.who);
   $('#chat-typing').innerHTML = [...working].map((id) => `<span class="typing"><span class="spin"></span>${esc(who(id).name)} is working<span class="dots"></span></span>`).join(' · ');
   renderYourTurn(ev);
   const room = $('#chat-room'); const atBottom = room.scrollHeight - room.scrollTop - room.clientHeight < 40;
-  const delta = Math.max(0, ev.length - (CH.evLen || 0)); CH.evLen = ev.length;
-  room.innerHTML = ev.length ? renderGroups(ev, working) : S.team.nodes.length ? `<div class="cempty"><b>#company is quiet</b>Type a goal below, or @mention an agent (e.g. <code>@${esc(S.team.nodes[0].name)} write hello.txt</code>).</div>` : '<div class="cempty"><b>No team yet</b>Create your team in the Team tab (or use the first-run guide), then chat with it here.</div>';
-  if (atBottom) { room.scrollTop = room.scrollHeight; CH.pendingNew = 0; } else CH.pendingNew = (CH.pendingNew || 0) + delta;
+  const prevH = room.scrollHeight, prevTop = room.scrollTop;
+  const page = Chat.pageOf(ev, CH.win || Chat.PAGE);
+  // The event list is a sliding window (capped at MAX), so ev.length alone can't count new arrivals —
+  // count events newer than the previous tail instead.
+  const delta = ev.filter((e) => e.at > (CH.evTailAt ?? -Infinity)).length;
+  if (ev.length) CH.evTailAt = ev[ev.length - 1].at;
+  room.innerHTML = page.items.length ? (page.hidden ? `<button id="chat-older" class="olderbar linklike">↑ ${page.hidden} earlier message${page.hidden === 1 ? '' : 's'} — scroll up or click to load</button>` : '') + renderGroups(page.items, working)
+    : S.team.nodes.length ? `<div class="cempty"><b>#company is quiet</b>Type a goal below, or @mention an agent (e.g. <code>@${esc(S.team.nodes[0].name)} write hello.txt</code>).</div>` : '<div class="cempty"><b>No team yet</b>Create your team in the Team tab (or use the first-run guide), then chat with it here.</div>';
+  if (atBottom) { CH.win = Chat.PAGE; room.scrollTop = room.scrollHeight; CH.pendingNew = 0; }
+  else { room.scrollTop = Chat.anchorScroll(prevTop, prevH, room.scrollHeight); CH.pendingNew = (CH.pendingNew || 0) + delta; }
+  const ob = $('#chat-older'); if (ob) ob.onclick = chatGrow;
   updateNewPill();
   const th = $('#chat-thread'); const t = S.tasks.find((x) => x.id === CH.thread); th.classList.toggle('hidden', !t);
   if (t) { const tev = ev.filter((e) => e.taskId === t.id);
