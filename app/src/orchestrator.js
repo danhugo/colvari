@@ -507,6 +507,30 @@ class Orchestrator extends EventEmitter {
     for (const p of this.procs.values()) p.kill('SIGTERM');
   }
 
+  // Self-update drain deadline: stop every live agent process so the restart can proceed (SIGTERM
+  // now, SIGKILL after killGraceMs; resolves once they have all exited — or 1s after the SIGKILL,
+  // so a process that ignores everything cannot stall the update again). Unlike stop() this keeps
+  // the Run alive and sets drainCutoff: runTask treats killed runs as restart-interrupted (task
+  // stays in_progress; after the relaunch reconcileOrphanedTasks resets it to todo and the session
+  // resumes), not crashed (which would park it for a human).
+  haltProcs(killGraceMs = 5000) {
+    if (this.procs.size === 0) return Promise.resolve();
+    this.drainCutoff = true;
+    for (const p of this.procs.values()) { try { p.kill('SIGTERM'); } catch {} }
+    return new Promise((resolve) => {
+      const t0 = Date.now(); let killed = false;
+      // Referenced on purpose: while waiting out the kill grace this interval is what keeps the
+      // process (and the pending update) alive after the agent children are gone.
+      const iv = setInterval(() => {
+        if (this.procs.size === 0) { clearInterval(iv); return resolve(); }
+        if (!killed && Date.now() - t0 >= killGraceMs) {
+          killed = true;
+          for (const p of this.procs.values()) { try { p.kill('SIGKILL'); } catch {} }
+        } else if (killed && Date.now() - t0 >= killGraceMs + 1000) { clearInterval(iv); resolve(); }
+      }, 100);
+    });
+  }
+
   // Reset any in_progress task whose assignee has no live session/process back to todo so it gets
   // re-dispatched. Covers agent exit/crash/idle leaving a task stranded in_progress.
   reconcileOrphanedTasks() {
@@ -759,6 +783,9 @@ class Orchestrator extends EventEmitter {
       let code = 1; let judge = null; let i = 0; let reason = ''; let human = null; let recover = false;
       a.stopRequested = false; a.pendingHuman = [];
       for (;;) {
+        // The run was killed for a self-update restart (haltProcs): no further iterations, human
+        // deliveries or stall recoveries — the task stays in_progress and resumes after the relaunch.
+        if (this.drainCutoff) { reason = 'interrupted for self-update restart'; break; }
         a.iteration = i + 1; this.changed();
         let args = null;
         if (base !== null) {
@@ -830,14 +857,16 @@ class Orchestrator extends EventEmitter {
         // Parked for a human, not a "please review this" hand-off: never auto-dispatched/auto-advanced.
         this.store.updateTask(task.id, { status: 'review', parkedForHuman: true });
         this.store.commentTask(task.id, 'orchestrator', judge.inconclusive ? `Goal check was inconclusive after ${i} iteration(s): ${judge.reason}. Check the result yourself.` : `Goal condition not met after ${i} iteration(s) (${reason}): ${judge.reason}`);
-      } else if (t && t.status === 'in_progress') {
+      } else if (t && t.status === 'in_progress' && !this.drainCutoff) {
         // Agent ended without updating status: success -> done, failure -> back to review for a human.
+        // (A run killed by the self-update drain cutoff skips this: its task stays in_progress so the
+        // post-restart reconcile re-dispatches it instead of parking it for a human.)
         const ok = code === 0 && this.running && !stoppedWhy && !(m.mode === 'goal' && !(judge && judge.met));
         const g = gate(ok ? 'done' : 'review');
         if (!ok) g.parkedForHuman = true;
         this.store.updateTask(task.id, g);
         this.store.commentTask(task.id, 'orchestrator', stoppedWhy ? `Agent stopped (${stoppedWhy}) after ${i} iteration(s); moved to review.` : `Agent exited (code ${code}) without setting status after ${i} iteration(s) (${reason}); moved automatically.`);
-      } else if (t && t.status === 'review' && !t.parkedForHuman && code !== 0 && this.running && !stoppedWhy) {
+      } else if (t && t.status === 'review' && !t.parkedForHuman && code !== 0 && this.running && !stoppedWhy && !this.drainCutoff) {
         // The agent itself moved this to 'review' (clearing parkedForHuman) but the process then crashed
         // (nonzero exit). A crashed run must never look like a clean hand-off eligible for silent
         // auto-advance to done: park it for a human to inspect.
