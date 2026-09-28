@@ -60,8 +60,9 @@ function pfDetail(n) {
 let lastV = null, lastVProject = null, runsChanged = true;
 const sameVersion = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 async function refresh() {
-  // Update in flight (see updFrozen near the self-update code): keep the last known-good snapshot
-  // on screen — fetch and swap nothing; just keep the veil/chip current (status pushes do too).
+  // Store-touching update phases in flight (see updFrozen near the self-update code): keep the last
+  // known-good snapshot on screen — fetch and swap nothing; just keep the veil/chip current (status
+  // pushes do too). pending/draining are NOT store-touching, so there the UI keeps updating.
   if (updFrozen()) { await loadSelfUpdate(); renderSelfUpdate(); return; }
   // Fetch into locals first; only swap the live P/S/ctx (and render) once everything required succeeds,
   // so a failed/partial IPC round-trip can't blank out a good previous render.
@@ -379,6 +380,10 @@ function switchTo(c) {
   else sel = { ...sel, node: null, edge: null };
   connectFrom = null; connectMode = false; $('#connect').classList.remove('on');
   ctx = c;
+  // A team click must always land visually: drop the cached version's team signatures so the refresh
+  // below cannot short-circuit as "nothing changed" (sigs are size:mtime — two teams can share one)
+  // and skip the re-render that moves the selection (t_93ffac88).
+  if (lastV && c.t) { delete lastV.team; delete lastV.teams; }
   // The sidebar selection drives every team-scoped tab: sync the Logs tab's own team filter so
   // switching teams here is visible there too (the dropdown can still narrow it afterwards).
   if (c.t && sel.logTeam !== c.t) { sel.logTeam = c.t; $('#logfilter').value = ''; }
@@ -1381,10 +1386,18 @@ let upd = { state: 'idle', enabled: false, history: [], stub: true };
 // grace period after it hides, since children also spawn right after an aborted update — keep the
 // last known-good snapshot instead of trusting what a mid-update read returns.
 const UPD_FREEZE_GRACE_MS = 60 * 1000;
-let updLiveAt = 0;
 const updIsLive = () => upd.state !== 'idle' && !!UPD_STATES[upd.state];
-const updFrozen = () => updIsLive() || Date.now() - updLiveAt < UPD_FREEZE_GRACE_MS;
-const trackUpd = () => { if (updIsLive()) updLiveAt = Date.now(); };
+// Only testing/restarting freeze data refreshes: they run after the fast-forward (mixed-version
+// reads, t_9dea9325) and block the main process with sync npm anyway. pending/draining only pause
+// dispatch and touch no store, so there the UI must keep following real agent state — freezing
+// them staled every spinner and swallowed sidebar team clicks for as long as the drain waited on
+// a running agent (t_93ffac88: the live app sat frozen 00:28:54->01:03 while Flux ran). The grace
+// likewise tracks only the freeze-worthy phases: it shields the dispatch-resume burst right after
+// an aborted post-merge update, not every status push.
+const updFreezes = () => upd.state === 'testing' || upd.state === 'restarting';
+let updFrozenAt = 0;
+const updFrozen = () => updFreezes() || Date.now() - updFrozenAt < UPD_FREEZE_GRACE_MS;
+const trackUpd = () => { if (updFreezes()) updFrozenAt = Date.now(); };
 const shortSha = (s) => String(s || '').slice(0, 7);
 // Defensive about the exact payload shape (Devon's task is still in flight): state/phase aliases,
 // from/to vs fromSha/toSha, history vs restarts, and per-row {ts,why,from,to,result|ok}.
