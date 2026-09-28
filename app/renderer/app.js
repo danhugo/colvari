@@ -1774,11 +1774,11 @@ function renderOverview() {
   for (const t of ['assign', 'message', 'review']) { const m = el('marker', { id: 'ovarr-' + t, viewBox: '0 0 10 10', refX: 9, refY: 5, markerWidth: 8, markerHeight: 8, markerUnits: 'userSpaceOnUse', orient: 'auto-start-reverse' }, defs); el('path', { d: 'M0,1 L9,5 L0,9 z', class: 'arrow arrow-' + t }, m); }
   // Same orthogonal geometry (and parallel-edge offsets) as the Team graph, so both views read alike.
   const pk = (e) => [e.from, e.to].sort().join('|'); const pairN = {}, pairI = {}; S.team.edges.forEach((e) => { pairN[pk(e)] = (pairN[pk(e)] || 0) + 1; });
-  const ovBlocks = ovNodes.map((n) => ({ x: n.x - 4, y: n.y - 4, w: W + 8, h: H + 8 }));
+  // Glance view: plain elbows between facing sides (drawn under the cards), no obstacle detours — detours made long bus lines that ran off-canvas.
   for (const e of S.team.edges) {
     const a = byId[e.from], b = byId[e.to]; if (!a || !b) continue; const type = e.type || 'assign';
     const key = pk(e); const i = (pairI[key] = (pairI[key] ?? -1) + 1); const off = (i - (pairN[key] - 1) / 2) * 22 * (e.from < e.to ? 1 : -1);
-    el('path', { d: edgeGeom(a, b, off, ovBlocks, edgeSeed(e)).d, class: `edge edge-${type}` + (hot.has(e.id) ? ' flash' : ''), 'marker-end': `url(#ovarr-${type})` }, svg);
+    el('path', { d: edgeGeom(a, b, off).d, class: `edge edge-${type}` + (hot.has(e.id) ? ' flash' : ''), 'marker-end': `url(#ovarr-${type})` }, svg);
   }
   for (const n of ovNodes) {
     const live = (S.orch.agents[n.id] || {}).status === 'working' ? 'working' : nodeLive(n); const isStuck = stuck.has(n.id); const c = agentColor(n.id);
@@ -1798,10 +1798,10 @@ function renderOverview() {
     el('title', {}, g).textContent = `${n.name} (${n.role}) — ${isStuck ? 'stuck' : live}`;
   }
   // Fit the graph to the available canvas without ever shrinking node text below its authored (readable) size:
-  // scale up to fill the wrap when the graph is small, but clamp at 1:1 and let the wrap scroll when it isn't.
+  // fit the whole graph in the wrap (never clipped); shrink down to 0.6 before letting the wrap scroll, grow up to 1.3.
   const gbox = graphBox(ovNodes), gpad = 40, bw = gbox.w + gpad * 2, bh = gbox.h + gpad * 2;
   const wrap = svg.parentElement, r = wrap.getBoundingClientRect();
-  const scale = Math.max(1, r.width && r.height ? Math.min(r.width / bw, r.height / bh) : 1);
+  const scale = clamp(r.width && r.height ? Math.min(r.width / bw, r.height / bh) : 1, 0.6, 1.3);
   const vbw = Math.max(bw, r.width ? r.width / scale : bw), vbh = Math.max(bh, r.height ? r.height / scale : bh);
   svg.setAttribute('viewBox', `${gbox.x - gpad - (vbw - bw) / 2} ${gbox.y - gpad - (vbh - bh) / 2} ${vbw} ${vbh}`);
   svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
