@@ -55,6 +55,12 @@ Every graph node shows small vendor/model chips (e.g. `Claude` / `opus`) next to
 
 `npm run gui-e2e:discovery` (also run as part of the full `npm run gui-e2e`) feeds the recorded real init event (`test/fixtures/real-init-event.json`, 58 skills / 123 slash commands including `goal`/`loop`) through `discoverCapabilities` exactly as a real Refresh would, and checks the Usage tab's Discovery panel (`#us-discovery`) shows those exact counts (Skills `58`, Commands `123`, Modes including `goal`/`loop`); it also checks the panel never renders a `↻` reset chip when no reset time is reported, and never renders a stale `↻0m`/`↻NaN` chip once a limit is configured but the reported window has already elapsed. Shot: `discovery-panel`.
 
+### Stalled runs: automatic stop + resume
+
+A hung model call (no events, no live process) used to strand an agent forever. The stall watchdog (`Orchestrator.sweepStalls()`, every 5s) checks each working run that has emitted nothing — no stdout/stderr byte, no parsed event — for `stallTimeoutMin` minutes (project setting, default 10, `0` disables the watchdog). Liveness is judged broadly before declaring a stall: any output refreshes the timer, a live non-zombie descendant process (a long silent tool call: build, network, sleep) or an advancing CPU time keeps the run alive, and an unreadable process table never stalls ("no hunches"). A genuinely silent run with no live process is stopped (SIGTERM, SIGKILL after an 8s grace), and its task resumes **the same session** (`--resume <session_id>`) with a short "continue" prompt. Recovery ownership is a one-way claim on the run object, so a watchdog tick racing a manual stop or a queued human message can never double-fire; manual interrupts always win and are never recovered over.
+
+The recovery budget is persisted on the task (`stallRecoveries`, so it survives app restarts) and allows **2** automatic recoveries; only a run exiting 0 (real progress) resets it. On the third stall — or when the stalled run has no session id to resume — the task is parked in `waiting_for_human` with an orchestrator comment instead of silently retrying fresh. Each step is logged and surfaced as `run.stalled` / `run.recovering` / `run.recovery_failed` events (renderer channels `run-stalled` / `run-recovering` / `run-recovery-failed`, shown as badges on the agent card and task). Tests: `test/stall-recovery.test.js` (fake clock + fake hung runner, no real model).
+
 ## Agent run modes and sessions
 
 Each agent has a **Run mode**, set in the agent panel (`src/agent-modes.js`):
