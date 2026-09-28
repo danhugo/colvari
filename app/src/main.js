@@ -528,6 +528,99 @@ async function guiE2E() {
     console.log('[gui-e2e] limits', JSON.stringify({ under, cli, warn, pause, guardTaskStatus: s.getTask(guardTask.id).status, chips, effortChips, probeBefore: dotBefore, probeAfter: dotAfter, discovered: !!added.capabilities }));
     require('electron').nativeTheme.themeSource = 'system';
   };
+  // Per-provider top-bar limits (three team compositions, stubbed limit data, no model calls): the meter
+  // must follow the providers the team actually uses. Claude-only shows the CLI's own utilization (it
+  // wins outright even when the local run count is higher); a Codex-only team — Codex reports no
+  // rate-limit windows at all — gets an honest per-node reason and never a fabricated 0%; a mixed team
+  // must not let Claude's numbers bleed onto the silent provider. The per-provider CHIP contract
+  // (label per provider, "limits unknown") is feature-gated: it asserts once usageStatus carries
+  // provider-keyed data or the meter renders [data-provider] chips, and until then logs how many
+  // checks it skipped — gating on the feature instead of enshrining the old single-provider wording.
+  const limitsProvidersShots = async () => {
+    await waitFor(`return !!document.querySelector('#tpl-select option')`);
+    const prevCtx = await ex(`return { ...ctx }`);
+    // A stub codex CLI so the Codex-only team counts as installed-but-silent ("codex --version" works,
+    // yet no rate-limit event ever arrives) — the real-world Codex shape today.
+    const cx = path.join(require('os').tmpdir(), 'squad-limits-codex.sh');
+    fs.writeFileSync(cx, `#!/bin/sh\necho 'codex-cli 0.0.0'\n`); fs.chmodSync(cx, 0o755);
+    const rl = (pct, hrs) => ({ pct, resetsAt: new Date(Date.now() + hrs * 3600000).toISOString() });
+    const grab = `(async () => ({ txt: $('#limitmeter').textContent, hidden: $('#limitmeter').classList.contains('hidden'), chips: document.querySelectorAll('#limitmeter [data-provider]').length, st: await call('usageStatus') }))()`;
+    const go = async (name) => { const pj = pm.create(name); await ex(`P = await call('listProjects'); renderSidebar(); await switchTo({ p: '${pj.id}' }); await w(700);`); return { pj, s: pm.store(pj.id), o: orchFor(pj.id) }; };
+    const scenarios = [];
+    // Claude-only: CLI-reported 42%/13% must show even though the local run count says 60%.
+    {
+      const { pj, s, o } = await go('Limits: Claude only');
+      const a = s.addNode({ name: 'ClaPM', role: 'PM', runtime: 'claude', model: 'opus', x: 60, y: 60 });
+      s.addNode({ name: 'ClaDev', role: 'Dev', runtime: 'claude', model: 'sonnet', x: 320, y: 60 });
+      for (let i = 0; i < 6; i++) s.addRun({ id: 'lp' + i, projectId: pj.id, nodeId: a.id, agent: a.name, kind: 'agent', runtime: 'claude', billingSource: 'subscription', startedAt: new Date(Date.now() - i * 1000).toISOString(), inputTokens: 10, outputTokens: 5 });
+      s.saveSettings({ usageLimits: { fiveHourLimit: 10, weeklyLimit: 0, tokenLimit: 0, costLimit: 0, warnPct: 80 } });
+      o.subscriptionRateLimits = { [a.id]: { fiveHour: rl(0.42, 1), weekly: rl(0.13, 72) } };
+      await ex(`await refresh(); await w(500);`);
+      const m = await ex(`return ${grab}`);
+      expect('limits-providers: Claude-only team shows the CLI-reported 42%/13%, not the higher local 60% count', !m.hidden && m.txt.includes('42%') && m.txt.includes('13%') && !m.txt.includes('60%'), m);
+      expect('limits-providers: Claude-only meter stays calm below the warn line and counts down the reset', !/near limit|paused/.test(m.txt) && /↻/.test(m.txt), m.txt);
+      await shot('limits-providers-claude-only');
+      scenarios.push({ name: 'Claude only', id: pj.id, m });
+      o.subscriptionRateLimits = {};
+    }
+    // Codex-only: nothing ever reports — the meter explains that per agent instead of inventing a %.
+    {
+      const { pj, s, o } = await go('Limits: Codex only');
+      s.addNode({ name: 'CodPM', role: 'PM', runtime: 'codex', model: 'gpt-5.6-terra', x: 60, y: 60 });
+      s.addNode({ name: 'CodDev', role: 'Dev', runtime: 'codex', model: 'gpt-5.6-cipher', x: 320, y: 60 });
+      s.saveSettings({ codexPath: cx });
+      await ex(`await refresh(); await w(500);`);
+      const m = await ex(`return ${grab}`);
+      expect('limits-providers: Codex-only team (Codex reports nothing) shows no fabricated percentage', !m.hidden && !/\d+%/.test(m.txt), m.txt);
+      expect('limits-providers: Codex-only meter explains why there is no data, without warn/pause', /no limit data/.test(m.txt) && !/near limit|paused/.test(m.txt), m.txt);
+      await shot('limits-providers-codex-only');
+      scenarios.push({ name: 'Codex only', id: pj.id, m });
+      o.subscriptionRateLimits = {};
+    }
+    // Mixed: only the Claude node reports — its numbers surface without being attributed to Codex.
+    {
+      const { pj, s, o } = await go('Limits: mixed');
+      const c = s.addNode({ name: 'MixClaude', role: 'PM', runtime: 'claude', model: 'opus', x: 60, y: 60 });
+      s.addNode({ name: 'MixCodex', role: 'Dev', runtime: 'codex', model: 'gpt-5.6-terra', x: 320, y: 60 });
+      s.saveSettings({ codexPath: cx, usageLimits: { fiveHourLimit: 10, weeklyLimit: 0, tokenLimit: 0, costLimit: 0, warnPct: 80 } });
+      o.subscriptionRateLimits = { [c.id]: { fiveHour: rl(0.42, 1), weekly: rl(0.13, 72) } };
+      await ex(`await refresh(); await w(500);`);
+      const m = await ex(`return ${grab}`);
+      expect('limits-providers: mixed team surfaces the Claude-reported 42% while Codex stays silent', !m.hidden && m.txt.includes('42%'), m.txt);
+      await shot('limits-providers-mixed');
+      scenarios.push({ name: 'mixed', id: pj.id, m });
+      o.subscriptionRateLimits = {};
+    }
+    // Feature gate for the chip contract: provider-keyed usageStatus (Devon's model) or [data-provider]
+    // chips (Uma's UI). Skipped loudly until then; once active, a mismatch red-lines the case on purpose.
+    const provKeyed = scenarios.some((x) => x.m.st && x.m.st.providers && (Array.isArray(x.m.st.providers) ? x.m.st.providers.length : Object.keys(x.m.st.providers).length));
+    const chipDom = scenarios.some((x) => x.m.chips > 0);
+    if (!(provKeyed || chipDom)) {
+      console.log('[gui-e2e] limits-providers: provider-keyed usageStatus / [data-provider] chips not present yet — 7 per-provider contract checks skipped (self-activate when the provider-keyed model + chips land)');
+    } else {
+      const provsOf = (st) => !st || !st.providers ? [] : (Array.isArray(st.providers) ? st.providers : Object.values(st.providers));
+      const hasPct = (o) => /0\.42\b/.test(JSON.stringify(o)) || /"pct":\s*42\b/.test(JSON.stringify(o));
+      for (const x of scenarios) {
+        await ex(`await switchTo({ p: '${x.id}' }); await w(500);`);
+        const t = (await ex(`return $('#limitmeter').textContent.toLowerCase()`)) || '';
+        const provs = provsOf(x.m.st);
+        if (x.name === 'Claude only') {
+          expect('limits-providers[contract]: Claude-only top bar is labeled for the Claude provider', t.includes('claude'), t);
+          expect('limits-providers[contract]: Claude-only usageStatus carries the CLI window under the claude provider', provs.some((p) => JSON.stringify(p).toLowerCase().includes('claude')) && hasPct(provs), provs);
+        } else if (x.name === 'Codex only') {
+          expect('limits-providers[contract]: Codex-only top bar has no Claude wording anywhere (no claude/5h/weekly)', !/claude|5h|weekly/.test(t), t);
+          expect('limits-providers[contract]: Codex-only shows a "limits unknown" state, never a fabricated 0%', /unknown/.test(t) && !/\d+%/.test(t), t);
+        } else {
+          expect('limits-providers[contract]: mixed top bar names both providers the team actually uses', t.includes('claude') && t.includes('codex'), t);
+          expect('limits-providers[contract]: mixed shows the Claude-reported 42% on its own provider chip', t.includes('42%'), t);
+          const codex = provs.filter((p) => JSON.stringify(p).toLowerCase().includes('codex'));
+          expect('limits-providers[contract]: mixed — Claude numbers never bleed onto the Codex entry', codex.length > 0 && codex.every((p) => !hasPct(p)), codex);
+        }
+      }
+    }
+    await ex(`await switchTo(${JSON.stringify(prevCtx)}); await w(300);`);
+    console.log('[gui-e2e] limits-providers', JSON.stringify({ scenarios: scenarios.map((x) => ({ name: x.name, pct: (x.m.txt.match(/\d+%/g) || []).join(','), chips: x.m.chips, providerKeyed: !!(x.m.st && x.m.st.providers) })) }));
+  };
   // Discovery panel regression: the recorded real init event (58 skills / 123 slash commands, incl.
   // goal+loop modes — test/fixtures/real-init-event.json) drives the Usage tab's #us-discovery panel the
   // same way a real Refresh would (discoverCapabilities({initEvent}) -> node.capabilities), so the panel's
@@ -1038,6 +1131,7 @@ async function guiE2E() {
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'parallel') { await parallelShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'mixed') { await mixedShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'limits') { await limitsShots(); throw null; }
+    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'limits-providers') { await limitsProvidersShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'discovery') { await discoveryPanelShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'usage') { await usagePerModelShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'existingdata') { await existingDataShots(); throw null; }
@@ -1237,6 +1331,7 @@ async function guiE2E() {
     if (!process.env.SKIP_WIKILOGS) await mainLogsWikiShots();
     if (!process.env.SKIP_CRITIQUE) await critiqueShots();
     if (!process.env.SKIP_LIMITS) await limitsShots();
+    if (!process.env.SKIP_LIMITS_PROVIDERS) await limitsProvidersShots();
     if (!process.env.SKIP_DISCOVERY) await discoveryPanelShots();
     if (!process.env.SKIP_USAGEPM) await usagePerModelShots();
     nativeTheme.themeSource = 'system';
