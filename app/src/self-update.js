@@ -79,6 +79,16 @@ class UpdateWatcher extends EventEmitter {
   }
   stop() { clearInterval(this._timer); this.setPaused(false); }
 
+  // Async failure outside _flow's own abort handling (e.g. a store error mid-poll): abort back to
+  // idle — setPhase('idle') unpauses dispatch, so a failed update never leaves the team paused.
+  _abort(why) {
+    if (this.phase === 'idle') return;
+    this._log('error', `self-update aborted: ${why}`);
+    appendHistory(this.store.dir, { ts: new Date().toISOString(), reason: this.reason, fromSha: this.fromSha, toSha: this.toSha, result: 'aborted: ' + why });
+    this.lastError = why; this._busy = false;
+    this.setPhase('idle');
+  }
+
   autoRestart() { try { return !!this.store.getSettings().autoRestart; } catch { return false; } }
   baseBranch() {
     if (this.branch) return this.branch;
