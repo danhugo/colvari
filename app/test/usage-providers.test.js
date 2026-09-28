@@ -255,3 +255,78 @@ test('providers: runtime-less runs stay uncounted when their runtime matches no 
   });
   assert.equal(providers[0].status, 'unknown');
 });
+
+test('providers: an Unknown provider never mirrors claude usage; runtime-less claude nodes merge into the one claude chip', () => {
+  // Data-layer contract behind the top bar: whatever produces an 'unknown' entry, it must carry none of
+  // claude's windows — the live bug was an Unknown chip rendering the exact same numbers as Claude's.
+  const a = node({ name: 'Cla' });
+  const providers = U.usageProviders({
+    runs: [agentRun({ runtime: 'claude' })],
+    limits: { fiveHourLimit: 10, weeklyLimit: 10, warnPct: 80 },
+    nodes: [a, node({ name: 'Old', runtime: 'unknown' })],
+    rateLimitsByNode: { [a.id]: { fiveHour: { pct: 0.42, resetsAt: inH(1) }, weekly: { pct: 0.36, resetsAt: inH(72) } } },
+    now: NOW,
+  });
+  const unk = prov(providers, 'unknown');
+  assert.ok(unk, 'an explicit unknown runtime is its own entry');
+  assert.equal(unk.status, 'unknown');
+  assert.deepEqual(unk.windows, []);
+  assert.ok(!/0\.42|0\.36|"pct"/.test(JSON.stringify(unk)), JSON.stringify(unk));
+  const claude = prov(providers, 'claude');
+  assert.equal(claude.status, 'ok');
+  assert.equal(claude.windows.find((w) => w.label === '5h').pct, 0.42);
+  assert.equal(claude.windows.find((w) => w.label === 'weekly').pct, 0.36);
+  // the actual live bug: a runtime-less node with its own claude windows joins the claude group
+  // (highest reading wins per window) instead of duplicating them under a second chip
+  const b = node({ name: 'Pia', runtime: undefined });
+  const merged = U.usageProviders({
+    runs: [], limits: {},
+    nodes: [a, b],
+    rateLimitsByNode: {
+      [a.id]: { fiveHour: { pct: 0.42, resetsAt: inH(1) }, weekly: { pct: 0.36, resetsAt: inH(72) } },
+      [b.id]: { fiveHour: { pct: 0.6, resetsAt: inH(2) }, weekly: { pct: 0.5, resetsAt: inH(96) } },
+    },
+    now: NOW,
+  });
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].provider, 'claude');
+  assert.equal(prov(merged, 'unknown'), undefined);
+  assert.equal(merged[0].windows.find((w) => w.label === '5h').pct, 0.6);
+  assert.equal(merged[0].windows.find((w) => w.label === 'weekly').pct, 0.5);
+});
+
+test('providers: a proxy provider with no quota source emits no weekly % (no fabricated wk)', () => {
+  const h = node({ runtime: 'helpycode' });
+  // proxy-billed runs are not subscription-windowed: with no CLI reading, even a configured weeklyLimit
+  // must mint no windows at all — never a wk row from budget math over per-token billing
+  const proxy = U.usageProviders({
+    runs: [1, 2, 3].map(() => agentRun({ runtime: 'helpycode', billingSource: 'proxy' })),
+    limits: { fiveHourLimit: 5, weeklyLimit: 10, warnPct: 80 },
+    nodes: [h],
+    now: NOW,
+  });
+  assert.equal(proxy.length, 1);
+  assert.equal(proxy[0].provider, 'helpycode');
+  assert.equal(proxy[0].plan, 'api'); // proxy billing is per-token, not subscription windows
+  assert.equal(proxy[0].status, 'unknown');
+  assert.deepEqual(proxy[0].windows, []);
+  assert.ok(!/weekly|"pct"/.test(JSON.stringify(proxy[0])), JSON.stringify(proxy[0]));
+  // a claude-stamped reading (the stale repoint case) must not become helpycode's wk% either
+  const stale = U.usageProviders({
+    runs: [], limits: { weeklyLimit: 10 },
+    nodes: [h],
+    rateLimitsByNode: { [h.id]: { fiveHour: { pct: 0.91, resetsAt: inH(1) }, weekly: { pct: 0.28, resetsAt: inH(96) }, runtime: 'claude' } },
+    now: NOW,
+  });
+  assert.equal(stale[0].status, 'unknown');
+  assert.deepEqual(stale[0].windows, []);
+  // positive control: a helpycode-stamped weekly reading is real quota data and does emit
+  const real = U.usageProviders({
+    runs: [], limits: {},
+    nodes: [h],
+    rateLimitsByNode: { [h.id]: { weekly: { pct: 0.28, resetsAt: inH(96) }, runtime: 'helpycode' } },
+    now: NOW,
+  });
+  assert.equal(real[0].status, 'ok');
+  assert.equal(real[0].windows.find((w) => w.label === 'weekly').pct, 0.28);
+});
