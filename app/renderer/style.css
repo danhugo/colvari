@@ -101,6 +101,9 @@ td.actions button { padding:2px 7px; font-size:12px; margin-right:4px; } #budget
 #helpdlg td { padding:3px 10px; }
 /* Header stays on one row whatever the pill contents: title, tabs and pills never wrap; the goal box absorbs the width. */
 header { flex-wrap:nowrap; min-width:0; } header > strong, header .pill, header button, #tabs { white-space:nowrap; flex-shrink:0; } #tabs { display:flex; }
+/* The status pills are the header's elastic middle: they shrink to an ellipsis so Run/Stop/help always
+   fit (overflow != visible lets flex shrink below the min-content size). */
+header #updst, header #runstate, header #totaltokens, header #totalcost { min-width:0; overflow:hidden; text-overflow:ellipsis; flex-shrink:1; }
 header #goal { flex:1 1 260px; min-width:100px; max-width:420px; } header .spacer { flex:0 1 12px; }
 header .pill { font-variant-numeric:tabular-nums; } .pill.quiet { color:var(--muted); }
 .cap { display: inline-block; padding: 0 6px; border-radius: 8px; font-size: 11px; margin: 2px 0; }
@@ -279,15 +282,13 @@ header .pill { border:none; background:none; color:var(--fg-muted); font-size:va
 /* One line tall, always: the meter sits in the header, and a wrapping "no limit data: …" reason
    would grow the header mid-session, shifting the whole layout and eating in-flight clicks.
    The full reason stays reachable via the part's title tooltip. */
-.limitmeter { display:flex; align-items:center; gap:6px; font-size:var(--text-xs); min-width:0; overflow:hidden; flex-shrink:0; }
-/* The meter never yields above 1350px: the goal input and spacer absorb tightness (goal bottoms out
-   at its 100px min first). Below that the window genuinely cannot fit everything, and the meter
-   clips at its right edge (chips never overlap: their own flex-shrink stays 0) instead of pushing
-   the Run/Stop buttons off-screen. */
-@media (max-width:1350px) { .limitmeter { flex-shrink:1; } }
+.limitmeter { display:flex; align-items:center; gap:6px; font-size:var(--text-xs); min-width:0; overflow:hidden; flex-shrink:1; }
 /* At working window widths the tab icons are pure padding — labels carry the tabs, and every
    freed pixel goes to the meter chips. */
 @media (max-width:1500px) { header .navicon { display:none; } }
+/* Below 1100px the header cannot fit the usage ledger and cost pills at a readable width even
+   ellipsised — the Usage tab covers them, so drop them entirely and let the rest breathe. */
+@media (max-width:1100px) { header #totaltokens, header #totalcost { display:none; } }
 .limitmeter.hidden { display:none; }
 .limitmeter .lm-flag { padding:2px 8px; border-radius:var(--radius-full); font-weight:var(--fw-semibold); white-space:nowrap; }
 .limitmeter .lm-flag.lm-warn { background:var(--warning-soft); color:var(--warning-text); } .limitmeter .lm-flag.lm-danger { background:var(--danger-soft); color:var(--danger); }
