@@ -1260,6 +1260,71 @@ async function guiE2E() {
     await shot('37-dynamicteam-settings');
     console.log('[gui-e2e] dynamicteam', JSON.stringify({ cores: cores().map((n) => n.id), createdBy: ps.getTeam().nodes.find((n) => n.id === ra.id).createdBy, settings: { maxAgents: psettings.getSettings().maxAgents, teamChangeApproval: psettings.getSettings().teamChangeApproval } }));
   };
+  // Recruit approval through the human Inbox (t_49f926ea): a core's recruit_agent files an approval
+  // request in the Inbox; approving it in the UI must add the node to the graph LIVE (no reload),
+  // declining must not — and the core is told either way. The REAL tool implementation runs
+  // in-process against the project-level store (exactly what mcp-server.js does), so the suite
+  // needs no claude run and stays red until the answer handler applies approved changes.
+  const recruitInboxShots = async () => {
+    const { makeTools } = require('./board-tools');
+    await waitFor(`return !!document.querySelector('#tpl-select option')`); await ex(`await refresh();`);
+    const cur = await ex(`return { p: ctx.p, t: S.teamId }`);
+    const ts = pm.store(cur.p, cur.t); const proj = pm.store(cur.p);
+    if (ts.getTeam().nodes.length < 2) { ts.addNode({ name: 'Corey', role: 'PM', x: 60, y: 60 }); ts.addNode({ name: 'Morgan', role: 'Dev', x: 340, y: 60 }); }
+    const corey = ts.getTeam().nodes.find((n) => n.name === 'Corey');
+    for (const n of ts.getTeam().nodes) if (n.core && n.id !== corey.id) ts.updateNode(n.id, { core: false });
+    if (!corey.core) ts.updateNode(corey.id, { core: true });
+    const task = ts.createTask({ title: 'Grow the team', assignee: corey.id, createdBy: corey.id });
+    ts.updateTask(task.id, { status: 'in_progress' });
+    const tools = makeTools(proj, corey.id);
+    const nodesBefore = ts.getTeam().nodes.length;
+    const until = async (fn, ms = 15000) => { for (let t = 0; t < ms; t += 200) { if (fn()) return true; await new Promise((r) => setTimeout(r, 200)); } return false; };
+    const named = (name) => ts.getTeam().nodes.filter((n) => n.name === name);
+    const openItem = (re) => proj.listInbox({ status: 'open' }).find((i) => i.change && re.test(i.question));
+    // (a) The core asks for a recruit: nothing changes until the human answers.
+    const req1 = tools.recruit_agent({ name: 'Rookie', role: 'Dev', reason: 'e2e: an extra pair of hands for the goal' });
+    const item1 = openItem(/Rookie/);
+    await ex(`await refresh(); await w(300); $('#tabs button[data-tab=inbox]').click(); await w(400);`);
+    const asked = { pending: !!req1.pending, item: !!item1, badge: await ex(`return $('#inbox-badge').textContent`), parked: ts.getTask(task.id).status, nodes: ts.getTeam().nodes.length };
+    expect('recruit ask: pending result, open item, badge 1, task parked, no node yet', asked.pending && asked.item && asked.badge === '1' && asked.parked === 'waiting_for_human' && asked.nodes === nodesBefore, asked);
+    await shot('41-recruitinbox-request');
+    // (b) Approve in the Inbox: the node joins the graph live — marker proves no reload happened.
+    await ex(`window.__noreload = 'alive'; const d = [...document.querySelectorAll('.inboxitem')].find((x) => x.textContent.includes('Rookie')); d.querySelector('.ib-choice[data-v=approve]').click(); await w(600);`);
+    const applied = await until(() => named('Rookie').length === 1);
+    const rookie = named('Rookie')[0] || {};
+    await ex(`await refresh(); await w(300); $('#tabs button[data-tab=team]').click(); await w(500);`);
+    const approved = {
+      applied, marker: await ex(`return window.__noreload === 'alive'`),
+      dom: await ex(`return { nodes: document.querySelectorAll('#graph .node').length, rookie: [...document.querySelectorAll('#graph .node')].some((n) => n.textContent.includes('Rookie')) }`),
+      createdBy: rookie.createdBy || null, edges: ts.getTeam().edges.filter((e) => (e.from === corey.id && e.to === rookie.id) || (e.from === rookie.id && e.to === corey.id)).map((e) => e.type).sort(),
+      itemClosed: !!item1 && proj.getInboxItem(item1.id).status !== 'open',
+      badgeAfter: await ex(`await refresh(); $('#tabs button[data-tab=inbox]').click(); await w(300); return $('#inbox-badge').textContent`),
+      task: ts.getTask(task.id).status,
+      toldCore: proj.listMessages({ to: corey.id }).some((m) => /Rookie/.test(m.text)),
+    };
+    expect('recruit approved: node appears live (no reload), createdBy=core, both edges, item closed, badge 0, task back, core told',
+      approved.applied && approved.marker && approved.dom.nodes === nodesBefore + 1 && approved.dom.rookie && approved.createdBy === corey.id && approved.edges.join() === 'assign,message' && approved.itemClosed && approved.badgeAfter === '' && approved.task === 'in_progress' && approved.toldCore, approved);
+    await ex(`$('#tabs button[data-tab=team]').click(); await w(300);`); await shot('42-recruitinbox-approved');
+    // (c) Decline: any non-'approve' answer changes nothing; the core still gets told.
+    const req2 = tools.recruit_agent({ name: 'Nova', role: 'Critic', reason: 'e2e: decline-path coverage' });
+    const item2 = openItem(/Nova/);
+    await ex(`await refresh(); await w(300); $('#tabs button[data-tab=inbox]').click(); await w(400);`);
+    await shot('43-recruitinbox-decline-request');
+    await ex(`const d = [...document.querySelectorAll('.inboxitem')].find((x) => x.textContent.includes('Nova')); d.querySelector('.ib-text').value = 'decline: not needed for this goal'; d.querySelector('.ib-send').click(); await w(800);`);
+    await new Promise((r) => setTimeout(r, 2000)); // settle: nothing is supposed to change
+    await ex(`await refresh(); await w(300);`);
+    const it2 = item2 && proj.getInboxItem(item2.id);
+    const declined = {
+      pending: !!req2.pending, answered: it2 ? it2.status === 'answered' && it2.answer : null,
+      nodes: ts.getTeam().nodes.length, task: ts.getTask(task.id).status,
+      badge: await ex(`return $('#inbox-badge').textContent`),
+      toldCore: proj.listMessages({ to: corey.id }).some((m) => /Nova/.test(m.text)),
+    };
+    expect('recruit declined: no node, item answered, badge 0, task back, core told',
+      declined.pending && declined.answered && declined.nodes === nodesBefore + 1 && declined.task === 'in_progress' && declined.badge === '' && declined.toldCore, declined);
+    await ex(`$('#tabs button[data-tab=team]').click(); await w(300);`); await shot('44-recruitinbox-declined');
+    console.log('[gui-e2e] recruitinbox', JSON.stringify({ asked, approved, declined }));
+  };
   // Top bar must fit any window width with the meter filled (bug t_19ec5471): header never overflows
   // (scrollWidth <= clientWidth), Run/Stop/Help/goal stay visible, and the bar stays a FIXED-SIZE
   // summary — one limit chip whatever the provider count (t_bc19b2f5; the tokens pill is gone, the
@@ -1413,6 +1478,7 @@ async function guiE2E() {
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'wake') { await wakeShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'subagents') { await subagentShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'dynamicteam') { await dynamicTeamShots(); throw null; }
+    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'recruitinbox') { await recruitInboxShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'topbar') { await topbarShots(); throw null; }
     // project/team management through the UI: create a project from the Startup template, then a Solo team, then switch back.
     // Wait until the template select is filled (the first refresh loads the templates) before choosing one.
