@@ -2594,16 +2594,21 @@ composerEl.addEventListener('dragleave', () => composerEl.classList.remove('drag
 composerEl.addEventListener('drop', (e) => { e.preventDefault(); composerEl.classList.remove('dragover'); const files = [...(e.dataTransfer?.files || [])]; if (files.length) act(addChatFiles)(files); });
 
 // ---------- human inbox (ask_human questions + approvals) ----------
+const ibOpen = new Map();
 function renderInbox() {
   const items = S.inbox || []; const n = items.length ? String(items.length) : '';
   $('#inbox-tab-badge').textContent = n;
   const taskTitle = (id) => (S.tasks.find((t) => t.id === id) || {}).title || '';
   $('#inboxlist').innerHTML = items.length ? items.map((i) => `<div class="inboxitem" data-iid="${i.id}">
-    <small>${i.kind === 'approval' ? 'Approval' : 'Question'} from <b>${esc(nodeName(i.nodeId))}</b>${i.taskId ? ' · task: ' + esc(taskTitle(i.taskId)) : ''} · ${esc(new Date(i.at).toLocaleString())}</small>
-    <p>${esc(i.question)}</p>
-    <p>${(i.kind === 'approval' ? ['approve'] : i.choices).map((c) => `<button class="ib-choice primary" data-v="${esc(c)}">${esc(c)}</button>`).join(' ')}</p>
+    <div class="ib-head" role="button" tabindex="0" aria-expanded="false">${avatarHtml(i.nodeId, new Set(), new Set([i.nodeId]))}<div class="ib-main"><div class="ib-q">${esc(i.question)}</div><small class="ib-meta">${i.kind === 'approval' ? 'Approval' : 'Question'} · ${esc(nodeName(i.nodeId))}${i.taskId ? ' · ' + esc(taskTitle(i.taskId)) : ''}</small></div><small class="ib-time" title="${esc(new Date(i.at).toLocaleString())}">${esc(agoTxt(i.at) || 'just now')}</small></div>
+    <div class="ib-body hidden"><p>${(i.kind === 'approval' ? ['approve'] : i.choices).map((c) => `<button class="ib-choice primary" data-v="${esc(c)}">${esc(c)}</button>`).join(' ')}</p>
     <textarea class="ib-text" rows="2" placeholder="${i.kind === 'approval' ? 'Or describe the changes you want' : 'Your answer'}"></textarea>
-    <p><button class="ib-send">${i.kind === 'approval' ? 'Request changes' : 'Send answer'}</button></p></div>`).join('') : '<p class="muted">Nothing waiting for you.</p>';
+    <p><button class="ib-send">${i.kind === 'approval' ? 'Request changes' : 'Send answer'}</button></p></div></div>`).join('') : `<div class="ib-empty"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12 6.5 5h11L20 12v6a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 18v-6ZM4 12h5.5l1 2h3l1-2H20"/></svg><h3>You're all caught up</h3><p>Agent questions, approvals and merge conflicts that need your call land here.</p><button class="ib-board">Go to Board</button></div>`;
+  const ibb = document.querySelector('.ib-board'); if (ibb) ibb.onclick = () => showTab('board');
+  document.querySelectorAll('.inboxitem .ib-head').forEach((h) => { const t = () => { const o = h.nextElementSibling.classList.toggle('hidden'); h.setAttribute('aria-expanded', String(!o)); ibOpen.set(h.parentElement.dataset.iid, !o); }; h.onclick = t; h.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); t(); } }; });
+  // Newest "your turn" item starts expanded so its choices show without a click; user toggles are remembered across re-renders.
+  const newest = items.reduce((m, i) => (!m || (i.createdAt || i.at || 0) >= (m.createdAt || m.at || 0) ? i : m), null);
+  document.querySelectorAll('.inboxitem').forEach((d) => { const id = d.dataset.iid; if (ibOpen.get(id) ?? (newest && newest.id === id)) { d.querySelector('.ib-body').classList.remove('hidden'); d.querySelector('.ib-head').setAttribute('aria-expanded', 'true'); } });
   document.querySelectorAll('.inboxitem').forEach((d) => {
     const answer = (v) => act(async () => { if (!v) return; await call('answerInbox', d.dataset.iid, v); refresh(); })();
     d.querySelectorAll('.ib-choice').forEach((b) => b.onclick = () => answer(b.dataset.v));
