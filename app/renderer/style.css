@@ -497,6 +497,14 @@ header .pill { border:none; background:none; color:var(--fg-muted); font-size:va
 .pill.upd-restarting { background:var(--ok); color:var(--fg-on-accent); border-color:var(--ok); }
 .pill.upd-failed { background:var(--danger); color:var(--fg-on-accent); border-color:var(--danger); }
 .pill.upd-deferred { color:var(--fg-muted); border-color:var(--border-strong); } /* restart deferred by a guard: calm, nothing is stuck */
+/* core restart-pending pill + "Core watching" indicator (t_5a1661d5): pending = soft amber info,
+   armed schedule = solid amber; the header theme strips pill borders, so state speaks through fills */
+header .pill.rst-pending { background:var(--warning-soft); color:var(--warning-text); padding:2px 8px; }
+header .pill.rst-armed { background:var(--warning-strong); color:var(--fg-on-accent); padding:2px 8px; }
+header .pill.watchst { cursor:pointer; }
+.tag.rstwait { background:var(--warning-soft); color:var(--warning-text); padding:0 var(--space-2); }
+/* watch digests: green like ok-results but bold, so the periodic core digest is scannable in the feed */
+.logrow.lv-watch, .loglevel.lv-watch { color:var(--term-green); } .logrow.lv-watch .logtext { font-weight:600; }
 .updhist { width:100%; margin:6px 0; } .updhist td, .updhist th { padding:3px 6px; font-size:12px; }
 .updhist code { font-family:var(--font-mono); font-size:11px; }
 .updres.ok { color:var(--ok); } .updres.bad { color:var(--danger); font-weight:600; }
