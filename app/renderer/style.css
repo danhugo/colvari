@@ -186,7 +186,7 @@ header .pill { font-variant-numeric:tabular-nums; } .pill.quiet { color:var(--mu
 #chat-preview { min-height:16px; font-size:11px; margin-bottom:4px; } #chat-preview.task { color:var(--accent-text); } #chat-preview.message { color:var(--success); } #chat-preview.goal { color:var(--term-yellow); } #chat-preview.error { color:var(--term-red); }
 #chat-mentions { margin:0 16px; background:var(--bg-raised); border:1px solid var(--border-strong); border-radius:8px; padding:4px; } #chat-mentions div { padding:4px 8px; border-radius:6px; cursor:pointer; display:flex; gap:8px; align-items:center; }
 #chat-mentions div.sel, #chat-mentions div:hover { background:var(--bg-hover); } #chat-mentions .avatar { flex-basis:22px; height:22px; font-size:10px; }
-#chat-thread { width:360px; border-left:1px solid var(--border); overflow:auto; display:flex; flex-direction:column; } #chat-thread .chat-head button { background:none; border:none; color:var(--fg-muted); }
+#chat-thread { width:360px; border-left:1px solid var(--border); overflow:auto; display:flex; flex-direction:column; } #chat-thread.hidden { display:none; } #chat-thread .chat-head button { background:none; border:none; color:var(--fg-muted); }
 .cempty { margin:auto; text-align:center; padding:40px; color:var(--fg-muted); } .cempty b { color:var(--fg-primary); font-size:16px; display:block; margin-bottom:6px; }
 
 /* ===== Design-token layer (design/prototype.html + critique.md) ===== */

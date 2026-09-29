@@ -1249,6 +1249,8 @@ async function guiE2E() {
   // Top bar must fit any window width with BOTH provider chips filled (bug t_19ec5471): header never
   // overflows (scrollWidth <= clientWidth), Run/Stop/Help/goal stay visible, and the tokens/cost pills
   // hide exactly at the 1100px breakpoint. Widths swept via setContentSize so the CSS viewport is exact.
+  // The chat pane must reach the window's right edge (t_a99ed2c2): the 360px task-thread aside must
+  // actually hide (its ID display:flex used to beat .hidden) and come back when a thread is opened.
   const topbarShots = async () => {
     await waitFor(`return !!document.querySelector('#tpl-select option')`); await ex(`await refresh();`); const cur = await ex(`return { p: ctx.p, t: S.teamId }`);
     const p = cur.p || pid(); const ts = pm.store(p, cur.t); const o = orchFor(p);
@@ -1262,11 +1264,15 @@ async function guiE2E() {
       ts.addRun({ id: 'tb-c' + i, projectId: p, nodeId: nodes[0].id, agent: nodes[0].name, kind: 'agent', runtime: 'claude', billingSource: 'subscription', startedAt: new Date(Date.now() - i * 1000).toISOString(), inputTokens: 5000, outputTokens: 1200, reportedCostUsd: 0.02 + i * 0.01 });
       ts.addRun({ id: 'tb-x' + i, projectId: p, nodeId: nodes[1].id, agent: nodes[1].name, kind: 'agent', runtime: 'codex', billingSource: 'subscription', startedAt: new Date(Date.now() - i * 1000).toISOString(), inputTokens: 4000, outputTokens: 900, reportedCostUsd: 0.02 + i * 0.01 });
     }
+    // A task with createdBy renders a handoff bubble carrying data-thread — used below to open the
+    // thread pane and prove #chat-thread.hidden still toggles (t_a99ed2c2).
+    ts.createTask({ title: 'Thread pane geometry', assignee: nodes[0].id, createdBy: nodes[1].id });
     await ex(`await refresh(); await w(500);`);
     expect('topbar: both provider chips filled before sweeping widths', await ex(`return document.querySelectorAll('#limitmeter [data-provider]').length >= 2 && !$('#limitmeter').classList.contains('hidden')`));
     expect('topbar: usage pills populated (ledger + cost visible)', await ex(`return !$('#totaltokens').classList.contains('hidden') && !$('#totalcost').classList.contains('hidden') && !/no usage yet|no cost yet/.test($('#totaltokens').textContent + $('#totalcost').textContent)`));
     const measure = `(async () => { const h = document.querySelector('header'); const d = document.documentElement; const vis = (s) => { const e = document.querySelector(s); if (!e || e.getClientRects().length === 0) return false; const r = e.getBoundingClientRect(); return r.width > 0 && r.left >= 0 && r.right <= window.innerWidth && r.top >= 0 && r.bottom <= window.innerHeight; };
-      return { sw: Math.max(d.scrollWidth, document.body.scrollWidth), cw: Math.min(d.clientWidth, document.body.clientWidth), edge: Math.round(Math.max(...[...h.children].map((c) => c.getBoundingClientRect().right))), iw: window.innerWidth, hdrSw: h.scrollWidth, hdrCw: h.clientWidth, run: vis('#run'), stop: vis('#stop'), help: vis('#help'), goal: vis('#goal'), tokens: vis('#totaltokens'), cost: vis('#totalcost') }; })()`;
+      const cm = document.querySelector('#tab-chat.active .chat-main'); const th = document.querySelector('#chat-thread');
+      return { sw: Math.max(d.scrollWidth, document.body.scrollWidth), cw: Math.min(d.clientWidth, document.body.clientWidth), edge: Math.round(Math.max(...[...h.children].map((c) => c.getBoundingClientRect().right))), iw: window.innerWidth, hdrSw: h.scrollWidth, hdrCw: h.clientWidth, run: vis('#run'), stop: vis('#stop'), help: vis('#help'), goal: vis('#goal'), tokens: vis('#totaltokens'), cost: vis('#totalcost'), cm: cm ? Math.round(cm.getBoundingClientRect().right) : null, thDisp: !!(th && th.getClientRects().length), thW: th ? Math.round(th.getBoundingClientRect().width) : 0 }; })()`;
     const prevSize = win.getContentSize();
     for (const cw of [1600, 1400, 1101, 1100, 900]) {
       win.setContentSize(cw, Math.max(600, Math.min(prevSize[1], 800))); await new Promise((r) => setTimeout(r, 350));
@@ -1276,7 +1282,17 @@ async function guiE2E() {
       expect(`topbar: Run/Stop/Help/goal visible at ${cw}px`, m.run && m.stop && m.help && m.goal, m);
       if (cw === 1100) expect('topbar: tokens/cost pills hidden at the 1100px breakpoint', !m.tokens && !m.cost, m);
       if (cw === 1101) expect('topbar: tokens/cost pills still shown just above the breakpoint', m.tokens && m.cost, m);
+      if (cw === 1600 || cw === 1400 || cw === 900) expect(`topbar: chat pane reaches the window's right edge at ${cw}px (chat right ${m.cm} vs window ${m.iw}, thread hidden)`, m.cm !== null && m.cm >= m.iw - 1 && !m.thDisp, m);
       await shot(`topbar-${cw}`);
+      if (cw === 1400) { // the fix must not hide the thread pane for good: opening a task thread shows it again
+        await ex(`document.querySelector('#chat-room [data-thread]').click(); await w(300);`);
+        const th = await ex(`return { disp: $('#chat-thread').getClientRects().length > 0, w: Math.round($('#chat-thread').getBoundingClientRect().width), cm: Math.round($('#tab-chat.active .chat-main').getBoundingClientRect().right) }`);
+        expect(`topbar: opened thread pane is displayed with width > 0 at 1400px (chat right ${th.cm} = window ${m.iw} - thread ${th.w})`, th.disp && th.w > 0 && th.cm <= m.iw - th.w + 1, th);
+        await shot('topbar-1400-thread');
+        await ex(`CH.thread = null; chatSig = null; renderChat(); await w(200);`);
+        const m2 = await ex(`return ${measure}`);
+        expect(`topbar: chat pane reaches the right edge again after closing the thread at 1400px (chat right ${m2.cm} vs window ${m2.iw})`, m2.cm >= m2.iw - 1 && !m2.thDisp, m2);
+      }
     }
     o.subscriptionRateLimits = {};
     win.setContentSize(prevSize[0], prevSize[1]); await ex(`await refresh(); await w(300);`);
