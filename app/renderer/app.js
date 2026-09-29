@@ -556,10 +556,12 @@ async function rstAction(kind) {
   }
 }
 // ---- blocker popover (t_ec59eefa): the chip's hover card with the full "waiting on" breakdown ----
-// Priority: Devon's landed core shape (blockedReason + busyAgents, t_acae4863), then the prose-array
-// alias, then — only for a core without any reason field — the honest subset derivable from the
-// state we already have, marked as provisional.
+// Priority: waitingReasons — the core's authoritative multi-line list, most-blocking first (Devon
+// t_acae4863; blockedReason merely mirrors [0], so reading it alone would drop lines [1..n]) — then
+// the blockedReason/busyAgents-only shape, then — only for a core without any reason field — the
+// honest subset derivable from the state we already have, marked as provisional.
 function rstWaiting() {
+  if (rst.waitingReasons) return { lines: rst.waitingReasons.length ? rst.waitingReasons : ['Nothing — it fires on the next tick.'], stub: false };
   if (rst.blockedReason !== undefined || rst.busyAgents !== undefined) {
     const lines = [];
     if (rst.blockedReason) lines.push(rst.blockedReason);
@@ -568,7 +570,6 @@ function rstWaiting() {
     if (!lines.length) lines.push('Nothing — it fires on the next tick.');
     return { lines, stub: false };
   }
-  if (rst.waitingReasons) return { lines: rst.waitingReasons.length ? rst.waitingReasons : ['Nothing — it fires on the next tick.'], stub: false };
   const armed = !!(rst.scheduledAfter || rst.scheduledNow);
   if (!armed) return { lines: ['No restart armed yet — the core agent (PM) schedules one, or it auto-arms when pending changes hit the cap.'], stub: false };
   const lines = [];
