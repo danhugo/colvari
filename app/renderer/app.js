@@ -470,7 +470,7 @@ function renderHeader() {
 // 'restart-state' / 'watch-status' (watch digests also arrive as kind:'watch' log lines). Until the
 // backend lands this runs on the last known state, stub-marked like the self-update chip above —
 // with nothing known, no pill shows at all rather than a wrong one.
-let rst = { pendingCount: 0, since: null, scheduledAfter: null, scheduledNow: false, gating: [], waitingReasons: undefined, blockedReason: undefined, busyAgents: undefined, stub: true };
+let rst = { pendingCount: 0, since: null, scheduledAfter: null, scheduledNow: false, gating: [], waitingReasons: undefined, blockedReason: undefined, busyAgents: undefined, targetSha: null, stub: true };
 let watch = { lastWatchAt: null, active: false, digest: '', intervalMin: 10, stub: true };
 // Blocker lines for the popover. Devon's landed core shape (t_acae4863) is authoritative:
 // blockedReason (one human line: anchor / drain with names / updater phase) + busyAgents. Absent
@@ -490,6 +490,7 @@ const normRestart = (d) => { d = d || {}; return {
   waitingReasons: normWaiting(d.waitingReasons ?? (d.waiting && d.waiting.reasons)),
   blockedReason: d.blockedReason === undefined ? undefined : (typeof d.blockedReason === 'string' && d.blockedReason ? d.blockedReason : null),
   busyAgents: Array.isArray(d.busyAgents) ? d.busyAgents.map(String).filter(Boolean) : undefined,
+  targetSha: typeof d.targetSha === 'string' && d.targetSha ? d.targetSha : null,
 }; };
 const normWatch = (d) => { d = d || {}; return {
   lastWatchAt: d.lastWatchAt || d.at || null,
@@ -515,8 +516,9 @@ function renderRestartPill() {
   if (!show) return;
   c.className = `pill rst-${armed ? 'armed' : 'pending'}`;
   const n = rst.pendingCount;
+  // t_7e590e54: pendingCount reads as commits behind (cores that expose targetSha); older ones count merged changes.
   const bits = ['Restart pending'];
-  if (n) bits.push(`${n} change${n === 1 ? '' : 's'}`);
+  if (n) bits.push(rst.targetSha ? `${n} commit${n === 1 ? '' : 's'} behind` : `${n} change${n === 1 ? '' : 's'}`);
   if (rst.scheduledAfter) bits.push(`after ${shortTaskId(rst.scheduledAfter)}`);
   else if (rst.scheduledNow) bits.push('once agents drain');
   const label = document.createElement('span');
@@ -583,7 +585,9 @@ function renderRstPop() {
   const w = rstWaiting();
   const div = (cls, txt) => { const d = document.createElement('div'); if (cls) d.className = cls; if (txt != null) d.textContent = txt; return d; };
   const kids = [div('rp-title', 'Restart pending')];
-  if (n) kids.push(div('rp-row', `${n} merged change${n === 1 ? '' : 's'} waiting${rst.since ? ` — first landed ${agoTxt(rst.since)}` : ''}.`));
+  if (n) kids.push(rst.targetSha
+    ? div('rp-row', `${n} commit${n === 1 ? '' : 's'} behind the running build${rst.since ? ` — pending for ${ago(rst.since)}` : ''}; the restart targets ${rst.targetSha.slice(0, 7)}.`)
+    : div('rp-row', `${n} merged change${n === 1 ? '' : 's'} waiting${rst.since ? ` — first landed ${agoTxt(rst.since)}` : ''}.`));
   kids.push(rst.scheduledAfter ? div('rp-row', `Scheduled: restarts once ${rst.scheduledAfter} is done.`)
     : rst.scheduledNow ? div('rp-row', 'Scheduled: restarts once agents drain.')
     : div('rp-row', 'Not scheduled — dispatch keeps running meanwhile.'));
