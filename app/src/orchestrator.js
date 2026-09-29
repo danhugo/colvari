@@ -443,7 +443,7 @@ class Orchestrator extends EventEmitter {
       let cwd = node.workdir || this.store.dir;
       fs.mkdirSync(cwd, { recursive: true });
       this.cwds.set(node.id, cwd);
-      const resume = this.lastSession(node.id);
+      const resume = this.lastSession(node.id, meta.runtime);
       this.log(node.id, 'system', `▶ ${node.name} wakes to handle messages in ${cwd}${resume ? ' [resume ' + resume + ']' : ''}`);
       let args = null;
       // Wake messages can carry attachments (their paths are in wakePrompt): pass the dir like the
@@ -713,10 +713,13 @@ class Orchestrator extends EventEmitter {
     }
   }
 
-  // The agent's most recent session id (from the board), used by continueSession.
-  lastSession(nodeId) {
-    const ts = this.store.listTasks().filter((t) => t.assignee === nodeId && t.sessionId).sort((a, b) => String(a.updatedAt).localeCompare(String(b.updatedAt)));
-    return ts.length ? ts[ts.length - 1].sessionId : null;
+  // The agent's most recent session id for a runtime (from the board's per-owner sessions map),
+  // used by continueSession. Never falls back to the legacy shared task.sessionId: it has no owner
+  // info, so resuming it can land in another agent's/runtime's dead session.
+  lastSession(nodeId, runtime = 'claude') {
+    const key = `${nodeId}:${runtime}`;
+    const ts = this.store.listTasks().filter((t) => t.assignee === nodeId && t.sessions && t.sessions[key]).sort((a, b) => String(a.updatedAt).localeCompare(String(b.updatedAt)));
+    return ts.length ? ts[ts.length - 1].sessions[key] : null;
   }
 
   env(cfg) {
@@ -755,16 +758,17 @@ class Orchestrator extends EventEmitter {
       run.subs = new SubagentTracker(node.id);
       a.subagents = []; a.subagentCount = 0; a.subagentTokens = { inputTokens: 0, outputTokens: 0 };
       a.currentRun = run; a.lastActivityAt = Date.now();
-      let buf = '';
+      let buf = ''; let errbuf = '';
       child.stdout.on('data', (d) => {
         a.lastActivityAt = Date.now();
         buf += d; let i;
         while ((i = buf.indexOf('\n')) >= 0) { const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1); if (line) this.onEvent(node, line, run, rt.id); }
       });
-      child.stderr.on('data', (d) => { a.lastActivityAt = Date.now(); this.log(node.id, 'stderr', String(d).trim()); });
+      child.stderr.on('data', (d) => { a.lastActivityAt = Date.now(); errbuf += d; if (errbuf.length > 8192) errbuf = errbuf.slice(-8192); this.log(node.id, 'stderr', String(d).trim()); });
       child.on('error', (e) => this.log(node.id, 'error', e.code === 'ENOENT' ? `${rt.label} binary not found: "${rt.bin(settings)}". Install it or set its path in Settings (run failed, no fallback).` : 'spawn failed: ' + e.message));
       child.on('close', (code) => {
         run.done = true;
+        run.stderr = errbuf.trim();
         if (a.currentRun === run) a.currentRun = null;
         try {
           if (buf.trim()) this.onEvent(node, buf.trim(), run, rt.id);
@@ -865,9 +869,12 @@ class Orchestrator extends EventEmitter {
       const autoCompactPct = Number(cfg.autoCompactPct || (settings.autoCompactPct ?? 40));
       if (meta.runtime === 'claude' && autoCompactPct > 0) env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE = autoCompactEnv(autoCompactPct);
       a.runtime = meta.runtime; a.model = cfg.model || '';
-      let resume = task.sessionId || (m.continueSession ? this.lastSession(node.id) : null);
+      // Sessions are per owner: only resume this agent's own session on this runtime (the legacy
+      // shared task.sessionId had no owner info and got other agents' dead sessions resumed).
+      const sessKey = `${node.id}:${meta.runtime}`;
+      let resume = (task.sessions && task.sessions[sessKey]) || (m.continueSession ? this.lastSession(node.id, meta.runtime) : null);
       this.log(node.id, 'system', `▶ ${node.name} starts "${task.title}" in ${cwd} [mode=${m.mode}${resume ? ', resume ' + resume : ''}]`);
-      let code = 1; let judge = null; let i = 0; let reason = ''; let human = null; let recover = false; let humanAtts = [];
+      let code = 1; let judge = null; let i = 0; let reason = ''; let human = null; let recover = false; let humanAtts = []; let freshTried = false;
       a.stopRequested = false; a.pendingHuman = [];
       for (;;) {
         // The run was killed for a self-update restart (haltProcs): no further iterations, human
@@ -885,9 +892,27 @@ class Orchestrator extends EventEmitter {
           catch (e) { this.log(node.id, 'error', 'bad agent settings: ' + e.message); }
         }
         if (i > 0) this.log(node.id, 'system', `↻ ${node.name} iteration ${i + 1} (${m.mode})`);
-        const r = await this.spawnRun(node, args, cwd, env, settings, { ...meta, iteration: i + 1, resumedFrom: args && resume ? resume : null });
+        const usedResume = !!(args && resume);
+        const r = await this.spawnRun(node, args, cwd, env, settings, { ...meta, iteration: i + 1, resumedFrom: usedResume ? resume : null });
         code = r.code; i++; human = null; recover = false; humanAtts = [];
-        if (r.sessionId) { resume = r.sessionId; this.store.updateTask(task.id, { sessionId: r.sessionId, iterations: i }); }
+        if (r.sessionId) {
+          resume = r.sessionId;
+          const tp = this.store.getTask(task.id);
+          this.store.updateTask(task.id, { sessions: { ...((tp && tp.sessions) || {}), [sessKey]: r.sessionId }, iterations: i });
+        }
+        // A resume can fail because the session id went stale (sessions are per cwd; ids stored
+        // before the per-owner key may belong to another agent or runtime): retry once from a fresh
+        // session instead of failing the whole run.
+        if (usedResume && code !== 0 && !freshTried && /No conversation found|Session not found/.test(`${r.result || ''}\n${r.stderr || ''}`)) {
+          freshTried = true;
+          const tp = this.store.getTask(task.id);
+          const sessions = { ...((tp && tp.sessions) || {}) };
+          delete sessions[sessKey];
+          this.store.updateTask(task.id, { sessions });
+          resume = null;
+          this.log(node.id, 'system', '↻ resume failed (session not found): retrying once from a fresh session');
+          continue;
+        }
         // A run that got through (exit 0) is real progress: the stall counter resets (persisted on the task,
         // so it survives app restarts — otherwise a restart would re-arm the recovery budget).
         if (code === 0) { const tp = this.store.getTask(task.id); if (tp && tp.stallRecoveries) this.store.updateTask(task.id, { stallRecoveries: 0 }); }

@@ -81,7 +81,7 @@ test('hung run with no live child: stopped, resumed in the same session, task co
   assert.equal(events[1][1].attempt, 1);
   assert.equal(events[1][1].max, 2);
   // Same-session resume: the recovery run reports the original session id, and the task kept it.
-  assert.equal(store.getTask(task.id).sessionId, 'sess-1');
+  assert.equal(store.getTask(task.id).sessions[`${node.id}:claude`], 'sess-1');
   // Real progress (exit 0) resets the persisted recovery budget.
   assert.equal(store.getTask(task.id).stallRecoveries, 0);
   disarm(orch); orch.stop();
@@ -104,7 +104,7 @@ test('run with a live child process is not recovered', async () => {
 test('third stall: recovery_failed event, task parked for a human, no further resume', async () => {
   const { store, node, task, orch } = setup({ mode: 'hang' });
   // Two recoveries already used (persisted from earlier runs of this task).
-  store.updateTask(task.id, { sessionId: 'sess-1', stallRecoveries: 2 });
+  store.updateTask(task.id, { sessions: { [`${node.id}:claude`]: 'sess-1' }, stallRecoveries: 2 });
   const failed = []; let resumes = 0;
   orch.on('run.recovery_failed', (e) => failed.push(e));
   orch.on('run.recovering', () => resumes++);
