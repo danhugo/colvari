@@ -179,6 +179,7 @@ function createWindow() {
 // GUI e2e: drive the real UI with clicks, run a PM -> Dev team, screenshot each tab.
 async function guiE2E() {
   const out = process.env.AGENTS_SQUAD_GUI_E2E; const fs = require('fs');
+  win.webContents.setBackgroundThrottling(false); // occluded windows composite rarely; shots would be stale
   const ex = (js) => win.webContents.executeJavaScript(`(async () => { const w = (ms) => new Promise(r => setTimeout(r, ms)); const $ = (s) => document.querySelector(s); ${js} })()`);
   const shot = async (name) => fs.writeFileSync(path.join(out, name + '.png'), (await win.capturePage()).toPNG());
   const click = async (sel) => { const r = await ex(`const b = $('${sel}').getBoundingClientRect(); return [b.x + 20, b.y + 20];`); for (const type of ['mouseDown', 'mouseUp']) win.webContents.sendInputEvent({ type, x: Math.round(r[0]), y: Math.round(r[1]), button: 'left', clickCount: 1 }); await new Promise((r) => setTimeout(r, 400)); };
@@ -1226,6 +1227,8 @@ async function guiE2E() {
     await ex(`await refresh(); await w(400);`);
     const chips = await ex(`return { a: !!document.querySelector('#graph .node[data-id="${ra.id}"] .chip-recruited'), b: !!document.querySelector('#graph .node[data-id="${rb.id}"] .chip-recruited'), core: !!document.querySelector('#graph .node[data-id="${corey.id}"] .chip-recruited') }`);
     expect('recruited chip on the createdBy node only', chips.a && !chips.b && !chips.core, chips);
+    // wait for the badges instead of a fixed sleep so the shot cannot race the repaint (t_df6d61e4)
+    await waitFor(`return !!document.querySelector('#graph .node[data-id="${ra.id}"] .chip-recruited') && !!document.querySelector('#graph .node[data-id="${corey.id}"] .corelock')`);
     await shot('36-dynamicteam-graph');
     // Settings: defaults 6/ask, saved values persist and re-render.
     await ex(`$('#tabs button[data-tab=settings]').click(); await w(300);`);
