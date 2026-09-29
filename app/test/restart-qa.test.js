@@ -150,6 +150,7 @@ test('qa: the fired schedule survives every sweep of the old process and is cons
   assert.equal(s.restartPending(), null, 'only the boot of the new process consumes it');
   const st = o2.restartState();
   assert.equal(st.pendingCount, 0);
+  assert.equal(st.targetSha, null);
   assert.equal(st.scheduledAfter, null);
   assert.equal(st.scheduledNow, false);
   assert.deepEqual(st.gating, []);

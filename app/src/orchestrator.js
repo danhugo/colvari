@@ -162,7 +162,7 @@ function wakePrompt(team, node, msgs) {
 }
 
 class Orchestrator extends EventEmitter {
-  constructor(store) {
+  constructor(store, opts = {}) {
     super();
     this.store = store;
     this.running = false;
@@ -222,6 +222,15 @@ class Orchestrator extends EventEmitter {
       const n = Number(bootRp.firedCount) || 0;
       store.clearRestartPending();
       this.log(null, 'system', `restart: completed after boot — cleared the consumed schedule (${n} change(s) had landed)`);
+    }
+    // What this RUNNING process was built from (t_7e590e54): the merge path reads it to express
+    // restartPending.count as "commits behind". It lives in meta because merges run in whichever
+    // process holds the store (an agent's board server flips tasks done), not just the app.
+    if (opts.repoDir) {
+      try {
+        const sha = WT.headSha(opts.repoDir);
+        if (sha && sha !== (store.meta() || {}).buildSha) store.update('project', {}, (m) => { m.buildSha = sha; return m; });
+      } catch {}
     }
     // Stall watchdog state: last seen cumulative CPU time of each run's CLI process (nodeId -> {pid, cpuMs}),
     // and the pending SIGKILL grace timers for stalled runs that ignore SIGTERM.
@@ -941,6 +950,7 @@ class Orchestrator extends EventEmitter {
     const st = {
       pendingCount: Math.max(0, Number(rp.count) || 0),
       since: rp.since || null,
+      targetSha: rp.sha || null,
       scheduledAfter: rp.afterTaskId || null,
       scheduledNow: !!rp.scheduledNow,
       gating: this._restartGating || [],
@@ -951,13 +961,15 @@ class Orchestrator extends EventEmitter {
     // Why the restart has not fired yet (t_acae4863, for the pill's subtitle). waitingReasons is the
     // UI contract Uma's renderer normalizes (t_ec59eefa): human-readable, most-blocking first;
     // blockedReason mirrors [0] for single-line reads. A pending count alone is not a scheduled
-    // restart — when nothing is armed but changes have landed, say exactly that.
+    // restart — when nothing is armed but changes have landed, say exactly that. Since t_7e590e54
+    // the pending state is ONE restart to rp.sha, and the count reads as commits behind.
     const waiting = st.waitingReasons;
     const phase = this.updater && this.updater.phase;
     if (!scheduled) {
       if (st.pendingCount > 0) {
         const cap = Math.max(1, Number(this.store.getSettings().restartCap) || RESTART.CAP);
-        waiting.push(`not armed — ${st.pendingCount} change${st.pendingCount === 1 ? '' : 's'} pending (cap ${cap})`);
+        const at = st.targetSha ? ` at ${String(st.targetSha).slice(0, 7)}` : '';
+        waiting.push(`not armed — ${st.pendingCount} commit${st.pendingCount === 1 ? '' : 's'} behind${at} (cap ${cap})`);
       }
     } else {
       const after = rp.afterTaskId ? this.store.getTask(rp.afterTaskId) : null;

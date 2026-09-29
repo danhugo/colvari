@@ -92,4 +92,10 @@ function unmergedSquadBranches(root) {
     .map((branch) => ({ root, base, branch }));
 }
 
-module.exports = { ensureWorktree, worktreeDiff, worktreeMerge, worktreeDiscard, unmergedSquadBranches, branchMergeState, dirtyMergeMessage, dirtyMainFiles };
+// HEAD sha of `dir`'s repo, or null when git fails (not a repo, no git).
+function headSha(dir) { try { return git(dir, ['rev-parse', 'HEAD']); } catch { return null; } }
+
+// Commits on `to` that `from` lacks, or null when the range does not resolve.
+function commitsBehind(root, from, to) { try { return Number(git(root, ['rev-list', '--count', `${from}..${to}`])); } catch { return null; } }
+
+module.exports = { ensureWorktree, worktreeDiff, worktreeMerge, worktreeDiscard, unmergedSquadBranches, branchMergeState, dirtyMergeMessage, dirtyMainFiles, headSha, commitsBehind };

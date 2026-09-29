@@ -40,7 +40,7 @@ const orchs = new Map(); // projectId -> Orchestrator (projects run independentl
 function orchFor(pid) {
   let o = orchs.get(pid);
   if (!o) {
-    o = new Orchestrator(pm.store(pid));
+    o = new Orchestrator(pm.store(pid), { repoDir: APP_ROOT });
     o.on('log', (l) => send('log', { ...l, projectId: pid }));
     o.on('state', (s) => send('state', { ...s, projectId: pid })); // slim: the renderer refreshes from the store on receipt
     o.on('notify', (n) => { send('notify', { ...n, projectId: pid }); notify(n, pid); });
