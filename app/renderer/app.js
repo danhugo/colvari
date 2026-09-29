@@ -742,12 +742,13 @@ function renderGraph() {
   const nodes = allGraphNodes(); const byId = Object.fromEntries(nodes.map((n) => [n.id, n]));
   const edges = [...S.team.edges, ...(S.cross || []).filter((e) => !S.team.edges.some((x) => x.id === e.id))];
   const pairN = {}, pairI = {}; const pk = (e) => [e.from, e.to].sort().join('|'); edges.forEach((e) => { pairN[pk(e)] = (pairN[pk(e)] || 0) + 1; });
+  const srcN = {}, srcI = {}; edges.forEach((e) => { srcN[e.from] = (srcN[e.from] || 0) + 1; });
   const blocks = nodes.map((n) => ({ x: n.x - 4, y: n.y - 4, w: W + 8, h: H + 8 })); const pills = [];
   edgeLayout = { nodes, blocks, per: [] };
   for (const e of edges) {
     const a = byId[e.from], b = byId[e.to]; if (!a || !b) continue;
     const key = pk(e); const i = (pairI[key] = (pairI[key] ?? -1) + 1); const cnt = pairN[key];
-    const sign = e.from < e.to ? 1 : -1; const off = (i - (cnt - 1) / 2) * 22 * sign;
+    const sign = e.from < e.to ? 1 : -1; const lane = (srcI[e.from] = (srcI[e.from] ?? -1) + 1); const off = (i - (cnt - 1) / 2) * 22 * sign + (lane - ((srcN[e.from] || 1) - 1) / 2) * 14;
     const type = e.type || 'assign'; const cross = !!(e.crossTeam || a.ghost || b.ghost); const g = edgeGeom(a, b, off, blocks, edgeSeed(e));
     const isSel = sel.edge === e.id;
     const L = cross ? xL : eL; const hit = el('path', { d: g.d, class: 'edgehit' }, L);
@@ -779,23 +780,23 @@ function renderGraph() {
     const sb = sub.count ? subBadgeInfo(sub) : null;
     let cx = 12, cy = 46;
     const putChip = (text, max, cls, title) => { const t = clipText(text, max); const w = 10 + t.length * 5.6; const lim = cy === 46 && sb ? W - sb.w - 12 : W - 10; if (cx + w > lim && cx > 12) { cx = 12; cy = 62; } const cg = el('g', { class: cls, transform: `translate(${cx},${cy})` }, g); if (title) el('title', {}, cg).textContent = title; el('rect', { width: w, height: 14, rx: 7 }, cg); el('text', { x: w / 2, y: 10.5, 'text-anchor': 'middle' }, cg).textContent = t; cx += w + 4; };
-    for (const chip of [runtimeLabel(rtId), ns.model || n.model || 'default'].filter(Boolean)) putChip(chip, 14, 'chip');
-    if (rtId !== 'claude') { const rows = ((S.orch.ledger || {}).byAgent || {})[n.name] || []; const cost = rows.reduce((c, r) => c + (r.costUsd || 0), 0);
+    if (VP.zoom >= 0.6) for (const chip of [runtimeLabel(rtId), ns.model || n.model || 'default'].filter(Boolean)) putChip(chip, 14, 'chip');
+    if (VP.zoom >= 0.6 && rtId !== 'claude') { const rows = ((S.orch.ledger || {}).byAgent || {})[n.name] || []; const cost = rows.reduce((c, r) => c + (r.costUsd || 0), 0);
       putChip(rows.length ? `$${cost.toFixed(2)} · ${rows.length} key${rows.length === 1 ? '' : 's'}` : 'no usage', 20, 'chip chip-usage', rows.length ? `${runtimeLabel(rtId)} usage, per model key (tokens are never summed across models): ${rows.map((r) => `${r.model}: ${r.runs} run(s) · ${r.costUsd != null ? '$' + r.costUsd.toFixed(4) + (r.costSource === 'estimated' ? ' est' : '') : 'cost —'}`).join(' · ')}` : `${runtimeLabel(rtId)} has no recorded usage yet`); }
     const effort = n.effort || 'low';
-    for (const chip of [`E:${effort}`, n.autoCompact ? `AC:${n.autoCompact}` : null].filter(Boolean)) { const isDefaultEffort = chip === `E:${effort}` && !n.effort; putChip(chip, 14, 'chip chip-em' + (isDefaultEffort ? ' chip-default' : ''), chip.startsWith('E:') ? `Reasoning effort: ${effort}${isDefaultEffort ? ' (default)' : ''}` : `Auto-compact window: ${n.autoCompact}`); }
-    if (n.createdBy && !n.core) putChip('recruited', 10, 'chip chip-recruited', 'Recruited by ' + nodeName(n.createdBy));
+    if (VP.zoom >= 0.6) for (const chip of [`E:${effort}`, n.autoCompact ? `AC:${n.autoCompact}` : null].filter(Boolean)) { const isDefaultEffort = chip === `E:${effort}` && !n.effort; putChip(chip, 14, 'chip chip-em' + (isDefaultEffort ? ' chip-default' : ''), chip.startsWith('E:') ? `Reasoning effort: ${effort}${isDefaultEffort ? ' (default)' : ''}` : `Auto-compact window: ${n.autoCompact}`); }
+    if (VP.zoom >= 0.6 && n.createdBy && !n.core) putChip('recruited', 10, 'chip chip-recruited', 'Recruited by ' + nodeName(n.createdBy));
     const capsSt = !n.capabilities ? 'none' : (n.capabilities.error || n.capabilities.ok === false) ? 'error' : 'ok';
     const cb = el('g', { class: 'capsdot caps-' + capsSt, transform: `translate(7,${H - 8})` }, g); el('circle', { r: 4 }, cb);
     el('title', {}, cb).textContent = capsSt === 'none' ? 'Capabilities not probed yet' : capsSt === 'error' ? 'Capability probe failed' : `Capabilities probed${n.capabilitiesProbedAt ? ' ' + new Date(n.capabilitiesProbedAt).toLocaleString() : ''}`;
     const sg = el('g', { class: 'status s-' + live, transform: `translate(${W - 16},16)` }, g); el('circle', { r: 5 }, sg); el('title', {}, sg).textContent = live;
     const pres = el('g', { class: 'pres ' + presence(n.id), transform: `translate(${W - 16},16)` }, g); el('circle', { r: 8 }, pres);
-    const pf = pfState(n); const bw = 8 + PF_LABEL[pf].length * 6;
-    const badge = el('g', { class: 'pfbadge pf-' + pf, transform: `translate(${W - bw - 30},-8)` }, g);
+    const pf = pfState(n);
+    const badge = el('g', { class: 'pfbadge pf-' + pf, transform: `translate(${W - 34},16)` }, g);
     el('title', {}, badge).textContent = pf === 'fail' && n.preflight ? 'Preflight failed: ' + n.preflight.error : 'Preflight: ' + PF_LABEL[pf];
-    el('rect', { width: bw, height: 15, rx: 7 }, badge); el('text', { x: bw / 2, y: 11, 'font-size': 9, 'text-anchor': 'middle' }, badge).textContent = PF_LABEL[pf];
+    el('circle', { r: 3.5 }, badge);
     if (n.core) { const cl = el('g', { class: 'corelock', transform: 'translate(10,-8)' }, g); el('title', {}, cl).textContent = 'Core agent — protected; recruits and retires teammates'; el('rect', { width: 46, height: 15, rx: 7 }, cl); el('text', { x: 23, y: 11, 'font-size': 9, 'text-anchor': 'middle' }, cl).textContent = '🔒 core'; }
-    if (live === 'working') {
+    if (live === 'working' && typeof ns.contextPct === 'number') {
       const ctxPct100 = typeof ns.contextPct === 'number' ? ns.contextPct * 100 : null;
       const pctTxt = typeof ctxPct100 === 'number' ? `${Math.round(Math.max(0, Math.min(100, ctxPct100)))}% ctx` : '— ctx';
       const pctCls = typeof ctxPct100 !== 'number' ? 'unknown' : ctxPct100 >= 85 ? 'danger' : ctxPct100 >= (S.settings.autoCompactPct || 40) ? 'warn' : 'ok';

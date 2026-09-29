@@ -73,8 +73,8 @@ table { border-collapse:collapse; background:var(--card); } td, th { border:1px 
 .bill-subscription { color:var(--ok); border-color:var(--ok); } .bill-api { color:var(--warn); border-color:var(--warn); } .bill-proxy, .bill-bedrock, .bill-vertex { color:var(--acc); border-color:var(--acc); }
 .costnote { color:var(--muted); font-size:11px; } .warn { color:var(--warn); } #us-summary table { margin:6px 0; }
 
-#graph .pfbadge rect { stroke:none; } #graph .pfbadge text { fill:var(--fg-on-accent); font-weight:600; }
-#graph .pf-pass rect { fill:var(--ok); } #graph .pf-fail rect { fill:var(--danger); } #graph .pf-stale rect, #graph .pf-testing rect { fill:var(--warn); } #graph .pf-untested rect { fill:var(--muted); }
+#graph .pfbadge circle { stroke:none; } #graph .pfbadge text { fill:var(--fg-on-accent); font-weight:600; }
+#graph .pf-pass circle { fill:var(--ok); } #graph .pf-fail circle { fill:var(--danger); } #graph .pf-stale circle, #graph .pf-testing circle { fill:var(--warn); } #graph .pf-untested circle { fill:var(--muted); opacity:.5; }
 #graph .pfbadge { pointer-events:all; }
 #graph .ctxbar-bg { fill:var(--line); } #graph .ctxbar-fill.ctx-ok { fill:var(--ok); } #graph .ctxbar-fill.ctx-warn { fill:var(--warn); } #graph .ctxbar-fill.ctx-danger { fill:var(--danger); }
 #graph .ctxpct { font-size:9.5px; font-family:var(--font-mono); fill:var(--fg-secondary); } #graph .ctxpct.ctx-warn { fill:var(--warn); } #graph .ctxpct.ctx-danger { fill:var(--danger); font-weight:600; } #graph .ctxpct.ctx-unknown { fill:var(--fg-muted); }
