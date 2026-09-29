@@ -240,6 +240,8 @@ test('22:00 regression: a deferred (skipped) restart leaves dispatch unpaused â€
   const fake = fakeClaude(d, RESULT);
   const s = new Store(path.join(d, 'p')); s.saveSettings({ claudePath: fake, autoRestart: true });
   const a = s.addNode({ name: 'A', role: 'Dev' }); const b = s.addNode({ name: 'B', role: 'Dev' });
+  const rev = s.addNode({ name: 'Rev', role: 'Reviewer' }); // the hand-offs complete via reviewer pickup
+  s.addEdge(a.id, rev.id, 'review'); s.addEdge(b.id, rev.id, 'review');
   s.createTask({ title: 'one', assignee: a.id });
   s.createTask({ title: 'two', assignee: b.id });
   const o = new Orchestrator(s);

@@ -33,6 +33,8 @@ test('(a) 3 ready todos with maxConcurrency=2 dispatch exactly 2; the 3rd starts
   const n1 = s.addNode({ name: 'N1', role: 'Dev' });
   const n2 = s.addNode({ name: 'N2', role: 'Dev' });
   const n3 = s.addNode({ name: 'N3', role: 'Dev' });
+  const rev = s.addNode({ name: 'Rev', role: 'Reviewer' }); // hand-offs complete via reviewer pickup (t_699b67b7)
+  for (const n of [n1, n2, n3]) s.addEdge(n.id, rev.id, 'review');
   const t1 = s.createTask({ title: 'one', assignee: n1.id });
   const t2 = s.createTask({ title: 'two', assignee: n2.id });
   const t3 = s.createTask({ title: 'three', assignee: n3.id });

@@ -99,7 +99,9 @@ test('goal mode resumes the session until the checker says met', async () => {
   assert.equal(agentRuns[1][agentRuns[1].indexOf('--resume') + 1], 'sess-1');
   assert.match(agentRuns[1][1], /NOT met yet/);
   const done = s.getTask(t.id);
-  assert.equal(done.status, 'done'); assert.equal(done.iterations, 2);
+  // t_699b67b7: the checker's "met" ends the run, but the hand-off lands in review —
+  // done requires reviewer/owner verification.
+  assert.equal(done.status, 'review'); assert.equal(done.iterations, 2);
   assert.ok(done.sessions && done.sessions[`${n.id}:claude`], 'the last run stores its session under the agent+runtime key');
 });
 

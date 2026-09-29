@@ -26,6 +26,8 @@ test('scheduler: 4 ready tasks + maxConcurrency 4 dispatch all 4 at once', async
   const s = new Store(path.join(d, 'p'));
   s.saveSettings({ claudePath: fake, maxConcurrency: 4 });
   const agents = ['A', 'B', 'C', 'D'].map((name) => s.addNode({ name, role: 'Dev' }));
+  const rev = s.addNode({ name: 'Rev', role: 'Reviewer' }); // hand-offs complete via reviewer pickup (t_699b67b7)
+  for (const n of agents) s.addEdge(n.id, rev.id, 'review');
   const tasks = agents.map((n) => s.createTask({ title: 'work ' + n.name, assignee: n.id }));
   const o = new Orchestrator(s);
   o.start();

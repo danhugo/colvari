@@ -16,6 +16,10 @@ test('parallel: 3 independent dev tasks across 2 teams overlap; dependent waits 
   const a = pm.store(pid, t1).addNode({ name: 'DevA', role: 'Dev' });
   const b = pm.store(pid, t1).addNode({ name: 'DevB', role: 'Dev' });
   const c = pm.store(pid, t2).addNode({ name: 'DevC', role: 'Dev' });
+  const rev = pm.store(pid, t1).addNode({ name: 'Rev', role: 'Reviewer' }); // hand-offs complete via reviewer pickup
+  pm.store(pid, t1).addEdge(a.id, rev.id, 'review');
+  pm.store(pid, t1).addEdge(b.id, rev.id, 'review');
+  pm.store(pid, t2).addEdge(c.id, rev.id, 'review'); // cross-team review edge
   const ta = s.createTask({ title: 'A', assignee: a.id });
   const tb = s.createTask({ title: 'B', assignee: b.id });
   const tc = s.createTask({ title: 'C', assignee: c.id });
@@ -25,7 +29,7 @@ test('parallel: 3 independent dev tasks across 2 teams overlap; dependent waits 
   o.on('state', () => { if (s.getTask(tdep.id).status !== 'todo' && s.getTask(ta.id).status !== 'done') depStartedWhileBlockerOpen = true; });
   await new Promise((res) => { o.once('done', res); o.start(); });
   assert.ok(s.listTasks().every((t) => t.status === 'done'));
-  const run = (tid) => s.listRuns().find((r) => r.taskId === tid && r.kind === 'agent');
+  const run = (tid) => s.listRuns().find((r) => r.taskId === tid && r.kind === 'agent' && r.nodeId !== rev.id); // the dev's run, not the reviewer pickup
   const win = (tid) => { const r = run(tid); return [Date.parse(r.startedAt), Date.parse(r.endedAt)]; };
   const [A, B, C, D] = [ta, tb, tc, tdep].map((t) => win(t.id));
   for (const w of [A, B, C]) assert.ok(w[1] - w[0] >= 1000, 'run lasts >= 1s');
