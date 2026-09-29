@@ -55,9 +55,9 @@ test('recruit: node built from allowed fields only, protected fields set server-
   assert.ok(n.recruitedAt);
   assert.equal(n.systemPrompt, 'be careful');
   assert.equal(n.runtime, 'codex');
-  assert.equal(n.x, core.x + 220);
-  assert.equal(n.y, core.y + 120 * 2); // one recruit already exists in setup
   const a = s.forTeam('a').getTeam();
+  // recruit goes through addNode's free-spot placement: never on top of an existing teammate
+  for (const other of a.nodes) if (other.id !== n.id) assert.ok(Math.abs(other.x - n.x) >= 200 || Math.abs(other.y - n.y) >= 110, 'recruit overlaps ' + other.name);
   assert.ok(a.nodes.some((x) => x.id === n.id), 'recruit lands in the core team file');
   assert.equal(s.forTeam('b').getTeam().nodes.some((x) => x.id === n.id), false, 'other team file untouched');
   assert.ok(a.edges.some((e) => e.from === core.id && e.to === n.id && (e.type || 'assign') === 'assign'), 'core -> recruit assign edge');
@@ -66,6 +66,17 @@ test('recruit: node built from allowed fields only, protected fields set server-
   const n2 = tools.recruit_agent({ name: 'Sneaky', role: 'Dev', core: true, createdBy: 'someone-else', reason: 'r' });
   assert.equal(n2.core, false);
   assert.equal(n2.createdBy, core.id);
+});
+
+test('recruit: lands on a free spot even when its old core-offset cell is taken', () => {
+  const { s, core, tools } = setup();
+  // the cell recruit_agent used to force (core.x+220, core.y+120*(k+1)) is already occupied
+  s.addNode({ name: 'Blocker', role: 'Dev', x: core.x + 220, y: core.y + 120 * 2 });
+  const n = tools.recruit_agent({ name: 'Rookie', role: 'QA', reason: 'r' });
+  for (const other of s.forTeam('a').getTeam().nodes) {
+    if (other.id === n.id) continue;
+    assert.ok(Math.abs(other.x - n.x) >= 200 || Math.abs(other.y - n.y) >= 110, 'recruit overlaps ' + other.name);
+  }
 });
 
 test('list_team adds core and createdBy', () => {

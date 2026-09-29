@@ -213,13 +213,13 @@ function makeTools(store, nodeId) {
       if (blocked2) throw new Error(blocked2);
       // The node is built ONLY from the request's allowed fields; core/createdBy/recruitedAt are set
       // here and never taken from the caller.
-      const k = s.getTeam().nodes.filter((x) => x.createdBy === nodeId).length;
       let node = s.addNode({
         name: String(name).trim(), role: String(role).trim(),
         ...(prompt != null ? { systemPrompt: String(prompt) } : {}), ...(runtime ? { runtime } : {}),
         ...(model ? { model: String(model) } : {}), ...(effort ? { effort } : {}),
         core: false, createdBy: nodeId, recruitedAt: new Date().toISOString(),
-        x: core.x + 220, y: core.y + 120 * (k + 1),
+        // no explicit x/y: the recruit falls through to addNode's free-spot search instead of
+        // forcing a core offset that can land on top of an existing teammate
       });
       // A recruit runs at its preset's/project's permission mode, never more permissive than its core.
       const st = store.getSettings();
