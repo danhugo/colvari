@@ -296,12 +296,20 @@ test('ask mode: the budget gate is re-checked after the human approves', () => {
 
 // Mirror of the main.js api.answerInbox sequence: store.answerInbox records the answer, then the
 // handler applies/consumes. orch is the real orchestrator in the app; here a recorder stub — the
-// real sendToAgent interrupts a live agent and otherwise stores the message, never starting a run.
+// real sendToAgent interrupts a live agent and otherwise stores the message, never starting a run,
+// and wakeForHuman (t_ccab4c19) dispatches an idle agent with already-stored messages (answers, nudges).
 function answerViaHandler(s, orch, id, text) {
   s.answerInbox(id, text);
   return applyAnsweredChange(s, orch, s.getInboxItem(id), text);
 }
-const stubOrch = () => ({ sent: [], sendToAgent(nodeId, text, taskId) { this.sent.push({ nodeId, text, taskId }); } });
+const stubOrch = () => ({
+  sent: [],
+  wakes: [],
+  procs: new Map(),
+  agent() { return { status: 'idle' }; },
+  sendToAgent(nodeId, text, taskId) { const m = { id: 'm' + (this.sent.length + 1), from: 'human', to: nodeId, text, taskId, delivered: 'inbox' }; this.sent.push({ nodeId, text, taskId, delivered: 'inbox' }); return m; },
+  wakeForHuman(nodeId, msgs, why) { this.wakes.push({ nodeId, msgs, why }); return Promise.resolve(true); },
+});
 
 test('answer handler: approve applies the stored change directly — node exists with no tool re-call', () => {
   const { s, core, tools } = setup({ approval: 'ask' });
@@ -402,16 +410,61 @@ test('answer handler: approve whose stored ask no longer matches (fp drift) repo
   assert.equal(orch.sent.length, 1);
   assert.match(orch.sent[0].text, /approved but not applied/);
   assert.match(orch.sent[0].text, /request not found/);
+  assert.equal(orch.wakes.length, 1, 'the idle asker is woken with the not-applied notice too');
   assert.equal(s.listInbox({ status: 'open' }).length, 1, 'the fresh ask askGate filed stays visible');
 });
 
-test('answer handler: plain ask_human questions are not handled', () => {
-  const { s, core } = setup();
-  const item = s.askHuman({ nodeId: core.id, question: 'Which color?', choices: ['red', 'blue'] });
+test('answer handler: plain ask answer reaches an idle asker plus the core, wakes both, one-shot (t_ccab4c19)', async () => {
+  const { s, core, human } = setup();
+  const item = s.askHuman({ nodeId: human.id, question: 'Which color?', choices: ['red', 'blue'] });
   s.answerInbox(item.id, 'blue');
   const orch = stubOrch();
-  assert.equal(applyAnsweredChange(s, orch, s.getInboxItem(item.id), 'blue'), false);
-  assert.equal(orch.sent.length, 0);
+  assert.equal(applyAnsweredChange(s, orch, s.getInboxItem(item.id), 'blue'), true, 'plain asks are handled now (was: false, answer stranded)');
+  assert.ok(s.listInbox().find((i) => i.id === item.id).consumed, 'one-shot: consumed after delivery');
+  const toAsker = orch.sent.filter((x) => x.nodeId === human.id);
+  assert.equal(toAsker.length, 1);
+  assert.match(toAsker[0].text, /Which color/);
+  assert.match(toAsker[0].text, /blue/);
+  assert.deepEqual(orch.wakes.map((w) => w.nodeId).sort(), [core.id, human.id].sort(), 'asker and core both woken');
+  assert.ok(orch.wakes.every((w) => w.why && w.why.reason === 'human answer' && Array.isArray(w.why.taskIds) && w.why.action), 'monitor metadata (reason/taskIds/action) on every answer wake');
+  assert.equal(applyAnsweredChange(s, orch, s.getInboxItem(item.id), 'blue'), false, 'consumed: no second delivery');
+  assert.equal(orch.wakes.length, 2, 'no second wake');
+});
+
+test('answer handler: a live asker is polling ask_human — no interrupt, no wake; core still told', () => {
+  const { s, core, human } = setup();
+  const item = s.askHuman({ nodeId: human.id, question: 'Go on?' });
+  s.answerInbox(item.id, 'yes');
+  const orch = stubOrch();
+  orch.procs.set(human.id, {});
+  orch.agent = (id) => ({ status: id === human.id ? 'working' : 'idle' });
+  assert.equal(applyAnsweredChange(s, orch, s.getInboxItem(item.id), 'yes'), true);
+  assert.equal(orch.sent.filter((x) => x.nodeId === human.id).length, 0, 'live asker not interrupted (poll delivers)');
+  assert.equal(orch.wakes.filter((w) => w.nodeId === human.id).length, 0);
+  assert.equal(orch.sent.filter((x) => x.nodeId === core.id).length, 1, 'core informed');
+  assert.ok(s.listInbox().find((i) => i.id === item.id).consumed);
+});
+
+test('answer handler: asker IS the core — no duplicate core notice', () => {
+  const { s, core } = setup();
+  const item = s.askHuman({ nodeId: core.id, question: 'Which db?' });
+  s.answerInbox(item.id, 'sqlite');
+  const orch = stubOrch();
+  assert.equal(applyAnsweredChange(s, orch, s.getInboxItem(item.id), 'sqlite'), true);
+  assert.equal(orch.sent.length, 1, 'single notice (asker===core)');
+  assert.equal(orch.wakes.length, 1);
+});
+
+test('answer handler: approved team change also wakes the idle core with its notice', () => {
+  const { s, core, tools } = setup({ approval: 'ask' });
+  assert.equal(tools.recruit_agent({ name: 'Rookie', role: 'QA', reason: 'r' }).pending, true);
+  const item = s.listInbox({ status: 'open' })[0];
+  const orch = stubOrch();
+  assert.equal(answerViaHandler(s, orch, item.id, 'approve'), true);
+  assert.equal(orch.wakes.length, 1, 'core woken once');
+  assert.equal(orch.wakes[0].nodeId, core.id);
+  assert.match(orch.wakes[0].msgs[0].text, /Rookie/, 'the wake carries the stored notice');
+  assert.equal(orch.wakes[0].why.action, 'wake asker');
 });
 
 test('real stdio MCP server lists the team tools only for a core node', async () => {
