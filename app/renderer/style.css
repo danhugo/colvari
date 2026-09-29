@@ -102,9 +102,13 @@ td.actions button { padding:2px 7px; font-size:12px; margin-right:4px; } #budget
 /* Header stays on one row whatever the pill contents: title, tabs and pills never wrap; the goal box absorbs the width. */
 header { flex-wrap:nowrap; min-width:0; } header > strong, header .pill, header button, #tabs { white-space:nowrap; flex-shrink:0; } #tabs { display:flex; }
 /* The status pills are the header's elastic middle: they shrink to an ellipsis so Run/Stop/help always
-   fit (overflow != visible lets flex shrink below the min-content size). */
+   fit (overflow != visible lets flex shrink below the min-content size). They are the BACKSTOP: goal
+   (weight 200×260px vs their ~1×basis) absorbs the deficit first; below 1759px the tokens/cost pills
+   hide entirely (same totals live in the Usage tab, Critic option A), so at the default 1400px window
+   goal absorbs the whole deficit and nothing clips — only below ~1400px does the meter tail become
+   the last valve. */
 header #updst, header #runstate, header #totaltokens, header #totalcost { min-width:0; overflow:hidden; text-overflow:ellipsis; flex-shrink:1; }
-header #goal { flex:1 1 260px; min-width:100px; max-width:420px; } header .spacer { flex:0 1 12px; }
+header #goal { flex:1 1 260px; flex-shrink:200; min-width:140px; max-width:420px; } header .spacer { flex:0 1 12px; }
 header .pill { font-variant-numeric:tabular-nums; } .pill.quiet { color:var(--muted); }
 .cap { display: inline-block; padding: 0 6px; border-radius: 8px; font-size: 11px; margin: 2px 0; }
 .cap.on { background: var(--success-soft); color: var(--success-text); } .cap.off { background: var(--danger-soft); color: var(--danger); }
@@ -286,9 +290,9 @@ header .pill { border:none; background:none; color:var(--fg-muted); font-size:va
 /* At working window widths the tab icons are pure padding — labels carry the tabs, and every
    freed pixel goes to the meter chips. */
 @media (max-width:1500px) { header .navicon { display:none; } }
-/* Below 1100px the header cannot fit the usage ledger and cost pills at a readable width even
-   ellipsised — the Usage tab covers them, so drop them entirely and let the rest breathe. */
-@media (max-width:1100px) { header #totaltokens, header #totalcost { display:none; } }
+/* Below 1759px the header cannot fit the usage ledger, cost pills AND the meter chips at a readable width even
+   ellipsised, with the goal input at its floor — the Usage tab covers them, so drop them entirely. */
+@media (max-width:1759px) { header #totaltokens, header #totalcost { display:none; } }
 .limitmeter.hidden { display:none; }
 .limitmeter .lm-flag { padding:2px 8px; border-radius:var(--radius-full); font-weight:var(--fw-semibold); white-space:nowrap; }
 .limitmeter .lm-flag.lm-warn { background:var(--warning-soft); color:var(--warning-text); } .limitmeter .lm-flag.lm-danger { background:var(--danger-soft); color:var(--danger); }
@@ -550,3 +554,4 @@ rect.usb-rep, i.usb-rep { fill:var(--accent); background:var(--accent); } rect.u
 .usr-name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; } .usr small { color:var(--fg-muted); }
 .usr-val { font-variant-numeric:tabular-nums; white-space:nowrap; }
 .usr-bar { display:flex; height:6px; border-radius:3px; background:var(--bg-app); overflow:hidden; margin-top:3px; }
+
