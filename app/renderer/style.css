@@ -984,3 +984,4 @@ button, .pchip, .tag, .badge, .pill, .avatar, .cchip summary, .lvchip, .asswitch
 .cgroup .bubble code { font-family:var(--font-mono); font-size:.9em; background:var(--bg-code); color:var(--fg-primary); padding:0 4px; border-radius:var(--radius-xs, 3px); white-space:pre-wrap; }
 .cgroup .bubble pre.cmd-pre { font-family:var(--font-mono); font-size:var(--text-xs, 12px); background:var(--bg-code); color:var(--fg-primary); border:1px solid var(--border); border-radius:var(--radius-sm); padding:var(--space-2) var(--space-3); margin:4px 0; white-space:pre; overflow-x:auto; max-width:100%; }
 .cgroup .bubble a { color:var(--accent-text); }
+.idlebanner.hidden { display:none; }
