@@ -44,8 +44,12 @@ function autoCompactEnv(pct) {
 
 // Wake-on-message: how often the orchestrator looks for unread agent->agent messages, how long a burst
 // may coalesce into one dispatch, and the ping-pong guard (max auto-wakes per sender->recipient pair
-// per window). Exported so tests can shorten the timings.
-const WAKE = { SWEEP_MS: 1000, DEBOUNCE_MS: 1500, MAX_PER_PAIR: 3, PAIR_WINDOW_MS: 10 * 60 * 1000 };
+// per window). MIN_GAP_MS is the per-recipient wake debounce: after an agent-to-agent wake, that
+// agent is not auto-woken again for at least this long — further messages accumulate unread in its
+// inbox until the interval passes (or the agent is dispatched for a task, whose prompt carries them).
+// Human/system wakes (ask_human answers, nudges, chat) and task dispatch bypass the interval.
+// Exported so tests can shorten the timings.
+const WAKE = { SWEEP_MS: 1000, DEBOUNCE_MS: 1500, MIN_GAP_MS: 5 * 60 * 1000, MAX_PER_PAIR: 3, PAIR_WINDOW_MS: 10 * 60 * 1000 };
 
 // The run's board MCP server is a long-lived stdio helper the CLI spawns for the whole session
 // (mcpConfig: <exec> src/mcp-server.js --project <dir> --node <id>). It idles between calls, so its
@@ -156,8 +160,14 @@ class Orchestrator extends EventEmitter {
     // Set by the UpdateWatcher while a self-update is pending/draining: no new dispatches (tasks or
     // wakes) until it is back to false, so the restart waits for agents instead of racing them.
     this.dispatchPaused = false;
-    this.wakeTimers = new Map(); // nodeId -> debounce timeout
+    // Nodes whose CURRENT run was cut by a self-update drain halt (haltProcs): runTask breaks those
+    // out instead of iterating/resuming them, and the run's task stays in_progress for the post-restart
+    // reconcile. Per-node (not global) so a halt that spares one agent does not poison another's run.
+    this.drainCutNodes = new Set();
+    this.wakeTimers = new Map(); // nodeId -> { timer, dueAt } — at most one pending wake per agent
     this.wakePairs = new Map(); // 'from>to' -> {count, since}
+    this.wakeLastAt = new Map(); // nodeId -> ts of the agent's last agent->agent wake dispatch
+    this.wakeSuppressedLogged = new Map(); // nodeId -> ts the current suppression window was logged at
     this._wakeTimer = setInterval(() => this.sweepWakes(), WAKE.SWEEP_MS);
     if (this._wakeTimer.unref) this._wakeTimer.unref();
     // Stall watchdog state: last seen cumulative CPU time of each run's CLI process (nodeId -> {pid, cpuMs}),
@@ -245,7 +255,9 @@ class Orchestrator extends EventEmitter {
     // mixes models across runs, so its flat token sums are cross-model totals the API no longer
     // offers — per-key splits come from snapshot.ledger.byAgent instead (t_3318ff63).
     const { currentRun, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens, cacheTokens, ...rest } = a;
-    return { ...rest, pendingHuman: a.pendingHuman.length, ...(currentRun ? { run: { sessionId: currentRun.sessionId ?? null, stall: currentRun.stall || null } } : {}) };
+    // wakePending: unread agent->agent messages held back by the per-agent wake debounce — the UI's
+    // "N messages pending, wake at ..." label (a null hides it; the field is absent, not null).
+    return { ...rest, pendingHuman: a.pendingHuman.length, ...(a.wakePending ? { wakePending: a.wakePending } : {}), ...(currentRun ? { run: { sessionId: currentRun.sessionId ?? null, stall: currentRun.stall || null } } : {}) };
   }
   // Per-key usage ledger over the persisted runs (see usage.js usageLedger): one row per
   // {runtime, provider, model}, plus byAgent/byTask groupings. Memoized on the runs file signature.
@@ -350,18 +362,52 @@ class Orchestrator extends EventEmitter {
   // messages as the prompt. The sender's send_message has already returned (it only writes to the
   // store); delivery happens here, in the background, debounced and loop-capped. ----
   sweepWakes() {
-    if (this.userStopped || this.dispatchPaused) { for (const t of this.wakeTimers.values()) clearTimeout(t); this.wakeTimers.clear(); return; }
+    if (this.userStopped || this.dispatchPaused) { for (const t of this.wakeTimers.values()) clearTimeout(t.timer); this.wakeTimers.clear(); return; }
     try {
       const team = this.store.getTeam();
+      const now = Date.now();
       for (const node of team.nodes) {
-        if (this.procs.has(node.id) || this.agent(node.id).status === 'working') continue;
+        const a = this.agent(node.id);
+        if (this.procs.has(node.id) || a.status === 'working') continue;
         const unread = this.wakeUnread(node.id, team);
-        if (!unread.length) continue;
-        // Debounce: a burst of messages coalesces into the one dispatch this timer fires.
-        if (!this.wakeTimers.has(node.id)) this.wakeTimers.set(node.id, setTimeout(() => {
-          this.wakeTimers.delete(node.id);
-          this.dispatchWake(node.id).catch((e) => this.log(node.id, 'error', 'wake dispatch: ' + e.message));
-        }, WAKE.DEBOUNCE_MS));
+        if (!unread.length) {
+          if (a.wakePending) { a.wakePending = null; this.changed(); }
+          this.wakeSuppressedLogged.delete(node.id);
+          continue;
+        }
+        // Per-agent wake debounce: while an agent runs (task or wake), messages stay queued unread —
+        // never a parallel run. Once idle, an agent->agent wake fires at most once per
+        // WAKE.MIN_GAP_MS; further messages accumulate in the inbox until the interval passes.
+        // Task dispatch is NOT debounced (an assigned/unblocked task reaches the agent right away and
+        // its prompt carries the unread count), and human/system wakes never enter this sweep.
+        const cooldown = (this.wakeLastAt.get(node.id) || 0) + WAKE.MIN_GAP_MS - now;
+        const suppressing = cooldown > 0;
+        const prev = a.wakePending;
+        if (!prev || prev.count !== unread.length || prev.suppressed !== suppressing) {
+          // nextWakeAt is the armed timer's due time or the interval's end; recomputed only on a
+          // transition so an unchanged pending state does not churn a state push every sweep.
+          a.wakePending = { count: unread.length, suppressed: suppressing, nextWakeAt: suppressing ? (this.wakeLastAt.get(node.id) || 0) + WAKE.MIN_GAP_MS : ((prev && !prev.suppressed && prev.nextWakeAt) || now + WAKE.DEBOUNCE_MS) };
+          this.changed();
+        }
+        if (suppressing) {
+          // Evidence over silence (one line per suppression window, not per sweep): the messages are
+          // deliberately held back and WILL wake on the timer.
+          if (!this.wakeSuppressedLogged.has(node.id)) {
+            this.wakeSuppressedLogged.set(node.id, now);
+            this.log(node.id, 'system', `✉ wake suppressed for another ${Math.ceil(cooldown / 60000)}min (last agent wake < ${Math.round(WAKE.MIN_GAP_MS / 60000)}min ago); ${unread.length} message(s) wait in the inbox and wake on the timer`);
+          }
+          continue;
+        }
+        this.wakeSuppressedLogged.delete(node.id);
+        // Debounce: a burst of messages coalesces into the one dispatch this timer fires. At most one
+        // pending wake per agent: the wakeTimers entry IS the dedupe key.
+        if (!this.wakeTimers.has(node.id)) {
+          const dueAt = now + WAKE.DEBOUNCE_MS;
+          this.wakeTimers.set(node.id, { dueAt, timer: setTimeout(() => {
+            this.wakeTimers.delete(node.id);
+            this.dispatchWake(node.id).catch((e) => this.log(node.id, 'error', 'wake dispatch: ' + e.message));
+          }, WAKE.DEBOUNCE_MS) });
+        }
       }
     } catch (e) { this.log(null, 'error', 'wake sweep: ' + e.message); }
   }
@@ -376,6 +422,9 @@ class Orchestrator extends EventEmitter {
     if (!node || this.userStopped || this.dispatchPaused || this.procs.has(nodeId)) return;
     const a = this.agent(nodeId);
     if (a.status === 'working' || a.budgetStop) return; // busy (or over budget): stay unread, the next sweep retries
+    // Re-check the debounce at fire time (the sweep armed this timer before it expired): still inside
+    // the per-agent interval — leave the messages unread, the sweep re-arms once the interval passes.
+    if (Date.now() - (this.wakeLastAt.get(nodeId) || 0) < WAKE.MIN_GAP_MS) return;
     const settings = this.store.getSettings();
     if (settings.maxConcurrency > 0 && this.procs.size >= settings.maxConcurrency) return;
     const msgs = this.wakeUnread(nodeId, team);
@@ -389,6 +438,9 @@ class Orchestrator extends EventEmitter {
       if (!e || now - e.since >= WAKE.PAIR_WINDOW_MS) this.wakePairs.set(k, { count: 1, since: now });
       else { e.count++; if (e.count === WAKE.MAX_PER_PAIR) this.log(nodeId, 'system', `wake cap reached for messages from ${f}: no more auto-wakes from this pair for a while`); }
     }
+    this.wakeLastAt.set(nodeId, now); // starts the agent's next wake-debounce interval
+    this.wakeSuppressedLogged.delete(nodeId);
+    a.wakePending = null;
     this.store.markMessagesRead(msgs.map((m) => m.id)); // delivered verbatim in the prompt below
     this.emit('woken_by_message', { nodeId, by: senders, messageIds: msgs.map((m) => m.id) });
     const nameOf = (id) => (team.nodes.find((n) => n.id === id) || {}).name || id;
@@ -397,11 +449,12 @@ class Orchestrator extends EventEmitter {
   }
   // Deliver already-stored messages to an IDLE agent as a wake run — the two paths the message sweep
   // deliberately ignores (human and system senders have their own delivery): the human's answer to an
-  // ask_human (team-answers) and the core nudge (nudgeIdle). Guards mirror dispatchWake plus the run
-  // gate: nothing auto-starts on a stopped project, a live agent is reached by its own channels, and
-  // maxRuns/maxConcurrency still bound auto-dispatch. `why` carries the monitor event Dev B's UI keys
-  // on — orch.log(nodeId, 'monitor', <sentence>, {reason, taskIds, action}) — emitted only when the
-  // wake actually fires, so a refused wake never reads as a watchdog action.
+  // ask_human (team-answers) and the core nudge (nudgeIdle). This path BYPASSES the per-agent wake
+  // debounce by design: anything from a human or the system must reach the agent immediately. Guards
+  // mirror dispatchWake plus the run gate: nothing auto-starts on a stopped project, a live agent is
+  // reached by its own channels, and maxRuns/maxConcurrency still bound auto-dispatch. `why` carries
+  // the monitor event Dev B's UI keys on — orch.log(nodeId, 'monitor', <sentence>, {reason, taskIds,
+  // action}) — emitted only when the wake actually fires, so a refused wake never reads as a watchdog action.
   async wakeForHuman(nodeId, msgs, why = {}) {
     const list = (msgs || []).filter(Boolean);
     if (!list.length) return false;
@@ -424,11 +477,16 @@ class Orchestrator extends EventEmitter {
   }
   // One background run delivering the messages (resumes the agent's last session when it has one).
   async wakeRun(node, msgs, team, settings) {
+    // Single-run lock, enforced at the last choke point: never a second live run for one agent, even
+    // if a caller raced past its own guard. The would-be wake stays queued (messages stay unread).
+    if (this.procs.has(node.id)) { this.log(node.id, 'system', `✉ wake not dispatched: ${node.name} already has a live run (single run per agent); messages stay queued`); return; }
     const a = this.agent(node.id);
-    a.status = 'working'; a.lastError = null; a.taskId = null; a.task = null; a.iteration = 0; a.stopRequested = false;
+    a.status = 'working'; a.lastError = null; a.taskId = null; a.task = null; a.iteration = 0; a.stopRequested = false; a.wakePending = null;
     // Live-run reason/activity, shown by Board/Team/Overview via snapshot: what woke the agent, from
-    // whom, and the first unread message as the excerpt. Cleared when the run ends.
-    a.activity = { trigger: 'message', messageId: msgs[0].id, fromNodeId: msgs[0].from, excerpt: msgs[0].text.slice(0, 200), taskId: (msgs.find((m) => m.taskId) || {}).taskId || null, count: msgs.length, startedAt: Date.now() };
+    // whom, and the first unread message as the excerpt. messageIds lets haltProcs put the messages
+    // back in the unread inbox when the run is cut for a restart (they were marked read below).
+    // Cleared when the run ends.
+    a.activity = { trigger: 'message', messageId: msgs[0].id, messageIds: msgs.map((m) => m.id), fromNodeId: msgs[0].from, excerpt: msgs[0].text.slice(0, 200), taskId: (msgs.find((m) => m.taskId) || {}).taskId || null, count: msgs.length, startedAt: Date.now() };
     a.runs++; this.runs++;
     this.procs.set(node.id, { kill() {} }); // reserve the slot synchronously
     try {
@@ -463,24 +521,46 @@ class Orchestrator extends EventEmitter {
       // Released however the bookkeeping above ends: a leaked slot leaves a self-update
       // drain waiting forever for an agent that already exited.
       this.procs.delete(node.id); this.cwds.delete(node.id);
+      // The gap anchors at the wake-run END (not just the dispatch): a long wake run was busy
+      // working, not churning, so the next burst waits WAKE.MIN_GAP_MS from when it went idle.
+      this.wakeLastAt.set(node.id, Date.now());
     }
     if (this.running) setImmediate(() => this.tick());
     if (this.running) setImmediate(() => this.tick());
   }
 
   // ---- stall watchdog: a run that has emitted nothing AND has no live child/descendant process for
-  // stallTimeoutMin (setting, default 10) is stalled. It is stopped; runTask (the r.stalled branch)
-  // then resumes the same session with a short continue prompt, max 2 recoveries per task. Manual
-  // interrupts (stopAgent, a queued human message) always take precedence and are never recovered over. ----
+  // stallTimeoutMin (setting, default 10) is stalled. Task runs are stopped and resumed in the same
+  // session (runTask's r.stalled branch) with a short continue prompt, max 2 recoveries per task.
+  // Wake runs (no task) are only stopped: the sweep re-delivers what still matters, and holding the
+  // agent's single-run slot forever on a hung wake is never right. Manual interrupts (stopAgent, a
+  // queued human message) always take precedence and are never recovered over. ----
   sweepStalls() {
-    if (!this.running || this.userStopped) return;
+    if (this.userStopped) return;
+    // Task-run recovery is the Run's business (it re-dispatches through runTask), but a wake run can
+    // be live with the Run over (dispatchWake does not require it) — those still get watched, since a
+    // hung wake run must not hold the agent's single-run slot forever.
+    let runOver = false;
+    if (!this.running) {
+      runOver = true;
+      let hasWake = false;
+      for (const [nodeId] of this.procs) {
+        const a = this.agents[nodeId];
+        if (a && a.status === 'working' && !a.taskId && a.activity && a.activity.trigger === 'message') hasWake = true;
+      }
+      if (!hasWake) return;
+    }
     const timeoutMin = Number(this.store.getSettings().stallTimeoutMin ?? 10);
     if (!(timeoutMin > 0)) return;
     const now = Date.now();
     for (const [nodeId, child] of [...this.procs]) {
       const a = this.agents[nodeId];
       const run = a && a.currentRun;
-      if (!a || a.status !== 'working' || !a.taskId || !run || run.done || run.stalled) continue;
+      if (!a || a.status !== 'working' || !run || run.done || run.stalled) continue;
+      // Cover both run kinds: task runs (a.taskId) and wake runs (no task, message-triggered activity).
+      const isWake = !a.taskId && !!(a.activity && a.activity.trigger === 'message');
+      if (!a.taskId && !isWake) continue;
+      if (runOver && !isWake) continue;
       if (a.stopRequested || a.pendingHuman.length) continue;
       if (now - (a.lastActivityAt || 0) < timeoutMin * 60000) continue;
       if (this.runAlive(nodeId, child)) continue;
@@ -489,8 +569,10 @@ class Orchestrator extends EventEmitter {
       run.stalled = true;
       a.stall = { state: 'stalled' };
       const idleMin = Math.round((now - (a.lastActivityAt || 0)) / 60000);
-      this.log(nodeId, 'error', `stall: no events and no live child process for ${idleMin} min; stopping the run to recover`);
-      this.emit('run.stalled', { nodeId, taskId: a.taskId, idleMin });
+      this.log(nodeId, 'error', isWake
+        ? `stall: wake run silent with no live child process for ${idleMin} min; stopping it (messages still pending re-wake the agent)`
+        : `stall: no events and no live child process for ${idleMin} min; stopping the run to recover`);
+      this.emit('run.stalled', { nodeId, taskId: a.taskId || null, idleMin, kind: isWake ? 'wake' : 'task' });
       try { child.kill('SIGTERM'); } catch {}
       this._stallKill.set(nodeId, setTimeout(() => {
         this._stallKill.delete(nodeId);
@@ -556,7 +638,7 @@ class Orchestrator extends EventEmitter {
   stop() {
     this.running = false;
     this.userStopped = true; // a human pressed stop: no wake dispatches behind their back
-    for (const t of this.wakeTimers.values()) clearTimeout(t); this.wakeTimers.clear();
+    for (const t of this.wakeTimers.values()) clearTimeout(t.timer); this.wakeTimers.clear();
     this.log(null, 'system', 'Orchestrator stopped');
     this.changed();
     // Only report the run done once every agent process has actually exited (kill is async: SIGTERM
@@ -566,29 +648,64 @@ class Orchestrator extends EventEmitter {
     for (const p of this.procs.values()) p.kill('SIGTERM');
   }
 
-  // Self-update drain deadline: stop every live agent process so the restart can proceed (SIGTERM
-  // now, SIGKILL after killGraceMs; resolves once they have all exited — or 1s after the SIGKILL,
-  // so a process that ignores everything cannot stall the update again). Unlike stop() this keeps
-  // the Run alive and sets drainCutoff: runTask treats killed runs as restart-interrupted (task
-  // stays in_progress; after the relaunch reconcileOrphanedTasks resets it to todo and the session
-  // resumes), not crashed (which would park it for a human).
+  // Self-update drain deadline: stop the live agent processes we are ALLOWED to stop so the restart
+  // can proceed (SIGTERM now, SIGKILL after killGraceMs; resolves once those have all exited).
+  // Resolves {cut, spared}: cut = runs stopped here, spared = live runs intentionally left running
+  // (a task already cut for a restart is never cut again — the drain keeps waiting for those).
+  // A stub haltProcs (tests) resolving without the shape reads as "spared nothing".
+  // Cut-once protection uses the persisted drainCuts on the task — it must survive the relaunch.
+  // The stall watchdog is the hang safety-valve for spared tasks, not this deadline. Wake runs have
+  // no task to protect: they are always cuttable, and their messages go back to the unread inbox so
+  // the agent is re-woken after the restart.
+  // Unlike stop() this keeps the Run alive and marks the cut nodes (drainCutNodes): runTask treats
+  // killed runs as restart-interrupted (task stays in_progress; after the relaunch
+  // reconcileOrphanedTasks resets it to todo and the session resumes), not crashed (which would park
+  // it for a human).
   haltProcs(killGraceMs = 5000) {
-    if (this.procs.size === 0) return Promise.resolve();
-    this.drainCutoff = true;
-    for (const p of this.procs.values()) { try { p.kill('SIGTERM'); } catch {} }
+    const targets = []; let spared = 0;
+    for (const [nodeId] of this.procs) {
+      const a = this.agents[nodeId];
+      const t = a && a.taskId ? this.store.getTask(a.taskId) : null;
+      if (t && (t.drainCuts || 0) > 0) {
+        spared++;
+        this.log(nodeId, 'system', `self-update drain: "${t.title}" was already cut for a restart once — not cutting it again; the drain waits for it to finish`);
+        continue;
+      }
+      targets.push(nodeId);
+    }
+    if (!targets.length) return Promise.resolve({ cut: 0, spared });
+    for (const nodeId of targets) {
+      this.drainCutNodes.add(nodeId);
+      const a = this.agents[nodeId];
+      if (a && a.taskId) {
+        const cuts = ((this.store.getTask(a.taskId) || {}).drainCuts || 0) + 1;
+        this.store.updateTask(a.taskId, { drainCuts: cuts });
+        this.log(nodeId, 'system', `self-update drain: cutting "${a.task}" for the restart (cut #${cuts}); it resumes from its session after the relaunch`);
+      } else if (a && a.activity && Array.isArray(a.activity.messageIds) && a.activity.messageIds.length) {
+        try { this.store.markMessagesRead(a.activity.messageIds, false); } catch {} // the cut wake run never delivered them
+      }
+      const p = this.procs.get(nodeId);
+      try { if (p) p.kill('SIGTERM'); } catch {}
+    }
+    this.changed();
     return new Promise((resolve) => {
       const t0 = Date.now(); let killed = false;
       // Referenced on purpose: while waiting out the kill grace this interval is what keeps the
-      // process (and the pending update) alive after the agent children are gone.
+      // process (and the pending update) alive after the agent children are gone. Waits only for the
+      // cut nodes — spared (cut-once) tasks keep running and are the drain loop's business.
       const iv = setInterval(() => {
-        if (this.procs.size === 0) { clearInterval(iv); return resolve(); }
+        if (!targets.some((id) => this.procs.has(id))) { clearInterval(iv); return resolve({ cut: targets.length, spared }); }
         if (!killed && Date.now() - t0 >= killGraceMs) {
           killed = true;
-          for (const p of this.procs.values()) { try { p.kill('SIGKILL'); } catch {} }
-        } else if (killed && Date.now() - t0 >= killGraceMs + 1000) { clearInterval(iv); resolve(); }
+          for (const id of targets) { const p = this.procs.get(id); try { if (p) p.kill('SIGKILL'); } catch {} }
+        } else if (killed && Date.now() - t0 >= killGraceMs + 1000) { clearInterval(iv); resolve({ cut: targets.length, spared }); }
       }, 100);
     });
   }
+
+  // An aborted self-update unpauses dispatch: the cut markers would make every subsequent run of the
+  // affected agents break instantly at their first iteration. (main.js setPaused(false) calls this.)
+  clearDrainCuts() { this.drainCutNodes.clear(); }
 
   // Reset any in_progress task whose assignee has no live session/process back to todo so it gets
   // re-dispatched. Covers agent exit/crash/idle leaving a task stranded in_progress.
@@ -822,10 +939,13 @@ class Orchestrator extends EventEmitter {
   }
 
   async runTask(node, task, team, settings) {
+    // Single-run lock, enforced at the last choke point: never a second live run for one agent, even
+    // if a caller raced past its own guard.
+    if (this.procs.has(node.id)) { this.log(node.id, 'error', `dispatch refused: ${node.name} already has a live run (single run per agent)`); return; }
     this.runs++;
     const reviewPickup = task.status === 'review'; // dispatched to review a hand-off: ending clean approves it
     this.store.updateTask(task.id, { status: 'in_progress' });
-    const a = this.agent(node.id); a.status = 'working'; a.lastError = null; a.taskId = task.id; a.task = task.title; a.runs++; a.iteration = 1; a.reviewPickup = reviewPickup;
+    const a = this.agent(node.id); a.status = 'working'; a.lastError = null; a.taskId = task.id; a.task = task.title; a.runs++; a.iteration = 1; a.reviewPickup = reviewPickup; a.wakePending = null; // the prompt carries the unread count
     this.procs.set(node.id, { kill() {} }); // reserve the slot synchronously
     try {
       this.changed();
@@ -879,7 +999,7 @@ class Orchestrator extends EventEmitter {
       for (;;) {
         // The run was killed for a self-update restart (haltProcs): no further iterations, human
         // deliveries or stall recoveries — the task stays in_progress and resumes after the relaunch.
-        if (this.drainCutoff) { reason = 'interrupted for self-update restart'; break; }
+        if (this.drainCutNodes.has(node.id)) { reason = 'interrupted for self-update restart'; break; }
         a.iteration = i + 1; this.changed();
         let args = null;
         if (base !== null) {
@@ -946,7 +1066,7 @@ class Orchestrator extends EventEmitter {
           continue;
         }
         const msgs = a.pendingHuman.splice(0);
-        if (msgs.length && this.running && !a.stopRequested) {
+        if (msgs.length && this.running && !a.stopRequested && !this.drainCutNodes.has(node.id)) {
           try { this.store.markMessagesRead(msgs.map((x) => x.id)); } catch {}
           if (this.runs >= settings.maxRuns) { reason = 'maxRuns reached'; break; }
           humanAtts = msgs.flatMap((x) => x.attachments || []);
@@ -974,7 +1094,7 @@ class Orchestrator extends EventEmitter {
         // Parked for a human, not a "please review this" hand-off: never auto-dispatched/auto-advanced.
         this.store.updateTask(task.id, { status: 'review', parkedForHuman: true });
         this.store.commentTask(task.id, 'orchestrator', judge.inconclusive ? `Goal check was inconclusive after ${i} iteration(s): ${judge.reason}. Check the result yourself.` : `Goal condition not met after ${i} iteration(s) (${reason}): ${judge.reason}`);
-      } else if (t && t.status === 'in_progress' && !this.drainCutoff) {
+      } else if (t && t.status === 'in_progress' && !this.drainCutNodes.has(node.id)) {
         // Agent ended without updating status: a normal dispatch hands off to review —
         // autoAdvanceReviews() then moves it to the reviewer, or straight to done when none is
         // configured — so nothing merges unreviewed. A run dispatched to review that ends clean
@@ -986,7 +1106,7 @@ class Orchestrator extends EventEmitter {
         if (!ok) g.parkedForHuman = true;
         this.store.updateTask(task.id, g);
         this.store.commentTask(task.id, 'orchestrator', stoppedWhy ? `Agent stopped (${stoppedWhy}) after ${i} iteration(s); moved to review.` : `Agent exited (code ${code}) without setting status after ${i} iteration(s) (${reason}); moved to review.`);
-      } else if (t && t.status === 'review' && !t.parkedForHuman && code !== 0 && this.running && !stoppedWhy && !this.drainCutoff) {
+      } else if (t && t.status === 'review' && !t.parkedForHuman && code !== 0 && this.running && !stoppedWhy && !this.drainCutNodes.has(node.id)) {
         // The agent itself moved this to 'review' (clearing parkedForHuman) but the process then crashed
         // (nonzero exit). A crashed run must never look like a clean hand-off eligible for silent
         // auto-advance to done: park it for a human to inspect.

@@ -71,10 +71,11 @@ function watcherFor(pid) {
       // re-dispatch after the relaunch (reconcileOrphanedTasks), the Run resumes via wasRunning.
       haltProcs: () => (orchs.get(pid) || { haltProcs: () => Promise.resolve() }).haltProcs(),
       // Unpausing after an aborted update must re-tick: the drain held the run session open with
-      // nothing dispatched, so only this nudge resumes dispatching. A drain-deadline cut sets
-      // drainCutoff while killing the runs; if the update then aborts, the flag must go with the
-      // pause or every subsequent run would break instantly at its first iteration.
-      setPaused: (v) => { const o = orchs.get(pid); if (o) { o.dispatchPaused = v; if (!v) { o.drainCutoff = false; setImmediate(() => o.tick()); } } },
+      // nothing dispatched, so only this nudge resumes dispatching. A drain-deadline cut marks the
+      // killed runs per node (drainCutNodes); if the update then aborts, those markers must go with
+      // the pause or every subsequent run of the affected agents would break instantly at its first
+      // iteration.
+      setPaused: (v) => { const o = orchs.get(pid); if (o) { o.dispatchPaused = v; if (!v) { o.clearDrainCuts(); setImmediate(() => o.tick()); } } },
     });
     w.on('log', (l) => send('log', { ...l, projectId: pid }));
     w.on('status', (st) => send('self-update-status', { projectId: pid, ...st }));

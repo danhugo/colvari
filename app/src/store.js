@@ -519,7 +519,7 @@ class Store {
       if (patch.blockedBy !== undefined) t.blockedBy = C.validateDeps(tid, patch.blockedBy, tasks);
       if (patch.status && patch.status !== 'review') t.awaitingApproval = false;
       if (patch.priority !== undefined) t.priority = C.normalizePriority(patch.priority);
-      for (const k of ['title', 'description', 'assignee', 'status', 'sessionId', 'sessions', 'iterations', 'awaitingApproval', 'reopenCount', 'worktreePath', 'worktreeBranch', 'isConflictResolution', 'conflictBranch', 'conflictRetries', 'parkedForHuman', 'stallRecoveries']) if (patch[k] !== undefined) t[k] = patch[k];
+      for (const k of ['title', 'description', 'assignee', 'status', 'sessionId', 'sessions', 'iterations', 'awaitingApproval', 'reopenCount', 'worktreePath', 'worktreeBranch', 'isConflictResolution', 'conflictBranch', 'conflictRetries', 'parkedForHuman', 'stallRecoveries', 'drainCuts']) if (patch[k] !== undefined) t[k] = patch[k];
       t.updatedAt = new Date().toISOString();
       // Parent auto-complete: when the last open subtask is done, the parent moves to done.
       for (let c = t; c.status === 'done' && c.parentId;) {
@@ -617,9 +617,9 @@ class Store {
     this.update('messages', { messages: [] }, (d) => { d.messages.push(m); });
     return m;
   }
-  markMessagesRead(ids) {
+  markMessagesRead(ids, read = true) {
     const set = new Set(ids); if (!set.size) return;
-    this.update('messages', { messages: [] }, (d) => { for (const m of d.messages) if (set.has(m.id)) m.read = true; });
+    this.update('messages', { messages: [] }, (d) => { for (const m of d.messages) if (set.has(m.id)) m.read = !!read; });
   }
 
   // ---- wiki (one readable .md per page; the index keeps title/slug/author/hash) ----
