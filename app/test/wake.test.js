@@ -158,3 +158,45 @@ test('wake: a working agent is not woken; user stop() cancels pending wake dispa
   assert.ok(s.listMessages({ to: b.id }).some((m) => !m.read && m.text === 'busy'));
   assert.ok(s.listMessages({ to: b.id }).some((m) => !m.read && m.text === 'after stop'));
 });
+
+test('wake: nudge wakes respect the per-agent gap — deferred inside it, fired after (t_cb6663f7)', async () => {
+  const d = tmp('squad-wake-');
+  const s = new Store(path.join(d, 'p'));
+  const pm = s.addNode({ name: 'Pia', role: 'PM' });
+  const r1 = s.addNode({ name: 'Rhea', role: 'Dev' }); const r2 = s.addNode({ name: 'Uma', role: 'Dev' });
+  s.addEdge(pm.id, r1.id); s.addEdge(pm.id, r2.id);
+  s.createTask({ title: 'goal', assignee: pm.id, createdBy: pm.id }); // open goal: idle nudges apply
+  const o = new Orchestrator(s);
+  o.running = true; // wakeForHuman's run gate; no tick loop is driven here
+  const wakes = [];
+  o.wakeRun = async (node, msgs) => { wakes.push(msgs.map((m) => m.text)); }; // stub the run itself
+  const nudges = () => s.listMessages({ to: pm.id }).filter((m) => m.from === 'system');
+
+  // A wake just ended: the pm's idle reports changed, but inside the gap the nudge must not wake
+  // her — live evidence was three pm wakes in 2 min, one 30s after "wake suppressed" was logged.
+  o.wakeLastAt.set(pm.id, Date.now());
+  o.nudgeIdle();
+  assert.equal(nudges().length, 0, 'no nudge message while inside the gap');
+  assert.ok(!o.nudged.get(pm.id + '|idle'), 'a deferred nudge must not consume its debounce key');
+  const logs = fs.readFileSync(s.logFile(), 'utf8');
+  assert.match(logs, /nudge deferred for another \d+min/, 'the deferral is logged');
+
+  await sleep(WAKE.MIN_GAP_MS + 60);
+  o.nudgeIdle(); // interval passed: the same (unconsumed) condition now fires
+  assert.equal(nudges().length, 1, 'the deferred nudge fires once the gap passes');
+  assert.match(nudges()[0].text, /2 agents idle/);
+  assert.ok(nudges()[0].read, 'delivered by the wake, not left unread');
+  assert.equal(wakes.length, 1);
+
+  // The gap re-arms on every wake: a report flipping busy changes the idle text, which would
+  // re-arm the debounce and wake the pm again immediately — deferred too, then delivered.
+  o.wakeLastAt.set(pm.id, Date.now());
+  o.agent(r1.id).status = 'working';
+  o.nudgeIdle();
+  assert.equal(nudges().length, 1, 'a changed idle set does not bypass the gap');
+  await sleep(WAKE.MIN_GAP_MS + 60);
+  o.nudgeIdle();
+  assert.equal(nudges().length, 2, 'the changed condition fires after the gap');
+  assert.match(nudges()[1].text, /1 agent idle/);
+  assert.equal(wakes.length, 2);
+});
