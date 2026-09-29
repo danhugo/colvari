@@ -151,7 +151,8 @@ test('qa: the fired schedule survives every sweep of the old process and is cons
   assert.equal(st.scheduledNow, false);
   assert.deepEqual(st.gating, []);
   assert.deepEqual(st.busyAgents, []);
-  assert.match(st.blockedReason, /no schedule armed/);
+  assert.deepEqual(st.waitingReasons, [], 'nothing pending, nothing armed: no reasons');
+  assert.equal(st.blockedReason, null);
 });
 
 // ---- watcher fakes (same shape as test/restart.test.js) ----
