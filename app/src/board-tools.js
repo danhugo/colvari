@@ -1,8 +1,9 @@
 // Pure tool implementations with scope enforcement. Used by the MCP server and by tests.
 const fs = require('fs');
 const path = require('path');
-const { outgoing, incoming, canAssign, canMessage, reviewees, visibleTask, canSetStatus } = require('./scope');
+const { outgoing, incoming, canAssign, canMessage, reviewees, visibleTask, canSetStatus, AGENT_PATCH_FIELDS, capPermissionMode, canManageAgent } = require('./scope');
 const { BOARD_TOOLS } = require('./agent-config');
+const { getRuntime } = require('./runtimes');
 const C = require('./controls');
 const SU = require('./self-update');
 
@@ -24,10 +25,49 @@ function makeTools(store, nodeId) {
   };
   const me = () => { const t = team(); const n = t.nodes.find((x) => x.id === nodeId); if (!n) throw new Error('unknown caller node ' + nodeId); return t; };
   const resolve = (t, ref, what) => { const n = t.nodes.find((x) => x.id === ref || x.name === ref); if (!n) throw new Error(`unknown ${what} "${ref}"`); return n; };
+  // ---- core-agent team management (recruit/retire/update_agent) ----
+  // All three tools act on the core's OWN team file: this Store has no teamId (getTeam() returns the
+  // merged view of every team and writes would land in the wrong file), so re-scope per call.
+  const coreStore = () => {
+    const core = me().nodes.find((x) => x.id === nodeId);
+    if (!core || !core.core) throw new Error('scope violation: team management tools are core-agent only');
+    const tid = store.nodeTeam(nodeId);
+    if (!tid) throw new Error('no team for core node ' + nodeId);
+    return { core, s: store.forTeam(tid) };
+  };
+  // Every applied or declined change lands on the core's current task (comment) and in the persisted
+  // log timeline (appendLog) — no new UI entry type.
+  const announce = (text) => {
+    const tk = store.listTasks({ assignee: nodeId, status: 'in_progress' })[0];
+    store.appendLog({ nodeId, kind: 'team.change', taskId: tk ? tk.id : null, text });
+    if (tk) store.commentTask(tk.id, nodeName(team(), nodeId), text);
+  };
+  // Canonical JSON so the same request always maps to the same inbox item regardless of key order.
+  const stable = (v) => Array.isArray(v) ? v.map(stable) : v && typeof v === 'object' ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, stable(v[k])])) : v;
+  // teamChangeApproval 'ask' must NOT block the tool call (an MCP call can time out): the first call
+  // files the request in the human Inbox — the core's current task goes waiting_for_human — and
+  // returns {pending:true}; nothing changes. When the human answered and the core calls again with
+  // the same request, the answered item decides: 'approve' applies it, anything else refuses.
+  const askGate = (change, question) => {
+    if ((store.getSettings().teamChangeApproval || 'ask') !== 'ask') return { proceed: true };
+    const fp = JSON.stringify(stable(change));
+    const mine = store.listInbox().filter((i) => i.kind === 'question' && i.nodeId === nodeId && i.change === fp);
+    const open = mine.find((i) => i.status === 'open');
+    if (open) return { pending: true, result: { pending: true, inboxId: open.id, note: 'pending approval: waiting for the human to answer in the Inbox; call this tool again once it is answered' } };
+    const answered = [...mine].reverse().find((i) => i.status === 'answered');
+    if (answered) return answered.answer === 'approve' ? { proceed: true } : { declined: true, result: { applied: false, note: `declined by the human (${answered.answer}); nothing was changed` } };
+    const tk = store.listTasks({ assignee: nodeId, status: 'in_progress' })[0];
+    store.askHuman({ taskId: tk ? tk.id : null, nodeId, question, choices: ['approve'], change: fp });
+    return { pending: true, result: { pending: true, note: 'pending approval: the request is in the human Inbox; nothing changes until it is approved and you call this tool again' } };
+  };
+  const refuseManage = (tool, core, target) => {
+    const why = target.id === core.id ? 'a core agent cannot manage itself' : target.core ? 'a core node can never be retired or updated' : `"${target.name}" was not recruited by this core agent`;
+    return new Error(`scope violation: ${tool}: ${why}`);
+  };
   const impl = {
     list_team() {
       const t = me();
-      const brief = (id) => { const n = t.nodes.find((x) => x.id === id); return n && { id: n.id, name: n.name, role: n.role }; };
+      const brief = (id) => { const n = t.nodes.find((x) => x.id === id); return n && { id: n.id, name: n.name, role: n.role, core: !!n.core, ...(n.createdBy ? { createdBy: n.createdBy } : {}) }; };
       return {
         self: brief(nodeId),
         canAssignTo: outgoing(t, nodeId).map(brief), receivesFrom: incoming(t, nodeId).map(brief),
@@ -120,6 +160,67 @@ function makeTools(store, nodeId) {
       if (process.env.AGENTS_SQUAD_DEV !== '1') return { requested: false, note: 'Self-update is disabled outside dev/dogfood mode.' };
       fs.writeFileSync(SU.requestFile(store.dir), JSON.stringify({ reason: String(reason || '').slice(0, 500), from: nodeId, ts: new Date().toISOString() }));
       return { requested: true, note: 'Picked up on the next watcher poll if auto-restart is on; the result appears in the activity feed.' };
+    },
+    recruit_agent({ name, role, prompt, runtime, model, effort, reason = '' } = {}) {
+      if (!String(name || '').trim()) throw new Error('name required');
+      if (!String(role || '').trim()) throw new Error('role required');
+      const { core, s } = coreStore();
+      getRuntime(runtime); // runtimes.js is the registry: unknown id -> error (model stays free text)
+      const g = askGate({ tool: 'recruit_agent', name, role, prompt, runtime, model, effort }, `Core agent "${core.name}" requests a new agent "${name}" (role ${role})${reason ? ` — ${reason}` : ''}. Approve?`);
+      if (!g.proceed) { if (g.declined) announce(`recruit of "${name}" declined by the human`); return g.result; }
+      // Counted again after approval too: the team may have grown while the request was pending.
+      const max = Math.max(1, parseInt(store.getSettings().maxAgents, 10) || 6);
+      if (s.getTeam().nodes.length >= max) throw new Error(`refused: maxAgents ${max} reached (team has ${s.getTeam().nodes.length} agents)`);
+      // The node is built ONLY from the request's allowed fields; core/createdBy/recruitedAt are set
+      // here and never taken from the caller.
+      const k = s.getTeam().nodes.filter((x) => x.createdBy === nodeId).length;
+      let node = s.addNode({
+        name: String(name).trim(), role: String(role).trim(),
+        ...(prompt != null ? { systemPrompt: String(prompt) } : {}), ...(runtime ? { runtime } : {}),
+        ...(model ? { model: String(model) } : {}), ...(effort ? { effort } : {}),
+        core: false, createdBy: nodeId, recruitedAt: new Date().toISOString(),
+        x: core.x + 220, y: core.y + 120 * (k + 1),
+      });
+      // A recruit runs at its preset's/project's permission mode, never more permissive than its core.
+      const st = store.getSettings();
+      const eff = node.permissionMode || st.permissionMode || 'bypassPermissions';
+      const coreMode = core.permissionMode || st.permissionMode || 'bypassPermissions';
+      if (capPermissionMode(coreMode, eff) !== eff) s.updateNode(node.id, { permissionMode: capPermissionMode(coreMode, eff) });
+      s.addEdge(nodeId, node.id);
+      s.addEdge(node.id, nodeId, 'message');
+      node = s.getTeam().nodes.find((x) => x.id === node.id);
+      announce(`recruited agent "${node.name}" (${node.role}) as ${node.id}`);
+      return node;
+    },
+    retire_agent({ nodeId: ref, reason = '' } = {}) {
+      const { core, s } = coreStore();
+      const target = resolve(s.getTeam(), ref, 'agent');
+      if (!canManageAgent(core, target)) throw refuseManage('retire_agent', core, target);
+      const inProg = store.listTasks({ assignee: target.id, status: 'in_progress' });
+      if (inProg.length) throw new Error(`refused: "${target.name}" still owns ${inProg.length} in_progress task(s) (${inProg.map((t) => t.id).join(', ')})`);
+      const g = askGate({ tool: 'retire_agent', nodeId: target.id }, `Core agent "${core.name}" requests retiring agent "${target.name}"${reason ? ` — ${reason}` : ''}. Approve?`);
+      if (!g.proceed) { if (g.declined) announce(`retire of "${target.name}" declined by the human`); return g.result; }
+      // Reassign BEFORE removeNode, while the core -> target edges still exist.
+      for (const tk of store.listTasks({ assignee: target.id, status: 'todo' })) store.updateTask(tk.id, { assignee: nodeId });
+      s.removeNode(target.id);
+      announce(`retired agent "${target.name}" (${target.id})`);
+      return { retired: true, nodeId: target.id };
+    },
+    update_agent({ nodeId: ref, patch, reason = '' } = {}) {
+      const { core, s } = coreStore();
+      const target = resolve(s.getTeam(), ref, 'agent');
+      if (!canManageAgent(core, target)) throw refuseManage('update_agent', core, target);
+      if (!patch || typeof patch !== 'object' || Array.isArray(patch) || !Object.keys(patch).length) throw new Error('patch object required');
+      const bad = Object.keys(patch).filter((k) => !AGENT_PATCH_FIELDS.includes(k));
+      if (bad.length) throw new Error(`patch field(s) not allowed: ${bad.join(', ')} (allowed: ${AGENT_PATCH_FIELDS.join(', ')})`);
+      if (patch.runtime) getRuntime(patch.runtime);
+      const g = askGate({ tool: 'update_agent', nodeId: target.id, patch }, `Core agent "${core.name}" requests updating agent "${target.name}": ${JSON.stringify(patch)}${reason ? ` — ${reason}` : ''}. Approve?`);
+      if (!g.proceed) { if (g.declined) announce(`update of "${target.name}" declined by the human`); return g.result; }
+      const storePatch = {};
+      for (const k of Object.keys(patch)) storePatch[k === 'prompt' ? 'systemPrompt' : k] = patch[k];
+      const n = s.updateNode(target.id, storePatch);
+      announce(`updated agent "${n.name}" (${Object.keys(patch).join(', ')})`);
+      return n;
     },
   };
   // Wrap each tool with the per-agent enable check (read at call time, so toggles apply to the next call).

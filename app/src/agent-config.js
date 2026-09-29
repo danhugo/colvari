@@ -6,7 +6,7 @@ const { normalizeBilling } = require('./usage');
 const SUGGESTED_ROLES = ['PM', 'Planner', 'Dev', 'Reviewer', 'QA'];
 const PERMISSION_MODES = ['default', 'acceptEdits', 'bypassPermissions', 'plan'];
 const EDGE_TYPES = ['assign', 'message', 'review'];
-const BOARD_TOOLS = ['list_team', 'list_tasks', 'create_task', 'update_task_status', 'comment_task', 'send_message', 'read_messages', 'ask_human', 'read_wiki', 'write_wiki', 'request_self_update'];
+const BOARD_TOOLS = ['list_team', 'list_tasks', 'create_task', 'update_task_status', 'comment_task', 'send_message', 'read_messages', 'ask_human', 'read_wiki', 'write_wiki', 'recruit_agent', 'retire_agent', 'update_agent', 'request_self_update'];
 const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
 
 // Fields every node carries. '' / 0 / [] / {} mean "not set" (use the project default or the CLI default).
@@ -19,6 +19,7 @@ const NODE_DEFAULTS = {
   effort: 'low', autoCompact: '', // autoCompact: '' = CLI default; 'auto', or a token window 100000-1000000
   autoCompactPct: '', // auto-compact threshold (% of the window); '' = use the project default (settings.autoCompactPct)
   enabledCapabilities: [], // names from node.capabilities.categorized (mode/skill/command/mcp) this agent should use
+  core: false, createdBy: '', recruitedAt: '', // core-agent team management: core:true on the one protected core; recruits carry who/when created them
   ...MODE_DEFAULTS,
 };
 const NODE_FIELDS = Object.keys(NODE_DEFAULTS);
@@ -70,6 +71,7 @@ function normalizeNode(n = {}, base = NODE_DEFAULTS) {
   for (const k of NODE_FIELDS) r[k] = n[k] !== undefined ? n[k] : (Array.isArray(base[k]) ? [...base[k]] : typeof base[k] === 'object' ? { ...base[k] } : base[k]);
   r.runtime = r.runtime ? String(r.runtime) : 'claude'; // unknown ids are kept so the run errors instead of silently using claude
   r.name = String(r.name || 'Agent'); r.role = String(r.role || '').trim() || 'Dev';
+  r.core = !!r.core; r.createdBy = String(r.createdBy || ''); r.recruitedAt = String(r.recruitedAt || '');
   if (r.permissionMode && !PERMISSION_MODES.includes(r.permissionMode)) throw new Error('bad permission mode ' + r.permissionMode);
   r.allowedTools = toList(r.allowedTools); r.disallowedTools = toList(r.disallowedTools); r.addDirs = toList(r.addDirs);
   r.enabledCapabilities = toList(r.enabledCapabilities);

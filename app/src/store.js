@@ -469,16 +469,18 @@ class Store {
   // ---- human inbox: questions (ask_human) and approval requests ----
   listInbox(filter = {}) { let xs = this.read('inbox', { items: [] }).items; if (filter.status) xs = xs.filter((i) => i.status === filter.status); return xs; }
   getInboxItem(iid) { return this.listInbox().find((i) => i.id === iid); }
-  addInbox({ kind = 'question', taskId = null, nodeId = null, question, choices = [] }) {
+  // `change` (optional) fingerprints a core-agent team-change request, so recruit/retire/update can
+  // find their own inbox item again when the core re-calls the tool after the human answered.
+  addInbox({ kind = 'question', taskId = null, nodeId = null, question, choices = [], change = null }) {
     if (!question) throw new Error('question required');
-    const item = { id: id('q'), kind, taskId, nodeId, question, choices: (choices || []).map(String), status: 'open', answer: null, at: new Date().toISOString() };
+    const item = { id: id('q'), kind, taskId, nodeId, question, choices: (choices || []).map(String), status: 'open', answer: null, at: new Date().toISOString(), ...(change ? { change } : {}) };
     this.update('inbox', { items: [] }, (d) => { d.items.push(item); });
     return item;
   }
   closeInbox(match, answer) { this.update('inbox', { items: [] }, (d) => { for (const i of d.items) if (match(i)) Object.assign(i, { status: 'answered', answer, answeredAt: new Date().toISOString() }); }); }
   // ask_human: store the question and park the task in waiting_for_human.
-  askHuman({ taskId, nodeId, question, choices }) {
-    const item = this.addInbox({ kind: 'question', taskId, nodeId, question, choices });
+  askHuman({ taskId, nodeId, question, choices, change }) {
+    const item = this.addInbox({ kind: 'question', taskId, nodeId, question, choices, change });
     if (taskId && this.getTask(taskId)) this.updateTask(taskId, { status: 'waiting_for_human' });
     return item;
   }
@@ -679,7 +681,7 @@ class Store {
   }
 
   // ---- settings ----
-  getSettings() { return { claudePath: 'claude', maxConcurrency: 8, maxRuns: 30, permissionMode: 'bypassPermissions', rolePresets: [], budgetUsd: 0, budgetTokens: 0, requireApproval: false, useWorktrees: false, usageLimits: {}, autoCompactPct: 40, stallTimeoutMin: 10, autoRestart: false, ...this.read('settings', {}) }; }
+  getSettings() { return { claudePath: 'claude', maxConcurrency: 8, maxRuns: 30, permissionMode: 'bypassPermissions', rolePresets: [], budgetUsd: 0, budgetTokens: 0, requireApproval: false, useWorktrees: false, usageLimits: {}, autoCompactPct: 40, stallTimeoutMin: 10, autoRestart: false, maxAgents: 6, teamChangeApproval: 'ask', ...this.read('settings', {}) }; }
   saveSettings(s) {
     const next = { ...this.getSettings(), ...s };
     if (s.rolePresets) {
@@ -687,6 +689,9 @@ class Store {
       const names = next.rolePresets.map((p) => p.name.toLowerCase());
       if (new Set(names).size !== names.length) throw new Error('duplicate preset name');
     }
+    // Core-agent team limits (see the dynamic-team plan): team size cap and approval mode.
+    if (s.maxAgents !== undefined) { const n = Number(s.maxAgents); if (!Number.isInteger(n) || n < 1) throw new Error('maxAgents must be an integer >= 1'); next.maxAgents = n; }
+    if (s.teamChangeApproval !== undefined && !['ask', 'auto'].includes(s.teamChangeApproval)) throw new Error('teamChangeApproval must be "ask" or "auto"');
     this.withLock(() => this.write('settings', next)); return this.getSettings();
   }
   // Role presets are per project (stored in settings.json).
