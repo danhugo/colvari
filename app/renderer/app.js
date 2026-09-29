@@ -1688,7 +1688,6 @@ function renderWiki() {
   $('#wk-empty').classList.toggle('hidden', !empty); $('#wk-editor').classList.toggle('hidden', empty);
   $('#wk-empty h3').textContent = all ? 'No page selected' : 'No wiki pages yet';
 }
-$('#wk-empty-new').onclick = () => $('#wk-new').click();
 $('#wk-new').onclick = () => { sel.page = null; wikiEdit = true; $('#wk-title').value = ''; $('#wk-content').value = ''; showWiki(); renderWiki(); };
 $('#wk-search').oninput = renderWiki;
 function loadPage() { const p = S.wiki[sel.page]; if (!p) return; $('#wk-title').value = p.title; $('#wk-content').value = p.content; showWiki(); }
@@ -1706,6 +1705,7 @@ $('#wk-del').onclick = async () => { $('#wk-more').open = false; if (sel.page &&
 
 // ---------- observability ----------
 const logTeamNodes = () => sel.logTeam ? S.allNodes.filter((n) => n.teamId === sel.logTeam) : S.allNodes;
+const obsIdleOpen = new Set();
 function renderObs() {
   if (!$('#tab-obs').classList.contains('active')) return;
   const okey = [S.v && S.v.project, S.v && S.v.teams, S.v && S.v.settings, ctx.p, logs.length, (logs[logs.length - 1] || {}).at, S.tasks.length, sel.logTeam, S.orch.runCost, S.orch.runTokens, agentStamp()].join('|');
@@ -1718,7 +1718,12 @@ function renderObs() {
   const counts = {}; let total = 0;
   const ids = new Set(nodes.map((n) => n.id));
   for (const l of logs) if (l.projectId === ctx.p && ids.has(l.nodeId)) { counts[l.nodeId] = (counts[l.nodeId] || 0) + 1; total++; }
-  const rows = nodes.map((n) => { const a = S.orch.agents[n.id] || {}; const w = who(n.id);
+  const idleKey = (n) => { const a = S.orch.agents[n.id] || {}; return (!a.status || a.status === 'idle') && !a.taskId && cur !== n.id ? `${runtimeLabel(n.runtime || 'claude')} · ${n.model || 'default'}` : null; };
+  const idleGroups = {}; for (const n of nodes) { const k = idleKey(n); if (k) (idleGroups[k] = idleGroups[k] || []).push(n); }
+  const collapsed = new Set(); let idleRows = '';
+  for (const [k, g] of Object.entries(idleGroups)) if (g.length > 2 && !obsIdleOpen.has(k)) { g.forEach((n) => collapsed.add(n.id));
+    idleRows += `<div class="logagent-row idlegroup" data-idle="${esc(k)}"><span class="avatar sm" style="background:#3a3f4b">${g.length}</span><span class="lameta"><b>${g.length} idle agents</b><small class="lastat">${esc(k)} · click to expand</small></span><span class="lacount">${g.reduce((x, n) => x + (counts[n.id] || 0), 0)}</span></div>`; }
+  const rows = idleRows + nodes.filter((n) => !collapsed.has(n.id)).map((n) => { const a = S.orch.agents[n.id] || {}; const w = who(n.id);
     const ttl = a.task || (S.tasks.find((t) => t.id === a.taskId) || {}).title || '';
     // Status line reads "working · t_xxxx title"; the model is secondary muted text below (t_e503dd78).
     const stat = [`<span class="lst-${esc(a.status || 'idle')}">${esc(a.status || 'idle')}</span>`,
@@ -1728,6 +1733,7 @@ function renderObs() {
     return `<div class="logagent-row ${cur === n.id ? 'sel' : ''}" data-id="${n.id}"><span class="avatar sm ${a.status === 'working' ? 'working' : ''}" style="background:${w.color}" title="${esc(w.name)}">${esc(w.ini)}</span><span class="lameta"><b>${esc(n.name)}</b><small class="lastat">${stat}</small><small class="lamodel" title="${esc(model)}">${esc(model)}</small></span><span class="lacount" title="${counts[n.id] || 0} log lines">${counts[n.id] || 0}</span><span class="lactions">${a.status === 'working' ? `<button data-stopagent="${n.id}" title="Stop">⏹</button>` : ''}<button data-msgagent="${n.id}" title="Message">✉</button></span></div>`; }).join('');
   $('#logagents').innerHTML = `<div class="logagent-row ${!cur ? 'sel' : ''}" data-id=""><span class="avatar sm" style="background:#3a3f4b">∀</span><span class="lameta"><b>All agents</b><small class="lastat">every session</small></span><span class="lacount" title="${total} log lines">${total}</span></div>` +
     (rows || '<p class="muted logempty">No agents in this team.</p>');
+  document.querySelectorAll('#logagents [data-idle]').forEach((d) => d.onclick = () => { obsIdleOpen.add(d.dataset.idle); obsSig = ''; renderObs(); });
   document.querySelectorAll('#logagents .logagent-row[data-id]').forEach((d) => d.onclick = (e) => { if (e.target.closest('.lactions')) return; $('#logfilter').value = d.dataset.id; renderLog(); renderObs(); });
   document.querySelectorAll('[data-stopagent]').forEach((b) => b.onclick = act(async (e) => { e.stopPropagation(); await call('stopAgent', b.dataset.stopagent); refresh(); }));
   document.querySelectorAll('[data-msgagent]').forEach((b) => b.onclick = act(async (e) => { e.stopPropagation(); const v = await ask(`Message to ${nodeName(b.dataset.msgagent)} (a running agent is interrupted and resumed with it)`); if (v) { await call('sendToAgent', b.dataset.msgagent, v); refresh(); } }));
@@ -1744,11 +1750,22 @@ function monitorText(l) {
   const ids = Array.isArray(l.taskIds) && l.taskIds.length ? ` (${l.taskIds.join(', ')})` : '';
   return esc(([l.action, l.reason].filter(Boolean).join(' — ') || l.text) + ids);
 }
+// "Read {"file_path":"/a/b.js"}" -> summary "Read b.js"; the raw JSON only shows on expand.
+function humanLog(t) {
+  const m = /^\s*([\w.:-]+)?\s*(\{[\s\S]*\}|\[[\s\S]*\])\s*$/.exec(t || ''); if (!m) return null;
+  let o; try { o = JSON.parse(m[2]); } catch { return null; }
+  const pick = o && !Array.isArray(o) && (o.file_path || o.path || o.command || o.pattern || o.url || o.description || o.query);
+  const arg = pick ? String(pick).split('\n')[0] : '';
+  const head = [m[1] || 'Event', arg].filter(Boolean).join(' ');
+  return { head: head.length > 140 ? head.slice(0, 139) + '…' : head, json: JSON.stringify(o, null, 2) };
+}
 function logRow(l) {
   const w = who(l.nodeId); const lvl = LOG_LEVEL[l.kind] || 'text';
   const task = l.taskId ? `<span class="logtask" data-tasklink="${esc(l.taskId)}" title="${esc(l.task || l.taskId)} — open in task thread">${esc(shortTaskId(l.taskId))}</span>` : '';
   const badge = l.kind === 'monitor' ? 'Monitor' : l.kind === 'watch' ? 'Watch' : esc(l.kind);
-  const text = l.kind === 'monitor' ? monitorText(l) : esc(l.text);
+  let text = l.kind === 'monitor' ? monitorText(l) : esc(l.text);
+  const hum = humanLog(l.text);
+  if (hum && l.kind !== 'monitor') text = `<details class="logjson"><summary>${esc(hum.head)}</summary><pre>${esc(hum.json)}</pre></details>`;
   return `<div class="logrow lv-${lvl}"><span class="logtime">${new Date(l.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span><span class="avatar sm" style="background:${w.color}" title="${esc(w.name)}">${esc(w.ini)}</span><span class="logagent" title="${esc(w.name)}">${esc(w.name)}</span>${task}<span class="loglevel lv-${lvl}">${badge}</span><span class="logtext">${text}</span></div>`;
 }
 // ---------- subagents (contract: t_c33656ba) ----------
@@ -1804,6 +1821,7 @@ function renderLog() {
   const prevH = box.scrollHeight, prevTop = box.scrollTop;
   const all = logs.filter((l) => l.projectId === ctx.p && (!teamIds || teamIds.has(l.nodeId)));
   const base = all.filter((l) => (!f || l.nodeId === f) && (!q || l.text.toLowerCase().includes(q)));
+  base.sort((a, b) => (a.at || 0) - (b.at || 0));
   let rows = base.filter((l) => logLevels.has(severityOf(l)));
   let hiddenInfo = 0;
   if (!rows.length && base.length) {
