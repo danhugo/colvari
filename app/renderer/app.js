@@ -853,8 +853,10 @@ function renderGraph() {
   const edges = [...S.team.edges, ...(S.cross || []).filter((e) => !S.team.edges.some((x) => x.id === e.id))];
   const pairN = {}, pairI = {}; const pk = (e) => [e.from, e.to].sort().join('|'); edges.forEach((e) => { pairN[pk(e)] = (pairN[pk(e)] || 0) + 1; });
   const srcN = {}, srcI = {}; edges.forEach((e) => { srcN[e.from] = (srcN[e.from] || 0) + 1; });
-  const blocks = nodes.map((n) => ({ x: n.x - 4, y: n.y - 4, w: W + 8, h: H + 8 })); const pills = [];
-  edgeLayout = { nodes, blocks, per: [] };
+   const blocks = nodes.map((n) => ({ x: n.x - 4, y: n.y - 4, w: W + 8, h: H + 8 })); const pills = [];
+   // open (non-done) task count per assignee — surfaces routing skew on the node cards
+   const openCnt = {}; for (const t of (S.tasks || [])) if (t.status !== 'done' && t.assignee) openCnt[t.assignee] = (openCnt[t.assignee] || 0) + 1;
+   edgeLayout = { nodes, blocks, per: [] };
   for (const e of edges) {
     const a = byId[e.from], b = byId[e.to]; if (!a || !b) continue;
     const key = pk(e); const i = (pairI[key] = (pairI[key] ?? -1) + 1); const cnt = pairN[key];
@@ -897,6 +899,7 @@ function renderGraph() {
     const sb = sub.count ? subBadgeInfo(sub) : null;
     let cx = 12, cy = 46;
     const putChip = (text, max, cls, title) => { const t = clipText(text, max); const w = 10 + t.length * 5.6; const lim = cy === 46 && sb ? W - sb.w - 12 : W - 10; if (cx + w > lim && cx > 12) { cx = 12; cy = 62; } const cg = el('g', { class: cls, transform: `translate(${cx},${cy})` }, g); if (title) el('title', {}, cg).textContent = title; el('rect', { width: w, height: 14, rx: 7 }, cg); el('text', { x: w / 2, y: 10.5, 'text-anchor': 'middle' }, cg).textContent = t; cx += w + 4; };
+    if (VP.zoom >= 0.6) { const oc = openCnt[n.id] || 0; if (oc) putChip(`${oc} open`, 12, 'chip chip-load', `${oc} open task${oc === 1 ? '' : 's'} assigned to ${n.name}`); else putChip('idle', 6, 'chip chip-idle', `${n.name} has no open tasks`); }
     if (VP.zoom >= 0.6) for (const chip of [runtimeLabel(rtId), ns.model || n.model || 'default'].filter(Boolean)) putChip(chip, 14, 'chip');
     if (VP.zoom >= 0.6 && rtId !== 'claude') { const rows = ((S.orch.ledger || {}).byAgent || {})[n.name] || []; const cost = rows.reduce((c, r) => c + (r.costUsd || 0), 0);
       putChip(rows.length ? `$${cost.toFixed(2)} · ${rows.length} key${rows.length === 1 ? '' : 's'}` : 'no usage', 20, 'chip chip-usage', rows.length ? `${runtimeLabel(rtId)} usage, per model key (tokens are never summed across models): ${rows.map((r) => `${r.model}: ${r.runs} run(s) · ${r.costUsd != null ? '$' + r.costUsd.toFixed(4) + (r.costSource === 'estimated' ? ' est' : '') : 'cost —'}`).join(' · ')}` : `${runtimeLabel(rtId)} has no recorded usage yet`); }
@@ -932,7 +935,7 @@ function renderGraph() {
     else if (pu) drawRtuBadge(g, pu);
     else { const wk = wakeRun(n.id); if (wk) drawWakeBadge(g, wk, () => openWakeTask(wk.taskId)); else { const wp = wakePending(n.id); if (wp) drawPendingBadge(g, wp); } }
     drawSubBadge(g, S.orch.agents[n.id] || {}, 46);
-    el('title', {}, g).textContent = `${n.name} (${n.role}) — ${live}`;
+    el('title', {}, g).textContent = `${n.name} (${n.role}) — ${live} · ${(openCnt[n.id] || 0) ? `${openCnt[n.id]} open task${openCnt[n.id] === 1 ? '' : 's'}` : 'idle'}`;
     if (typeof ns.contextPct === 'number' && live === 'working') {
       const pct = Math.max(0, Math.min(100, ns.contextPct * 100));
       const cls = pct >= 85 ? 'danger' : pct >= (S.settings.autoCompactPct || 40) ? 'warn' : 'ok';
