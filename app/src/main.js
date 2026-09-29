@@ -245,7 +245,7 @@ async function guiE2E() {
     let q = null; for (let i = 0; i < 150 && !q; i++) { await new Promise((r) => setTimeout(r, 2000)); q = fstore.listInbox({ status: 'open' }).find((x) => x.kind === 'question'); }
     const ib = { asked: !!q, question: q && q.question, choices: q && q.choices, taskStatus: q && q.taskId && fstore.getTask(q.taskId).status };
     ib.badge = await ex(`await refresh(); return $('#inbox-tab-badge').textContent`);
-    await ex(`$('#tabs button[data-tab=inbox]').click(); await w(400);`); await shot('15-inbox-question');
+    await ex(`$('#sb-inbox').click(); await w(400);`); await shot('15-inbox-question');
     ib.clicked = await ex(`const b = [...document.querySelectorAll('.ib-choice')].find((x) => x.dataset.v === 'blue'); if (!b) return false; b.click(); await w(800); return true;`);
     ib.statusAfterAnswer = q && q.taskId && fstore.getTask(q.taskId).status; ib.answer = q && fstore.getInboxItem(q.id).answer;
     await shot('15-inbox-answered');
@@ -431,9 +431,9 @@ async function guiE2E() {
     const dep = s.createTask({ title: 'Depends on ParA', assignee: c.id, blockedBy: [ts[0].id] });
     const o = orchFor(p); const done = new Promise((r) => o.once('done', r)); o.start();
     await ex(`$('#tabs button[data-tab=board]').click(); await refresh();`);
-    const live = await waitFor(`await refresh(); return /3 in parallel/.test($('#runstate').textContent) && [...document.querySelectorAll('.card')].some((c) => /Depends on ParA/.test(c.textContent) && /Blocked by Parallel ParA/.test((c.querySelector('.tag.blocked') || {}).textContent || ''))`, 18000);
+    const live = await waitFor(`await refresh(); return /3 running/.test($('#runstate').textContent) && [...document.querySelectorAll('.card')].some((c) => /Depends on ParA/.test(c.textContent) && /Blocked by Parallel ParA/.test((c.querySelector('.tag.blocked') || {}).textContent || ''))`, 18000);
     const hdr = await ex(`return $('#runstate').textContent`);
-    expect('parallel: header shows "3 in parallel" and dependent shows Blocked by Parallel ParA', live, hdr);
+    expect('parallel: header shows "3 running" and dependent shows Blocked by Parallel ParA', live, hdr);
     expect('parallel: 3 agents working at once across 2 teams', ts.every((t) => s.getTask(t.id).status === 'in_progress') && s.getTask(dep.id).status === 'todo', ts.map((t) => s.getTask(t.id).status));
     for (const t of ['light', 'dark']) {
       require('electron').nativeTheme.themeSource = t;
@@ -441,7 +441,7 @@ async function guiE2E() {
       await ex(`$('#tabs button[data-tab=overview]').click(); await w(300);`); await shot(`27-parallel-overview-${t}`);
     }
     require('electron').nativeTheme.themeSource = 'system';
-    expect('parallel: still 3 in parallel after shots', /3 in parallel/.test(await ex(`await refresh(); return $('#runstate').textContent`)));
+    expect('parallel: still 3 running after shots', /3 running/.test(await ex(`await refresh(); return $('#runstate').textContent`)));
     await done;
     const win = (tid) => { const r = s.listRuns().find((x) => x.taskId === tid && x.kind === 'agent'); return r ? [Date.parse(r.startedAt), Date.parse(r.endedAt)] : [0, 0]; };
     const [A, B, C] = ts.map((t) => win(t.id)); const D = win(dep.id); const ov = (x, y) => x[0] < y[1] && y[0] < x[1];
@@ -585,21 +585,20 @@ async function guiE2E() {
     const grab = `(async () => ({ txt: $('#limitmeter').textContent, hidden: $('#limitmeter').classList.contains('hidden'), chips: document.querySelectorAll('#limitmeter [data-provider]').length, st: await call('usageStatus') }))()`;
     // Chip geometry: the single summary chip must be fully visible and the "· limits unknown" wording
     // must never shrink-ellipsise ("Codex U… lim…"). This suite runs at the DEFAULT window width
-    // (1400px), where the goal input is the header's shrink valve (shrink weight 200×basis, 140px
-    // floor): it absorbs the whole deficit, so the meter must clip NOTHING here — tail clipping is
-    // allowed only in the narrow sweeps of the 'topbar' suite (< 1400px, after goal bottoms out).
-    // +1 tolerates sub-pixel flex rounding.
+    // (1400px): since t_db67859d the header holds only fixed-size chrome (the goal composer is a
+    // popover off "New goal"), so the meter must clip NOTHING here — tail clipping is allowed only
+    // in the narrow sweeps of the 'topbar' suite (< 1400px). +1 tolerates sub-pixel flex rounding.
     const geom = `(async () => { const m = $('#limitmeter');
       const chips = [...m.querySelectorAll('[data-provider]')].map((c) => { const r = c.getBoundingClientRect(); return { p: c.dataset.provider, l: Math.round(r.left), r: Math.round(r.right) }; });
       let overlap = null;
       for (let i = 0; i < chips.length && !overlap; i++) for (let j = i + 1; j < chips.length; j++) { const a = chips[i], b = chips[j]; if (a.l < b.r - 1 && b.l < a.r - 1) overlap = [a.p, b.p]; }
       const unknown = [...m.querySelectorAll('.lm-unknown')].map((c) => { const s = c.querySelector('small'); return { p: c.dataset.provider, txt: c.textContent.trim(), cut: s ? s.scrollWidth > s.clientWidth + 1 : false }; });
       const h = document.querySelector('header'); const vis = (s) => { const e = document.querySelector(s); if (!e) return false; const r = e.getBoundingClientRect(); return r.width > 0 && r.left >= -1 && r.right <= window.innerWidth + 1; };
-      return { chips, overlap, unknown, clipped: m.scrollWidth > m.clientWidth + 1, fit: h.scrollWidth <= h.clientWidth + 1, run: vis('#run'), stop: vis('#stop'), help: vis('#help') }; })()`;
+      return { chips, overlap, unknown, clipped: m.scrollWidth > m.clientWidth + 1, fit: h.scrollWidth <= h.clientWidth + 1, goal: vis('#newgoal'), help: vis('#help') }; })()`;
     const geomCheck = async (label) => {
       const g = await ex(`return ${geom}`);
       expect(`limits-providers: ${label} — chips lay side by side, bounding rects do not overlap`, g.chips.length >= 1 && !g.overlap, g);
-      expect(`limits-providers: ${label} — header fits, Run/Stop/help visible`, g.fit && g.run && g.stop && g.help, g);
+      expect(`limits-providers: ${label} — header fits, New goal/help visible`, g.fit && g.goal && g.help, g);
       expect(`limits-providers: ${label} — every chip fully visible, meter clips nothing (default width: goal absorbs first)`, !g.clipped, g);
       expect(`limits-providers: ${label} — every chip keeps a legible width, never squeezed away`, g.chips.every((c) => c.r - c.l >= 100), g);
       if (g.unknown.length) expect(`limits-providers: ${label} — unknown wording legible ("· limits unknown", never ellipsised)`, g.unknown.every((u) => !u.cut && /· limits unknown/.test(u.txt)), g.unknown);
@@ -1362,7 +1361,7 @@ async function guiE2E() {
     // (a) The core asks for a recruit: nothing changes until the human answers.
     const req1 = tools.recruit_agent({ name: 'Rookie', role: 'Dev', reason: 'e2e: an extra pair of hands for the goal' });
     const item1 = openItem(/Rookie/);
-    await ex(`await refresh(); await w(300); $('#tabs button[data-tab=inbox]').click(); await w(400);`);
+    await ex(`await refresh(); await w(300); $('#sb-inbox').click(); await w(400);`);
     const asked = { pending: !!req1.pending, item: !!item1, badge: await ex(`return $('#inbox-tab-badge').textContent`), parked: ts.getTask(task.id).status, nodes: ts.getTeam().nodes.length };
     expect('recruit ask: pending result, open item, badge 1, task parked, no node yet', asked.pending && asked.item && asked.badge === '1' && asked.parked === 'waiting_for_human' && asked.nodes === nodesBefore, asked);
     await shot('41-recruitinbox-request');
@@ -1376,7 +1375,7 @@ async function guiE2E() {
       dom: await ex(`return { nodes: document.querySelectorAll('#graph .node').length, rookie: [...document.querySelectorAll('#graph .node')].some((n) => n.textContent.includes('Rookie')) }`),
       createdBy: rookie.createdBy || null, edges: ts.getTeam().edges.filter((e) => (e.from === corey.id && e.to === rookie.id) || (e.from === rookie.id && e.to === corey.id)).map((e) => e.type).sort(),
       itemClosed: !!item1 && proj.getInboxItem(item1.id).status !== 'open',
-      badgeAfter: await ex(`await refresh(); $('#tabs button[data-tab=inbox]').click(); await w(300); return $('#inbox-tab-badge').textContent`),
+      badgeAfter: await ex(`await refresh(); $('#sb-inbox').click(); await w(300); return $('#inbox-tab-badge').textContent`),
       task: ts.getTask(task.id).status,
       toldCore: proj.listMessages({ to: corey.id }).some((m) => /Rookie/.test(m.text)),
     };
@@ -1386,7 +1385,7 @@ async function guiE2E() {
     // (c) Decline: any non-'approve' answer changes nothing; the core still gets told.
     const req2 = tools.recruit_agent({ name: 'Nova', role: 'Critic', reason: 'e2e: decline-path coverage' });
     const item2 = openItem(/Nova/);
-    await ex(`await refresh(); await w(300); $('#tabs button[data-tab=inbox]').click(); await w(400);`);
+    await ex(`await refresh(); await w(300); $('#sb-inbox').click(); await w(400);`);
     await shot('43-recruitinbox-decline-request');
     await ex(`const d = [...document.querySelectorAll('.inboxitem')].find((x) => x.textContent.includes('Nova')); d.querySelector('.ib-text').value = 'decline: not needed for this goal'; d.querySelector('.ib-send').click(); await w(800);`);
     await new Promise((r) => setTimeout(r, 2000)); // settle: nothing is supposed to change
@@ -1404,7 +1403,8 @@ async function guiE2E() {
     console.log('[gui-e2e] recruitinbox', JSON.stringify({ asked, approved, declined }));
   };
   // Top bar must fit any window width with the meter filled (bug t_19ec5471): header never overflows
-  // (scrollWidth <= clientWidth), Run/Stop/Help/goal stay visible, and the bar stays a FIXED-SIZE
+  // (scrollWidth <= clientWidth), New goal/Help stay visible (the goal composer is a popover since
+  // t_db67859d; Stop only shows while a run is live), and the bar stays a FIXED-SIZE
   // summary — one limit chip whatever the provider count (t_bc19b2f5; the tokens pill is gone, the
   // cost pill stays at every width). Widths swept via setContentSize so the CSS viewport is exact.
   // The chat pane must reach the window's right edge (t_a99ed2c2): the 360px task-thread aside must
@@ -1428,16 +1428,14 @@ async function guiE2E() {
     await ex(`await refresh(); await w(500);`);
     expect('topbar: exactly ONE limit chip, naming the worst provider (claude 42%)', await ex(`return document.querySelectorAll('#limitmeter [data-provider]').length === 1 && document.querySelector('#limitmeter [data-provider]').dataset.provider === 'claude' && /42%/.test($('#limitmeter').textContent) && !$('#limitmeter').classList.contains('hidden')`));
     expect('topbar: cost pill populated (tokens pill removed; cost visible)', await ex(`return !$('#totalcost').classList.contains('hidden') && !/no cost yet/.test($('#totalcost').textContent) && !document.querySelector('#totaltokens')`));
-    // Regime (t_bc19b2f5, t_57421101 round 3): the meter and the cost pill are FIXED — they may
-    // never shrink or clip, at any width. #goal (shrink weight 200×basis, no floor anymore) absorbs
-    // the deficit first, #updst/#runstate ellipsize as the last valves, and below 1200px the brand
-    // text hides and the tab labels collapse to icons (measured: the pills alone cannot cover a 900px
-    // window — the fixed chip+cost add ~317px back while goal/runstate only give ~156px). #goal is
-    // excluded from the clipped list: an input's scrollWidth grows with its own text, which is
-    // scrolling, not clipping.
+    // Regime (t_bc19b2f5, t_57421101 round 3; goal popover in t_db67859d): the meter and the cost
+    // pill are FIXED — they may never shrink or clip, at any width. #updst/#runstate ellipsize as
+    // the last valves, and below 1200px the brand text hides and the tab labels collapse to icons.
+    // The header holds only fixed-size chrome now: the goal composer lives in a popover off the
+    // "New goal" button, asserted to open focused and fully on-screen at 1400px below.
     const measure = `(async () => { const h = document.querySelector('header'); const d = document.documentElement; const vis = (s) => { const e = document.querySelector(s); if (!e || e.getClientRects().length === 0) return false; const r = e.getBoundingClientRect(); return r.width > 0 && r.left >= 0 && r.right <= window.innerWidth && r.top >= 0 && r.bottom <= window.innerHeight; };
       const cm = document.querySelector('#tab-chat.active .chat-main'); const th = document.querySelector('#chat-thread');
-      return { sw: Math.max(d.scrollWidth, document.body.scrollWidth), cw: Math.min(d.clientWidth, document.body.clientWidth), edge: Math.round(Math.max(...[...h.children].map((c) => c.getBoundingClientRect().right))), iw: window.innerWidth, hdrSw: h.scrollWidth, hdrCw: h.clientWidth, run: vis('#run'), stop: vis('#stop'), help: vis('#help'), goal: vis('#goal'), cost: vis('#totalcost'), goalW: Math.round(document.querySelector('#goal').getBoundingClientRect().width), clipped: [...h.children].filter((c) => c.id !== 'goal' && c.scrollWidth > c.clientWidth + 1).map((c) => c.id || c.className), kids: [...h.children].map((c) => ({ id: c.id || c.className, w: Math.round(c.getBoundingClientRect().width), sw: c.scrollWidth, cw: c.clientWidth })), meterKids: [...document.querySelector('#limitmeter').children].map((c) => ({ cls: c.className, w: Math.round(c.getBoundingClientRect().width), t: c.textContent.trim().slice(0, 24) })), cm: cm ? Math.round(cm.getBoundingClientRect().right) : null, thDisp: !!(th && th.getClientRects().length), thW: th ? Math.round(th.getBoundingClientRect().width) : 0 }; })()`;
+      return { sw: Math.max(d.scrollWidth, document.body.scrollWidth), cw: Math.min(d.clientWidth, document.body.clientWidth), edge: Math.round(Math.max(...[...h.children].map((c) => c.getBoundingClientRect().right))), iw: window.innerWidth, hdrSw: h.scrollWidth, hdrCw: h.clientWidth, newgoal: vis('#newgoal'), help: vis('#help'), cost: vis('#totalcost'), clipped: [...h.children].filter((c) => c.id !== 'goalpop' && c.scrollWidth > c.clientWidth + 1).map((c) => c.id || c.className), kids: [...h.children].map((c) => ({ id: c.id || c.className, w: Math.round(c.getBoundingClientRect().width), sw: c.scrollWidth, cw: c.clientWidth })), meterKids: [...document.querySelector('#limitmeter').children].map((c) => ({ cls: c.className, w: Math.round(c.getBoundingClientRect().width), t: c.textContent.trim().slice(0, 24) })), cm: cm ? Math.round(cm.getBoundingClientRect().right) : null, thDisp: !!(th && th.getClientRects().length), thW: th ? Math.round(th.getBoundingClientRect().width) : 0 }; })()`;
     const prevSize = win.getContentSize();
     const sweep = [];
     for (const cw of [1900, 1600, 1400, 900]) {
@@ -1445,13 +1443,19 @@ async function guiE2E() {
       const m = await ex(`return ${measure}`); sweep.push({ cw, ...m });
       expect(`topbar: no horizontal scroll at ${cw}px (page scrollWidth ${m.sw} <= ${m.cw})`, m.sw <= m.cw + 1, m);
       expect(`topbar: no header item cut off at ${cw}px (rightmost edge ${m.edge} <= window ${m.iw})`, m.edge <= m.iw + 1, m);
-      expect(`topbar: Run/Stop/Help/goal visible at ${cw}px`, m.run && m.stop && m.help && m.goal, m);
-      expect(`topbar: goal ${cw >= 1400 ? 'keeps its 140px floor' : 'stays visible (narrow allowed below the 1200px collapse)'} at ${cw}px (width ${m.goalW})`, cw >= 1400 ? m.goalW >= 139 : m.goalW >= 20, m);
+      expect(`topbar: New goal/Help visible at ${cw}px`, m.newgoal && m.help, m);
       expect(`topbar: cost pill visible at ${cw}px (no breakpoint: the pill stays at every width)`, m.cost, m);
       if (cw >= 1400) expect(`topbar: nothing clipped at ${cw}px — goal absorbs, the summary chip shows full text`, m.clipped.length === 0, m);
       else expect(`topbar: below 1400px only #updst/#runstate may clip — the chip and the cost pill never do`, m.clipped.every((x) => String(x).includes('updst') || String(x).includes('runstate')), m);
       if (cw === 1600 || cw === 1400 || cw === 900) expect(`topbar: chat pane reaches the window's right edge at ${cw}px (chat right ${m.cm} vs window ${m.iw}, thread hidden)`, m.cm !== null && m.cm >= m.iw - 1 && !m.thDisp, m);
       await shot(`topbar-${cw}`);
+      if (cw === 1400) { // the composer popover must open focused and sit fully on-screen (t_db67859d)
+        await ex(`$('#newgoal').click(); await w(200);`);
+        const gp = await ex(`return { open: !$('#goalpop').classList.contains('hidden'), w: Math.round($('#goalpop').getBoundingClientRect().width), r: Math.round($('#goalpop').getBoundingClientRect().right), b: Math.round($('#goalpop').getBoundingClientRect().bottom), ih: window.innerHeight, focused: document.activeElement === $('#goal') }`);
+        expect(`topbar: goal popover opens focused and fits at 1400px (w ${gp.w}, right ${gp.r})`, gp.open && gp.focused && gp.w >= 440 && gp.r <= m.iw + 1 && gp.b <= gp.ih + 1, gp);
+        await shot('topbar-1400-goalpop');
+        await ex(`$('#goalpop').classList.add('hidden'); await w(100);`);
+      }
       if (cw === 1400) { // the fix must not hide the thread pane for good: opening a task thread shows it again
         await ex(`document.querySelector('#chat-room [data-thread]').click(); await w(300);`);
         const th = await ex(`return { disp: $('#chat-thread').getClientRects().length > 0, w: Math.round($('#chat-thread').getBoundingClientRect().width), cm: Math.round($('#tab-chat.active .chat-main').getBoundingClientRect().right) }`);
@@ -1492,8 +1496,7 @@ async function guiE2E() {
       win.setContentSize(cw, Math.max(600, Math.min(prevSize[1], 800))); await new Promise((r) => setTimeout(r, 350));
       const m = await ex(`return ${measure}`); six[cw] = m;
       expect(`topbar-6: no overflow at ${cw}px (page ${m.sw} <= ${m.cw}, rightmost ${m.edge} <= ${m.iw})`, m.sw <= m.cw + 1 && m.edge <= m.iw + 1, m);
-      expect(`topbar-6: Run/Stop/Help/goal visible at ${cw}px`, m.run && m.stop && m.help && m.goal, m);
-      expect(`topbar-6: goal ${cw >= 1400 ? 'keeps its 140px floor' : 'stays visible (narrow allowed)'} at ${cw}px (width ${m.goalW})`, cw >= 1400 ? m.goalW >= 139 : m.goalW >= 20, m);
+      expect(`topbar-6: New goal/Help visible at ${cw}px`, m.newgoal && m.help, m);
       if (cw >= 1400) expect(`topbar-6: nothing clipped at ${cw}px`, m.clipped.length === 0, m);
       else expect(`topbar-6: below 1400px only #updst/#runstate may clip — the chip and the cost pill never do`, m.clipped.every((x) => String(x).includes('updst') || String(x).includes('runstate')), m);
       expect(`topbar-6: bar same width as the 2-provider header at ${cw}px (${m.meterKids[0] ? m.meterKids[0].w : null}px vs ${chipW2(cw)}px)`, m.meterKids[0] && chipW2(cw) != null && Math.abs(m.meterKids[0].w - chipW2(cw)) <= 1, { six: m.meterKids[0], two: chipW2(cw) });
@@ -1614,7 +1617,7 @@ async function guiE2E() {
     expect('preflight badges shown', pfNodes.every((n) => typeof n.ok === 'boolean'), pfNodes);
     console.log('[gui-e2e] preflight', JSON.stringify({ nodes: pfNodes, badges: await ex(`return [...document.querySelectorAll('#graph .pfbadge text')].map((t) => t.textContent)`), summary: await ex(`return $('#pf-summary').textContent`), checks: await ex(`return document.querySelectorAll('#nf-pf .pf-checks li').length`) }));
     await ex(`window.__confirms = []; window.confirm = (m) => { window.__confirms.push(m); return true; };`);
-    await ex(`$('#goal').value = 'Create a file hello.txt containing exactly: hello world. PM should delegate the implementation to the Dev.';`);
+    await ex(`$('#goal').value = 'Create a file hello.txt containing exactly: hello world. PM should delegate the implementation to the Dev.'; $('#newgoal').click(); await w(150);`);
     await click('#run');
     for (let i = 0; i < 180; i++) { await new Promise((r) => setTimeout(r, 2000)); if (!orch.running && orch.runs > 0) break; }
     await new Promise((r) => setTimeout(r, 1500)); await shot('2-observability');
@@ -1696,7 +1699,7 @@ async function guiE2E() {
       gstore.createTask({ title: 'Two steps', description: 'Iterative task. If step1.txt does NOT exist in the working directory: create step1.txt containing 1 and stop right away; do NOT create step2.txt in this pass. If step1.txt already exists: create step2.txt containing 2.', assignee: byName('Goaler').id });
       gstore.createTask({ title: 'Loop append', description: 'Append exactly one line containing only the letter L to the file loop.txt in the working directory (create it if missing). Do this once per pass.', assignee: byName('Looper').id });
       gstore.createTask({ title: 'ARGTEXT', assignee: byName('Flow').id });
-      await ex(`window.confirm = () => true; window.__alerts = []; window.alert = (m) => window.__alerts.push(m); $('#goal').value = ''; await refresh(); await w(300);`);
+      await ex(`window.confirm = () => true; window.__alerts = []; window.alert = (m) => window.__alerts.push(m); $('#goal').value = ''; $('#newgoal').click(); await refresh(); await w(300);`);
       await click('#run');
       for (let i = 0; i < 240; i++) { await new Promise((r) => setTimeout(r, 2000)); if (!gorch.running && gorch.runs > 0) break; }
       await new Promise((r) => setTimeout(r, 1500)); await shot('10-second-project');
