@@ -406,7 +406,7 @@ header .pill { border:none; background:none; color:var(--fg-muted); font-size:va
 #graph .epill { cursor:pointer; } #graph .epill rect { fill:var(--bg-raised); stroke:var(--border-strong); } #graph .epill text { font-size:10px; fill:var(--fg-secondary); font-weight:var(--fw-medium); }
 #graph .epill-assign rect { stroke:var(--accent); } #graph .epill-message rect { stroke:var(--info); } #graph .epill-review rect { stroke:var(--warning-strong); } #graph .epill.sel rect { fill:var(--accent-soft); stroke-width:2; }
 .gcontrols { position:absolute; left:12px; bottom:12px; display:flex; align-items:center; gap:2px; padding:3px; background:var(--bg-raised); border:1px solid var(--border); border-radius:var(--radius-sm); box-shadow:var(--shadow-md); }
-.gcontrols button { border:none; background:none; min-width:28px; padding:4px 6px; } .gcontrols button:hover { background:var(--bg-hover); }
+.gcontrols button { border:none; background:none; min-width:28px; padding:4px 6px; font-size:12px; font-weight:var(--fw-semibold); } .gcontrols button:hover { background:var(--bg-hover); }
 .gcontrols #zoomlvl { font-size:var(--text-xs); color:var(--fg-muted); min-width:38px; text-align:center; font-variant-numeric:tabular-nums; } .gsep { width:1px; height:18px; background:var(--border); margin:0 3px; }
 #minimap { position:absolute; right:12px; bottom:12px; width:170px; height:110px; background:var(--bg-raised); border:1px solid var(--border); border-radius:var(--radius-sm); box-shadow:var(--shadow-md); cursor:pointer; }
 #minimap .mnode { opacity:.75; } #minimap .mghost { fill:none; stroke:var(--fg-muted); stroke-width:4; stroke-dasharray:12 8; } #minimap .mview { fill:color-mix(in srgb, var(--accent) 10%, transparent); stroke:var(--accent); stroke-width:6; }

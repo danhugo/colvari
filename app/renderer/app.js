@@ -647,7 +647,7 @@ const agentColor = (id) => { let h = 0; for (const c of String(id)) h = (h * 31 
 const edgeSeed = (e) => { let h = 0; for (const c of String(e.id || '')) h = (h * 31 + c.charCodeAt(0)) >>> 0; return h; };
 const initials = (s) => String(s || '?').split(/\s+/).map((w) => w[0]).join('').slice(0, 2).toUpperCase();
 const nodeLive = (n) => ((S.nstat || {})[n.id] || {}).status || ((S.orch.agents[n.id] || {}).status === 'working' ? 'working' : 'idle');
-const applyVP = () => { const v = $('#graph > g.viewport'); if (v) v.setAttribute('transform', `translate(${VP.x},${VP.y}) scale(${VP.zoom})`); const gs = $('#graph'); if (gs) { gs.classList.toggle('lod-far', VP.zoom < 0.6); gs.style.setProperty('--nz', Math.max(1, 11 / (13 * VP.zoom)).toFixed(3)); } renderMinimap(); $('#zoomlvl') && ($('#zoomlvl').textContent = Math.round(VP.zoom * 100) + '%'); };
+const applyVP = () => { const v = $('#graph > g.viewport'); if (v) v.setAttribute('transform', `translate(${VP.x},${VP.y}) scale(${VP.zoom})`); const gs = $('#graph'); if (gs) { gs.classList.toggle('lod-far', VP.zoom < 0.6); gs.style.setProperty('--nz', Math.max(1, 12 / (13 * VP.zoom)).toFixed(3)); } renderMinimap(); $('#zoomlvl') && ($('#zoomlvl').textContent = Math.round(VP.zoom * 100) + '%'); };
 const saveVP = () => { clearTimeout(vpSave); vpSave = setTimeout(() => call('setViewport', VP).catch(() => {}), 400); };
 const toWorld = (cx, cy) => { const r = $('#graph').getBoundingClientRect(); return [(cx - r.left - VP.x) / VP.zoom, (cy - r.top - VP.y) / VP.zoom]; };
 function zoomAt(f, cx, cy) {
@@ -664,7 +664,7 @@ let vpCount = 0, edgeLayout = null; // per-render edge geometry + DOM refs; patc
 function fitIfClipped() { const r = $('#graph').getBoundingClientRect(); const b = graphBox(allGraphNodes()); if (r.width && (b.x * VP.zoom + VP.x < 0 || b.y * VP.zoom + VP.y < 0 || (b.x + b.w) * VP.zoom + VP.x > r.width || (b.y + b.h) * VP.zoom + VP.y > r.height)) fitView(); }
 function fitView() {
   const r = $('#graph').getBoundingClientRect(); const b = graphBox(allGraphNodes()); const pad = 48;
-  const z = Math.min(1.5, Math.max(0.25, Math.min((r.width - pad * 2) / b.w, (r.height - pad * 2) / b.h)));
+  const z = Math.min(1, Math.max(0.25, Math.min((r.width - pad * 2) / b.w, (r.height - pad * 2) / b.h)));
   VP = { zoom: z, x: (r.width - b.w * z) / 2 - b.x * z, y: (r.height - b.h * z) / 2 - b.y * z }; applyVP(); saveVP();
 }
 // Nodes from other teams linked by cross-team edges, shown as dashed ghosts beside the graph.
@@ -747,7 +747,7 @@ function edgeGeom(a, b, off, obs = [], seed = 0) {
 const overlaps = (r, q) => r.x < q.x + q.w && q.x < r.x + r.w && r.y < q.y + q.h && q.y < r.y + r.h;
 function renderGraph() {
   const svg = $('#graph'); svg.innerHTML = '';
-  if (vpTeam !== ctx.t) { vpTeam = ctx.t; vpCount = 0; VP = { x: 20, y: 20, zoom: 1 }; call('getViewport').then((v) => { if (v && v.zoom) { VP = v; applyVP(); fitIfClipped(); } else if (S.team.nodes.length) fitView(); }).catch(() => {}); }
+  if (vpTeam !== ctx.t) { vpTeam = ctx.t; vpCount = 0; } // first open always re-fits (once visible, see below) — a persisted viewport can be stale (tiny/panned away)
   const defs = el('defs', {}, svg);
   for (const t of ['assign', 'message', 'review', 'sel']) { const m = el('marker', { id: 'arr-' + t, viewBox: '0 0 10 10', refX: 9, refY: 5, markerWidth: 8, markerHeight: 8, markerUnits: 'userSpaceOnUse', orient: 'auto-start-reverse' }, defs); el('path', { d: 'M0,1 L9,5 L0,9 z', class: 'arrow arrow-' + t }, m); }
   const vp = el('g', { class: 'viewport' }, svg); const eL = el('g', { class: 'edges' }, vp), nL = el('g', { class: 'nodes' }, vp), xL = el('g', { class: 'edges cross-layer' }, vp), lL = el('g', { class: 'labels' }, vp); // cross-team edges draw above nodes so the dashed line into the ghost stays visible
@@ -854,8 +854,8 @@ function renderGraph() {
     g.onmousedown = (ev) => { if (ev.button === 0) startDrag(ev, n, g); else if (ev.button === 2) { ev.stopPropagation(); selectNode(n.id); nodeMenu(ev, n); } };
     g.oncontextmenu = (ev) => { ev.preventDefault(); ev.stopPropagation(); if ($('#ctxmenu').classList.contains('hidden')) { selectNode(n.id); nodeMenu(ev, n); } };
   }
-  // New nodes landing outside the view (e.g. added in bulk) -> refit so nothing is cut off.
-  if (nodes.length > vpCount && svg.getBoundingClientRect().width) { fitIfClipped(); vpCount = nodes.length; } // only once visible (hidden tab has 0 width)
+  // First open of a team, or new nodes landing outside the view (e.g. added in bulk) -> fit/refit so nothing is cut off.
+  if (nodes.length > vpCount && svg.getBoundingClientRect().width) { (vpCount ? fitIfClipped : fitView)(); vpCount = nodes.length; } // only once visible (hidden tab has 0 width)
   applyVP();
   svg.onmousedown = (ev) => { if (ev.button === 0) startPan(ev); };
   svg.oncontextmenu = (ev) => { ev.preventDefault(); canvasMenu(ev); };
