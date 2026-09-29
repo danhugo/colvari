@@ -794,7 +794,8 @@ class Orchestrator extends EventEmitter {
     // staleMin reuses the stall timeout (no new setting); <=0 disables the watchdog condition.
     const staleMin = Number(this.store.getSettings().stallTimeoutMin ?? 10);
     const now = Date.now();
-    const opts = staleMin > 0 ? { staleMin, now } : {};
+    const opts = { companyIdle: !!(this.running && this.procs.size === 0) };
+    if (staleMin > 0) { opts.staleMin = staleMin; opts.now = now; }
     for (const n of IDLE.idleNudges(this.store.getTeam(), this.store.listTasks(), this.agents, opts)) {
       // Debounce per kind, keyed by pmId+kind so the two conditions never clobber each other: idle
       // nudges by their (already distinct) text, stale nudges by the sorted taskIds — a core that
@@ -824,7 +825,7 @@ class Orchestrator extends EventEmitter {
       this.nudged.set(mk, key);
       const m = this.store.sendMessage({ from: 'system', to: n.pmId, text: n.text });
       this.log(n.pmId, 'system', 'nudge: ' + n.text);
-      this.wakeForHuman(n.pmId, [m], { reason: kind === 'stale' ? 'stale tasks' : 'idle reports', taskIds: n.taskIds || [], action: 'wake core' })
+      this.wakeForHuman(n.pmId, [m], { reason: kind === 'stale' ? 'stale tasks' : kind === 'open' ? 'open work with everyone idle' : 'idle reports', taskIds: n.taskIds || [], action: kind === 'open' ? 'wake lead' : 'wake core' })
         .catch((e) => this.log(n.pmId, 'error', 'nudge wake: ' + e.message));
     }
   }
@@ -1004,29 +1005,76 @@ class Orchestrator extends EventEmitter {
     this._pushRestartState();
   }
 
-  // Tasks left in review that never got picked back up (their reviewer's process crashed/exited, or
-  // the run stopped mid-way) are dispatched to their reviewer. With no reviewer configured for the
-  // assignee the task STAYS in review: done requires reviewer/owner verification (t_699b67b7), so the
-  // sweep surfaces the stranded task once instead of finishing unreviewed work. Returns the
-  // (possibly stale) tasks in review that DO have a reviewer, ready for dispatch.
+  // Review routing (t_8df2cab6): a task in review is dispatched to a LIVE reviewer — an existing
+  // team member (a retire removes the node), never the assignee (no self-review). Route order per
+  // IDLE.pickReviewer: a review-edge agent of the assignee, then the assignee's lead, then the
+  // human approval gate (ask_human semantics: awaitingApproval + approval inbox item). With no
+  // reviewer anywhere the task STAYS in review: done requires reviewer/owner verification
+  // (t_699b67b7), so the sweep surfaces the stranded task once instead of finishing unreviewed
+  // work. Returns the (possibly stale) tasks in review that DO have a reviewer, ready for dispatch.
   autoAdvanceReviews(team) {
     const out = [];
     for (const t of this.store.listTasks()) {
       if (t.status !== 'review' || t.awaitingApproval || t.parkedForHuman) continue;
-      const reviewer = outgoing(team, t.assignee, ['review']).map((id) => team.nodes.find((n) => n.id === id)).find(Boolean);
-      if (reviewer) { out.push({ task: t, node: reviewer }); continue; }
+      const { reviewer, route } = IDLE.pickReviewer(team, t, this._reviewerAvailable(), t.reviewStage || 0);
+      if (reviewer) { out.push({ task: t, node: reviewer, route }); continue; }
       (this._noReviewerNoted ||= new Set());
       if (this._noReviewerNoted.has(t.id)) continue;
       this._noReviewerNoted.add(t.id);
-      // An approval-gated project also records the human gate: with no reviewer, only a human can
-      // approve it as done. Either way the task stays in review (t_699b67b7), surfaced once.
-      if (C.needsApproval(team.nodes.find((n) => n.id === t.assignee), this.store.getSettings())) {
-        this.store.updateTask(t.id, { status: 'review', awaitingApproval: true });
-      }
-      this.store.commentTask(t.id, 'orchestrator', 'staying in review: no reviewer is configured for this task (no review edge from the assignee). Done requires reviewer/owner verification — add a reviewer or move it to done yourself.');
-      this.log(t.assignee, 'system', `⏸ "${t.title}" stays in review (no reviewer configured); it will not auto-advance to done`);
+      // No live reviewer anywhere: the human becomes the reviewer of last resort — ask_human
+      // semantics (approval inbox item; approve -> done, changes -> todo). The task stays in
+      // review (t_699b67b7: done requires reviewer/owner verification), surfaced once.
+      this.store.updateTask(t.id, { status: 'review', awaitingApproval: true, reviewStage: 2 });
+      this.store.commentTask(t.id, 'orchestrator', 'staying in review: no reviewer is available for this task (no live review-edge agent and no lead). Done requires reviewer/owner verification — approve it yourself or add a reviewer.');
+      this.log(t.assignee, 'system', `⏸ "${t.title}" stays in review (no reviewer available); it will not auto-advance to done`);
     }
     return out;
+  }
+  // Availability for review routing: a paused runtime or an over-budget agent cannot review right
+  // now (mirrors the tick dispatch filter) — the router falls past them to the next route.
+  _reviewerAvailable() {
+    const paused = (n) => this.dispatchPaused || (this.usagePaused && (!n || (n.runtime || 'claude') === 'claude')) || this.runtimeUnavailableFor(n);
+    return (n) => !paused(n) && !this.agent(n.id).budgetStop;
+  }
+  // Review watchdog (t_8df2cab6): a task waiting in review longer than reviewWatchdogMin minutes
+  // (default 10; <=0 disables) while its routed reviewer is idle gets a re-wake — twice — before
+  // escalating: the lead takes over (reviewStage 1), and with no live lead either the human
+  // approval gate (stage 2, applied by autoAdvanceReviews on the next tick). A reviewer who picked
+  // the task up (live run or the task moved on) resets nothing here: the task simply stops matching.
+  // Clock anchors are persisted task fields (updatedAt / reviewWakeAt), so sweeps are restart- and
+  // fake-clock friendly.
+  sweepReviews() {
+    const wdMin = Number(this.store.getSettings().reviewWatchdogMin ?? 10);
+    if (!(wdMin > 0)) return;
+    const team = this.store.getTeam();
+    const now = Date.now();
+    const available = this._reviewerAvailable();
+    for (const t of this.store.listTasks()) {
+      if (t.status !== 'review' || t.awaitingApproval || t.parkedForHuman) continue;
+      const stage = t.reviewStage || 0;
+      const { reviewer, route } = IDLE.pickReviewer(team, t, available, stage);
+      if (!reviewer) {
+        // Route exhausted without any wake (no live candidate at this stage): escalate now; the
+        // stage-2 gate itself is applied (and commented) by autoAdvanceReviews.
+        if (stage < 2) this.store.updateTask(t.id, { reviewStage: 2 });
+        continue;
+      }
+      const a = this.agent(reviewer.id);
+      if (this.procs.has(reviewer.id) || a.status === 'working') continue; // review picked up
+      const anchor = Math.max(new Date(t.updatedAt).getTime(), t.reviewWakeAt ? new Date(t.reviewWakeAt).getTime() : 0);
+      if (anchor + wdMin * 60000 > now) continue;
+      if ((t.reviewWakes || 0) < 2) {
+        this.store.updateTask(t.id, { reviewWakes: (t.reviewWakes || 0) + 1, reviewWakeAt: new Date().toISOString() });
+        const m = this.store.sendMessage({ from: 'system', to: reviewer.id, text: `review reminder: "${t.title}" has been waiting in review for ${wdMin}+ min — please pick it up (review and move it to done, or send it back).` });
+        this.log(reviewer.id, 'system', `⏰ review reminder sent (${route} route): "${t.title}"`);
+        this.wakeForHuman(reviewer.id, [m], { reason: 'review waiting', taskIds: [t.id], action: 'wake reviewer' })
+          .catch((e) => this.log(reviewer.id, 'error', 'review wake: ' + e.message));
+      } else if (stage < 2) {
+        this.store.updateTask(t.id, { reviewStage: stage + 1, reviewWakes: 0, reviewWakeAt: null });
+        this.store.commentTask(t.id, 'orchestrator', `${route === 'lead' ? 'Lead' : 'Reviewer'} did not pick up the review after two reminders — escalating to ${stage + 1 === 1 ? 'the assignee\'s lead' : 'a human approval'}.`);
+        this.log(null, 'system', `⏫ "${t.title}" review escalated to ${stage + 1 === 1 ? 'lead' : 'human'} (no pickup after two reminders)`);
+      }
+    }
   }
 
   tick() {
@@ -1074,6 +1122,7 @@ class Orchestrator extends EventEmitter {
       if (this.runtimeUnavailableFor(node)) holdLog(t, node, `runtime ${(node.runtime || 'claude')} is unavailable (paused); fix it and resume`);
     }
     try { this.nudgeIdle(); } catch (e) { this.log(null, 'error', 'idle nudge: ' + e.message); }
+    try { this.sweepReviews(); } catch (e) { this.log(null, 'error', 'review sweep: ' + e.message); }
     try { this.sweepWatch(); } catch (e) { this.log(null, 'error', 'watch sweep: ' + e.message); }
     if (this.procs.size === 0) {
       // UpdateWatcher is draining for a restart: hold the run session open (no dispatches while
