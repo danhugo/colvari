@@ -456,15 +456,6 @@ function renderHeader() {
   c.title = total > 0
     ? `API-eq (API-equivalent) $${total.toFixed(4)} — what all recorded usage would cost at API list prices; the same single total the Usage tab's grand total shows. Actually billed per token (API key / proxy / cloud): $${billed.toFixed(4)}. Covered by subscription, not billed per token: $${sub.toFixed(4)}. "est" marks list-price estimates for keys that report no cost themselves.`
     : 'No recorded usage yet.';
-  // Ledger pill: usage is tracked per {runtime, provider, model} key and token sums across models
-  // are meaningless, so the pill shows the ledger's shape (distinct models · runs); hover for per-key rows.
-  const led = (o.ledger && o.ledger.rows && o.ledger.rows.length) ? o.ledger : (RUNS.length ? ledgerFromRuns(RUNS) : { rows: [] }); const tt = $('#totaltokens');
-  const nModels = new Set(led.rows.map((r) => r.model)).size;
-  const nRuns = led.rows.reduce((a, r) => a + r.runs, 0);
-  tt.textContent = led.rows.length ? `${nModels} model${nModels === 1 ? '' : 's'} · ${nRuns} run${nRuns === 1 ? '' : 's'}` : 'no usage yet';
-  tt.classList.toggle('hidden', !led.rows.length);
-  tt.title = led.rows.length ? `Usage ledger, one row per runtime · provider · model (tokens are never summed across models):\n` +
-    led.rows.map((r) => `${runtimeLabel(r.runtime)} / ${r.provider || '?'} / ${r.model}: ${r.runs} run(s) · ${r.costUsd != null ? '$' + r.costUsd.toFixed(4) + (r.costSource === 'estimated' ? ' (est)' : '') : 'cost —'}`).join('\n') : 'No usage recorded yet.';
 }
 // ---------- top-bar limits meter (subscription 5h/weekly windows; no $ shown, just % + reset countdown) ----------
 const fmtCountdown = (ms) => {
@@ -546,10 +537,9 @@ function providerChipHtml(p, idle) {
   const all = full.map((w) => `${w.label}: ${Math.min(100, Math.round(w.pct * 100))}% used${resetIn(w) > 0 ? ` · resets in ${fmtCountdown(resetIn(w))}` : ''}`).join(' · ');
   return `<span class="lm-part lm-chip ${cls}${idle ? ' lm-idle' : ''}" data-provider="${esc(p.provider)}" title="${esc(prettyProvider(p.provider))}${p.plan ? ` · ${esc(p.plan)}` : ''} — ${esc(all)}">${head} ${full.map((w, i) => win(w, i === 0)).join('')}</span>`;
 }
-async function renderLimitMeter() {
-  let st; try { st = await call('usageStatus'); } catch { st = null; }
-  const m = $('#limitmeter');
-  // Provider-keyed path: one chip per provider as the core reports them (array or object form).
+// Normalized + deduped provider list from usageStatus (array or object form) — shared by the
+// top-bar summary chip and the Usage tab's full per-provider list.
+function limitProviders(st) {
   const rawProvs = st && st.providers ? (Array.isArray(st.providers) ? st.providers : Object.entries(st.providers).map(([k, v]) => (v && typeof v === 'object' && !Array.isArray(v) ? { provider: k, ...v } : { provider: k }))) : null;
   const provs = rawProvs ? rawProvs.map(normProviderEntry).filter(Boolean) : [];
   // Never render the same provider twice (case-insensitive): keep the first entry that carries a
@@ -561,10 +551,42 @@ async function renderLimitMeter() {
     if (i < 0) uniq.push(p);
     else if (!hasRealPct(uniq[i]) && hasRealPct(p)) uniq[i] = p;
   }
-  if (uniq.length) {
+  return uniq;
+}
+async function renderLimitMeter() {
+  let st; try { st = await call('usageStatus'); } catch { st = null; }
+  const m = $('#limitmeter');
+  m.title = 'Usage limits — one summary chip for the worst provider/window; click for the full per-provider detail in the Usage tab';
+  m.onclick = () => showTab('usage');
+  // The summary chip: provider name + the worst window's number (the tiny bar and reset countdown of
+  // exactly that window); the full per-window detail stays in the tooltip and the Usage tab.
+  const worstChip = (p) => {
+    const head = `Limits: <b>${esc(prettyProvider(p.provider))}</b>${p.plan ? ` <small class="lm-plan">${esc(p.plan)}</small>` : ''}`;
+    const idle = providerIsIdle(p) ? ' lm-idle' : '';
+    const real = p.windows.filter((w) => w.pct != null);
+    if (!real.length) { // nothing real to show: one honest chip, never a fabricated 0%
+      const why = p.reason || 'the provider CLI reports no usage windows';
+      return `<span class="lm-part lm-chip lm-unknown${idle}" data-provider="${esc(p.provider)}" title="${esc(prettyProvider(p.provider))}${p.plan ? ` · ${esc(p.plan)}` : ''} — limits unknown: ${esc(why)}">${head} <small>· limits unknown</small></span>`;
+    }
+    const w = real.slice().sort((a, b) => b.pct - a.pct)[0];
+    const pct = Math.min(100, Math.round(w.pct * 100));
+    const cls = p.pause ? 'lm-danger' : p.warn ? 'lm-warn' : 'lm-ok';
+    const all = p.windows.map((x) => `${x.label}: ${x.pct != null ? `${Math.min(100, Math.round(x.pct * 100))}% used` : 'no data'}${resetIn(x) > 0 ? ` · resets in ${fmtCountdown(resetIn(x))}` : ''}`).join(' · ');
+    const ms = resetIn(w);
+    // The paused/near-limit flag lives INSIDE the chip: its word replaces the % text, so the meter
+    // never grows an extra element when the state changes — the exact % stays in the bar and tooltip.
+    const state = p.pause ? 'paused' : p.warn ? 'near limit' : `${pct}%`;
+    return `<span class="lm-part lm-chip ${cls}${idle}" data-provider="${esc(p.provider)}" title="${esc(prettyProvider(p.provider))}${p.plan ? ` · ${esc(p.plan)}` : ''} — ${esc(all)}">${head} ${state}<i class="lm-bar"><i class="lm-fill" style="width:${pct}%"></i></i>${ms > 0 ? `<small>↻${fmtCountdown(ms)}</small>` : ''}</span>`;
+  };
+  const provs = limitProviders(st);
+  if (provs.length) {
+    // The one provider the fixed-size summary chip names: paused > near limit > carries a real %
+    // window > silent, ties broken by the highest single-window %.
+    const rank = (p) => (p.pause ? 3 : p.warn ? 2 : p.windows.some((w) => w.pct != null) ? 1 : 0);
+    const maxPct = (p) => Math.max(-1, ...p.windows.map((w) => (w.pct != null ? w.pct : -1)));
+    const worst = provs.slice().sort((a, b) => rank(b) - rank(a) || maxPct(b) - maxPct(a))[0];
     m.classList.remove('hidden');
-    m.innerHTML = (st.pause ? '<span class="lm-flag lm-danger">paused</span>' : st.warn ? '<span class="lm-flag lm-warn">near limit</span>' : '') +
-      uniq.map((p) => providerChipHtml(p, providerIsIdle(p))).join('');
+    m.innerHTML = worstChip(worst);
     return;
   }
   const isSubscriptionUser = S.team.nodes.some((n) => (n.billingMode || 'auto') !== 'api' && (n.billingMode || 'auto') !== 'proxy');
@@ -573,19 +595,21 @@ async function renderLimitMeter() {
     m.classList.remove('hidden');
     const reason = await noLimitDataReason();
     const why = `Subscription 5h/weekly usage appears here once the CLI reports it (after a run) or a limit is set in Usage &amp; limits. (${esc(reason)})`;
-    m.innerHTML = `<span class="lm-part lm-pending" title="${why}"><b>5h</b> <small>– no limit data: ${esc(reason)}</small></span>` +
-      `<span class="lm-part lm-pending" title="${why}"><b>weekly</b> <small>– no limit data: ${esc(reason)}</small></span>`;
+    m.innerHTML = `<span class="lm-part lm-pending" title="${why}"><b>Limits</b> <small>– no limit data: ${esc(reason)}</small></span>`;
     return;
   }
   m.classList.remove('hidden');
-  const part = (label, u, ms) => {
-    if (!u.limit) return `<span class="lm-part lm-pending" title="No ${esc(label)} limit set — set one in Usage &amp; limits to see a % meter here."><b>${esc(label)}</b> <small>–</small></span>`;
-    const pct = Math.min(100, Math.round(u.pct * 100)); const cls = u.pause ? 'danger' : u.warn ? 'warn' : 'ok';
-    const resetTitle = ms > 0 ? ` · resets in ${fmtCountdown(ms)}` : '';
-    const resetChip = ms > 0 ? `<small>↻${fmtCountdown(ms)}</small>` : '';
-    return `<span class="lm-part lm-${cls}" title="${esc(label)}: ${pct}% used${resetTitle}"><b>${esc(label)}</b> ${pct}%<i class="lm-bar"><i class="lm-fill" style="width:${pct}%"></i></i>${resetChip}</span>`; };
-  m.innerHTML = (st.pause ? '<span class="lm-flag lm-danger">paused</span>' : st.warn ? '<span class="lm-flag lm-warn">near limit</span>' : '') +
-    part('5h', st.fiveHour, resetIn(st.fiveHour)) + part('weekly', st.weekly, resetIn(st.weekly));
+  const wins = ['5h', 'weekly'].map((label) => { const u = st[label === '5h' ? 'fiveHour' : 'weekly']; return u && u.limit ? { label, pct: Math.min(1, u.pct != null ? u.pct : u.used / u.limit), warn: !!u.warn, pause: !!u.pause, resetsAt: u.resetsAt } : { label, pct: null, warn: false, pause: false, resetsAt: u && u.resetsAt }; });
+  const worst = wins.filter((w) => w.pct != null).sort((a, b) => (b.pause - a.pause) || (b.warn - a.warn) || (b.pct - a.pct))[0];
+  const pct = Math.min(100, Math.round(worst.pct * 100));
+  const cls = worst.pause ? 'danger' : worst.warn ? 'warn' : 'ok';
+  const pctR = (w) => Math.min(100, Math.round(w.pct * 100));
+  const title = wins.map((w) => w.pct != null ? `${w.label}: ${pctR(w)}% used${resetIn(w) > 0 ? ` · resets in ${fmtCountdown(resetIn(w))}` : ''}` : `${w.label}: no limit set`).join(' · ');
+  const ms = resetIn(worst);
+  // Same in-chip flag as the provider path: the state word replaces the % text, exact numbers stay
+  // in the bar and the tooltip.
+  const state = worst.pause ? 'paused' : worst.warn ? 'near limit' : `${pct}%`;
+  m.innerHTML = `<span class="lm-part lm-${cls}" title="${esc(title)}">Limits: ${state} <b>${esc(worst.label)}</b><i class="lm-bar"><i class="lm-fill" style="width:${pct}%"></i></i>${ms > 0 ? `<small>↻${fmtCountdown(ms)}</small>` : ''}</span>`;
 }
 function showTab(name) { document.querySelector(`#tabs button[data-tab="${name}"]`).click(); }
 $('#run').onclick = async () => {
@@ -1668,7 +1692,10 @@ async function renderUsageLimits() {
   const lim = S.settings.usageLimits || {}; let st;
   try { st = await call('usageStatus'); } catch { st = null; }
   const money = (v) => '$' + (v || 0).toFixed(2);
-  $('#us-limits').innerHTML = `<h3>Usage limits</h3><p class="muted">Subscription 5h/weekly meters now live in the top bar (once a limit is set below).</p>${st && st.warn ? `<p class="warn">Approaching a usage limit.</p>` : ''}${st && st.pause ? `<p class="warn">A usage limit has been reached; new runs may be paused.</p>` : ''}
+  // The top bar names only the worst provider; this tab lists every provider's windows (same chips).
+  const provs = limitProviders(st);
+  $('#us-limits').innerHTML = `<h3>Usage limits</h3><p class="muted">The top bar shows only the worst provider as one summary chip; every provider's limit windows are listed here (5h/weekly budgets settable below).</p>${st && st.warn ? `<p class="warn">Approaching a usage limit.</p>` : ''}${st && st.pause ? `<p class="warn">A usage limit has been reached; new runs may be paused.</p>` : ''}
+    ${provs.length ? `<div class="limitmeter us-list">${provs.map((p) => providerChipHtml(p, false)).join('')}</div>` : ''}
     <div class="toolbar" style="align-items:flex-start">
     <div class="cards">
       ${usageLimitBar('API key/proxy, reported cost', st && st.cost, money)}
