@@ -2,7 +2,8 @@
 // (a) at most one live run per agent (wakes queue while a run is live; the lock releases on crash/kill);
 // (b) the self-update drain never cuts the same task twice (persisted drainCuts) and a cut wake run
 //     re-queues its messages;
-// (c) per-agent wake debounce (>= MIN_GAP_MS) with logged suppressions and a human-path bypass;
+// (c) unread agent messages wake an idle agent on the next sweep — never suppressed (t_9e4b4805);
+//     the human path bypasses every auto-wake gate;
 // (d) a deferred/skipped restart leaves dispatch unpaused — todo tasks are picked up regardless.
 const test = require('node:test');
 const assert = require('node:assert');
@@ -102,7 +103,7 @@ test('single run per agent: a hung wake run is stopped by the stall watchdog (lo
 
 // ---- (c) per-agent wake debounce ----
 
-test('wake debounce: an agent is auto-woken at most once per MIN_GAP_MS; suppressions are logged', async () => {
+test('wake: a burst inside the old per-agent gap still wakes the idle agent on the next sweep (no suppression window)', async () => {
   const d = tmp('squad-lock-');
   const argsLog = path.join(d, 'args.txt');
   const fake = fakeClaude(d, `echo "$*" >> ${argsLog}\n` + RESULT);
@@ -112,24 +113,21 @@ test('wake debounce: an agent is auto-woken at most once per MIN_GAP_MS; suppres
   const o = new Orchestrator(s);
   const woken = trackWakes(o);
   const ta = makeTools(s, a.id);
-  // a wide interval so the window survives the first spawn's ~0.4s cold-start latency
+  // a wide gap so burst two lands squarely inside the old MIN_GAP_MS window (t_9e4b4805: it must
+  // wake anyway — the old 5-minute suppression delayed teammate messages while the agent sat idle)
   WAKE.MIN_GAP_MS = 1500;
   try {
     ta.send_message({ to: 'B', text: 'first ping' });
     await waitFor(() => woken.length === 1, 'first wake fires');
     assert.equal(s.listMessages({ to: b.id }).every((m) => m.read), true);
     await waitFor(() => o.agent(b.id).status === 'idle' && !o.procs.has(b.id), 'first wake run over');
-    ta.send_message({ to: 'B', text: 'second ping within the interval' });
-    await sleep(120);
-    assert.equal(woken.length, 1, 'no wake dispatch inside the debounce interval');
-    assert.equal(s.listMessages({ to: b.id }).filter((m) => !m.read).length, 1, 'the message waits in the inbox');
-    assert.ok(s.readLogs().some((l) => /wake suppressed/.test(l.text)), 'the suppression is logged once');
-    const view = o.snapshotSlim().agents[b.id];
-    assert.equal(view.wakePending.suppressed, true, 'the UI label state is exposed');
-    assert.equal(view.wakePending.count, 1);
-    await waitFor(() => woken.length === 2, 'the timer wake fires once the interval passes');
+    ta.send_message({ to: 'B', text: 'second ping within the old gap' });
+    await waitFor(() => { const w = o.snapshotSlim().agents[b.id].wakePending; return w && w.count === 1; }, 'pending state exposed while the burst coalesces');
+    assert.equal(o.snapshotSlim().agents[b.id].wakePending.suppressed, false, 'message wakes are never suppressed');
+    await waitFor(() => woken.length === 2, 'the debounced wake fires on the next sweep despite the fresh gap');
     await waitFor(() => s.listRuns({ nodeId: b.id }).length === 2, 'both wake runs persisted');
-    assert.match(fs.readFileSync(argsLog, 'utf8'), /second ping within the interval/);
+    assert.match(fs.readFileSync(argsLog, 'utf8'), /second ping within the old gap/);
+    assert.ok(!s.readLogs().some((l) => /wake suppressed/.test(l.text)), 'wakes for unread agent messages are never suppressed');
     assert.equal(o.snapshotSlim().agents[b.id].wakePending, undefined, 'pending label cleared after dispatch');
   } finally { WAKE.MIN_GAP_MS = 400; }
   o.stop();
@@ -143,9 +141,10 @@ test('wake debounce: human/system wakes bypass the per-agent interval', async ()
   s.addEdge(a.id, b.id); s.addEdge(c.id, b.id);
   const o = new Orchestrator(s);
   const woken = trackWakes(o);
-  // c's long task keeps the Run alive; b stays free for the two wakes
+  // c's long task keeps the Run alive; b stays free for the two wakes. A separate script FILE:
+  // fakeClaude() writes a fixed name, so overwriting it would swap the wake run's CLI too.
   s.createTask({ title: 'run keeper', assignee: c.id });
-  const keep = fakeClaude(d, 'exec sleep 2\n');
+  const keep = fakeClaude(fs.mkdirSync(path.join(d, 'keeper'), { recursive: true }), 'exec sleep 30\n');
   s.saveSettings({ claudePath: keep });
   o.start();
   await waitFor(() => o.procs.size === 1, 'run keeper live');
@@ -203,6 +202,10 @@ test('drain: cutting a wake run puts its messages back in the unread inbox', asy
   makeTools(s, a.id).send_message({ to: 'B', text: 'wake run that will be cut' });
   await waitFor(() => woken.length === 1 && o.procs.size === 1 && o.agent(b.id).status === 'working', 'wake run live');
   assert.equal(s.listMessages({ to: b.id }).every((m) => m.read), true, 'marked read at dispatch');
+  // Freeze the wake sweep: since t_9e4b4805 there is no suppression window, so a live sweep would
+  // re-wake B and re-mark the re-queued messages read within milliseconds of the cut.
+  clearInterval(o._wakeTimer);
+  for (const t of o.wakeTimers.values()) clearTimeout(t.timer);
   await o.haltProcs(200);
   assert.equal(s.listMessages({ to: b.id }).some((m) => !m.read), true, 'the cut wake run re-queues its messages for the post-restart sweep');
   assert.equal(o.drainCutNodes.has(b.id), true);
