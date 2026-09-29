@@ -975,6 +975,30 @@ async function guiE2E() {
   // first; and the Logs "new lines" pill, if shipped, stays hidden while already scrolled to the tail.
   // Several of these depend on Uma's t_961b3b38 (still in progress) — checks are written now and pass/fail
   // is reported per item rather than assumed, per the plan (t_7f8764c8).
+  const auditShots = async () => {
+    win.setSize(1440, 900); const outDir = process.env.AUDIT_OUT || out;
+    const cp = pm.create('Audit'); const st = pm.store(cp.id);
+    for (const [n, r, x, y] of [['Pia', 'PM', 60, 60], ['Devon', 'Dev', 320, 40], ['Dana', 'Dev', 320, 200], ['Rex', 'Reviewer', 580, 120], ['Cy', 'Critic', 580, 260]]) st.addNode({ name: n, role: r, x, y });
+    const ns = st.getTeam().nodes; for (const d of [1, 2]) { st.addEdge(ns[0].id, ns[d].id, 'assign'); st.addEdge(ns[d].id, ns[3].id, 'message'); }
+    const titles = ['Add dark mode toggle', 'Fix login redirect loop', 'Refactor usage aggregation into a reusable module with tests', 'Write onboarding copy', 'Sidebar icons', 'Stale worker badge', 'Wiki backlinks', 'Graph zoom'];
+    titles.forEach((t, i) => { const k = st.createTask({ title: t, assignee: ns[1 + (i % 2)].id, description: 'Demo ' + t }); st.commentTask(k.id, ns[0].id, 'Please handle.'); if (i > 1) st._updateTask(k.id, { status: ['todo', 'in_progress', 'review', 'waiting_for_human', 'done', 'done'][i % 6] }); });
+    for (let i = 0; i < 22; i++) { const k = st.createTask({ title: 'Shipped item ' + (i + 1), assignee: ns[1].id }); st._updateTask(k.id, { status: 'done' }); }
+    const mc = st.createTask({ title: 'Merge conflict demo', assignee: ns[2].id }); st._updateTask(mc.id, { status: 'merge_conflict' });
+    st.writeWiki('Runbook', '# Runbook\n\nSee [[Glossary]].\n', 'human'); st.writeWiki('Glossary', '## Terms\n\n- **LOD**\n', 'human');
+    const L = (ago, n, kind, text) => `logs.push({ projectId: '${cp.id}', nodeId: '${n.id}', kind: '${kind}', text: ${JSON.stringify(text)}, at: Date.now() - ${ago} });`;
+    await ex(`await refresh(); await switchTo({ p: '${cp.id}', t: '${pm.get(cp.id).teams[0].id}' }); await w(400); ${ns.map((n, i) => L(60000 - i * 900, n, 'system', '▶ ' + n.name + ' starts a task') + L(30000, n, 'tool', 'Read {"file_path":"a.txt"}')).join('')} await refresh(); S.orch.agents = { '${ns[1].id}': { status: 'working', taskId: '${st.listTasks ? '' : ''}' } };`);
+    const sh = async (name) => { fs.writeFileSync(path.join(outDir, 'audit-' + name + '.png'), (await win.capturePage()).toPNG()); };
+    for (const theme of ['light', 'dark']) {
+      require('electron').nativeTheme.themeSource = theme; await ex(`await w(300);`);
+      for (const tab of ['chat', 'board', 'overview', 'team', 'wiki', 'obs', 'usage', 'settings', 'inbox']) {
+        await ex(`$('#tabs button[data-tab=${tab}]').click(); await w(700);`); await sh(`${tab}-${theme}`);
+        if (tab === 'board') { await ex(`const c = document.querySelector('#board, .board'); if (c) c.scrollLeft = 99999; await w(300);`); await sh(`board-right-${theme}`); }
+        if (tab === 'usage') { await ex(`const m = document.querySelector('#usage, .view.active, main'); (document.scrollingElement || m).scrollTop = 99999; if (m) m.scrollTop = 99999; await w(300);`); await sh(`usage-scrolled-${theme}`); }
+        if (tab === 'team') { await ex(`try { VP.zoom = 0.3; applyView && applyView(); } catch (e) {} await w(300);`); await sh(`team-small-${theme}`); }
+      }
+    }
+    require('electron').nativeTheme.themeSource = 'system';
+  };
   const critiqueShots = async () => {
     const prevSize = win.getSize(); win.setSize(1440, 900);
     await waitFor(`return !!document.querySelector('#tpl-select option')`); await ex(`await refresh();`);
@@ -1528,6 +1552,7 @@ async function guiE2E() {
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'existingdata') { await existingDataShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'polish') { await polishShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'mainlogswiki') { await mainLogsWikiShots(); throw null; }
+    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'audit') { await auditShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'critique') { await critiqueShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'wake') { await wakeShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'wakebusy') { await wakeBusyShots(); throw null; }
