@@ -570,6 +570,12 @@ header .pill { border:none; background:none; color:var(--fg-muted); font-size:va
    armed schedule = solid amber; the header theme strips pill borders, so state speaks through fills */
 header .pill.rst-pending { background:var(--warning-soft); color:var(--warning-text); padding:2px 8px; }
 header .pill.rst-armed { background:var(--warning-strong); color:var(--fg-on-accent); padding:2px 8px; }
+/* in-pill actions (t_8c795573): ghost buttons keyed to the pill's own color, so they hold on both
+   the soft and the solid amber fill and in light+dark without per-theme rules */
+header .pill .rstact { margin-left:5px; padding:0 6px; font-size:10px; font-weight:600; line-height:16px; border-radius:var(--radius-full); border:1px solid color-mix(in srgb, currentColor 45%, transparent); background:none; color:inherit; cursor:pointer; }
+header .pill .rstact:hover { background:color-mix(in srgb, currentColor 14%, transparent); }
+header .pill .rstact:disabled { opacity:.55; cursor:default; }
+header .pill .rsterr { margin-left:6px; font-size:10px; opacity:.8; }
 header .pill.watchst { cursor:pointer; }
 .tag.rstwait { background:var(--warning-soft); color:var(--warning-text); padding:0 var(--space-2); }
 /* watch digests: green like ok-results but bold, so the periodic core digest is scannable in the feed */
