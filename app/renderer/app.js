@@ -2636,11 +2636,11 @@ composerEl.addEventListener('drop', (e) => { e.preventDefault(); composerEl.clas
 // ---------- human inbox (ask_human questions + approvals) ----------
 const ibOpen = new Map();
 function renderInbox() {
-  const items = S.inbox || []; const n = items.length ? String(items.length) : '';
+  const items = [...(S.inbox || [])].sort((a, b) => (b.createdAt || b.at || 0) - (a.createdAt || a.at || 0)); const n = items.length ? String(items.length) : '';
   $('#inbox-tab-badge').textContent = n;
   const taskTitle = (id) => (S.tasks.find((t) => t.id === id) || {}).title || '';
   $('#inboxlist').innerHTML = items.length ? items.map((i) => `<div class="inboxitem" data-iid="${i.id}">
-    <div class="ib-head" role="button" tabindex="0" aria-expanded="false">${avatarHtml(i.nodeId, new Set(), new Set([i.nodeId]))}<div class="ib-main"><div class="ib-q">${esc(i.question)}</div><small class="ib-meta">${i.kind === 'approval' ? 'Approval' : 'Question'} · ${esc(nodeName(i.nodeId))}${i.taskId ? ' · ' + esc(taskTitle(i.taskId)) : ''}</small></div><small class="ib-time" title="${esc(new Date(i.at).toLocaleString())}">${esc(agoTxt(i.at) || 'just now')}</small></div>
+    <div class="ib-head" role="button" tabindex="0" aria-expanded="false">${S.allNodes.some((x) => x.id === i.nodeId) ? avatarHtml(i.nodeId, new Set(), new Set([i.nodeId])) : '<div class="avatar" style="background:#3a3f4b" title="System">⚙</div>'}<div class="ib-main"><div class="ib-q">${esc(i.question)}</div><small class="ib-meta">${i.kind === 'approval' ? 'Approval' : 'Question'} · ${S.allNodes.some((x) => x.id === i.nodeId) ? esc(nodeName(i.nodeId)) : 'System'}${i.taskId ? ' · ' + esc(taskTitle(i.taskId)) : ''}</small></div><small class="ib-time" title="${esc(new Date(i.at).toLocaleString())}">${esc(agoTxt(i.at) || 'just now')}</small></div>
     <div class="ib-body hidden"><p>${(i.kind === 'approval' ? ['approve'] : i.choices).map((c) => `<button class="ib-choice primary" data-v="${esc(c)}">${esc(c)}</button>`).join(' ')}</p>
     <textarea class="ib-text" rows="2" placeholder="${i.kind === 'approval' ? 'Or describe the changes you want' : 'Your answer'}"></textarea>
     <p><button class="ib-send">${i.kind === 'approval' ? 'Request changes' : 'Send answer'}</button></p></div></div>`).join('') : `<div class="ib-empty"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12 6.5 5h11L20 12v6a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 18v-6ZM4 12h5.5l1 2h3l1-2H20"/></svg><h3>You're all caught up</h3><p>Agent questions, approvals and merge conflicts that need your call land here.</p><button class="ib-board">Go to Board</button></div>`;
