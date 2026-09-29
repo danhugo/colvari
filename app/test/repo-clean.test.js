@@ -14,9 +14,18 @@ function gitStatus() {
 }
 
 test('default project root stays outside the repo checkout', () => {
+  // The point is the env->home fallback, but it must not touch the user's real ~/.agents-squad
+  // (a bare ProjectManager there would mkdir/create projects in the live store — the "Red demo" leak class).
   delete process.env.AGENTS_SQUAD_HOME; delete process.env.AGENTS_SQUAD_PROJECT;
-  const pm = new ProjectManager();
-  assert.ok(!pm.root.startsWith(repoRoot), `project root ${pm.root} must not be inside the repo`);
+  const savedHome = process.env.HOME;
+  process.env.HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'squad-fakehome-'));
+  try {
+    const pm = new ProjectManager();
+    assert.ok(!pm.root.startsWith(repoRoot), `project root ${pm.root} must not be inside the repo`);
+    assert.ok(pm.root.startsWith(process.env.HOME), `project root ${pm.root} must be under the (temp) home`);
+  } finally {
+    process.env.HOME = savedHome;
+  }
 });
 
 test('running an orchestrator job from the repo cwd leaves git status clean', async () => {
