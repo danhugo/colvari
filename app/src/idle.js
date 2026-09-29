@@ -56,4 +56,46 @@ function idleNudges(team, tasks, agents = {}, opts = {}) {
   return res;
 }
 
-module.exports = { agentStates, idleNudges, coreNode };
+// -> [{ nodeId, taskIds, kind: 'company', text }] when EVERY agent is idle while open work remains
+// (t_8df2cab6): a board where nobody is running but tasks are unfinished must wake someone — each
+// open task wakes its owner (assignee); an owner that cannot act (missing or budget-stopped)
+// escalates to the owner's lead (first assign edge into the owner). Skipped on purpose: review
+// hand-offs (the review watchdog's job), human-gated tasks (waiting_for_human / parkedForHuman /
+// awaitingApproval), and blocked todos — a blocked task's owner cannot start it, so waking them
+// only burns a run; the blocker's own wake (or the human) unblocks it.
+function idleCompanyWakes(team, tasks, agents = {}) {
+  const nodes = team.nodes || [];
+  if (!nodes.length) return [];
+  const st = agentStates(team, tasks, agents);
+  if (Object.values(st).some((s) => s === 'busy')) return [];
+  const blocked = (t) => (t.blockedBy || []).some((id) => { const b = tasks.find((x) => x.id === id); return b && b.status !== 'done'; });
+  const skip = (t) => t.status === 'done' || t.status === 'review' || t.status === 'waiting_for_human' || t.awaitingApproval || t.parkedForHuman || (t.status === 'todo' && blocked(t));
+  const open = tasks.filter((t) => !skip(t));
+  if (!open.length) return [];
+  const dead = (id) => !nodes.some((n) => n.id === id) || !!(agents[id] || {}).budgetStop;
+  const leadOf = (id) => (team.edges || [])
+    .filter((e) => (e.type || 'assign') === 'assign' && e.to === id).map((e) => e.from)
+    .find((f) => !dead(f)) || null;
+  const byNode = new Map();
+  // A recipient the plain idle nudge already wakes (a lead with assign reports and open goals) must
+  // not also get a company wake for the same tick — one wake with agency beats two with task lists.
+  const covered = new Set((team.nodes || []).filter((n) => {
+    const reports = (team.edges || []).some((e) => e.from === n.id && (e.type || 'assign') === 'assign');
+    const goals = tasks.some((t) => OPEN(t) && (t.assignee === n.id || t.createdBy === n.id));
+    return reports && goals;
+  }).map((n) => n.id));
+  for (const t of open) {
+    const rid = !dead(t.assignee) ? t.assignee : leadOf(t.assignee);
+    if (!rid || covered.has(rid)) continue;
+    if (!byNode.has(rid)) byNode.set(rid, []);
+    byNode.get(rid).push(t);
+  }
+  const res = [];
+  for (const [nodeId, ts] of byNode) {
+    const list = ts.slice(0, 4).map((t) => `"${String(t.title || t.id).slice(0, 40)}" (${t.status})`).join(', ');
+    res.push({ nodeId, taskIds: ts.map((t) => t.id), kind: 'company', text: `every agent is idle but ${ts.length} open task${ts.length > 1 ? 's' : ''} remain${ts.length > 4 ? ` (e.g. ${list} +${ts.length - 4} more)` : `: ${list}`} — pick yours back up, unblock or reassign it` });
+  }
+  return res;
+}
+
+module.exports = { agentStates, idleNudges, idleCompanyWakes, coreNode };

@@ -220,6 +220,10 @@ class Orchestrator extends EventEmitter {
     this._stallKill = new Map();
     this._stallTimer = setInterval(() => this.sweepStalls(), STALL.SWEEP_MS);
     if (this._stallTimer.unref) this._stallTimer.unref();
+    // Review watchdog state (sweepReviews): per review task, which link of the review chain is current
+    // and how often its reviewer was re-woken (taskId -> {link, wakes, lastWakeAt}). In-memory on
+    // purpose: a restart starts the chain over rather than carrying a stale escalation across boots.
+    this._reviewWatch = new Map();
     // Perf (t_9d92c3d3): snapshot() runs on every changed()/getAll; its file-derived parts
     // (modelStats, timeline, wiki, nodeTeams, logs) are memoized by store file signatures so repeated
     // snapshots with unchanged files cost stats instead of re-reading and re-parsing multi-MB JSON.
@@ -795,14 +799,20 @@ class Orchestrator extends EventEmitter {
     const staleMin = Number(this.store.getSettings().stallTimeoutMin ?? 10);
     const now = Date.now();
     const opts = staleMin > 0 ? { staleMin, now } : {};
-    for (const n of IDLE.idleNudges(this.store.getTeam(), this.store.listTasks(), this.agents, opts)) {
-      // Debounce per kind, keyed by pmId+kind so the two conditions never clobber each other: idle
-      // nudges by their (already distinct) text, stale nudges by the sorted taskIds — a core that
-      // wakes and changes nothing must not be woken again for the same stale set, while a changed
+    const team = this.store.getTeam();
+    const tasks = this.store.listTasks();
+    // Company wake (t_8df2cab6): every agent idle while open work remains — each stuck task's owner
+    // (or their lead) is woken, debounced like the nudges below.
+    const entries = [...IDLE.idleNudges(team, tasks, this.agents, opts), ...IDLE.idleCompanyWakes(team, tasks, this.agents)];
+    for (const n of entries) {
+      // Debounce per kind, keyed by recipient+kind so the conditions never clobber each other: idle
+      // nudges by their (already distinct) text, stale/company nudges by the sorted taskIds — a core
+      // that wakes and changes nothing must not be woken again for the same stale set, while a changed
       // stale set is a new condition even if the wording matches.
       const kind = n.kind || 'idle';
-      const key = kind === 'stale' ? [...n.taskIds].sort().join(',') : n.text;
-      const mk = `${n.pmId}|${kind}`;
+      const rid = n.pmId || n.nodeId;
+      const key = kind === 'idle' ? n.text : [...n.taskIds].sort().join(',');
+      const mk = `${rid}|${kind}`;
       if (this.nudged.get(mk) === key) continue;
       // Nudge wakes respect the per-agent wake anchor (t_cb6663f7): the text-key debounce re-arms
       // whenever the idle set changes — any report flipping busy<->idle — and each "new" nudge would
@@ -811,21 +821,25 @@ class Orchestrator extends EventEmitter {
       // was woken moments ago would still churn. Deferred, not dropped: the key is recorded only when
       // the wake actually fires, so the condition re-fires on a later tick once the interval passes
       // (a newer condition supersedes it meanwhile).
-      const cooldown = (this.wakeLastAt.get(n.pmId) || 0) + WAKE.MIN_GAP_MS - now;
+      const cooldown = (this.wakeLastAt.get(rid) || 0) + WAKE.MIN_GAP_MS - now;
       if (cooldown > 0) {
-        const last = (this.nudgeDeferredLogged ||= new Map()).get(n.pmId) || 0;
+        const last = (this.nudgeDeferredLogged ||= new Map()).get(rid) || 0;
         if (now - last >= WAKE.MIN_GAP_MS) { // one line per gap window
-          this.nudgeDeferredLogged.set(n.pmId, now);
-          this.log(n.pmId, 'system', `nudge deferred for another ${Math.ceil(cooldown / 60000)}min (last wake < ${Math.round(WAKE.MIN_GAP_MS / 60000)}min ago); it re-fires once the interval passes: ${n.text}`);
+          this.nudgeDeferredLogged.set(rid, now);
+          this.log(rid, 'system', `nudge deferred for another ${Math.ceil(cooldown / 60000)}min (last wake < ${Math.round(WAKE.MIN_GAP_MS / 60000)}min ago); it re-fires once the interval passes: ${n.text}`);
         }
         continue;
       }
-      this.nudgeDeferredLogged?.delete(n.pmId);
+      this.nudgeDeferredLogged?.delete(rid);
       this.nudged.set(mk, key);
-      const m = this.store.sendMessage({ from: 'system', to: n.pmId, text: n.text });
-      this.log(n.pmId, 'system', 'nudge: ' + n.text);
-      this.wakeForHuman(n.pmId, [m], { reason: kind === 'stale' ? 'stale tasks' : 'idle reports', taskIds: n.taskIds || [], action: 'wake core' })
-        .catch((e) => this.log(n.pmId, 'error', 'nudge wake: ' + e.message));
+      const m = this.store.sendMessage({ from: 'system', to: rid, text: n.text });
+      this.log(rid, 'system', 'nudge: ' + n.text);
+      this.wakeForHuman(rid, [m], {
+        reason: kind === 'stale' ? 'stale tasks' : kind === 'company' ? 'idle company with open work' : 'idle reports',
+        taskIds: n.taskIds || [],
+        action: kind === 'company' ? 'wake owner' : 'wake core',
+      })
+        .catch((e) => this.log(rid, 'error', 'nudge wake: ' + e.message));
     }
   }
 
@@ -1004,16 +1018,29 @@ class Orchestrator extends EventEmitter {
     this._pushRestartState();
   }
 
+  // The review hand-off chain for a task (t_8df2cab6): first every reviewer with a review edge into
+  // the assignee, then the assignee's lead (first assign edge into the assignee) as the fallback. An
+  // empty chain means ask_human: nobody on the team can review, so the task waits for the human.
+  reviewChain(team, t) {
+    const nodes = team.nodes || [];
+    const revs = outgoing(team, t.assignee, ['review']).map((id) => nodes.find((n) => n.id === id)).filter(Boolean);
+    const seen = new Set(revs.map((n) => n.id));
+    const lead = incoming(team, t.assignee, ['assign']).map((id) => nodes.find((n) => n.id === id)).find((n) => n && !seen.has(n.id));
+    return lead ? [...revs, lead] : revs;
+  }
+
   // Tasks left in review that never got picked back up (their reviewer's process crashed/exited, or
-  // the run stopped mid-way) are dispatched to their reviewer. With no reviewer configured for the
-  // assignee the task STAYS in review: done requires reviewer/owner verification (t_699b67b7), so the
-  // sweep surfaces the stranded task once instead of finishing unreviewed work. Returns the
-  // (possibly stale) tasks in review that DO have a reviewer, ready for dispatch.
+  // the run stopped mid-way) are dispatched to the CURRENT link of their review chain — the review
+  // edge reviewer, or after a watchdog fallback the assignee's lead (sweepReviews advances the link).
+  // With no reviewer at all the task STAYS in review: done requires reviewer/owner verification
+  // (t_699b67b7), so the sweep surfaces the stranded task once instead of finishing unreviewed work.
+  // Returns the (possibly stale) tasks in review that DO have a reviewer, ready for dispatch.
   autoAdvanceReviews(team) {
     const out = [];
     for (const t of this.store.listTasks()) {
       if (t.status !== 'review' || t.awaitingApproval || t.parkedForHuman) continue;
-      const reviewer = outgoing(team, t.assignee, ['review']).map((id) => team.nodes.find((n) => n.id === id)).find(Boolean);
+      const st = this._reviewWatch && this._reviewWatch.get(t.id);
+      const reviewer = this.reviewChain(team, t)[(st && st.link) || 0];
       if (reviewer) { out.push({ task: t, node: reviewer }); continue; }
       (this._noReviewerNoted ||= new Set());
       if (this._noReviewerNoted.has(t.id)) continue;
@@ -1027,6 +1054,69 @@ class Orchestrator extends EventEmitter {
       this.log(t.assignee, 'system', `⏸ "${t.title}" stays in review (no reviewer configured); it will not auto-advance to done`);
     }
     return out;
+  }
+
+  // Review watchdog (t_8df2cab6): a task that has sat in review longer than the stall timeout while
+  // its reviewer idles gets that reviewer re-woken once; a reviewer that stays idle after the re-wake
+  // hands the review to the next link in the chain (lead), and an exhausted chain parks the task for
+  // a human (ask_human). Reviewers busy with a run are left alone — the dispatch sweep hands the task
+  // to them as soon as a slot frees.
+  sweepReviews() {
+    if (!this.running || this.userStopped || this.dispatchPaused) return;
+    // N reuses the stall timeout (no new setting), same anchor the stale-task nudge uses; <=0 disables.
+    const staleMin = Number(this.store.getSettings().stallTimeoutMin ?? 10);
+    if (!(staleMin > 0)) return;
+    const team = this.store.getTeam();
+    const now = Date.now();
+    const all = this.store.listTasks();
+    const seen = new Set();
+    for (const t of all) {
+      if (t.status !== 'review' || t.awaitingApproval || t.parkedForHuman) continue;
+      seen.add(t.id);
+      if (C.isBlocked(t, all)) continue;
+      const st = this._reviewWatch.get(t.id) || { link: 0, wakes: 0, lastWakeAt: 0 };
+      this._reviewWatch.set(t.id, st);
+      const chain = this.reviewChain(team, t);
+      if (st.link >= chain.length) { this._escalateAskHuman(t); continue; }
+      const reviewer = chain[st.link];
+      const a = this.agent(reviewer.id);
+      if (a.status === 'working' || this.procs.has(reviewer.id)) continue;
+      const since = Math.max(new Date(t.updatedAt).getTime(), st.lastWakeAt);
+      if (now - since < staleMin * 60000) continue;
+      const idleMin = Math.max(1, Math.round((now - since) / 60000));
+      if (st.wakes === 0) {
+        // First breach: nudge the reviewer back to the task. Recorded even if the wake run is
+        // refused (slots/budget): the message stays unread and surfaces in the reviewer's next prompt.
+        st.wakes = 1; st.lastWakeAt = now;
+        const m = this.store.sendMessage({ from: 'system', to: reviewer.id, text: `"${t.title}" (id=${t.id}) has been in review for ~${idleMin} min while you were idle. Please review it now: read the task, comment findings, and set its status with update_task_status (done if it passes; todo/review if not).` });
+        this.log(reviewer.id, 'monitor', `waking ${reviewer.name}: review overdue (${idleMin} min in review while idle)`, { reason: 'review overdue', taskIds: [t.id], action: 'wake reviewer' });
+        this.log(reviewer.id, 'system', `⏰ review watchdog: "${t.title}" has sat in review ${idleMin} min with you idle; re-waking you to review it`);
+        this.wakeForHuman(reviewer.id, [m], { reason: 'review overdue', taskIds: [t.id], action: 'wake reviewer' })
+          .catch((e) => this.log(reviewer.id, 'error', 'review wake: ' + e.message));
+      } else if (st.link + 1 < chain.length) {
+        // Already re-woken once and still nothing: the next link takes over the review.
+        const prev = chain[st.link];
+        st.link += 1; st.wakes = 0; st.lastWakeAt = 0; // the fallback comment below re-anchors the window
+        const next = chain[st.link];
+        this.store.commentTask(t.id, 'orchestrator', `Review watchdog: ${prev.name} stayed idle ~${idleMin} min after a re-wake without acting; the review falls back to ${next.name}.`);
+        this.log(next.id, 'system', `⏰ review watchdog: "${t.title}" falls back to ${next.name} for review (${prev.name} idle after a re-wake)`);
+      } else {
+        this._escalateAskHuman(t, idleMin);
+      }
+    }
+    for (const id of [...this._reviewWatch.keys()]) if (!seen.has(id)) this._reviewWatch.delete(id);
+  }
+
+  // Terminal link of the review chain: nobody on the team acted after the fallbacks — a human decides.
+  // Surfaced once per task (the same once-set the no-reviewer path uses).
+  _escalateAskHuman(t, idleMin = 0) {
+    (this._noReviewerNoted ||= new Set());
+    if (this._noReviewerNoted.has(t.id)) return;
+    this._noReviewerNoted.add(t.id);
+    this.store.updateTask(t.id, { status: 'review', awaitingApproval: true });
+    this.store.commentTask(t.id, 'orchestrator', `Review watchdog:${idleMin ? ` the review sat ${idleMin} min past its deadline and ` : ' '}no reviewer acted after the fallbacks — this task now waits for a human. Review it yourself or move it to done.`);
+    this.log(t.assignee, 'system', `⏸ "${t.title}" waits for a human: no reviewer acted after the watchdog fallbacks`);
+    this.notify('Approval needed', `${t.id}: ${t.title}`, { taskId: t.id });
   }
 
   tick() {
@@ -1074,6 +1164,7 @@ class Orchestrator extends EventEmitter {
       if (this.runtimeUnavailableFor(node)) holdLog(t, node, `runtime ${(node.runtime || 'claude')} is unavailable (paused); fix it and resume`);
     }
     try { this.nudgeIdle(); } catch (e) { this.log(null, 'error', 'idle nudge: ' + e.message); }
+    try { this.sweepReviews(); } catch (e) { this.log(null, 'error', 'review watchdog: ' + e.message); }
     try { this.sweepWatch(); } catch (e) { this.log(null, 'error', 'watch sweep: ' + e.message); }
     if (this.procs.size === 0) {
       // UpdateWatcher is draining for a restart: hold the run session open (no dispatches while
