@@ -622,7 +622,7 @@ class Store {
       if (patch.blockedBy !== undefined) t.blockedBy = C.validateDeps(tid, patch.blockedBy, tasks);
       if (patch.status && patch.status !== 'review') t.awaitingApproval = false;
       if (patch.priority !== undefined) t.priority = C.normalizePriority(patch.priority);
-      for (const k of ['title', 'description', 'assignee', 'status', 'sessionId', 'sessions', 'iterations', 'awaitingApproval', 'reopenCount', 'worktreePath', 'worktreeBranch', 'isConflictResolution', 'conflictBranch', 'conflictRetries', 'parkedForHuman', 'stallRecoveries', 'drainCuts', 'redMaster']) if (patch[k] !== undefined) t[k] = patch[k];
+      for (const k of ['title', 'description', 'assignee', 'status', 'sessionId', 'sessions', 'iterations', 'awaitingApproval', 'reopenCount', 'worktreePath', 'worktreeBranch', 'isConflictResolution', 'conflictBranch', 'conflictRetries', 'parkedForHuman', 'stallRecoveries', 'drainCuts', 'redMaster', 'reviewStage', 'reviewWakes', 'reviewWakeAt']) if (patch[k] !== undefined) t[k] = patch[k];
       t.updatedAt = new Date().toISOString();
       // Parent auto-complete: when the last open subtask is done, the parent moves to done.
       for (let c = t; c.status === 'done' && c.parentId;) {
