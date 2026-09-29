@@ -570,7 +570,7 @@ header > strong.brand { display:flex; align-items:center; gap:6px; font-weight:7
 .att-chip .att-spin { width:64px; height:64px; border-radius:var(--radius-xs); background:var(--bg-hover); display:block; flex:none; }
 .att-chip .att-nopic { width:64px; height:64px; border-radius:var(--radius-xs); background:var(--bg-hover); color:var(--fg-muted); font-size:24px; display:flex; align-items:center; justify-content:center; flex:none; }
 .att-chip .att-name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:var(--text-xs); color:var(--fg-primary); }
-.att-chip .att-err { color:var(--danger); font-size:var(--text-xs); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.att-chip .att-err { color:var(--danger); font-size:var(--text-xs); min-width:0; overflow-wrap:anywhere; }
 .att-chip .att-x { border:none; background:none; cursor:pointer; color:var(--fg-muted); font-size:14px; padding:2px 3px; flex:none; }
 .att-chip .att-x:hover { color:var(--danger); }
 .composer.dragover { outline:2px dashed var(--accent); outline-offset:-4px; }
