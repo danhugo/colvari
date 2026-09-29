@@ -607,6 +607,10 @@ rect.usb-rep, i.usb-rep { fill:var(--accent); background:var(--accent); } rect.u
 /* Colvari brand */
 header > strong.brand { display:flex; align-items:center; gap:6px; font-weight:700; letter-spacing:-.02em; color:var(--fg-primary); }
 @media (max-width:1200px) { header > strong.brand { display:none; } }
+/* macOS hiddenInset draws the traffic lights over the page's top-left (~x 12-70) — inset the
+   header content clear of them so the brand never collides with the window controls
+   (Vex audit t_9399168c → t_56896946). Other platforms have no overlay controls there. */
+:root[data-platform="mac"] header { padding-left:78px; }
 .brandmark { width:20px; height:20px; color:var(--accent-text); } .brandmark.big { width:40px; height:40px; display:block; margin:0 auto 8px; }
 
 /* Composer attachments (t_993822cf): chips with 64px lazy thumbnails, drop highlight, bubble thumbs. */
