@@ -156,11 +156,31 @@ class UpdateWatcher extends EventEmitter {
     this.tick(true).catch((e) => this._abort(e.message));
   }
 
+  // Scheduled restart (orchestrator, plan t_42f310cf item 1): a core/human/cap-armed schedule came
+  // due. The schedule itself is the decision, so — like restartNow — this bypasses the restart
+  // guards AND the auto-restart setting; the flow still runs its full safety sequence (drain,
+  // tests on the target sha, relaunch, boot resume). Returns false when a flow is already running.
+  restartScheduled(reason) {
+    if (this.phase !== 'idle' || this._busy) return false;
+    this._log('system', `self-update: scheduled restart requested (${reason})`);
+    this.tick(true, reason).catch((e) => this._abort(e.message));
+    return true;
+  }
+
+  // Cancel a running restart flow (the pill's "Cancel schedule" while the veil is up): abort back
+  // to idle — the setPaused callback unpauses dispatch and re-ticks. Not running: no-op.
+  cancel() {
+    if (this.phase === 'idle') return;
+    this._abort('cancelled by the user');
+  }
+
   // One poll. Consumes a PM request_self_update file (if any) and starts the flow when there is
   // something to update, auto-restart is on, and the restart guards allow it. An update blocked by
   // a restart guard is deferred (keeping the from-sha captured when the commits were first seen)
   // and retried on later polls once the guard clears — skipping must not consume the commit.
-  async tick(force = false) {
+  // force (manual/scheduled restart) bypasses the new-commits check, the guards and the
+  // auto-restart setting: an explicit restart request is itself the decision to restart.
+  async tick(force = false, reasonOverride = null) {
     if (this.phase !== 'idle' || this._busy) return;
     this.lastCheckAt = new Date().toISOString();
     const req = readJson(requestFile(this.store.dir), null);
@@ -174,8 +194,8 @@ class UpdateWatcher extends EventEmitter {
     const keepDefer = !isNew && !!this._deferred && this._deferred.sha === s.to;
     this._seenSha = s.to;
     if (!isNew && !keepDefer && !req && !force) { this.emitStatus(); return; }
-    const reason = (req && req.reason) || (keepDefer && this._deferred.reason) || `new commits on ${this.baseBranch()}`;
-    if (!this.autoRestart()) {
+    const reason = reasonOverride || (req && req.reason) || (keepDefer && this._deferred.reason) || `new commits on ${this.baseBranch()}`;
+    if (!this.autoRestart() && !force) {
       if (req) this._log('system', `self-update requested (${reason}) but auto-restart is off; ignoring.`);
       this.emitStatus(); return;
     }
@@ -239,6 +259,7 @@ class UpdateWatcher extends EventEmitter {
       // report the shape (tests, custom wiring) proceeds, as before.
       let halted = false;
       while (this.procCount() > 0) {
+        if (this.phase === 'idle') return; // aborted mid-drain (cancel): stop waiting, relaunch nothing
         if (!halted && deadline != null && this.now() >= deadline) {
           halted = true;
           this._log('system', `self-update: drain grace (${Math.round(drainMs / 60000)}min) over with ${this.procCount()} run(s) still active; stopping the runs not already cut once — their tasks resume after the restart. Tasks already cut once keep running and the drain waits for them.`);
@@ -254,6 +275,7 @@ class UpdateWatcher extends EventEmitter {
       }
       this.drainEndsAt = null;
       this.waitingOn = 0; this.emitStatus();
+      if (this.phase === 'idle') return; // aborted while draining with nothing left to wait for
       // Commits that landed while the drain waited coalesce into THIS restart: the freeze was
       // already paid once, so re-resolve the target instead of restarting onto a stale sha.
       const latest = this.shas();
