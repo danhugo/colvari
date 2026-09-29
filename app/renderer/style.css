@@ -79,6 +79,8 @@ table { border-collapse:collapse; background:var(--card); } td, th { border:1px 
 #graph .ctxbar-bg { fill:var(--line); } #graph .ctxbar-fill.ctx-ok { fill:var(--ok); } #graph .ctxbar-fill.ctx-warn { fill:var(--warn); } #graph .ctxbar-fill.ctx-danger { fill:var(--danger); }
 #graph .ctxpct { font-size:9.5px; font-family:var(--font-mono); fill:var(--fg-secondary); } #graph .ctxpct.ctx-warn { fill:var(--warn); } #graph .ctxpct.ctx-danger { fill:var(--danger); font-weight:600; } #graph .ctxpct.ctx-unknown { fill:var(--fg-muted); }
 #graph .compactbadge rect { fill:var(--acc); } #graph .compactbadge text { fill:var(--fg-on-accent); font-weight:600; }
+#graph .corelock rect { fill:var(--acc); } #graph .corelock text { fill:var(--fg-on-accent); font-weight:600; } #graph .corelock { pointer-events:all; }
+#graph .chip-recruited rect { fill:var(--accent-soft); stroke:var(--accent); } #graph .chip-recruited text { fill:var(--accent); font-weight:var(--fw-semibold); }
 .logrow.lv-compact, .loglevel.lv-compact { color:var(--acc); } .logrow.lv-compact .logtext { font-weight:600; }
 .pill.pf-pass { background:var(--ok); color:var(--fg-on-accent); border-color:var(--ok); } .pill.pf-fail { background:var(--danger); color:var(--fg-on-accent); border-color:var(--danger); }
 .pill.pf-stale, .pill.pf-testing { color:var(--warn); border-color:var(--warn); } .pill.pf-untested { color:var(--muted); } #pf-summary:empty { display:none; }

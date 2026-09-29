@@ -1192,6 +1192,53 @@ async function guiE2E() {
     await shot('34-subagents-chat');
     console.log('[gui-e2e] subagents', JSON.stringify({ blocks, expand, counts, ovb, chat }));
   };
+  // Dynamic team GUI (t_2054825d): core toggle in the node form, lock badge + recruited chip on the graph, maxAgents/teamChangeApproval settings.
+  const dynamicTeamShots = async () => {
+    // refresh BEFORE the first tab click: a click renders the settings form, and empty S.settings
+    // would trip the unguarded maxConcurrency/maxRuns number inputs ("cannot be parsed" warnings).
+    await ex(`await refresh(); $('#tabs button[data-tab=team]').click(); await w(300); await refresh();`);
+    const cur = await ex(`return { p: ctx.p, t: S.teamId }`);
+    const ps = pm.store(cur.p, cur.t); const psettings = pm.store(cur.p);
+    if (ps.getTeam().nodes.length < 3) { ps.addNode({ name: 'Corey', role: 'PM', x: 60, y: 60 }); ps.addNode({ name: 'Recruit A', role: 'Dev', x: 340, y: 60 }); ps.addNode({ name: 'Recruit B', role: 'Critic', x: 340, y: 200 }); }
+    const team = ps.getTeam(); const corey = team.nodes.find((n) => n.name === 'Corey'); const ra = team.nodes.find((n) => n.name === 'Recruit A'); const rb = team.nodes.find((n) => n.name === 'Recruit B');
+    await ex(`await refresh(); await w(400);`);
+    const cores = () => ps.getTeam().nodes.filter((n) => n.core);
+    const waitForStore = async (fn, ms = 8000) => { for (let t = 0; t < ms; t += 200) { if (fn(ps.getTeam(), psettings.getSettings())) return true; await new Promise((r) => setTimeout(r, 200)); } return false; };
+    // Core toggle through the node form: check, save, exactly one core in the team, lock badge on the graph.
+    await ex(`selectNode('${corey.id}'); await w(300);`);
+    const boxBefore = await ex(`return { present: !!$('#nf-core'), checked: $('#nf-core') ? $('#nf-core').checked : null }`);
+    expect('core toggle present and unchecked for a fresh node', boxBefore.present && boxBefore.checked === false, boxBefore);
+    await ex(`$('#nf-core').checked = true; $('#nf-save').click(); await w(600);`);
+    expect('setting core saves core:true on the node', await waitForStore((t) => cores().length === 1 && cores()[0].id === corey.id), cores().map((n) => n.id));
+    const lockOn = await ex(`return { core: !!document.querySelector('#graph .node[data-id="${corey.id}"] .corelock'), total: document.querySelectorAll('#graph .corelock').length }`);
+    expect('lock badge shows on the core node only', lockOn.core && lockOn.total === 1, lockOn);
+    // The form opens pre-checked for the core node; unchecking clears core (zero cores is safe, two are not).
+    await ex(`selectNode('${corey.id}'); await w(300);`);
+    const boxAfter = await ex(`return $('#nf-core') ? $('#nf-core').checked : null`);
+    expect('form opens with the core box checked for the core node', boxAfter === true, boxAfter);
+    await ex(`$('#nf-core').checked = false; $('#nf-save').click(); await w(600);`);
+    expect('unchecking core saves core:false', await waitForStore((t) => !cores().length), cores().length);
+    expect('lock badge gone when core is off', await ex(`return document.querySelectorAll('#graph .corelock').length`) === 0);
+    await ex(`selectNode('${corey.id}'); await w(200); $('#nf-core').checked = true; $('#nf-save').click(); await w(600);`);
+    expect('core re-enabled for the screenshots', await waitForStore((t) => cores().length === 1 && cores()[0].id === corey.id));
+    // Recruited chip: nodes with createdBy (set the way recruit_agent does), not on the core or plain nodes.
+    ps.updateNode(ra.id, { createdBy: corey.id });
+    await ex(`await refresh(); await w(400);`);
+    const chips = await ex(`return { a: !!document.querySelector('#graph .node[data-id="${ra.id}"] .chip-recruited'), b: !!document.querySelector('#graph .node[data-id="${rb.id}"] .chip-recruited'), core: !!document.querySelector('#graph .node[data-id="${corey.id}"] .chip-recruited') }`);
+    expect('recruited chip on the createdBy node only', chips.a && !chips.b && !chips.core, chips);
+    await shot('36-dynamicteam-graph');
+    // Settings: defaults 6/ask, saved values persist and re-render.
+    await ex(`$('#tabs button[data-tab=settings]').click(); await w(300);`);
+    const defaults = await ex(`return { maxAgents: $('#st-maxagents') ? $('#st-maxagents').value : null, approval: $('#st-tcappr') ? $('#st-tcappr').value : null }`);
+    expect('settings default maxAgents=6 and teamChangeApproval=ask', defaults.maxAgents === '6' && defaults.approval === 'ask', defaults);
+    await ex(`$('#st-maxagents').value = '8'; $('#st-tcappr').value = 'auto'; $('#st-save').click(); await w(600);`);
+    expect('settings save maxAgents=8 and teamChangeApproval=auto', await waitForStore((t, s) => s.maxAgents === 8 && s.teamChangeApproval === 'auto'), psettings.getSettings());
+    await ex(`await refresh(); await w(300);`);
+    const saved = await ex(`return { maxAgents: $('#st-maxagents').value, approval: $('#st-tcappr').value }`);
+    expect('settings fields re-render the saved values', saved.maxAgents === '8' && saved.approval === 'auto', saved);
+    await shot('37-dynamicteam-settings');
+    console.log('[gui-e2e] dynamicteam', JSON.stringify({ cores: cores().map((n) => n.id), createdBy: ps.getTeam().nodes.find((n) => n.id === ra.id).createdBy, settings: { maxAgents: psettings.getSettings().maxAgents, teamChangeApproval: psettings.getSettings().teamChangeApproval } }));
+  };
   try {
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'helpycode') { await helpycodeShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'wikilogs') { await wikiLogsShots(); throw null; }
@@ -1213,6 +1260,7 @@ async function guiE2E() {
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'critique') { await critiqueShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'wake') { await wakeShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'subagents') { await subagentShots(); throw null; }
+    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'dynamicteam') { await dynamicTeamShots(); throw null; }
     // project/team management through the UI: create a project from the Startup template, then a Solo team, then switch back.
     // Wait until the template select is filled (the first refresh loads the templates) before choosing one.
     await ex(`$('#tabs button[data-tab=team]').click(); await w(300);`); // Chat is the default tab; the flow below clicks the graph
