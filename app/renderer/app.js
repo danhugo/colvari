@@ -1887,26 +1887,35 @@ $('#us-clear').onclick = act(async () => { if (!confirm('Clear the usage history
 function renderSettings() {
   const s = S.settings;
   const tplCur = $('#tpl-select') ? $('#tpl-select').value : '';
-  $('#settingsform').innerHTML = `<h3>Settings</h3><p class="muted">Project data: ${esc(S.dir)}</p>
-    <label>Template for new project/team</label><select id="tpl-select">${Object.entries(P.templates).map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join('')}</select>
-    <label>Claude CLI path</label><input id="st-claude" value="${esc(s.claudePath)}">
-    <label>Max concurrent agents</label><input id="st-conc" type="number" min="1" max="8" value="${s.maxConcurrency}">
-    <label>Max agent runs per Run (safety cap)</label><input id="st-runs" type="number" min="1" value="${s.maxRuns}">
-    <label>Max agents per team <span class="muted">(core agent recruit limit)</span></label><input id="st-maxagents" type="number" min="1" value="${s.maxAgents ?? 6}">
-    <label>Core team changes <span class="muted">(recruit / retire / update — ask the human first, or apply automatically)</span></label><select id="st-tcappr">${['ask', 'auto'].map((m) => `<option ${m === (s.teamChangeApproval ?? 'ask') ? 'selected' : ''}>${m}</option>`).join('')}</select>
-    <label>Default permission mode (agents can override)</label><select id="st-perm">${['bypassPermissions', 'acceptEdits', 'default', 'plan'].map((m) => `<option ${m === s.permissionMode ? 'selected' : ''}>${m}</option>`).join('')}</select>
-    <label>Project budget per Run, $ <span class="muted">(stops all agents; 0 = none)</span></label><input id="st-budgetusd" type="number" min="0" step="0.01" value="${s.budgetUsd || 0}">
-    <label>Project token budget per Run <span class="muted">(input + output; 0 = none)</span></label><input id="st-budgettok" type="number" min="0" step="1000" value="${s.budgetTokens || 0}">
-    <label>Stuck warning after N minutes without output</label><input id="st-stuck" type="number" min="1" value="${s.stuckMinutes || 5}">
-    <label>Stall timeout — stop + auto-resume a silent run after N minutes <span class="muted">(max 2 recoveries, then the task is marked recovery failed)</span></label><input id="st-stall" type="number" min="1" value="${s.stallTimeoutMin ?? 10}">
-    <label>Auto-compact at % <span class="muted">(context usage that triggers /compact; 0 = off)</span></label><input id="st-autocompactpct" type="number" min="0" max="95" value="${s.autoCompactPct ?? 40}">
-    <label class="inline"><input type="checkbox" id="st-approval" ${s.requireApproval ? 'checked' : ''}> Require human approval for every agent's "done"</label>
-    <label class="inline"><input type="checkbox" id="st-notify" ${s.notifications === false ? '' : 'checked'}> Desktop notifications (approval needed, budget reached, run finished)</label>
-    <p><button id="st-save" class="primary">Save settings</button></p>
-    ${upd.devMode === false ? '' : `<hr><h3>App updates</h3>
+  $('#settingsform').innerHTML = `<h3 class="set-pagetitle">Settings</h3>
+    <div class="set-path"><span>Project data</span><code title="${esc(S.dir)}">${esc(S.dir)}</code><button id="st-copydir" title="Copy path">Copy</button></div>
+    <section class="set-sec"><h3>Runtime</h3><div class="set-rows">
+    <div class="set-row stack"><div class="set-lab"><label for="st-claude">Claude CLI path</label><p class="set-hint">Binary used to launch agents. Leave as-is unless your CLI lives outside PATH.</p></div><input id="st-claude" value="${esc(s.claudePath)}"></div>
+    <div class="set-row"><div class="set-lab"><label for="tpl-select">Template for new project / team</label></div><div class="set-ctl"><select id="tpl-select">${Object.entries(P.templates).map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join('')}</select></div></div>
+    <div class="set-row"><div class="set-lab"><label for="st-perm">Default permission mode</label><p class="set-hint">Agents can override this per node.</p></div><div class="set-ctl"><select id="st-perm">${['bypassPermissions', 'acceptEdits', 'default', 'plan'].map((m) => `<option ${m === s.permissionMode ? 'selected' : ''}>${m}</option>`).join('')}</select></div></div>
+    </div></section>
+    <section class="set-sec"><h3>Limits &amp; budgets</h3><div class="set-rows">
+    <div class="set-row"><div class="set-lab"><label for="st-conc">Max concurrent agents</label><p class="set-hint">How many agents may run at the same time.</p></div><div class="set-num"><input id="st-conc" type="number" min="1" max="8" value="${s.maxConcurrency}"><span class="set-unit">agents</span></div></div>
+    <div class="set-row"><div class="set-lab"><label for="st-maxagents">Max agents per team</label><p class="set-hint">Core agent recruit limit.</p></div><div class="set-num"><input id="st-maxagents" type="number" min="1" value="${s.maxAgents ?? 6}"><span class="set-unit">agents</span></div></div>
+    <div class="set-row"><div class="set-lab"><label for="st-runs">Max agent runs per Run</label><p class="set-hint">Safety cap for the scheduler.</p></div><div class="set-num"><input id="st-runs" type="number" min="1" value="${s.maxRuns}"><span class="set-unit">runs</span></div></div>
+    <div class="set-row"><div class="set-lab"><label for="st-budgetusd">Project budget per Run</label><p class="set-hint">Stops all agents when reached. 0 = no limit.</p></div><div class="set-num"><span class="set-unit">$</span><input id="st-budgetusd" type="number" min="0" step="0.01" value="${s.budgetUsd || 0}"></div></div>
+    <div class="set-row"><div class="set-lab"><label for="st-budgettok">Project token budget per Run</label><p class="set-hint">Input + output. 0 = no limit.</p></div><div class="set-num"><input id="st-budgettok" type="number" min="0" step="1000" value="${s.budgetTokens || 0}"><span class="set-unit">tokens</span></div></div>
+    <div class="set-row"><div class="set-lab"><label for="st-autocompactpct">Auto-compact at</label><p class="set-hint">Context usage that triggers /compact. 0 = off.</p></div><div class="set-num"><input id="st-autocompactpct" type="number" min="0" max="95" value="${s.autoCompactPct ?? 40}"><span class="set-unit">%</span></div></div>
+    </div></section>
+    <section class="set-sec"><h3>Recovery</h3><div class="set-rows">
+    <div class="set-row"><div class="set-lab"><label for="st-stuck">Stuck warning after</label><p class="set-hint">Flag a run that has been silent this long.</p></div><div class="set-num"><input id="st-stuck" type="number" min="1" value="${s.stuckMinutes || 5}"><span class="set-unit">min</span></div></div>
+    <div class="set-row"><div class="set-lab"><label for="st-stall">Stall timeout</label><p class="set-hint">Stop + auto-resume a silent run. Max 2 recoveries, then the task is marked recovery failed.</p></div><div class="set-num"><input id="st-stall" type="number" min="1" value="${s.stallTimeoutMin ?? 10}"><span class="set-unit">min</span></div></div>
+    </div></section>
+    <section class="set-sec"><h3>Approvals</h3><div class="set-rows">
+    <div class="set-row"><div class="set-lab"><label>Require approval for every agent's "done"</label><p class="set-hint">A human confirms before a task counts as done.</p></div><div class="set-ctl"><input type="checkbox" id="st-approval" ${s.requireApproval ? 'checked' : ''}></div></div>
+    <div class="set-row"><div class="set-lab"><label for="st-tcappr">Core team changes</label><p class="set-hint">Recruit / retire / update — ask the human first, or apply automatically.</p></div><div class="set-ctl"><select id="st-tcappr">${['ask', 'auto'].map((m) => `<option ${m === (s.teamChangeApproval ?? 'ask') ? 'selected' : ''}>${m}</option>`).join('')}</select></div></div>
+    <div class="set-row"><div class="set-lab"><label>Desktop notifications</label><p class="set-hint">Approval needed, budget reached, run finished.</p></div><div class="set-ctl"><input type="checkbox" id="st-notify" ${s.notifications === false ? '' : 'checked'}></div></div>
+    </div></section>
+    <p class="set-actions"><button id="st-save" class="primary">Save settings</button></p>
+    ${upd.devMode === false ? '' : `<hr><section class="set-sec"><h3>App updates</h3>
     <label class="inline"><input type="checkbox" id="st-autorestart" ${upd.enabled ? 'checked' : ''}> Auto-restart on new merged code</label>
     <p class="muted">When new commits land on this app's base branch: pause the scheduler, wait for running agents to finish, test the new code, then relaunch and resume the run. Failed tests cancel the restart.</p>
-    <div id="upd-history"></div>`}
+    <div id="upd-history"></div></section>`}
     <h3>Role presets (this project)</h3><p class="muted">Presets appear as role suggestions. A new agent whose role matches a preset gets its prompt, tools and permission mode.</p>
     <table id="presettable"><tr><th>Name</th><th>Permission</th><th>Allowed</th><th>Disallowed</th><th></th></tr>${(s.rolePresets || []).map((p) => `<tr><td>${esc(p.name)}</td><td>${esc(p.permissionMode || 'default')}</td><td>${esc(p.allowedTools.join(', '))}</td><td>${esc(p.disallowedTools.join(', '))}</td><td><button data-editp="${esc(p.name)}">Edit</button><button data-delp="${esc(p.name)}">Delete</button></td></tr>`).join('')}</table>
     <div id="presetform"><label>Name</label><input id="pr-name"><label>Default system prompt</label><textarea id="pr-prompt" rows="3"></textarea>
@@ -1915,6 +1924,10 @@ function renderSettings() {
     <p><button id="pr-save">Save preset</button></p></div>
     <hr>${renderRuntimesSection()}`;
   const ts = $('#tpl-select'); if (ts && tplCur) ts.value = tplCur;
+  $('#st-copydir').onclick = async () => {
+    try { await navigator.clipboard.writeText(S.dir); } catch { const t = document.createElement('textarea'); t.value = S.dir; document.body.appendChild(t); t.select(); document.execCommand('copy'); t.remove(); }
+    $('#st-copydir').textContent = 'Copied'; setTimeout(() => { const b = $('#st-copydir'); if (b) b.textContent = 'Copy'; }, 1200);
+  };
   wireRuntimesSection(); wireDraftForm();
   document.querySelectorAll('[data-delp]').forEach((b) => b.onclick = act(async () => { await call('deletePreset', b.dataset.delp); refresh(); }));
   document.querySelectorAll('[data-editp]').forEach((b) => b.onclick = () => { const p = s.rolePresets.find((x) => x.name === b.dataset.editp); $('#pr-name').value = p.name; $('#pr-prompt').value = p.systemPrompt; $('#pr-allowed').value = p.allowedTools.join(', '); $('#pr-disallowed').value = p.disallowedTools.join(', '); $('#pr-perm').value = p.permissionMode; });
