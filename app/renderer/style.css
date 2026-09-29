@@ -769,12 +769,17 @@ header > strong.brand { display:flex; align-items:center; gap:6px; font-weight:7
 
 /* ===== t_db67859d: top bar = context + actions; single homes for Inbox/Settings; goal composer ===== */
 header { position:relative; }
-.sb-inbox .navicon, #settingsbtn .navicon, #chat-attach .navicon { width:14px; height:14px; flex:0 0 auto; stroke:currentColor; fill:none; stroke-width:1.6; stroke-linecap:round; stroke-linejoin:round; }
+.sb-inbox .navicon, #settingsbtn .navicon, #chat-attach .navicon, #themebtn .navicon { width:14px; height:14px; flex:0 0 auto; stroke:currentColor; fill:none; stroke-width:1.6; stroke-linecap:round; stroke-linejoin:round; }
 /* Settings: icon button at the header's right edge (config, not navigation — Linear/Slack pattern). */
 #settingsbtn { width:28px; height:26px; padding:0; display:inline-flex; align-items:center; justify-content:center; color:var(--fg-secondary); }
 #settingsbtn:hover { background:var(--bg-hover); color:var(--fg-primary); }
 #settingsbtn.active { color:var(--accent-text); background:var(--accent-soft); }
 #settingsbtn:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
+/* Theme toggle: same chrome as the settings gear. Without a sized box + svg rule the
+   unsized svg collapsed/clipped and the glyph was invisible in dark mode (t_7403c2cc). */
+#themebtn { width:28px; height:26px; padding:0; display:inline-flex; align-items:center; justify-content:center; color:var(--fg-secondary); }
+#themebtn:hover { background:var(--bg-hover); color:var(--fg-primary); }
+#themebtn:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
 /* Stop is only worth a slot in the bar while something is running (⌘. always works). */
 header #stop { color:var(--danger); border-color:color-mix(in srgb, var(--danger) 45%, transparent); }
 header #stop:hover { background:var(--danger-soft); color:var(--danger); }
@@ -866,11 +871,13 @@ button, .pchip, .tag, .badge, .pill, .avatar, .cchip summary, .lvchip, .asswitch
 .wk-toolbar #wk-new { background: transparent; border-color: transparent; color: var(--fg-muted); font-weight: var(--fw-medium); box-shadow: none; }
 .wk-toolbar #wk-new:hover { background: var(--bg-hover); color: var(--fg-primary); }
 
-/* Node status states (Overview + Team graphs): idle mutes the disc, working gets a pulsing
-   success ring, stuck gets a warning ring; lead agents wear a star on the disc edge. */
+/* Node status states (Overview + Team graphs): idle is a HOLLOW disc — a ring in the agent's
+   team hue, no fill, full opacity — so "not working" reads at a glance and stays legible on
+   dark (the old 42–50% opacity dimming all but vanished there). Working keeps a solid disc
+   with a pulsing success ring; stuck gets a warning ring. --av carries the hue from markup. */
 #ov-graph .node .avatar, #graph .node .avatar { transition: opacity var(--dur-base) var(--ease-out); }
-#ov-graph .node:not(.working):not(.stuck) .avatar, #graph .node:not(.working):not(.stuck):not(.sel) .avatar { opacity: .5; filter: grayscale(.92); }
-#graph .node.st-idle .avatar { filter: grayscale(.92); }
+#ov-graph .node.st-idle:not(.stuck) .avatar, #graph .node.st-idle:not(.sel):not(.stuck) .avatar { fill: none !important; stroke: var(--av, var(--fg-muted)); stroke-width: 2.5; filter: none; opacity: 1; }
+#ov-graph .node.st-idle:not(.stuck) .avtext, #graph .node.st-idle:not(.stuck) .avtext { fill: var(--fg-secondary); opacity: 1; }
 #ov-graph .node.stuck .avatar, #graph .node.stuck .avatar { opacity: 1; stroke: var(--warning); stroke-width: 2.5; }
 #ov-graph .node.working .avatar, #graph .node.working .avatar { stroke: var(--success); stroke-width: 2.5; animation: avpulse 2.2s var(--ease-out) infinite; }
 @keyframes avpulse { 0%, 100% { stroke-opacity: 1; } 50% { stroke-opacity: .4; } }
@@ -892,7 +899,6 @@ button, .pchip, .tag, .badge, .pill, .avatar, .cchip summary, .lvchip, .asswitch
 /* Team graph: working vs idle readable without hover; cluster cards */
 #graph .node.st-working .card { fill:var(--success-soft); stroke:var(--success); }
 #graph .node.st-idle:not(.sel) .card { fill:var(--bg-app); stroke-dasharray:none; }
-#graph .node.st-idle .avatar, #graph .node.st-idle .stripe, #graph .node.st-idle .avtext { opacity:.5; }
 #graph .node.st-idle .nname { fill:var(--fg-secondary); }
 #graph .stpill rect { fill:var(--bg-hover); stroke:var(--border-strong); stroke-width:1; } #graph .stpill text { fill:var(--fg-secondary); font-size:11px; font-weight:var(--fw-semibold); }
 #graph .stpill.sp-working rect { fill:var(--success); stroke:none; } #graph .stpill.sp-working text { fill:#fff; }
