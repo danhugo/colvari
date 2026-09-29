@@ -403,6 +403,8 @@ header .pill { border:none; background:none; color:var(--fg-muted); font-size:va
 #graph .chip-em rect { fill:var(--accent-soft); stroke:var(--accent); } #graph .chip-em text { fill:var(--accent); font-weight:var(--fw-semibold); }
 #graph .chip-em.chip-default rect { fill:var(--bg-code); stroke:var(--border); } #graph .chip-em.chip-default text { fill:var(--fg-secondary); font-weight:var(--fw-normal, normal); }
 #graph .chip-usage rect { fill:var(--bg); stroke:var(--border); stroke-dasharray:2,2; } #graph .chip-usage text { fill:var(--fg-muted); }
+#graph .chip-load rect { fill:var(--accent-soft); stroke:var(--accent); } #graph .chip-load text { fill:var(--accent); font-weight:var(--fw-semibold); }
+#graph .chip-idle rect { fill:var(--bg); stroke:var(--border); stroke-dasharray:2,2; } #graph .chip-idle text { fill:var(--fg-muted); font-style:italic; }
 #runtimetable { width:100%; border-collapse:collapse; margin:8px 0; } #runtimetable th, #runtimetable td { text-align:left; padding:4px 8px; border-bottom:1px solid var(--line); font-size:12px; }
 #rt-draft fieldset { margin-top:10px; }
 /* Runtime draft provenance: per-field source badges (help/probe/agent/fallback/edited), amber

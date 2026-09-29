@@ -753,15 +753,20 @@ function zoomAt(f, cx, cy) {
   const z = Math.min(2.5, Math.max(0.25, VP.zoom * f)); const [wx, wy] = toWorld(cx, cy);
   VP = { zoom: z, x: cx - r.left - wx * z, y: cy - r.top - wy * z }; applyVP(); saveVP();
 }
-function graphBox(nodes) {
+function graphBox(nodes, withEdges = false) {
   if (!nodes.length) return { x: 0, y: 0, w: 400, h: 300 };
-  const xs = nodes.map((n) => n.x), ys = nodes.map((n) => n.y); const x = Math.min(...xs), y = Math.min(...ys);
-  return { x, y, w: Math.max(...xs) + W - x, h: Math.max(...ys) + H - y };
+  const xs = nodes.map((n) => n.x), ys = nodes.map((n) => n.y);
+  let x0 = Math.min(...xs), y0 = Math.min(...ys), x1 = Math.max(...xs) + W, y1 = Math.max(...ys) + H;
+  if (withEdges && edgeLayout && nodes.length > 1) for (const it of edgeLayout.per) { // edge routes (detours, dashed cross-team lines) count toward the fit box
+    const nums = (it.geo.d.match(/-?\d+(?:\.\d+)?/g) || []).map(Number);
+    for (let i = 0; i + 1 < nums.length; i += 2) { x0 = Math.min(x0, nums[i] - 8); x1 = Math.max(x1, nums[i] + 8); y0 = Math.min(y0, nums[i + 1] - 8); y1 = Math.max(y1, nums[i + 1] + 8); }
+  }
+  return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
 }
 let vpCount = 0, edgeLayout = null; // per-render edge geometry + DOM refs; patched in place by dragEdges during node drags
-function fitIfClipped() { const r = $('#graph').getBoundingClientRect(); const b = graphBox(allGraphNodes()); if (r.width && (b.x * VP.zoom + VP.x < 0 || b.y * VP.zoom + VP.y < 0 || (b.x + b.w) * VP.zoom + VP.x > r.width || (b.y + b.h) * VP.zoom + VP.y > r.height)) fitView(); }
+function fitIfClipped() { const r = $('#graph').getBoundingClientRect(); const b = graphBox(allGraphNodes(), true); if (r.width && (b.x * VP.zoom + VP.x < 0 || b.y * VP.zoom + VP.y < 0 || (b.x + b.w) * VP.zoom + VP.x > r.width || (b.y + b.h) * VP.zoom + VP.y > r.height)) fitView(); }
 function fitView() {
-  const r = $('#graph').getBoundingClientRect(); const b = graphBox(allGraphNodes()); const pad = 48;
+  const r = $('#graph').getBoundingClientRect(); const b = graphBox(allGraphNodes(), true); const pad = 48;
   const z = Math.min(1, Math.max(0.25, Math.min((r.width - pad * 2) / b.w, (r.height - pad * 2) / b.h)));
   VP = { zoom: z, x: (r.width - b.w * z) / 2 - b.x * z, y: (r.height - b.h * z) / 2 - b.y * z }; applyVP(); saveVP();
 }
@@ -893,8 +898,10 @@ function renderGraph() {
   const edges = GV.edges;
   const pairN = {}, pairI = {}; const pk = (e) => [e.from, e.to].sort().join('|'); edges.forEach((e) => { pairN[pk(e)] = (pairN[pk(e)] || 0) + 1; });
   const srcN = {}, srcI = {}; edges.forEach((e) => { srcN[e.from] = (srcN[e.from] || 0) + 1; });
-  const blocks = nodes.map((n) => ({ x: n.x - 4, y: n.y - 4, w: W + 8, h: H + 8 })); const pills = [];
-  edgeLayout = { nodes, blocks, per: [] };
+   const blocks = nodes.map((n) => ({ x: n.x - 4, y: n.y - 4, w: W + 8, h: H + 8 })); const pills = [];
+   // open (non-done) task count per assignee — surfaces routing skew on the node cards
+   const openCnt = {}; for (const t of (S.tasks || [])) if (t.status !== 'done' && t.assignee) openCnt[t.assignee] = (openCnt[t.assignee] || 0) + 1;
+   edgeLayout = { nodes, blocks, per: [] };
   for (const e of edges) {
     const a = byId[e.from], b = byId[e.to]; if (!a || !b) continue;
     const key = pk(e); const i = (pairI[key] = (pairI[key] ?? -1) + 1); const cnt = pairN[key];
@@ -949,6 +956,7 @@ function renderGraph() {
     const sb = sub.count ? subBadgeInfo(sub) : null;
     let cx = 12, cy = 46;
     const putChip = (text, max, cls, title) => { const t = clipText(text, max); const w = 10 + t.length * 5.6; const lim = cy === 46 && sb ? W - sb.w - 12 : W - 10; if (cx + w > lim && cx > 12) { cx = 12; cy = 62; } const cg = el('g', { class: cls, transform: `translate(${cx},${cy})` }, g); if (title) el('title', {}, cg).textContent = title; el('rect', { width: w, height: 14, rx: 7 }, cg); el('text', { x: w / 2, y: 10.5, 'text-anchor': 'middle' }, cg).textContent = t; cx += w + 4; };
+    if (VP.zoom >= 0.6) { const oc = openCnt[n.id] || 0; if (oc) putChip(`${oc} open`, 12, 'chip chip-load', `${oc} open task${oc === 1 ? '' : 's'} assigned to ${n.name}`); else putChip('idle', 6, 'chip chip-idle', `${n.name} has no open tasks`); }
     if (VP.zoom >= 0.6) for (const chip of [runtimeLabel(rtId), ns.model || n.model || 'default'].filter(Boolean)) putChip(chip, 14, 'chip');
     if (VP.zoom >= 0.6 && rtId !== 'claude') { const rows = ((S.orch.ledger || {}).byAgent || {})[n.name] || []; const cost = rows.reduce((c, r) => c + (r.costUsd || 0), 0);
       putChip(rows.length ? `$${cost.toFixed(2)} · ${rows.length} key${rows.length === 1 ? '' : 's'}` : 'no usage', 20, 'chip chip-usage', rows.length ? `${runtimeLabel(rtId)} usage, per model key (tokens are never summed across models): ${rows.map((r) => `${r.model}: ${r.runs} run(s) · ${r.costUsd != null ? '$' + r.costUsd.toFixed(4) + (r.costSource === 'estimated' ? ' est' : '') : 'cost —'}`).join(' · ')}` : `${runtimeLabel(rtId)} has no recorded usage yet`); }
@@ -985,7 +993,7 @@ function renderGraph() {
     else if (pu) drawRtuBadge(g, pu);
     else { const wk = wakeRun(n.id); if (wk) drawWakeBadge(g, wk, () => openWakeTask(wk.taskId)); else { const wp = wakePending(n.id); if (wp) drawPendingBadge(g, wp); } }
     drawSubBadge(g, S.orch.agents[n.id] || {}, 46);
-    el('title', {}, g).textContent = `${n.name} (${n.role}) — ${live}`;
+    el('title', {}, g).textContent = `${n.name} (${n.role}) — ${live} · ${(openCnt[n.id] || 0) ? `${openCnt[n.id]} open task${openCnt[n.id] === 1 ? '' : 's'}` : 'idle'}`;
     if (typeof ns.contextPct === 'number' && live === 'working') {
       const pct = Math.max(0, Math.min(100, ns.contextPct * 100));
       const cls = pct >= 85 ? 'danger' : pct >= (S.settings.autoCompactPct || 40) ? 'warn' : 'ok';

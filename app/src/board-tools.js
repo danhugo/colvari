@@ -4,6 +4,7 @@ const path = require('path');
 const { outgoing, incoming, canAssign, canMessage, reviewees, visibleTask, canSetStatus, AGENT_PATCH_FIELDS, capPermissionMode, canManageAgent, canRetire } = require('./scope');
 const { BOARD_TOOLS } = require('./agent-config');
 const { getRuntime } = require('./runtimes');
+const WT = require('./worktree');
 const C = require('./controls');
 const SU = require('./self-update');
 
@@ -101,6 +102,26 @@ function makeTools(store, nodeId) {
     if (tok > 0 && tokens >= 0.8 * tok) return `refused: project token budget ${tok} is >=80% used (${tokens}); retire an agent or raise the budget before recruiting`;
     return null;
   };
+  // Repo root owning this store's task worktrees — the same derivation the merge gate and the
+  // store's listUnmergedBranches use (worktrees live at <root>/.squad/worktrees/<taskId>).
+  // Null when no task carries a worktree.
+  const squadRepoRoot = () => {
+    const xs = store.listTasks().filter((x) => x.worktreePath);
+    return xs.length ? path.resolve(xs[xs.length - 1].worktreePath, '..', '..', '..') : null;
+  };
+  // Overload guard (advisory only — never blocks creation): warn when the assignee ends up with
+  // >=2 open tasks while an idle teammate of the same role (or any dev) could take the work.
+  const overloadWarning = (t, assignee) => {
+    const role = (n) => String(n.role || '').trim().toLowerCase();
+    const open = store.listTasks().filter((x) => x.status !== 'done' && x.assignee === assignee.id);
+    if (open.length < 2) return null;
+    const idle = t.nodes.filter((n) => n.id !== assignee.id
+      && (role(n) === role(assignee) || role(n).startsWith('dev'))
+      && !store.listTasks().some((x) => x.status !== 'done' && x.assignee === n.id));
+    if (!idle.length) return null;
+    const names = idle.slice(0, 3).map((n) => `${n.name} (${n.role})`).join(', ');
+    return `overload: ${assignee.name} now has ${open.length} open tasks while ${idle.length} idle teammate${idle.length > 1 ? 's' : ''} could take work: ${names}${idle.length > 3 ? ` +${idle.length - 3} more` : ''} — consider assigning there.`;
+  };
   const impl = {
     list_team() {
       const t = me();
@@ -131,13 +152,25 @@ function makeTools(store, nodeId) {
       const t = me();
       const target = assignee ? resolve(t, assignee, 'assignee') : t.nodes.find((n) => n.id === nodeId);
       if (!canAssign(t, nodeId, target.id)) throw new Error(`scope violation: ${nodeName(t, nodeId)} cannot assign tasks to ${target.name} (no assign edge)`);
-      return store.createTask({ title, description, assignee: target.id, createdBy: nodeId, parentId, blockedBy, priority });
+      const task = store.createTask({ title, description, assignee: target.id, createdBy: nodeId, parentId, blockedBy, priority });
+      const warn = overloadWarning(t, target);
+      return warn ? { ...task, warning: warn } : task;
     },
     update_task_status({ taskId, status, priority }) {
       const t = me(); const tk = store.getTask(taskId);
       if (!tk) throw new Error('no task ' + taskId);
       if (!canSetStatus(t, nodeId, tk, status)) throw new Error('scope violation: cannot modify this task');
       if (tk.awaitingApproval && status === 'done') throw new Error('this task is waiting for human approval; only a human can move it to done');
+      // A done flip must never strand an unmerged branch. When the task carries its worktree, the
+      // merge gate inside store.updateTask lands the branch as part of this same flip (every gate
+      // failure reopens the task), so done cannot stick unmerged. Without a worktree the merge
+      // would never run — refuse up front with the branch named, unless the branch is provably
+      // already merged or there is no repo to ask (fail-open keeps no-git stores working).
+      if (status === 'done' && tk.worktreeBranch && !tk.worktreePath) {
+        const root = squadRepoRoot();
+        const st = root && WT.branchMergeState(root, tk.worktreeBranch);
+        if (st && !st.merged) throw new Error(`cannot mark done: branch ${tk.worktreeBranch} is not merged into ${st.base} and the task has no worktree for the auto-merge — merge it into ${st.base} (or restore the task's worktree), then mark done again.`);
+      }
       const g = C.gateStatus(status, t.nodes.find((n) => n.id === tk.assignee), store.getSettings());
       // Explicit agent-initiated review (vs. the orchestrator parking an incomplete/failed run for a human):
       // eligible for reviewer dispatch (no reviewer -> it stays in review, surfaced).
@@ -197,6 +230,19 @@ function makeTools(store, nodeId) {
       if (process.env.AGENTS_SQUAD_DEV !== '1') return { requested: false, note: 'Self-update is disabled outside dev/dogfood mode.' };
       fs.writeFileSync(SU.requestFile(store.dir), JSON.stringify({ reason: String(reason || '').slice(0, 500), from: nodeId, ts: new Date().toISOString() }));
       return { requested: true, note: 'Picked up on the next watcher poll if auto-restart is on; the result appears in the activity feed.' };
+    },
+    // PM-only (the protected core agent; enforced by caller role here, not by prompt omission —
+    // Cato t_42f310cf #3): arm a restart, after a given task completes or once agents drain.
+    // Merges never restart the app on their own — they only count toward the pending total the
+    // cap watches. afterTaskId is validated in the store (a task that may never finish is refused).
+    schedule_restart({ afterTaskId = null, now = false, reason = '' } = {}) {
+      const t = me();
+      const n = t.nodes.find((x) => x.id === nodeId);
+      if (!n || String(n.role).toLowerCase() !== 'pm') throw new Error('scope violation: schedule_restart is PM-only (the protected core agent)');
+      const rp = store.scheduleRestart({ afterTaskId, now });
+      const what = now ? 'restart once agents drain' : `restart after ${afterTaskId}`;
+      announce(`scheduled ${what} — ${Number(rp.count) || 0} change(s) pending${String(reason || '').trim() ? ` — ${String(reason).trim()}` : ''}`);
+      return { scheduled: true, pendingCount: Number(rp.count) || 0, scheduledAfter: rp.afterTaskId || null, scheduledNow: !!rp.scheduledNow };
     },
     recruit_agent({ name, role, prompt, runtime, model, effort, reason = '' } = {}) {
       if (!String(name || '').trim()) throw new Error('name required');
