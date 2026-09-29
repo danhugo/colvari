@@ -421,8 +421,10 @@ $('#importfile').onchange = act(async (e) => {
 });
 
 // ---------- tabs ----------
-document.querySelectorAll('#tabs button').forEach((b) => b.onclick = () => {
-  document.querySelectorAll('#tabs button').forEach((x) => x.classList.toggle('active', x === b));
+// Every element with data-tab switches tabs — the header nav, the sidebar Inbox row and the
+// Settings gear all share the one active-state treatment (t_db67859d).
+document.querySelectorAll('button[data-tab]').forEach((b) => b.onclick = () => {
+  document.querySelectorAll('button[data-tab]').forEach((x) => x.classList.toggle('active', x === b));
   document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.id === 'tab-' + b.dataset.tab));
   // Hidden heavy sections skip rendering (t_9315f18a); a freshly shown one must draw once even
   // if nothing changed since it was last hidden. renderLog is not part of renderAll — call it here.
@@ -434,8 +436,12 @@ document.querySelectorAll('#tabs button').forEach((b) => b.onclick = () => {
 // ---------- header ----------
 function renderHeader() {
   const o = S.orch; const par = o.running ? runningIds().length : 0;
-  $('#runstate').textContent = o.running ? `running · ${par > 1 ? `${par} in parallel` : `${par || 1} agent`} · ${o.runs || 0} runs` : 'idle';
+  // Short status chip (t_db67859d): "4 running" — never truncates at 1440px; the full wording
+  // (parallel/agent split, run count) stays in the tooltip.
+  $('#runstate').textContent = o.running ? `${par || 1} running` : 'idle';
+  $('#runstate').title = o.running ? `running · ${par > 1 ? `${par} in parallel` : `${par || 1} agent`} · ${o.runs || 0} runs` : 'No run active';
   $('#runstate').classList.toggle('on', !!o.running);
+  $('#stop').classList.toggle('hidden', !o.running); // Stop only earns a slot in the bar while something runs (⌘. always works)
   // Money pill: the app's single cost total — API-eq over ALL recorded runs, the same per-run ledger
   // sum the Usage tab's grand total shows, so pill and tab can never disagree (t_b1115e48). The
   // billed vs subscription split stays in the tooltip: subscription usage is covered by the plan,
@@ -609,7 +615,13 @@ async function renderLimitMeter() {
   const state = worst.pause ? 'paused' : worst.warn ? 'near limit' : `${pct}%`;
   m.innerHTML = `<span class="lm-part lm-${cls}" title="${esc(title)}">Limits: ${state} <b>${esc(worst.label)}</b><i class="lm-bar"><i class="lm-fill" style="width:${pct}%"></i></i>${ms > 0 ? `<small>↻${fmtCountdown(ms)}</small>` : ''}</span>`;
 }
-function showTab(name) { document.querySelector(`#tabs button[data-tab="${name}"]`).click(); }
+function showTab(name) { document.querySelector(`button[data-tab="${name}"]`)?.click(); }
+// New goal composer (t_db67859d): the goal box lives in a popover off the "New goal" button, so the
+// header holds context + actions only and nothing in it can truncate. Run keeps its id — the chat
+// flow and the first-run guide set #goal and click #run programmatically (also gui-e2e autorun).
+function openGoalPop() { $('#goalpop').classList.remove('hidden'); $('#goal').focus(); }
+$('#newgoal').onclick = () => { const p = $('#goalpop'); if (p.classList.contains('hidden')) openGoalPop(); else { p.classList.add('hidden'); $('#newgoal').focus(); } };
+document.addEventListener('mousedown', (e) => { const p = $('#goalpop'); if (!p.classList.contains('hidden') && !p.contains(e.target) && !$('#newgoal').contains(e.target)) p.classList.add('hidden'); });
 $('#run').onclick = async (runAtts) => {
   runAtts = Array.isArray(runAtts) ? runAtts : null; // chatSend passes saved attachments; real clicks pass an Event
   const goal = $('#goal').value.trim();
@@ -618,10 +630,10 @@ $('#run').onclick = async (runAtts) => {
     const hasIn = new Set(S.team.edges.map((e) => e.to));
     const lead = S.team.nodes.find((n) => n.id === sel.node) || S.team.nodes.find((n) => !hasIn.has(n.id)) || S.team.nodes[0];
     await call('createTask', { title: goal.slice(0, 80), description: goal, assignee: lead.id, ...(runAtts ? { attachments: runAtts } : {}) }); $('#goal').value = '';
-  } else if (!S.tasks.some((t) => t.status === 'todo')) { alert('Type a goal next to Run (or create a todo task in Board) first.'); return $('#goal').focus(); }
+  } else if (!S.tasks.some((t) => t.status === 'todo')) { alert('Type a goal next to Run (or create a todo task in Board) first.'); return openGoalPop(); }
   const bad = S.allNodes.filter((n) => ['fail', 'untested', 'stale'].includes(pfState(n)));
   if (bad.length && !confirm(`Preflight not passed for ${bad.length} agent(s):\n${bad.map((n) => `- ${n.name}: ${n.preflightStatus === 'fail' ? 'FAILED' + (n.preflight && n.preflight.error ? ' (' + n.preflight.error.slice(0, 120) + ')' : '') : n.preflightStatus === 'stale' ? 'config changed since test' : 'untested'}`).join('\n')}\n\nRun anyway? (Use "Test team" in the Team tab to check them.)`)) return showTab('team');
-  if (!$('#tab-chat.active')) showTab('obs'); await call('run'); refresh();
+  if (!$('#tab-chat.active')) showTab('obs'); await call('run'); refresh(); $('#goalpop').classList.add('hidden');
 };
 $('#stop').onclick = async () => { await call('stop'); refresh(); };
 
@@ -2293,17 +2305,20 @@ squad.on('notify', (n) => {
   d.onclick = () => { if (n.inbox) { showTab('inbox'); d.remove(); return; } if (n.taskId) { sel.task = n.taskId; showTab('board'); renderBoard(); } d.remove(); };
   $('#toasts').appendChild(d); setTimeout(() => d.remove(), 8000);
 });
-// Keyboard shortcuts: Ctrl/Cmd+1..6 tabs, Ctrl/Cmd+Enter Run, Ctrl/Cmd+. Stop, Esc clear selection / close, ? help.
-const TABS = ['chat', 'team', 'board', 'wiki', 'obs', 'usage', 'settings', 'overview', 'inbox'];
+// Keyboard shortcuts: Ctrl/Cmd+1..7 tabs, ⌘, settings, ⌘I inbox, Ctrl/Cmd+Enter Run, Ctrl/Cmd+. Stop,
+// / goal composer, Esc clear selection / close, ? help.
+const TABS = ['chat', 'team', 'board', 'overview', 'wiki', 'obs', 'usage'];
 document.addEventListener('keydown', (e) => {
   const mod = e.metaKey || e.ctrlKey; const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName);
-  if (mod && e.key >= '1' && e.key <= '9') { e.preventDefault(); showTab(TABS[+e.key - 1]); }
+  if (mod && e.key >= '1' && e.key <= '9') { e.preventDefault(); const t = TABS[+e.key - 1]; if (t) showTab(t); }
+  else if (mod && e.key === ',') { e.preventDefault(); showTab('settings'); }
+  else if (mod && (e.key === 'i' || e.key === 'I')) { e.preventDefault(); showTab('inbox'); }
   else if (mod && e.key === 'Enter') { e.preventDefault(); $('#run').click(); }
   else if (mod && e.key === '.') { e.preventDefault(); $('#stop').click(); }
-  else if (e.key === 'Escape' && !$('#askdlg').open) { if ($('#helpdlg').open) return; if (typing) return document.activeElement.blur(); sel = { ...sel, node: null, edge: null, task: null }; connectMode = false; connectFrom = null; $('#connect').classList.remove('on'); renderGraph(); renderNodeForm(); renderBoard(); }
+  else if (e.key === 'Escape' && !$('#askdlg').open) { if ($('#helpdlg').open) return; if (!$('#goalpop').classList.contains('hidden')) return $('#goalpop').classList.add('hidden'); if (typing) return document.activeElement.blur(); sel = { ...sel, node: null, edge: null, task: null }; connectMode = false; connectFrom = null; $('#connect').classList.remove('on'); renderGraph(); renderNodeForm(); renderBoard(); }
   else if (!typing && !mod && e.key === '?') $('#helpdlg').showModal();
   else if (!typing && !mod && e.key === 'n' && document.querySelector('#tab-board.active')) { e.preventDefault(); $('#nt-title').focus(); }
-  else if (!typing && !mod && e.key === '/') { e.preventDefault(); $('#goal').focus(); }
+  else if (!typing && !mod && e.key === '/') { e.preventDefault(); openGoalPop(); }
 });
 squad.on('state', (st) => { if (st.projectId && st.projectId !== ctx.p) { clearTimeout(pendingP); pendingP = setTimeout(async () => { P = await call('listProjects'); renderSidebar(); }, 200); return; } clearTimeout(pending); pending = setTimeout(refresh, 100); });
 setInterval(() => { if (S.orch.running) refresh(); }, 2000); // pick up board changes made by agents

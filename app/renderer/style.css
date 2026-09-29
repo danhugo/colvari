@@ -112,16 +112,18 @@ td.actions button { padding:2px 7px; font-size:12px; margin-right:4px; } #budget
 #toasts { position:fixed; right:14px; bottom:14px; display:flex; flex-direction:column; gap:8px; z-index:10; }
 .toast { background:var(--card); border:1px solid var(--acc); border-left:4px solid var(--acc); border-radius:6px; padding:8px 12px; max-width:340px; box-shadow:0 4px 14px rgba(0,0,0,.2); cursor:pointer; }
 #helpdlg td { padding:3px 10px; }
-/* Header stays on one row whatever the pill contents: title, tabs and pills never wrap; the goal box absorbs the width. */
+/* Header stays on one row whatever the pill contents: title, tabs and pills never wrap. */
 header { flex-wrap:nowrap; min-width:0; } header > strong, header .pill, header button, #tabs { white-space:nowrap; flex-shrink:0; } #tabs { display:flex; }
-/* #updst/#runstate are the header's last elastic valves: they shrink to an ellipsis so Run/Stop/help
-   always fit (overflow != visible lets flex shrink below the min-content size). Goal (weight
-   200×260px vs their ~1×basis) absorbs the deficit first. The meter chip and the cost pill NEVER
-   shrink — that is the point of the fixed-size regime (t_57421101): both stay readable at every
-   width, so below 1200px the brand text hides and the tab labels collapse to their icons instead
-   (media rule below) rather than the pills squashing. */
+/* #updst/#runstate are the header's elastic valves: they shrink to an ellipsis so the buttons always
+   fit (overflow != visible lets flex shrink below the min-content size). The goal composer no longer
+   lives in the header (t_db67859d) — it opens from the "New goal" button as a popover — so the meter
+   chip and the cost pill NEVER shrink: that is the point of the fixed-size regime (t_57421101), both
+   stay readable at every width. Below 1200px the brand text hides and the tab labels collapse to
+   their icons instead (media rule below) rather than the pills squashing. */
 header #updst, header #runstate { min-width:0; overflow:hidden; text-overflow:ellipsis; flex-shrink:1; }
-header #goal { flex:1 1 260px; flex-shrink:200; min-width:0; max-width:420px; } header .spacer { flex:0 1 12px; }
+/* The spacer carries ALL the slack (the goal input used to absorb it): the status cluster hugs the
+   right edge at every width. */
+header .spacer { flex:1 1 12px; }
 header .pill { font-variant-numeric:tabular-nums; } .pill.quiet { color:var(--muted); }
 .cap { display: inline-block; padding: 0 6px; border-radius: 8px; font-size: 11px; margin: 2px 0; }
 .cap.on { background: var(--success-soft); color: var(--success-text); } .cap.off { background: var(--danger-soft); color: var(--danger); }
@@ -421,7 +423,7 @@ header .pill { border:none; background:none; color:var(--fg-muted); font-size:va
 #sidebar .sb-head { display:flex; align-items:center; justify-content:space-between; gap:4px; min-width:0; } #sidebar .sb-head h4 { margin:0; flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 #sidebar .sb-actions { display:flex; gap:1px; flex:0 0 auto; }
 #sidebar .sb-actions button { width:22px; height:22px; padding:0; font-size:12px; line-height:1; display:inline-flex; align-items:center; justify-content:center; background:transparent; border-color:transparent; color:var(--fg-muted); }
-#sidebar .sb-actions button:hover { background:var(--bg-hover); color:var(--fg); }
+#sidebar .sb-actions button:hover { background:var(--bg-hover); color:var(--fg-primary); }
 #sidebar .sb-actions button.danger:hover { color:#fff; background:var(--danger, #d64545); border-color:transparent; }
 #sidebar select { width:100%; }
 /* graph LOD: keep names legible when zoomed out */
@@ -637,8 +639,6 @@ header > strong.brand { display:flex; align-items:center; gap:6px; font-weight:7
 .cchip:not(.subagent) > summary { list-style:none; cursor:pointer; color:var(--fg-muted); font-family:var(--font-sans, inherit); font-size:var(--text-xs); max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .cchip:not(.subagent) > summary:hover { color:var(--fg-secondary); }
 .cchip:not(.subagent) > pre { background:var(--bg-code); border-radius:var(--radius-sm); padding:6px 8px; font-size:11.5px; white-space:pre-wrap; }
-header #tabs button[data-tab="settings"] .lbl { display:inline; }
-header #goal { min-width:180px; }
 
 .us-groups h4 { display:none; }
 .seg button:focus-visible { outline:2px solid var(--accent); outline-offset:1px; } .seg button.on:focus-visible { outline-offset:2px; box-shadow:0 0 0 1px var(--bg-app); }
@@ -664,3 +664,33 @@ header #goal { min-width:180px; }
 .us-anchors a { padding:2px 10px; border-radius:var(--radius-full); color:var(--fg-secondary); font-size:var(--text-xs); text-decoration:none; } .us-anchors a:hover { background:var(--bg-hover); color:var(--fg-primary); }
 #us-summary, #us-discovery, #us-limits, #us-runs { scroll-margin-top:40px; }
 .us-empty { margin:16px 0; padding:var(--space-6) var(--space-3); border:1px dashed var(--border-strong); border-radius:var(--radius-md); text-align:center; color:var(--fg-muted); }
+
+/* ===== t_db67859d: top bar = context + actions; single homes for Inbox/Settings; goal composer ===== */
+header { position:relative; }
+.sb-inbox .navicon, #settingsbtn .navicon { width:14px; height:14px; flex:0 0 auto; stroke:currentColor; fill:none; stroke-width:1.6; stroke-linecap:round; stroke-linejoin:round; }
+/* Settings: icon button at the header's right edge (config, not navigation — Linear/Slack pattern). */
+#settingsbtn { width:28px; height:26px; padding:0; display:inline-flex; align-items:center; justify-content:center; color:var(--fg-secondary); }
+#settingsbtn:hover { background:var(--bg-hover); color:var(--fg-primary); }
+#settingsbtn.active { color:var(--accent-text); background:var(--accent-soft); }
+#settingsbtn:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
+/* Stop is only worth a slot in the bar while something is running (⌘. always works). */
+header #stop { color:var(--danger); border-color:color-mix(in srgb, var(--danger) 45%, transparent); }
+header #stop:hover { background:var(--danger-soft); color:var(--danger); }
+.goalpop { position:absolute; top:calc(100% + 6px); right:8px; width:460px; max-width:calc(100vw - 24px); display:flex; flex-direction:column; gap:6px; padding:var(--space-3); background:var(--bg-raised); border:1px solid var(--border); border-radius:var(--radius-md); box-shadow:var(--shadow-lg); z-index:70; }
+.goalpop.hidden { display:none; }
+.goalpop label { font-size:var(--text-xs); font-weight:var(--fw-semibold); color:var(--fg-secondary); }
+.goalpop textarea { width:100%; min-height:60px; resize:vertical; }
+.goalpop-foot { display:flex; align-items:center; gap:8px; }
+.goalpop-foot .muted { font-size:var(--text-xs); }
+.goalpop .spacer { flex:1 1 auto; } /* header .spacer's 12px valve must not flatten the popover's right-aligned Run */
+/* Inbox's single home: a nav row at the top of the sidebar (Slack pattern); unread count on the badge. */
+.sb-inbox { display:flex; align-items:center; gap:7px; width:100%; padding:5px 8px; background:none; border:1px solid transparent; border-radius:var(--radius-sm); color:var(--fg-secondary); font-weight:var(--fw-medium); }
+.sb-inbox:hover { background:var(--bg-hover); color:var(--fg-primary); }
+.sb-inbox.active { background:var(--accent-soft); color:var(--accent-text); }
+.sb-inbox:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
+.sb-inbox .badge { margin-left:auto; }
+/* Section action icons reveal on hover or keyboard focus only; --fg-secondary keeps them ≥3:1
+   on the sidebar surface in both themes (the old --fg-muted glyphs read as background noise). */
+#sidebar .sb-actions { opacity:0; transition:opacity var(--dur-fast) var(--ease-out); }
+.sb-sec:hover .sb-actions, .sb-sec:focus-within .sb-actions { opacity:1; }
+#sidebar .sb-actions button { width:24px; height:24px; color:var(--fg-secondary); }
