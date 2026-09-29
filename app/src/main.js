@@ -890,11 +890,13 @@ async function guiE2E() {
     console.log('[gui-e2e] wikilogs', JSON.stringify({ wempty, lempty, wlist, wview, rows, filtered, searched }));
   };
   // Team filter for Logs (t_cb945259, plan t_db23070d): 2 teams (Alpha, Beta) plus a cross-team message
-  // edge from Alpha into Beta. Checks: selecting a team hides other teams' log lines and narrows #logfilter
-  // to that team's agents; a cross-team message is visible from both ends; picking a team resets an agent
-  // filter that's no longer in scope; All restores everything; an empty team shows a dedicated empty state.
-  // The #logteam select is feature-detected (Uma's t_86da3a0b, in progress alongside this task) — checked
-  // once it ships, logged as pending until then.
+  // logged under the recipient (Beta's dev, sent by Alpha's PM). With per-team log scope (t_8d3d6989)
+  // the log defaults to the current team's lines and "All teams" is the explicit lift. Checks: the
+  // default scope shows only the current team; All teams shows every line; selecting a team hides other
+  // teams' lines and narrows #logfilter to that team's agents; a cross-team message renders only on the
+  // recipient's team side (the sender's team does not mirror it); changing team resets an out-of-scope
+  // agent filter; a team with no activity shows a dedicated empty state. The #logteam select is
+  // feature-detected (Uma's t_86da3a0b) — logged as pending until then.
   const teamFilterShots = async () => {
     await waitFor(`return !!document.querySelector('#tpl-select option')`); await ex(`await refresh();`); const cur = await ex(`return { p: ctx.p, t: S.teamId }`);
     const gp = cur.p || pid(); const alpha = pm.store(gp, cur.t);
@@ -918,24 +920,34 @@ async function guiE2E() {
     const teamSel = await has(['#logteam', '#log-team', '[data-log=team]']);
     if (!teamSel) { console.log('[gui-e2e] teamfilter: #logteam UI pending (Uma t_86da3a0b)'); return; }
     const rowsText = () => ex(`return [...document.querySelectorAll('#log .logrow .logtext')].map((r) => r.textContent)`);
+    const selectTeam = (name) => ex(`const s = $('${teamSel}'); const o = [...s.options].find((x) => new RegExp('${name}', 'i').test(x.textContent)); s.value = o.value; s.dispatchEvent(new Event('change')); await w(250);`);
+    // Per-team log scope (t_8d3d6989): switchTo scopes the log to the current team, so the default view
+    // is Alpha-only, and "All teams" is the explicit way to see every line.
+    const scoped = await rowsText();
+    expect('teamfilter: log scope defaults to the current team (Alpha only)', scoped.some((r) => r.includes('AlphaPM: planning')) && scoped.some((r) => r.includes('AlphaDev: writing')) && !scoped.some((r) => r.includes('BetaDev: reviewing')) && !scoped.some((r) => r.includes('BetaRev: left')), scoped);
+    await shot('teamfilter-default');
+    await selectTeam('all');
     const all = await rowsText();
-    expect('teamfilter: All teams shows every line', fixture.every((l) => all.some((r) => r.includes(l.text.slice(0, 15)))), { all });
+    expect('teamfilter: All teams shows every team\'s line', fixture.every((l) => all.some((r) => r.includes(l.text.slice(0, 15)))), { all });
+    await shot('teamfilter-all');
     const teamOptions = await ex(`return [...document.querySelectorAll('${teamSel} option')].map((o) => o.textContent.trim())`);
     expect('teamfilter: select lists All teams + Alpha + Beta', /all/i.test(teamOptions[0] || '') && teamOptions.some((t) => /alpha/i.test(t)) && teamOptions.some((t) => /beta/i.test(t)), teamOptions);
-    // Select Beta: narrow agent filter to Beta's agents, hide Alpha-only lines, show the cross-team message.
-    const selectTeam = (name) => ex(`const s = $('${teamSel}'); const o = [...s.options].find((x) => new RegExp('${name}', 'i').test(x.textContent)); s.value = o.value; s.dispatchEvent(new Event('change')); await w(250);`);
+    // Select Beta: hides Alpha-only lines, keeps Beta's own, narrows the agent filter to Beta's agents,
+    // and shows the cross-team message (it is logged under Beta's dev — the recipient side).
     await selectTeam('beta');
     const betaRows = await rowsText();
     const betaAgentOpts = await ex(`return [...document.querySelectorAll('#logfilter option')].map((o) => o.textContent.trim())`);
-    expect('teamfilter: Beta hides Alpha-only lines', !betaRows.some((r) => r.includes('AlphaDev: writing')), betaRows);
+    expect('teamfilter: Beta hides Alpha-only lines', !betaRows.some((r) => r.includes('AlphaDev: writing')) && !betaRows.some((r) => r.includes('AlphaPM: planning')), betaRows);
+    expect('teamfilter: Beta keeps Beta\'s own lines', betaRows.some((r) => r.includes('BetaDev: reviewing')) && betaRows.some((r) => r.includes('BetaRev: left')), betaRows);
     expect('teamfilter: Beta narrows agent filter to Beta agents', betaAgentOpts.some((o) => /BetaDev/.test(o)) && betaAgentOpts.some((o) => /BetaRev/.test(o)) && !betaAgentOpts.some((o) => /AlphaDev/.test(o)), betaAgentOpts);
     expect('teamfilter: cross-team message visible from the recipient (Beta) side', betaRows.some((r) => r.includes('cross-team')), betaRows);
     await shot('teamfilter-beta');
-    // Select Alpha: the same cross-team message (sent by an Alpha agent) should also be visible here.
+    // Select Alpha: Beta-only lines are hidden, and the cross-team message is NOT mirrored here — it is
+    // logged under the recipient, so per-team scope keeps it on the Beta side only.
     await selectTeam('alpha');
     const alphaRows = await rowsText();
-    expect('teamfilter: Alpha hides Beta-only lines', !alphaRows.some((r) => r.includes('BetaRev: left')), alphaRows);
-    expect('teamfilter: cross-team message also visible from the sender (Alpha) side', alphaRows.some((r) => r.includes('cross-team')), alphaRows);
+    expect('teamfilter: Alpha hides Beta-only lines', !alphaRows.some((r) => r.includes('BetaRev: left')) && !alphaRows.some((r) => r.includes('BetaDev: reviewing')), alphaRows);
+    expect('teamfilter: cross-team message stays on the recipient (Beta) side, not mirrored to Alpha', alphaRows.some((r) => r.includes('AlphaPM: planning')) && !alphaRows.some((r) => r.includes('cross-team')), alphaRows);
     await shot('teamfilter-alpha');
     // Agent filter resets to All when the previously selected agent isn't in the newly selected team.
     await ex(`$('#logfilter').value = '${devB.id}'; $('#logfilter').dispatchEvent(new Event('change')); await w(150);`);
