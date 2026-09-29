@@ -2207,7 +2207,7 @@ composerEl.addEventListener('drop', (e) => { e.preventDefault(); composerEl.clas
 // ---------- human inbox (ask_human questions + approvals) ----------
 function renderInbox() {
   const items = S.inbox || []; const n = items.length ? String(items.length) : '';
-  $('#inbox-badge').textContent = n; $('#inbox-tab-badge').textContent = n;
+  $('#inbox-tab-badge').textContent = n;
   const taskTitle = (id) => (S.tasks.find((t) => t.id === id) || {}).title || '';
   $('#inboxlist').innerHTML = items.length ? items.map((i) => `<div class="inboxitem" data-iid="${i.id}">
     <small>${i.kind === 'approval' ? 'Approval' : 'Question'} from <b>${esc(nodeName(i.nodeId))}</b>${i.taskId ? ' · task: ' + esc(taskTitle(i.taskId)) : ''} · ${esc(new Date(i.at).toLocaleString())}</small>
@@ -2221,7 +2221,6 @@ function renderInbox() {
     d.querySelector('.ib-send').onclick = () => answer(d.querySelector('.ib-text').value.trim());
   });
 }
-$('#inbox-side').onclick = () => showTab('inbox');
 
 // ---------- live updates ----------
 let pending = null, pendingP = null;
