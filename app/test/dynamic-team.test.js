@@ -372,6 +372,28 @@ test('answer handler: update_agent applies via the stored payload (nested patch 
   assert.match(orch.sent[0].text, /approved/);
 });
 
+test('answer handler: approve whose stored ask no longer matches (fp drift) reports "request not found", not success', () => {
+  const { s, tools } = setup({ approval: 'ask' });
+  const before = s.forTeam('a').getTeam().nodes.length;
+  assert.equal(tools.recruit_agent({ name: 'Ghost', role: 'Dev', reason: 'r' }).pending, true);
+  const item = s.listInbox({ status: 'open' })[0];
+  s.answerInbox(item.id, 'approve');
+  // fp drift: askGate matches the answered item by exact stable-JSON string equality, so a stored
+  // fingerprint from an older scheme (here: different key order) never matches the re-call —
+  // askGate files a fresh ask and returns {pending:true} instead of applying. The notice must say
+  // "not applied", never "applied".
+  s.update('inbox', { items: [] }, (d) => {
+    d.items.find((x) => x.id === item.id).change = '{"tool":"recruit_agent","name":"Ghost","role":"QA"}';
+  });
+  const orch = stubOrch();
+  assert.equal(applyAnsweredChange(s, orch, s.getInboxItem(item.id), 'approve'), true);
+  assert.equal(s.forTeam('a').getTeam().nodes.length, before, 'nothing applied');
+  assert.equal(orch.sent.length, 1);
+  assert.match(orch.sent[0].text, /approved but not applied/);
+  assert.match(orch.sent[0].text, /request not found/);
+  assert.equal(s.listInbox({ status: 'open' }).length, 1, 'the fresh ask askGate filed stays visible');
+});
+
 test('answer handler: plain ask_human questions are not handled', () => {
   const { s, core } = setup();
   const item = s.askHuman({ nodeId: core.id, question: 'Which color?', choices: ['red', 'blue'] });

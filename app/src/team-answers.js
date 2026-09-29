@@ -34,8 +34,9 @@ function applyAnsweredChange(store, orch, item, answer) {
   try {
     const tool = makeTools(store, live.nodeId)[req.tool];
     if (typeof tool !== 'function') throw new Error(`unknown tool "${req.tool}"`);
-    tool({ ...req, reason: live.reason || 'approved by the human in the Inbox' });
-    say(`Your ${req.tool} request for ${who} was approved by the human and applied.`);
+    const r = tool({ ...req, reason: live.reason || 'approved by the human in the Inbox' });
+    if (r && r.pending) say(`Your ${req.tool} request for ${who} was approved but not applied: request not found — the stored ask no longer matched, so a fresh approval ask was filed instead.`);
+    else say(`Your ${req.tool} request for ${who} was approved by the human and applied.`);
   } catch (e) {
     say(`Your ${req.tool} request for ${who} was approved but not applied: ${e.message}`);
   }
