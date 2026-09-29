@@ -384,6 +384,33 @@ class Orchestrator extends EventEmitter {
     this.log(nodeId, 'system', `✉ woken by message from ${senders.map(nameOf).join(', ')}: ${msgs[0].text.slice(0, 200)}`);
     await this.wakeRun(node, msgs, team, settings);
   }
+  // Deliver already-stored messages to an IDLE agent as a wake run — the two paths the message sweep
+  // deliberately ignores (human and system senders have their own delivery): the human's answer to an
+  // ask_human (team-answers) and the core nudge (nudgeIdle). Guards mirror dispatchWake plus the run
+  // gate: nothing auto-starts on a stopped project, a live agent is reached by its own channels, and
+  // maxRuns/maxConcurrency still bound auto-dispatch. `why` carries the monitor event Dev B's UI keys
+  // on — orch.log(nodeId, 'monitor', <sentence>, {reason, taskIds, action}) — emitted only when the
+  // wake actually fires, so a refused wake never reads as a watchdog action.
+  async wakeForHuman(nodeId, msgs, why = {}) {
+    const list = (msgs || []).filter(Boolean);
+    if (!list.length) return false;
+    const team = this.store.getTeam();
+    const node = team.nodes.find((n) => n.id === nodeId);
+    if (!node || !this.running || this.userStopped || this.dispatchPaused) return false;
+    const a = this.agent(nodeId);
+    if (a.status === 'working' || this.procs.has(nodeId) || a.budgetStop) return false;
+    if (this.usagePaused && (node.runtime || 'claude') === 'claude') return false; // same pause rule as tick()
+    const settings = this.store.getSettings();
+    if (settings.maxConcurrency > 0 && this.procs.size >= settings.maxConcurrency) return false;
+    if (settings.maxRuns > 0 && this.runs >= settings.maxRuns) return false; // at the cap the stored message still informs the human via the Board
+    this.store.markMessagesRead(list.map((m) => m.id));
+    this.emit('woken_by_message', { nodeId, by: [...new Set(list.map((m) => m.from))], messageIds: list.map((m) => m.id) });
+    const { reason = 'human message', taskIds = [], action = 'wake' } = why;
+    this.log(nodeId, 'monitor', `waking ${node.name}: ${reason}`, { reason, taskIds, action });
+    this.log(nodeId, 'system', `✉ waking for ${reason}: ${list[0].text.slice(0, 200)}`);
+    await this.wakeRun(node, list, team, settings);
+    return true;
+  }
   // One background run delivering the messages (resumes the agent's last session when it has one).
   async wakeRun(node, msgs, team, settings) {
     const a = this.agent(node.id);
@@ -569,13 +596,28 @@ class Orchestrator extends EventEmitter {
 
   agentStates() { return IDLE.agentStates(this.store.getTeam(), this.store.listTasks(), this.agents); }
   // Board message to each PM with open goals whose reports are idle; repeats only when the idle set changes.
+  // With the watchdog (t_ccab4c19) a nudge is no longer Board-only: a NEW nudge also wakes its
+  // recipient with the nudge text, so an all-idle stall actually reaches a core. No LLM call unless
+  // something really changed — the same-condition debounce below is the wake-loop guard.
   nudgeIdle() {
     this.nudged ||= new Map();
-    for (const n of IDLE.idleNudges(this.store.getTeam(), this.store.listTasks(), this.agents)) {
-      if (this.nudged.get(n.pmId) === n.text) continue;
-      this.nudged.set(n.pmId, n.text);
-      this.store.sendMessage({ from: 'system', to: n.pmId, text: n.text });
+    // staleMin reuses the stall timeout (no new setting); <=0 disables the watchdog condition.
+    const staleMin = Number(this.store.getSettings().stallTimeoutMin ?? 10);
+    const opts = staleMin > 0 ? { staleMin, now: Date.now() } : {};
+    for (const n of IDLE.idleNudges(this.store.getTeam(), this.store.listTasks(), this.agents, opts)) {
+      // Debounce per kind, keyed by pmId+kind so the two conditions never clobber each other: idle
+      // nudges by their (already distinct) text, stale nudges by the sorted taskIds — a core that
+      // wakes and changes nothing must not be woken again for the same stale set, while a changed
+      // stale set is a new condition even if the wording matches.
+      const kind = n.kind || 'idle';
+      const key = kind === 'stale' ? [...n.taskIds].sort().join(',') : n.text;
+      const mk = `${n.pmId}|${kind}`;
+      if (this.nudged.get(mk) === key) continue;
+      this.nudged.set(mk, key);
+      const m = this.store.sendMessage({ from: 'system', to: n.pmId, text: n.text });
       this.log(n.pmId, 'system', 'nudge: ' + n.text);
+      this.wakeForHuman(n.pmId, [m], { reason: kind === 'stale' ? 'stale tasks' : 'idle reports', taskIds: n.taskIds || [], action: 'wake core' })
+        .catch((e) => this.log(n.pmId, 'error', 'nudge wake: ' + e.message));
     }
   }
 

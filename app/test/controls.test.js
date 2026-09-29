@@ -164,8 +164,7 @@ exec sleep 5
   assert.match(humanPrompt('hi', 'BASE'), /^BASE\n\nMessage from the human/);
 });
 
-test('persisted logs: monitor events keep their structured fields, other kinds stay whitelisted', () => {
-  const mon = { at: 123, nodeId: 'core', kind: 'monitor', text: 'woke the core', reason: '2 open tasks, all agents idle', taskIds: ['t_1', 't_2'], action: 'woke core' };
+test('persisted logs: monitor events keep their structured fields, other kinds stay whitelisted', () => {  const mon = { at: 123, nodeId: 'core', kind: 'monitor', text: 'woke the core', reason: '2 open tasks, all agents idle', taskIds: ['t_1', 't_2'], action: 'woke core' };
   const back = C.parseLogs(C.logLine(mon))[0];
   assert.equal(back.reason, '2 open tasks, all agents idle');
   assert.deepEqual(back.taskIds, ['t_1', 't_2']);
@@ -175,4 +174,36 @@ test('persisted logs: monitor events keep their structured fields, other kinds s
   assert.equal(plain.reason, undefined); // whitelist still strips unknown extras on other kinds
   const malformed = C.parseLogs(C.logLine({ at: 1, kind: 'monitor', text: 'x', taskIds: 't_1' }))[0];
   assert.equal(malformed.taskIds, null); // non-array taskIds persist as null, not a string
+});
+
+test('watchdog: a stale-task nudge wakes the core once, with the monitor event (t_ccab4c19)', async () => {
+  const d = tmp('squad-idlew-');
+  const s = new Store(path.join(d, 'p'));
+  s.saveSettings({ claudePath: fakeClaude(d, 'sleep 0.1\n' + RESULT(0.001)) });
+  const pm = s.addNode({ name: 'PM', role: 'PM' }); const dev = s.addNode({ name: 'Dev', role: 'Dev' });
+  s.addEdge(pm.id, dev.id);
+  const t1 = s.createTask({ title: 'busy work', assignee: dev.id }); // keeps dev busy so t2 can go stale
+  s.createTask({ title: 'stale work', assignee: dev.id }); // t2: todo and untouched while dev runs t1
+  const o = new Orchestrator(s);
+  // Freeze "now" 20 min ahead for the starting tick only: t2 (updatedAt ~real now) crosses
+  // stallTimeoutMin (default 10) exactly in the pass that must nudge; every later tick runs on real
+  // time, so the same stale set can only ever produce this one nudge — a built-in wake-loop check.
+  const real = Date.now; const shifted = Date.now() + 20 * 60000; Date.now = () => shifted;
+  let done;
+  try { done = new Promise((res) => o.once('done', res)); o.start(); } finally { Date.now = real; }
+  // RED on current code: the nudge is a Board-only system message nobody wakes for.
+  await done;
+  // Assert through the PERSISTED logs — the same readLogs path the monitor UI renders
+  // (controls.js logLine keeps reason/taskIds/action for kind 'monitor' via monitorFields).
+  const mons = s.readLogs().filter((l) => l.kind === 'monitor' && l.nodeId === pm.id);
+  assert.equal(mons.length, 1, 'exactly one monitor event: fired only for the wake that actually ran');
+  const mon = mons[0];
+  assert.equal(mon.reason, 'stale tasks');
+  assert.equal(mon.action, 'wake core');
+  assert.deepEqual(mon.taskIds, [s.listTasks().find((t) => t.title === 'stale work').id]);
+  assert.match(mon.text, /waking PM/);
+  const nudges = s.listMessages({ to: pm.id }).filter((m) => /stale work/.test(m.text));
+  assert.equal(nudges.length, 1, 'no wake loop: the same stale set nudges once');
+  assert.equal(nudges[0].read, true, 'the wake consumed the nudge message');
+  assert.equal(o.runs, 3, 'dev ran both tasks, the PM woke once for the nudge');
 });
