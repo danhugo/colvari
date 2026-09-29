@@ -574,20 +574,23 @@ async function guiE2E() {
     const grab = `(async () => ({ txt: $('#limitmeter').textContent, hidden: $('#limitmeter').classList.contains('hidden'), chips: document.querySelectorAll('#limitmeter [data-provider]').length, st: await call('usageStatus') }))()`;
     // Chip geometry: provider chips must lay out side by side (bounding rects never intersect) and the
     // "· limits unknown" wording must be fully visible — never shrink-ellipsised ("Codex U… lim…").
-    // Since the meter became the header's clip valve (flex-shrink:1 at every width, t_5847fa5f), a few
-    // pixels of tail clip under mild pressure is by design — the contract is that the HEADER never
-    // overflows, Run/Stop/help stay visible, and no chip is squeezed into nothing.
+    // This suite runs at the DEFAULT window width (1400px), where the tokens/cost pills are hidden
+    // (breakpoint 1759px, t_5847fa5f round 3 option A) and the goal input is the header's shrink valve
+    // (shrink weight 200×basis, 140px floor): it absorbs the whole deficit, so the meter must clip
+    // NOTHING here — tail clipping is allowed only in the narrow sweeps of the 'topbar' suite
+    // (< 1400px, after goal bottoms out). +1 tolerates sub-pixel flex rounding.
     const geom = `(async () => { const m = $('#limitmeter');
       const chips = [...m.querySelectorAll('[data-provider]')].map((c) => { const r = c.getBoundingClientRect(); return { p: c.dataset.provider, l: Math.round(r.left), r: Math.round(r.right) }; });
       let overlap = null;
       for (let i = 0; i < chips.length && !overlap; i++) for (let j = i + 1; j < chips.length; j++) { const a = chips[i], b = chips[j]; if (a.l < b.r - 1 && b.l < a.r - 1) overlap = [a.p, b.p]; }
-      const unknown = [...m.querySelectorAll('.lm-unknown')].map((c) => { const s = c.querySelector('small'); return { p: c.dataset.provider, txt: c.textContent.trim(), cut: s ? s.scrollWidth > s.clientWidth : false }; });
+      const unknown = [...m.querySelectorAll('.lm-unknown')].map((c) => { const s = c.querySelector('small'); return { p: c.dataset.provider, txt: c.textContent.trim(), cut: s ? s.scrollWidth > s.clientWidth + 1 : false }; });
       const h = document.querySelector('header'); const vis = (s) => { const e = document.querySelector(s); if (!e) return false; const r = e.getBoundingClientRect(); return r.width > 0 && r.left >= -1 && r.right <= window.innerWidth + 1; };
       return { chips, overlap, unknown, clipped: m.scrollWidth > m.clientWidth + 1, fit: h.scrollWidth <= h.clientWidth + 1, run: vis('#run'), stop: vis('#stop'), help: vis('#help') }; })()`;
     const geomCheck = async (label) => {
       const g = await ex(`return ${geom}`);
       expect(`limits-providers: ${label} — chips lay side by side, bounding rects do not overlap`, g.chips.length >= 1 && !g.overlap, g);
       expect(`limits-providers: ${label} — header fits, Run/Stop/help visible`, g.fit && g.run && g.stop && g.help, g);
+      expect(`limits-providers: ${label} — every chip fully visible, meter clips nothing (default width: goal absorbs first)`, !g.clipped, g);
       expect(`limits-providers: ${label} — every chip keeps a legible width, never squeezed away`, g.chips.every((c) => c.r - c.l >= 100), g);
       if (g.unknown.length) expect(`limits-providers: ${label} — unknown wording legible ("· limits unknown", never ellipsised)`, g.unknown.every((u) => !u.cut && /· limits unknown/.test(u.txt)), g.unknown);
       return g;
@@ -1248,7 +1251,8 @@ async function guiE2E() {
   };
   // Top bar must fit any window width with BOTH provider chips filled (bug t_19ec5471): header never
   // overflows (scrollWidth <= clientWidth), Run/Stop/Help/goal stay visible, and the tokens/cost pills
-  // hide exactly at the 1100px breakpoint. Widths swept via setContentSize so the CSS viewport is exact.
+  // hide below the 1759px breakpoint and show above it. Widths swept via setContentSize so the CSS
+  // viewport is exact.
   // The chat pane must reach the window's right edge (t_a99ed2c2): the 360px task-thread aside must
   // actually hide (its ID display:flex used to beat .hidden) and come back when a thread is opened.
   const topbarShots = async () => {
@@ -1270,18 +1274,27 @@ async function guiE2E() {
     await ex(`await refresh(); await w(500);`);
     expect('topbar: both provider chips filled before sweeping widths', await ex(`return document.querySelectorAll('#limitmeter [data-provider]').length >= 2 && !$('#limitmeter').classList.contains('hidden')`));
     expect('topbar: usage pills populated (ledger + cost visible)', await ex(`return !$('#totaltokens').classList.contains('hidden') && !$('#totalcost').classList.contains('hidden') && !/no usage yet|no cost yet/.test($('#totaltokens').textContent + $('#totalcost').textContent)`));
+    // Regime (Critic option A, round 3): below the 1759px breakpoint the tokens/cost pills hide entirely
+    // (same totals live in the Usage tab), so at the default 1400px the goal input — shrink weight
+    // 200×basis, 140px floor — absorbs the whole deficit and nothing clips; only below 1400px, after
+    // goal bottoms out, may the meter tail and the #updst pill ellipsis-clip. #goal is excluded from the
+    // clipped list: an input's scrollWidth grows with its own text, which is scrolling, not clipping.
     const measure = `(async () => { const h = document.querySelector('header'); const d = document.documentElement; const vis = (s) => { const e = document.querySelector(s); if (!e || e.getClientRects().length === 0) return false; const r = e.getBoundingClientRect(); return r.width > 0 && r.left >= 0 && r.right <= window.innerWidth && r.top >= 0 && r.bottom <= window.innerHeight; };
       const cm = document.querySelector('#tab-chat.active .chat-main'); const th = document.querySelector('#chat-thread');
-      return { sw: Math.max(d.scrollWidth, document.body.scrollWidth), cw: Math.min(d.clientWidth, document.body.clientWidth), edge: Math.round(Math.max(...[...h.children].map((c) => c.getBoundingClientRect().right))), iw: window.innerWidth, hdrSw: h.scrollWidth, hdrCw: h.clientWidth, run: vis('#run'), stop: vis('#stop'), help: vis('#help'), goal: vis('#goal'), tokens: vis('#totaltokens'), cost: vis('#totalcost'), cm: cm ? Math.round(cm.getBoundingClientRect().right) : null, thDisp: !!(th && th.getClientRects().length), thW: th ? Math.round(th.getBoundingClientRect().width) : 0 }; })()`;
+      return { sw: Math.max(d.scrollWidth, document.body.scrollWidth), cw: Math.min(d.clientWidth, document.body.clientWidth), edge: Math.round(Math.max(...[...h.children].map((c) => c.getBoundingClientRect().right))), iw: window.innerWidth, hdrSw: h.scrollWidth, hdrCw: h.clientWidth, run: vis('#run'), stop: vis('#stop'), help: vis('#help'), goal: vis('#goal'), tokens: vis('#totaltokens'), cost: vis('#totalcost'), goalW: Math.round(document.querySelector('#goal').getBoundingClientRect().width), clipped: [...h.children].filter((c) => c.id !== 'goal' && c.scrollWidth > c.clientWidth + 1).map((c) => c.id || c.className), kids: [...h.children].map((c) => ({ id: c.id || c.className, w: Math.round(c.getBoundingClientRect().width), sw: c.scrollWidth, cw: c.clientWidth })), meterKids: [...document.querySelector('#limitmeter').children].map((c) => ({ cls: c.className, w: Math.round(c.getBoundingClientRect().width), t: c.textContent.trim().slice(0, 24) })), cm: cm ? Math.round(cm.getBoundingClientRect().right) : null, thDisp: !!(th && th.getClientRects().length), thW: th ? Math.round(th.getBoundingClientRect().width) : 0 }; })()`;
     const prevSize = win.getContentSize();
-    for (const cw of [1600, 1400, 1101, 1100, 900]) {
+    const sweep = [];
+    for (const cw of [1900, 1759, 1600, 1400, 900]) {
       win.setContentSize(cw, Math.max(600, Math.min(prevSize[1], 800))); await new Promise((r) => setTimeout(r, 350));
-      const m = await ex(`return ${measure}`);
+      const m = await ex(`return ${measure}`); sweep.push({ cw, ...m });
       expect(`topbar: no horizontal scroll at ${cw}px (page scrollWidth ${m.sw} <= ${m.cw})`, m.sw <= m.cw + 1, m);
       expect(`topbar: no header item cut off at ${cw}px (rightmost edge ${m.edge} <= window ${m.iw})`, m.edge <= m.iw + 1, m);
       expect(`topbar: Run/Stop/Help/goal visible at ${cw}px`, m.run && m.stop && m.help && m.goal, m);
-      if (cw === 1100) expect('topbar: tokens/cost pills hidden at the 1100px breakpoint', !m.tokens && !m.cost, m);
-      if (cw === 1101) expect('topbar: tokens/cost pills still shown just above the breakpoint', m.tokens && m.cost, m);
+      expect(`topbar: goal keeps its 140px floor at ${cw}px (width ${m.goalW})`, m.goalW >= 139, m);
+      if (cw >= 1400) expect(`topbar: nothing clipped at ${cw}px — pills hidden below the breakpoint, goal absorbs, meter shows full text`, m.clipped.length === 0, m);
+      else expect(`topbar: below 1400px only the elastic pieces (meter tail, #updst, #runstate) may clip at ${cw}px`, m.clipped.every((x) => String(x).includes('limitmeter') || String(x).includes('updst') || String(x).includes('runstate')), m);
+      if (cw === 1759) expect('topbar: tokens/cost pills hidden at the 1759px breakpoint', !m.tokens && !m.cost, m);
+      if (cw === 1900) expect('topbar: tokens/cost pills shown above the 1759px breakpoint', m.tokens && m.cost, m);
       if (cw === 1600 || cw === 1400 || cw === 900) expect(`topbar: chat pane reaches the window's right edge at ${cw}px (chat right ${m.cm} vs window ${m.iw}, thread hidden)`, m.cm !== null && m.cm >= m.iw - 1 && !m.thDisp, m);
       await shot(`topbar-${cw}`);
       if (cw === 1400) { // the fix must not hide the thread pane for good: opening a task thread shows it again
@@ -1295,6 +1308,7 @@ async function guiE2E() {
       }
     }
     o.subscriptionRateLimits = {};
+    console.log('[gui-e2e] topbar sweep', JSON.stringify(sweep.map(({ cw, hdrSw, hdrCw, goalW, clipped, kids, meterKids }) => ({ cw, hdrSw, hdrCw, goalW, clipped, kids, meterKids }))));
     win.setContentSize(prevSize[0], prevSize[1]); await ex(`await refresh(); await w(300);`);
   };
   try {
