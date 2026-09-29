@@ -140,7 +140,7 @@ function makeTools(store, nodeId) {
       if (tk.awaitingApproval && status === 'done') throw new Error('this task is waiting for human approval; only a human can move it to done');
       const g = C.gateStatus(status, t.nodes.find((n) => n.id === tk.assignee), store.getSettings());
       // Explicit agent-initiated review (vs. the orchestrator parking an incomplete/failed run for a human):
-      // eligible for reviewer dispatch / auto-advance so its dependents unblock.
+      // eligible for reviewer dispatch (no reviewer -> it stays in review, surfaced).
       if (g.status === 'review') g.parkedForHuman = false;
       const r = store.updateTask(taskId, priority !== undefined ? { ...g, priority } : g);
       return g.awaitingApproval ? { ...r, note: 'Moved to review: a human must approve this task before it is done.' } : r;

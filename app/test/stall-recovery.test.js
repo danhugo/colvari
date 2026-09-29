@@ -66,13 +66,18 @@ function waitFor(predicate, timeout = 4000) {
 }
 
 test('hung run with no live child: stopped, resumed in the same session, task completes', async () => {
-  const { store, node, task, orch } = setup();
+  const { root, store, node, task, orch } = setup();
+  const rev = store.addNode({ name: 'Rev', role: 'Reviewer' }); // the recovered hand-off completes via reviewer pickup
+  store.addEdge(node.id, rev.id, 'review');
   const events = [];
   orch.on('run.stalled', (e) => events.push(['stalled', e]));
   orch.on('run.recovering', (e) => events.push(['recovering', e]));
   orch.start();
   await waitFor(() => orch.agent(node.id).currentRun && orch.agent(node.id).currentRun.sessionId === 'sess-1');
   orch.agent(node.id).lastActivityAt = Date.now() - 5000; // past the (shortened) stall timeout
+  // Every later run (recovery + reviewer pickup) finishes at once, so only the hung first run
+  // produces stall events and the hand-off lands done through the reviewer.
+  fs.writeFileSync(path.join(root, 'fake-claude.sh'), '#!/bin/sh\nprintf \'%s\\n\' \'{"type":"result","subtype":"success","session_id":"sess-1","total_cost_usd":0,"num_turns":1,"usage":{}}\'\n');
   orch.sweepStalls();
   await waitFor(() => store.getTask(task.id).status === 'done');
 

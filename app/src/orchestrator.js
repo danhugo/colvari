@@ -773,28 +773,26 @@ class Orchestrator extends EventEmitter {
   }
 
   // Tasks left in review that never got picked back up (their reviewer's process crashed/exited, or
-  // the run stopped mid-way). With no reviewer configured for the assignee, auto-advances the task to
-  // done (once) so its dependents unblock, instead of leaving it stranded forever. Returns the
-  // (possibly stale) tasks still in review that DO have a reviewer, ready for dispatch.
+  // the run stopped mid-way) are dispatched to their reviewer. With no reviewer configured for the
+  // assignee the task STAYS in review: done requires reviewer/owner verification (t_699b67b7), so the
+  // sweep surfaces the stranded task once instead of finishing unreviewed work. Returns the
+  // (possibly stale) tasks in review that DO have a reviewer, ready for dispatch.
   autoAdvanceReviews(team) {
     const out = [];
     for (const t of this.store.listTasks()) {
       if (t.status !== 'review' || t.awaitingApproval || t.parkedForHuman) continue;
       const reviewer = outgoing(team, t.assignee, ['review']).map((id) => team.nodes.find((n) => n.id === id)).find(Boolean);
       if (reviewer) { out.push({ task: t, node: reviewer }); continue; }
-      (this._autoAdvanced ||= new Set());
-      if (this._autoAdvanced.has(t.id)) continue;
-      this._autoAdvanced.add(t.id);
-      const g = C.gateStatus('done', team.nodes.find((n) => n.id === t.assignee), this.store.getSettings());
-      if (g.status === 'done') {
-        this.store.updateTask(t.id, { status: 'done' });
-        this.store.commentTask(t.id, 'orchestrator', 'auto-advanced to done: no reviewer is configured for this task (no review edge from the assignee).');
-        this.log(t.assignee, 'system', `↷ "${t.title}" auto-advanced to done (no reviewer)`);
-      } else {
-        // Approval-gated project with no reviewer: a silent exit may not become done unattended.
-        this.store.updateTask(t.id, g);
-        this.store.commentTask(t.id, 'orchestrator', 'no reviewer is configured for this task and the project requires approval: waiting for a human to approve it as done.');
+      (this._noReviewerNoted ||= new Set());
+      if (this._noReviewerNoted.has(t.id)) continue;
+      this._noReviewerNoted.add(t.id);
+      // An approval-gated project also records the human gate: with no reviewer, only a human can
+      // approve it as done. Either way the task stays in review (t_699b67b7), surfaced once.
+      if (C.needsApproval(team.nodes.find((n) => n.id === t.assignee), this.store.getSettings())) {
+        this.store.updateTask(t.id, { status: 'review', awaitingApproval: true });
       }
+      this.store.commentTask(t.id, 'orchestrator', 'staying in review: no reviewer is configured for this task (no review edge from the assignee). Done requires reviewer/owner verification — add a reviewer or move it to done yourself.');
+      this.log(t.assignee, 'system', `⏸ "${t.title}" stays in review (no reviewer configured); it will not auto-advance to done`);
     }
     return out;
   }
@@ -1116,9 +1114,9 @@ class Orchestrator extends EventEmitter {
         this.store.commentTask(task.id, 'orchestrator', judge.inconclusive ? `Goal check was inconclusive after ${i} iteration(s): ${judge.reason}. Check the result yourself.` : `Goal condition not met after ${i} iteration(s) (${reason}): ${judge.reason}`);
       } else if (t && t.status === 'in_progress' && !this.drainCutNodes.has(node.id)) {
         // Agent ended without updating status: a normal dispatch hands off to review —
-        // autoAdvanceReviews() then moves it to the reviewer, or straight to done when none is
-        // configured — so nothing merges unreviewed. A run dispatched to review that ends clean
-        // approves the hand-off (done); a failed/stopped run parks for a human instead.
+        // autoAdvanceReviews() then moves it to the reviewer, or leaves it in review (surfaced)
+        // when none is configured — so nothing merges unreviewed. A run dispatched to review that
+        // ends clean approves the hand-off (done); a failed/stopped run parks for a human instead.
         // (A run killed by the self-update drain cutoff skips this: its task stays in_progress so the
         // post-restart reconcile re-dispatches it instead of parking it for a human.)
         const ok = code === 0 && this.running && !stoppedWhy && !(m.mode === 'goal' && !(judge && judge.met));

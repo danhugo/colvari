@@ -76,12 +76,15 @@ test('orchestrator: blocked task waits for its dependency', async () => {
   const d = tmp('squad-ctl-');
   const s = new Store(path.join(d, 'p')); s.saveSettings({ claudePath: fakeClaude(d, 'sleep 0.2\n' + RESULT(0.001)), maxConcurrency: 2 });
   const x = s.addNode({ name: 'X', role: 'Dev' }); const y = s.addNode({ name: 'Y', role: 'Dev' });
+  const rev = s.addNode({ name: 'Rev', role: 'Reviewer' }); // hand-offs complete via reviewer pickup
+  s.addEdge(x.id, rev.id, 'review'); s.addEdge(y.id, rev.id, 'review');
   const first = s.createTask({ title: 'first', assignee: x.id });
   const second = s.createTask({ title: 'second', assignee: y.id, blockedBy: [first.id] });
   const o = new Orchestrator(s);
-  const runs = []; o.on('run', (r) => runs.push(r.taskId));
+  const runs = []; o.on('run', (r) => runs.push(r));
   await runToDone(o);
-  assert.deepEqual(runs, [first.id, second.id]); // with 2 slots, the second still ran only after the first
+  // Reviewer pickups repeat the task ids; the devs themselves still ran first -> second, in order.
+  assert.deepEqual(runs.filter((r) => r.nodeId !== rev.id).map((r) => r.taskId), [first.id, second.id]); // with 2 slots, the second still ran only after the first
   assert.ok(s.listTasks().every((t) => t.status === 'done'));
   assert.ok(s.readLogs().some((l) => /Finished/.test(l.text))); // logs persisted per project
 });
@@ -98,15 +101,17 @@ test('orchestrator: blocked-only board stops with a clear reason', async () => {
   assert.equal(o.runs, 0); assert.match(notes[0].body, /blocked/);
 });
 
-test('orchestrator: review task with no reviewer edge auto-advances so its dependent is not stuck', async () => {
+test('orchestrator: review task with no reviewer edge stays in review and is surfaced, never auto-done', async () => {
   const d = tmp('squad-ctl-'); const s = new Store(path.join(d, 'p')); s.saveSettings({ claudePath: fakeClaude(d, RESULT(0)) });
   const x = s.addNode({ name: 'X', role: 'Dev' });
   const a = s.createTask({ title: 'a', assignee: x.id }); s.updateTask(a.id, { status: 'review' });
   const b = s.createTask({ title: 'b', assignee: x.id, blockedBy: [a.id] });
   const o = new Orchestrator(s);
   await runToDone(o);
-  assert.equal(s.getTask(a.id).status, 'done');
-  assert.equal(s.getTask(b.id).status, 'done');
+  const ta = s.getTask(a.id);
+  assert.equal(ta.status, 'review', 'done requires reviewer/owner verification');
+  assert.ok(ta.comments.some((c) => c.author === 'orchestrator' && /no reviewer/.test(c.text)), 'the stranded task is surfaced');
+  assert.equal(s.getTask(b.id).status, 'todo', 'the dependent stays blocked until a reviewer/owner verifies');
 });
 
 test('orchestrator: agent budget stops that agent, project budget stops the Run', async () => {

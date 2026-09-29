@@ -43,14 +43,16 @@ test('store: createTask defaults priority to P2, updateTask validates it', () =>
 test('orchestrator: scheduler dispatches the highest-priority ready task first', async () => {
   const { s } = setup();
   const n = s.addNode({ name: 'D', role: 'Dev' }); // single agent: only one task can run at a time
+  const rev = s.addNode({ name: 'Rev', role: 'Reviewer' }); // clean exits complete via reviewer pickup
+  s.addEdge(n.id, rev.id, 'review');
   const low = s.createTask({ title: 'low', assignee: n.id, priority: 'P3' });
   const high = s.createTask({ title: 'high', assignee: n.id, priority: 'P0' });
   const o = new Orchestrator(s);
+  const runs = []; o.on('run', (r) => runs.push(r.taskId));
   const done = new Promise((res) => o.on('done', res));
   o.start();
-  await new Promise((r) => setTimeout(r, 50));
-  assert.equal(o.snapshot().active[0].taskId, high.id, 'P0 task must be dispatched before the P3 task');
   await done;
+  assert.equal(runs[0], high.id, 'P0 task must be dispatched before the P3 task');
   assert.ok([low, high].every((t) => s.getTask(t.id).status === 'done'));
 });
 
@@ -86,7 +88,7 @@ test('orchestrator: review task with a reviewer edge is dispatched to the review
   assert.equal(o.agent(rev.id).runs, 2, 'the reviewer must actually have run both hand-offs');
 });
 
-test('orchestrator: review task with no reviewer edge auto-advances to done so dependents unblock', async () => {
+test('orchestrator: review task with no reviewer edge stays in review and is surfaced, never done', async () => {
   const { s } = setup();
   const dev = s.addNode({ name: 'Dev', role: 'Dev' }); // no review edge from dev anywhere
   const t = s.createTask({ title: 'orphan review', assignee: dev.id });
@@ -97,9 +99,9 @@ test('orchestrator: review task with no reviewer edge auto-advances to done so d
   o.start();
   await done;
   const after = s.getTask(t.id);
-  assert.equal(after.status, 'done');
-  assert.ok(after.comments.some((c) => c.author === 'orchestrator' && /auto-advanced/.test(c.text)));
-  assert.equal(s.getTask(dependent.id).status, 'done');
+  assert.equal(after.status, 'review', 'done requires reviewer/owner verification; the sweep must not finish unreviewed work');
+  assert.ok(after.comments.some((c) => c.author === 'orchestrator' && /no reviewer/.test(c.text)), 'the stranded task is surfaced');
+  assert.equal(s.getTask(dependent.id).status, 'todo', 'the dependent stays blocked until a reviewer/owner verifies');
 });
 
 test('orchestrator: a review task parked for a human (no reviewer role) is left alone, not auto-advanced', async () => {
@@ -163,7 +165,7 @@ function setupRepo(script = RESULT()) {
 }
 const COMMIT_WORK = RESULT("echo work > work.txt\ngit add .\ngit -c user.email=a@b -c user.name=a commit -qm work\n");
 
-test('orchestrator: clean exit without status hands off to review without merging; no reviewer -> done on the sweep', async () => {
+test('orchestrator: clean exit without status hands off to review without merging; no reviewer -> stays in review', async () => {
   // (1) dev with a review edge: the silent exit is a review hand-off, not an instant done+merge
   const a = setupRepo(COMMIT_WORK);
   const dev = a.s.addNode({ name: 'Dev', role: 'Dev' });
@@ -180,7 +182,7 @@ test('orchestrator: clean exit without status hands off to review without mergin
   assert.ok(!fs.existsSync(path.join(a.repo, 'work.txt')), 'nothing is merged before the review happens');
   assert.ok(!r1.comments.some((c) => /auto-merged/.test(c.text)), 'no merge is claimed');
 
-  // (2) no review edge anywhere: the same hand-off lands done when the sweep (next tick) runs
+  // (2) no review edge anywhere: the same hand-off stays in review — done needs reviewer/owner
   const b = setupRepo(COMMIT_WORK);
   const dev2 = b.s.addNode({ name: 'Dev2', role: 'Dev' });
   const t2 = b.s.createTask({ title: 'silent exit, no reviewer', assignee: dev2.id });
@@ -190,9 +192,9 @@ test('orchestrator: clean exit without status hands off to review without mergin
   assert.equal(b.s.getTask(t2.id).status, 'review');
   o2.autoAdvanceReviews(b.s.getTeam());
   const r2 = b.s.getTask(t2.id);
-  assert.equal(r2.status, 'done', 'the sweep finishes the hand-off when no reviewer is configured');
-  assert.ok(r2.comments.some((c) => c.author === 'orchestrator' && /auto-advanced/.test(c.text)));
-  assert.ok(fs.existsSync(path.join(b.repo, 'work.txt')), 'the hand-off still lands the merge once done');
+  assert.equal(r2.status, 'review', 'the sweep leaves the hand-off in review when no reviewer is configured');
+  assert.ok(r2.comments.some((c) => c.author === 'orchestrator' && /no reviewer/.test(c.text)), 'the stranded hand-off is surfaced');
+  assert.ok(!fs.existsSync(path.join(b.repo, 'work.txt')), 'nothing merges without reviewer verification');
 });
 
 // ---- session id per agent+runtime ----

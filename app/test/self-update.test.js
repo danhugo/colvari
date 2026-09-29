@@ -416,6 +416,8 @@ test('drain: dispatchPaused keeps the run session alive; unpausing resumes and f
   const s = new Store(path.join(d, 'p'));
   s.saveSettings({ claudePath: fake, maxRuns: 5 });
   const a = s.addNode({ name: 'A', role: 'Dev' });
+  const rev = s.addNode({ name: 'Rev', role: 'Reviewer' }); // the finished hand-off completes via reviewer pickup
+  s.addEdge(a.id, rev.id, 'review');
   s.createTask({ title: 'drain me', assignee: a.id });
   const o = new Orchestrator(s);
   o.dispatchPaused = true; // watcher is draining: pause before the first dispatch
@@ -431,7 +433,7 @@ test('drain: dispatchPaused keeps the run session alive; unpausing resumes and f
   const waitFor = async (fn) => { const t0 = Date.now(); while (!fn()) { if (Date.now() - t0 > 8000) throw new Error('timeout'); await new Promise((r) => setTimeout(r, 10)); } };
   await waitFor(() => !o.running);
   assert.strictEqual(s.getTask(s.listTasks()[0].id).status, 'done');
-  assert.ok(s.listRuns().length === 1);
+  assert.ok(s.listRuns().length === 2, 'dev run + reviewer pickup');
   assert.ok(s.readLogs().some((l) => /No more todo tasks. Finished./.test(l.text)));
   o.stop && o.stop();
 });
@@ -469,6 +471,8 @@ test('drain: a run whose bookkeeping crashes releases its slot; drain completes;
   const s = new Store(path.join(d, 'p'));
   s.saveSettings({ claudePath: fake, maxRuns: 5, autoRestart: true });
   const a = s.addNode({ name: 'A', role: 'Dev' });
+  const rev = s.addNode({ name: 'Rev', role: 'Reviewer' }); // the resumed hand-off completes via reviewer pickup
+  s.addEdge(a.id, rev.id, 'review');
   s.createTask({ title: 'crash my bookkeeping', assignee: a.id });
   const o = new Orchestrator(s);
   const waitFor = async (fn, what) => { const t0 = Date.now(); while (!fn()) { if (Date.now() - t0 > 8000) throw new Error('timeout: ' + what); await new Promise((r) => setTimeout(r, 10)); } };
@@ -518,6 +522,8 @@ test('drain cutoff: haltProcs stops a long run, the task stays re-dispatchable a
   const s = new Store(path.join(d, 'p'));
   s.saveSettings({ claudePath: fake, maxRuns: 5 });
   const a = s.addNode({ name: 'A', role: 'Dev' });
+  const rev = s.addNode({ name: 'Rev', role: 'Reviewer' }); // the resumed hand-off completes via reviewer pickup
+  s.addEdge(a.id, rev.id, 'review');
   s.createTask({ title: 'long runner', assignee: a.id });
   const o = new Orchestrator(s);
   const waitFor = async (fn, what) => { const t0 = Date.now(); while (!fn()) { if (Date.now() - t0 > 8000) throw new Error('timeout: ' + what); await new Promise((r) => setTimeout(r, 10)); } };
