@@ -20,6 +20,10 @@ function setup(n) {
 
 test('orchestrator resets and re-dispatches orphaned in_progress tasks instead of stopping blocked', async () => {
   const { s, ns } = setup(7);
+  // A reviewer so hand-offs can complete: since t_699b67b7 a clean exit lands in review and only a
+  // reviewer pickup (or owner) moves it to done — with no reviewer the run would legitimately strand.
+  const rev = s.addNode({ name: 'Rev', role: 'Reviewer' });
+  for (const n of ns) s.addEdge(n.id, rev.id, 'review');
   // 6 in_progress tasks whose assignees have no live process (simulating a prior run that ended
   // without a clean handoff: app restart, crash, etc.)
   const stuck = ns.slice(0, 6).map((n, i) => {
