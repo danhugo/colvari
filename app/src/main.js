@@ -1276,10 +1276,11 @@ async function guiE2E() {
     await ex(`await refresh(); await w(500);`);
     expect('topbar: exactly ONE limit chip, naming the worst provider (claude 42%)', await ex(`return document.querySelectorAll('#limitmeter [data-provider]').length === 1 && document.querySelector('#limitmeter [data-provider]').dataset.provider === 'claude' && /42%/.test($('#limitmeter').textContent) && !$('#limitmeter').classList.contains('hidden')`));
     expect('topbar: cost pill populated (tokens pill removed; cost visible)', await ex(`return !$('#totalcost').classList.contains('hidden') && !/no cost yet/.test($('#totalcost').textContent) && !document.querySelector('#totaltokens')`));
-    // Regime (t_bc19b2f5): the meter is one fixed-size chip (worst provider), the tokens pill is gone
-    // and the cost pill shows at EVERY width, so at the default 1400px the goal input — shrink weight
-    // 200×basis, 140px floor — absorbs the whole deficit and nothing clips; only below 1400px, after
-    // goal bottoms out, may the chip tail and the #updst/#totalcost/#runstate ellipses clip. #goal is
+    // Regime (t_bc19b2f5, t_57421101 round 3): the meter and the cost pill are FIXED — they may
+    // never shrink or clip, at any width. #goal (shrink weight 200×basis, no floor anymore) absorbs
+    // the deficit first, #updst/#runstate ellipsize as the last valves, and below 1200px the brand
+    // text hides and the tab labels collapse to icons (measured: the pills alone cannot cover a 900px
+    // window — the fixed chip+cost add ~317px back while goal/runstate only give ~156px). #goal is
     // excluded from the clipped list: an input's scrollWidth grows with its own text, which is
     // scrolling, not clipping.
     const measure = `(async () => { const h = document.querySelector('header'); const d = document.documentElement; const vis = (s) => { const e = document.querySelector(s); if (!e || e.getClientRects().length === 0) return false; const r = e.getBoundingClientRect(); return r.width > 0 && r.left >= 0 && r.right <= window.innerWidth && r.top >= 0 && r.bottom <= window.innerHeight; };
@@ -1293,10 +1294,10 @@ async function guiE2E() {
       expect(`topbar: no horizontal scroll at ${cw}px (page scrollWidth ${m.sw} <= ${m.cw})`, m.sw <= m.cw + 1, m);
       expect(`topbar: no header item cut off at ${cw}px (rightmost edge ${m.edge} <= window ${m.iw})`, m.edge <= m.iw + 1, m);
       expect(`topbar: Run/Stop/Help/goal visible at ${cw}px`, m.run && m.stop && m.help && m.goal, m);
-      expect(`topbar: goal keeps its 140px floor at ${cw}px (width ${m.goalW})`, m.goalW >= 139, m);
+      expect(`topbar: goal ${cw >= 1400 ? 'keeps its 140px floor' : 'stays visible (narrow allowed below the 1200px collapse)'} at ${cw}px (width ${m.goalW})`, cw >= 1400 ? m.goalW >= 139 : m.goalW >= 20, m);
       expect(`topbar: cost pill visible at ${cw}px (no breakpoint: the pill stays at every width)`, m.cost, m);
       if (cw >= 1400) expect(`topbar: nothing clipped at ${cw}px — goal absorbs, the summary chip shows full text`, m.clipped.length === 0, m);
-      else expect(`topbar: below 1400px only the elastic pieces (chip tail, #updst, #runstate, #totalcost) may clip at ${cw}px`, m.clipped.every((x) => String(x).includes('limitmeter') || String(x).includes('updst') || String(x).includes('runstate') || String(x).includes('totalcost')), m);
+      else expect(`topbar: below 1400px only #updst/#runstate may clip — the chip and the cost pill never do`, m.clipped.every((x) => String(x).includes('updst') || String(x).includes('runstate')), m);
       if (cw === 1600 || cw === 1400 || cw === 900) expect(`topbar: chat pane reaches the window's right edge at ${cw}px (chat right ${m.cm} vs window ${m.iw}, thread hidden)`, m.cm !== null && m.cm >= m.iw - 1 && !m.thDisp, m);
       await shot(`topbar-${cw}`);
       if (cw === 1400) { // the fix must not hide the thread pane for good: opening a task thread shows it again
@@ -1308,6 +1309,13 @@ async function guiE2E() {
         const m2 = await ex(`return ${measure}`);
         expect(`topbar: chat pane reaches the right edge again after closing the thread at 1400px (chat right ${m2.cm} vs window ${m2.iw})`, m2.cm >= m2.iw - 1 && !m2.thDisp, m2);
       }
+    }
+    // Critic round 3: the chip and the cost pill must be READABLE at 900px, not squashed — assert
+    // unclipped (scrollWidth <= clientWidth) and width-stable (the SAME width as at 1400px).
+    const kidAt = (cw2, id) => { const s2 = sweep.find((s3) => s3.cw === cw2); return (s2 && s2.kids.find((k2) => k2.id === id)) || null; };
+    for (const id of ['limitmeter', 'totalcost']) {
+      const k9 = kidAt(900, id), k14 = kidAt(1400, id);
+      expect(`topbar: ${id} unclipped and the SAME width at 900px as at 1400px (${k9 && k9.w}px vs ${k14 && k14.w}px)`, k9 && k14 && k9.sw <= k9.cw && Math.abs(k9.w - k14.w) <= 1, { at900: k9, at1400: k14 });
     }
     // Fixed-size bar whatever the provider count (t_bc19b2f5): 6 providers must still render the SAME
     // one-chip summary — the same width as the 2-provider header swept above — with no overflow at
@@ -1327,23 +1335,30 @@ async function guiE2E() {
     await ex(`await refresh(); await w(500);`);
     expect('topbar-6: exactly one chip despite 6 providers — the worst one (claude 42%), never the others', await ex(`return document.querySelectorAll('#limitmeter [data-provider]').length === 1 && document.querySelector('#limitmeter [data-provider]').dataset.provider === 'claude' && /42%/.test($('#limitmeter').textContent) && !/codex|opencode|helpycode|gemini|droid/i.test($('#limitmeter').textContent) && !$('#limitmeter').classList.contains('hidden')`));
     const chipW2 = (cw2) => { const x = sweep.find((s2) => s2.cw === cw2); return x && x.meterKids[0] ? x.meterKids[0].w : null; };
+    const six = {};
     for (const cw of [1600, 1400, 900]) {
       win.setContentSize(cw, Math.max(600, Math.min(prevSize[1], 800))); await new Promise((r) => setTimeout(r, 350));
-      const m = await ex(`return ${measure}`);
+      const m = await ex(`return ${measure}`); six[cw] = m;
       expect(`topbar-6: no overflow at ${cw}px (page ${m.sw} <= ${m.cw}, rightmost ${m.edge} <= ${m.iw})`, m.sw <= m.cw + 1 && m.edge <= m.iw + 1, m);
       expect(`topbar-6: Run/Stop/Help/goal visible at ${cw}px`, m.run && m.stop && m.help && m.goal, m);
-      expect(`topbar-6: goal keeps its 140px floor at ${cw}px (width ${m.goalW})`, m.goalW >= 139, m);
-      if (cw >= 1400) {
-        expect(`topbar-6: nothing clipped at ${cw}px`, m.clipped.length === 0, m);
-        expect(`topbar-6: bar same width as the 2-provider header at ${cw}px (${m.meterKids[0] ? m.meterKids[0].w : null}px vs ${chipW2(cw)}px)`, m.meterKids[0] && chipW2(cw) != null && Math.abs(m.meterKids[0].w - chipW2(cw)) <= 1, { six: m.meterKids[0], two: chipW2(cw) });
-      } else expect(`topbar-6: below 1400px only the elastic pieces may clip at ${cw}px`, m.clipped.every((x) => String(x).includes('limitmeter') || String(x).includes('updst') || String(x).includes('runstate') || String(x).includes('totalcost')), m);
+      expect(`topbar-6: goal ${cw >= 1400 ? 'keeps its 140px floor' : 'stays visible (narrow allowed)'} at ${cw}px (width ${m.goalW})`, cw >= 1400 ? m.goalW >= 139 : m.goalW >= 20, m);
+      if (cw >= 1400) expect(`topbar-6: nothing clipped at ${cw}px`, m.clipped.length === 0, m);
+      else expect(`topbar-6: below 1400px only #updst/#runstate may clip — the chip and the cost pill never do`, m.clipped.every((x) => String(x).includes('updst') || String(x).includes('runstate')), m);
+      expect(`topbar-6: bar same width as the 2-provider header at ${cw}px (${m.meterKids[0] ? m.meterKids[0].w : null}px vs ${chipW2(cw)}px)`, m.meterKids[0] && chipW2(cw) != null && Math.abs(m.meterKids[0].w - chipW2(cw)) <= 1, { six: m.meterKids[0], two: chipW2(cw) });
       await shot(`topbar-6-${cw}`);
+    }
+    for (const id of ['limitmeter', 'totalcost']) {
+      const k9 = six[900].kids.find((k2) => k2.id === id), k14 = six[1400].kids.find((k2) => k2.id === id);
+      expect(`topbar-6: ${id} unclipped and the SAME width at 900px as at 1400px (${k9 && k9.w}px vs ${k14 && k14.w}px)`, k9 && k14 && k9.sw <= k9.cw && Math.abs(k9.w - k14.w) <= 1, { at900: k9, at1400: k14 });
     }
     // Clicking the summary chip opens the Usage tab, which lists EVERY provider (the top bar names only the worst).
     await ex(`$('#limitmeter').click(); await w(300);`);
     await waitFor(`return $('#tab-usage').classList.contains('active') && document.querySelectorAll('#us-limits [data-provider]').length === 6`);
     const det = await ex(`return { provs: [...document.querySelectorAll('#us-limits [data-provider]')].map((c) => c.dataset.provider) }`);
     expect('topbar-6: clicking the chip opens the Usage tab listing every provider', det.provs.length === 6 && rts.every((r) => det.provs.includes(r)), det);
+    await ex(`document.querySelector('#us-limits').scrollIntoView({ block: 'center' }); await w(250);`);
+    const uv = await ex(`return (() => { const r = document.querySelector('#us-limits').getBoundingClientRect(); return { top: Math.round(r.top), bottom: Math.round(r.bottom), ih: window.innerHeight }; })()`);
+    expect('topbar-6: #us-limits is scrolled into view for the shot (evidence that all 6 providers are listed)', uv.top >= 0 && uv.bottom <= uv.ih, uv);
     await shot('topbar-6-usage');
     // Pause/near-limit renders INSIDE the one chip — the word replaces the % text — so the meter
     // never gains an element when the state changes and the equal-width comparison above stays

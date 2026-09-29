@@ -101,14 +101,14 @@ td.actions button { padding:2px 7px; font-size:12px; margin-right:4px; } #budget
 #helpdlg td { padding:3px 10px; }
 /* Header stays on one row whatever the pill contents: title, tabs and pills never wrap; the goal box absorbs the width. */
 header { flex-wrap:nowrap; min-width:0; } header > strong, header .pill, header button, #tabs { white-space:nowrap; flex-shrink:0; } #tabs { display:flex; }
-/* The status pills are the header's elastic middle: they shrink to an ellipsis so Run/Stop/help always
-   fit (overflow != visible lets flex shrink below the min-content size). They are the BACKSTOP: goal
-   (weight 200×260px vs their ~1×basis) absorbs the deficit first. The meter is one fixed-size summary
-   chip whatever the provider count (details live in the Usage tab), so at the default 1400px window
-   goal absorbs the whole deficit and nothing clips — only below ~1400px do the pill ellipses and the
-   meter tail become the last valves. */
-header #updst, header #runstate, header #totalcost { min-width:0; overflow:hidden; text-overflow:ellipsis; flex-shrink:1; }
-header #goal { flex:1 1 260px; flex-shrink:200; min-width:140px; max-width:420px; } header .spacer { flex:0 1 12px; }
+/* #updst/#runstate are the header's last elastic valves: they shrink to an ellipsis so Run/Stop/help
+   always fit (overflow != visible lets flex shrink below the min-content size). Goal (weight
+   200×260px vs their ~1×basis) absorbs the deficit first. The meter chip and the cost pill NEVER
+   shrink — that is the point of the fixed-size regime (t_57421101): both stay readable at every
+   width, so below 1200px the brand text hides and the tab labels collapse to their icons instead
+   (media rule below) rather than the pills squashing. */
+header #updst, header #runstate { min-width:0; overflow:hidden; text-overflow:ellipsis; flex-shrink:1; }
+header #goal { flex:1 1 260px; flex-shrink:200; min-width:0; max-width:420px; } header .spacer { flex:0 1 12px; }
 header .pill { font-variant-numeric:tabular-nums; } .pill.quiet { color:var(--muted); }
 .cap { display: inline-block; padding: 0 6px; border-radius: 8px; font-size: 11px; margin: 2px 0; }
 .cap.on { background: var(--success-soft); color: var(--success-text); } .cap.off { background: var(--danger-soft); color: var(--danger); }
@@ -287,16 +287,19 @@ header .pill { border:none; background:none; color:var(--fg-muted); font-size:va
    would grow the header mid-session, shifting the whole layout and eating in-flight clicks.
    The full reason stays reachable via the part's title tooltip. Clicking it opens the Usage
    tab, where the full per-provider list renders. */
-.limitmeter { display:flex; align-items:center; gap:6px; font-size:var(--text-xs); min-width:0; overflow:hidden; flex-shrink:1; cursor:pointer; }
+.limitmeter { display:flex; align-items:center; gap:6px; font-size:var(--text-xs); flex-shrink:0; cursor:pointer; }
 /* In the Usage tab the same chips list EVERY provider — they may wrap there (no header squeeze). */
 .limitmeter.us-list { flex-wrap:wrap; overflow:visible; cursor:default; row-gap:4px; }
 /* At working window widths the tab icons are pure padding — labels carry the tabs, and every
-   freed pixel goes to the meter chips. */
+   freed pixel goes to the meter chips. Below 1200px there is no longer room for the fixed chip,
+   the cost pill AND 450px of tab labels (the pills may no longer squash), so the labels collapse
+   back to their icons and the brand text hides — nothing is lost (icons + tooltips remain). */
 @media (max-width:1500px) { header .navicon { display:none; } }
+@media (max-width:1200px) { header .navicon { display:inline-block; } header #tabs button .lbl, header > strong { display:none; } }
 .limitmeter.hidden { display:none; }
 /* Chips never shrink: a shrunken chip keeps its nowrap text at full width but paints it over the
-   neighbouring chip (the "42%Codex" garble) and ellipsises its small into "U…". If the header
-   genuinely runs out of room the meter clips at its own right edge instead — ugly, but honest. */
+   neighbouring chip (the "42%Codex" garble) and ellipsises its small into "U…" — so the meter is
+   flex-shrink:0 and the header never squeezes it; the tab strip and brand give way instead. */
 .limitmeter .lm-part { display:flex; align-items:center; gap:5px; padding:2px 7px; border-radius:var(--radius-full); background:var(--bg-hover); color:var(--fg-secondary); white-space:nowrap; flex:0 0 auto; }
 .limitmeter .lm-part b { font-weight:var(--fw-semibold); }
 .limitmeter .lm-part.lm-warn { background:var(--warning-soft); color:var(--warning-text); } .limitmeter .lm-part.lm-danger { background:var(--danger-soft); color:var(--danger); }
