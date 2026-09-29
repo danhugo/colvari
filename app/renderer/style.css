@@ -295,7 +295,7 @@ header .pill { border:none; background:none; color:var(--fg-muted); font-size:va
    the cost pill AND 450px of tab labels (the pills may no longer squash), so the labels collapse
    back to their icons and the brand text hides — nothing is lost (icons + tooltips remain). */
 @media (max-width:1500px) { header .navicon { display:none; } }
-@media (max-width:1200px) { header .navicon { display:inline-block; } header #tabs button .lbl, header > strong { display:none; } }
+@media (max-width:1200px) { header .navicon { display:inline-block; } header #tabs button .lbl { display:none; } }
 .limitmeter.hidden { display:none; }
 /* Chips never shrink: a shrunken chip keeps its nowrap text at full width but paints it over the
    neighbouring chip (the "42%Codex" garble) and ellipsises its small into "U…" — so the meter is
@@ -558,4 +558,5 @@ rect.usb-rep, i.usb-rep { fill:var(--accent); background:var(--accent); } rect.u
 
 /* Colvari brand */
 header > strong.brand { display:flex; align-items:center; gap:6px; font-weight:700; letter-spacing:-.02em; color:var(--fg-primary); }
+@media (max-width:1200px) { header > strong.brand { display:none; } }
 .brandmark { width:20px; height:20px; color:var(--accent-text); } .brandmark.big { width:40px; height:40px; display:block; margin:0 auto 8px; }
