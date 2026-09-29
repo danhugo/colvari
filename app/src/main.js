@@ -1127,7 +1127,8 @@ async function guiE2E() {
     console.log('[gui-e2e] helpycode', JSON.stringify({ draft, rtId, model, saved }));
   };
   // Wake-run UI (t_03a0e1a0): feed S.orch.agents[id].activity exactly as the backend shapes it
-  // (orchestrator wakeRun: {trigger:'message', messageId, fromNodeId, excerpt, taskId, startedAt}) and
+  // (orchestrator wakeRun: {trigger:'message', messageId, fromNodeId, excerpt, taskId, count, startedAt};
+  // count = unread msgs delivered this run, renderer maps it to "+N queued") and
   // check the Board banner + presence chip, the Team and Overview node badges, then cleared again.
   const wakeShots = async () => {
     await waitFor(`return !!document.querySelector('#tpl-select option')`); await ex(`await refresh();`);
@@ -1156,6 +1157,38 @@ async function guiE2E() {
     expect('wake: cleared activity hides the banner and chip', off.wakebarHidden && !off.chip, off);
     await shot('wake-board-cleared');
     console.log('[gui-e2e] wake', JSON.stringify({ board, team, ov, off }));
+  };
+  // Wake run on an agent that ALSO has an in_progress task (t_8af586bc) — the case that used to
+  // render bare "working": the backend keeps a.taskId null for the whole wake, so the old
+  // wakeRun() veto on any in_progress task hid the wake info everywhere. Same seeded activity
+  // shape as wakeShots, plus count (queued) and the in_progress task.
+  const wakeBusyShots = async () => {
+    await waitFor(`return !!document.querySelector('#tpl-select option')`); await ex(`await refresh();`);
+    const cur = await ex(`return { p: ctx.p, t: S.teamId }`);
+    const ps = pm.store(cur.p || pid(), cur.t); let nodes = ps.getTeam().nodes;
+    if (nodes.length < 2) { ps.addNode({ name: 'Pia', role: 'PM', x: 60, y: 60 }); ps.addNode({ name: 'Devon', role: 'Dev', x: 320, y: 160 }); nodes = ps.getTeam().nodes; }
+    const [pmN, dev] = nodes;
+    const task = ps.createTask({ title: 'Busy wake demo', assignee: dev.id });
+    ps.updateTask(task.id, { status: 'in_progress' });
+    await ex(`await refresh(); await w(200);`); // pick up the seeded task before injecting wake state
+    const seed = (onTask) => `S.orch.agents = { '${dev.id}': { status: 'working', activity: { trigger: 'message', messageId: 'm1', fromNodeId: '${pmN.id}', excerpt: 'Please look at the failing test', taskId: null, count: 2, startedAt: Date.now() }${onTask ? `, taskId: '${task.id}'` : ''} } }; renderIdle(); renderGraph(); renderOverview(); renderChat();`;
+    await ex(`$('#tabs button[data-tab=team]').click(); await w(200);`);
+    const team = await ex(`${seed(false)} await w(100); return { badge: !!document.querySelector('#graph .wakerunbadge'), chip: !!document.querySelector('#presence .pchip.wake'), typing: '' }`);
+    expect('wakebusy: wake badge shows despite the in_progress task (was bare working)', team.badge && team.chip, team);
+    await shot('wakebusy-team');
+    const chat = await ex(`$('#tabs button[data-tab=chat]').click(); await w(200); ${seed(false)} await w(100); return { typing: $('#chat-typing').textContent || '' }`);
+    expect('wakebusy: chat header shows the wake reason, not bare "Name is working"', chat.typing.includes('woken by message from Pia') && !/^Devon is working/.test(chat.typing), chat);
+    await shot('wakebusy-chat');
+    await ex(`$('#tabs button[data-tab=overview]').click(); await w(200);`);
+    const ov = await ex(`${seed(false)} await w(100); return { badge: !!document.querySelector('#ov-graph .wakerunbadge') }`);
+    expect('wakebusy: Overview shows the wake badge despite the in_progress task', ov.badge, ov);
+    await shot('wakebusy-overview');
+    // The veto still applies when the live run IS the task run (a.taskId set): badge goes away.
+    await ex(`$('#tabs button[data-tab=team]').click(); await w(200);`);
+    const onTask = await ex(`${seed(true)} await w(100); return { badge: !!document.querySelector('#graph .wakerunbadge') }`);
+    expect('wakebusy: task badge wins when the live run is the task run (a.taskId set)', !onTask.badge, onTask);
+    await shot('wakebusy-taskwins');
+    console.log('[gui-e2e] wakebusy', JSON.stringify({ team, chat, ov, onTask }));
   };
   // Subagent (Task/Agent tool) visibility: replay REAL captured CLI streams (test/fixtures/subagents-*.jsonl —
   // claude 2.1.283 with two parallel Agent spawns + parent_tool_use_id child events, helpycode 0.3.5 with two
@@ -1477,6 +1510,7 @@ async function guiE2E() {
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'mainlogswiki') { await mainLogsWikiShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'critique') { await critiqueShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'wake') { await wakeShots(); throw null; }
+    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'wakebusy') { await wakeBusyShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'subagents') { await subagentShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'dynamicteam') { await dynamicTeamShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'recruitinbox') { await recruitInboxShots(); throw null; }
