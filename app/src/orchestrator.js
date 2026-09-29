@@ -13,6 +13,7 @@ const PF = require('./preflight');
 const C = require('./controls');
 const IDLE = require('./idle');
 const WT = require('./worktree');
+const MG = require('./merge-gate');
 const RT = require('./runtimes');
 const CAP = require('./capabilities');
 const { SubagentTracker, isSubagentTool } = require('./subagents');
@@ -632,6 +633,11 @@ class Orchestrator extends EventEmitter {
     // by agents' own board MCP servers are invisible to this process until the next look.
     this._tickTimer = setInterval(() => { try { this.tick(); } catch {} }, SCHED.TICK_MS);
     if (this._tickTimer.unref) this._tickTimer.unref();
+    // Red-master sweep (t_897cca56): the merge gate keeps master green through merges, but a base
+    // branch can also go red OUTSIDE the gate (direct commits). Detect that at startup and surface
+    // it (master.red log + P0 fix task); a no-op unless the base tree differs from the last tree
+    // the gate proved green. Fire-and-forget: must never block or break startup.
+    setImmediate(() => { try { MG.checkMasterHealth(this.store); } catch {} });
   }
   stop() {
     this.running = false;

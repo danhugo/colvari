@@ -5,6 +5,7 @@ const { ProjectManager, TEMPLATES, isolateTestRoot } = require('./projects');
 const { pickChanged } = require('./store');
 const AC = require('./agent-config');
 const WT = require('./worktree');
+const MG = require('./merge-gate');
 const U = require('./usage');
 const PF = require('./preflight');
 const RT = require('./runtimes');
@@ -2000,7 +2001,12 @@ const api = {
   inboxCounts: () => Object.fromEntries(pm.list().map((p) => [p.id, pm.store(p.id).listInbox({ status: 'open' }).length])),
   approveTask: (c, id, ok, note) => ST(c).approveTask(id, ok, note), getLogs: (c, n) => ST(c).readLogs(n || 2000), clearLogs: (c) => ST(c).clearLogs(),
   taskDiff: (c, id) => WT.worktreeDiff(wtTask(c, id)),
-  taskMerge: (c, id) => { const r = WT.worktreeMerge(wtTask(c, id)); ST(c).commentTask(id, 'human', r.refused ? WT.dirtyMergeMessage(r.dirty) : r.merged ? `merged ${r.branch} into ${r.base}` : `nothing merged: no commits on ${r.branch} ahead of ${r.base}`); return r; },
+  taskMerge: async (c, id) => {
+    const s = ST(c);
+    const r = await MG.gateMerge(wtTask(c, id), s);
+    s.commentTask(id, 'human', r.refused ? WT.dirtyMergeMessage(r.dirty) : r.merged ? `merged ${r.branch} into ${r.base} (merge gate: npm test ${r.gate.state}${r.gate.tests ? `, ${r.gate.tests} tests` : ''})` : r.gate && r.gate.state !== 'skipped' ? `merge gate blocked the merge (${r.gate.state}); the task was reopened` : `nothing merged: no commits on ${r.branch} ahead of ${r.base}`);
+    return r;
+  },
   taskDiscard: (c, id) => { const r = WT.worktreeDiscard(wtTask(c, id)); ST(c).updateTask(id, { worktreePath: null, worktreeBranch: null }); return r; },
   unmergedBranches: (c) => ST(c).listUnmergedBranches(),
   pickDir: async () => { const { dialog } = require('electron'); const r = await dialog.showOpenDialog(win, { properties: ['openDirectory', 'createDirectory'] }); return r.canceled ? null : r.filePaths[0]; },
