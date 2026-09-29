@@ -470,15 +470,17 @@ function renderHeader() {
 // 'restart-state' / 'watch-status' (watch digests also arrive as kind:'watch' log lines). Until the
 // backend lands this runs on the last known state, stub-marked like the self-update chip above —
 // with nothing known, no pill shows at all rather than a wrong one.
-let rst = { pendingCount: 0, since: null, scheduledAfter: null, scheduledNow: false, gating: [], waitingReasons: undefined, stub: true };
+let rst = { pendingCount: 0, since: null, scheduledAfter: null, scheduledNow: false, gating: [], waitingReasons: undefined, blockedReason: undefined, busyAgents: undefined, stub: true };
 let watch = { lastWatchAt: null, active: false, digest: '', intervalMin: 10, stub: true };
-// Devon's blocker lines (t_ec59eefa contract): flat prose strings, most-blocking first. Absent
-// (his field has not landed yet) stays undefined so the popover can stub; a landed [] means
-// nothing blocks — the next tick fires.
+// Blocker lines for the popover. Devon's landed core shape (t_acae4863) is authoritative:
+// blockedReason (one human line: anchor / drain with names / updater phase) + busyAgents. Absent
+// fields mean an older core without any reason → the popover stubs; blockedReason === null means
+// landed and nothing blocks — the next tick fires. waitingReasons stays as a defensive alias for
+// the prose-array contract proposed on t_acae4863.
 const normWaiting = (v) => !Array.isArray(v) ? undefined
   : v.map((r) => (typeof r === 'string' ? r : (r && (r.text || r.reason)) || '')).filter(Boolean);
-// Defensive about the exact payload shape (Devon's tasks are still in flight): pending/count vs
-// pendingCount, afterTaskId vs scheduledAfter, gatedTaskIds vs gating, waitingReasons vs waiting.reasons.
+// Defensive about the exact payload shape (pending/count vs pendingCount, afterTaskId vs
+// scheduledAfter, gatedTaskIds vs gating, waitingReasons vs waiting.reasons).
 const normRestart = (d) => { d = d || {}; return {
   pendingCount: Math.max(0, Number(d.pendingCount ?? d.pending ?? d.count) || 0),
   since: d.since || null,
@@ -486,6 +488,8 @@ const normRestart = (d) => { d = d || {}; return {
   scheduledNow: !!d.scheduledNow || d.now === true,
   gating: Array.isArray(d.gating) ? d.gating : Array.isArray(d.gatedTaskIds) ? d.gatedTaskIds : [],
   waitingReasons: normWaiting(d.waitingReasons ?? (d.waiting && d.waiting.reasons)),
+  blockedReason: d.blockedReason === undefined ? undefined : (typeof d.blockedReason === 'string' && d.blockedReason ? d.blockedReason : null),
+  busyAgents: Array.isArray(d.busyAgents) ? d.busyAgents.map(String).filter(Boolean) : undefined,
 }; };
 const normWatch = (d) => { d = d || {}; return {
   lastWatchAt: d.lastWatchAt || d.at || null,
@@ -552,9 +556,18 @@ async function rstAction(kind) {
   }
 }
 // ---- blocker popover (t_ec59eefa): the chip's hover card with the full "waiting on" breakdown ----
-// Devon's waitingReasons (contract agreed on t_acae4863) is authoritative once it lands; until then
-// the honest subset derivable from the state we already have renders, marked as provisional.
+// Priority: Devon's landed core shape (blockedReason + busyAgents, t_acae4863), then the prose-array
+// alias, then — only for a core without any reason field — the honest subset derivable from the
+// state we already have, marked as provisional.
 function rstWaiting() {
+  if (rst.blockedReason !== undefined || rst.busyAgents !== undefined) {
+    const lines = [];
+    if (rst.blockedReason) lines.push(rst.blockedReason);
+    const extra = (rst.busyAgents || []).filter((n) => !rst.blockedReason || !rst.blockedReason.includes(n));
+    if (extra.length) lines.push(`${extra.length} agent${extra.length === 1 ? '' : 's'} still running: ${extra.join(', ')}`);
+    if (!lines.length) lines.push('Nothing — it fires on the next tick.');
+    return { lines, stub: false };
+  }
   if (rst.waitingReasons) return { lines: rst.waitingReasons.length ? rst.waitingReasons : ['Nothing — it fires on the next tick.'], stub: false };
   const armed = !!(rst.scheduledAfter || rst.scheduledNow);
   if (!armed) return { lines: ['No restart armed yet — the core agent (PM) schedules one, or it auto-arms when pending changes hit the cap.'], stub: false };
