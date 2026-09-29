@@ -1,5 +1,5 @@
 /* Copied from design/tokens.css — keep in sync. */
-/* Agents Squad design tokens — light default, dark via [data-theme="dark"] or prefers-color-scheme */
+/* Colvari design tokens — light default, dark via [data-theme="dark"] or prefers-color-scheme */
 :root {
   /* type */
   --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
@@ -16,11 +16,11 @@
   --dur-fast: 120ms; --dur-base: 200ms; --dur-slow: 360ms;
 
   /* colour — light */
-  --bg-app: #f4f5f8; --bg-sidebar: #eceef3; --bg-surface: #ffffff; --bg-raised: #ffffff; --bg-hover: #e4e7ee; --bg-active: #dde3ff;
-  --bg-bubble: #ffffff; --bg-bubble-self: #4f5bff; --bg-code: #f1f2f6;
+  --bg-app: #f4f5f8; --bg-sidebar: #eceef3; --bg-surface: #ffffff; --bg-raised: #ffffff; --bg-hover: #e4e7ee; --bg-active: #d3eeea;
+  --bg-bubble: #ffffff; --bg-bubble-self: #0b7a70; --bg-code: #f1f2f6;
   --fg-primary: #16181f; --fg-secondary: #4a4f5e; --fg-muted: #5f6576; --fg-on-accent: #ffffff;
   --border: #e1e4eb; --border-strong: #cdd2dd;
-  --accent: #4f5bff; --accent-soft: #e8eaff; --accent-text: #3a44d6;
+  --accent: #0b7a70; --accent-soft: #dff3f0; --accent-text: #0a6b62;
   --success: #0f9749; --success-soft: #dcf5e6; --warning: #d98a00; --warning-soft: #fff1d6; --danger: #e5484d; --danger-soft: #ffe3e3; --info: #0b8ad9;
   /* AA text-safe status colours (≥4.5:1 on bg + soft) */
   --success-text: #0f7a3d; --warning-text: #8f5b00; --warning-strong: #b35f00;
@@ -43,11 +43,11 @@
   --term-bg: #0f1115; --term-fg: #cfd6e4; --term-dim: #7f8aa3; --term-red: #ef6b73; --term-yellow: #e5c07b; --term-green: #98c379; --term-blue: #61afef;
 }
 [data-theme="dark"] {
-  --bg-app: #0f1116; --bg-sidebar: #0b0d11; --bg-surface: #161920; --bg-raised: #1c2029; --bg-hover: #222733; --bg-active: #262d4a;
-  --bg-bubble: #1c2029; --bg-bubble-self: #4f5bff; --bg-code: #10131a;
+  --bg-app: #0f1116; --bg-sidebar: #0b0d11; --bg-surface: #161920; --bg-raised: #1c2029; --bg-hover: #222733; --bg-active: #1a3a36;
+  --bg-bubble: #1c2029; --bg-bubble-self: #0b7a70; --bg-code: #10131a;
   --fg-primary: #eceef3; --fg-secondary: #b3b8c6; --fg-muted: #8a90a6; --fg-on-accent: #101322; /* dark ink on light dark-mode fills — ≥4.5:1 */
   --border: #252a35; --border-strong: #333a48;
-  --accent: #7c85ff; --accent-soft: #232852; --accent-text: #a3a9ff;
+  --accent: #34c79c; --accent-soft: #123a33; --accent-text: #5ee0b8;
   --success: #3ccf7e; --success-soft: #133322; --warning: #f5b544; --warning-soft: #3a2c10; --danger: #ff6b6f; --danger-soft: #3d1a1c;
   --success-text: #3ccf7e; --warning-text: #f5b544; --warning-strong: #f5b544;
   --shadow-sm: 0 1px 2px rgba(0,0,0,.4); --shadow-md: 0 2px 10px rgba(0,0,0,.45); --shadow-lg: 0 16px 40px rgba(0,0,0,.55);
@@ -60,11 +60,11 @@
 
 /* follow the OS theme unless explicitly set */
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
-  --bg-app: #0f1116; --bg-sidebar: #0b0d11; --bg-surface: #161920; --bg-raised: #1c2029; --bg-hover: #222733; --bg-active: #262d4a;
-  --bg-bubble: #1c2029; --bg-bubble-self: #4f5bff; --bg-code: #10131a;
+  --bg-app: #0f1116; --bg-sidebar: #0b0d11; --bg-surface: #161920; --bg-raised: #1c2029; --bg-hover: #222733; --bg-active: #1a3a36;
+  --bg-bubble: #1c2029; --bg-bubble-self: #0b7a70; --bg-code: #10131a;
   --fg-primary: #eceef3; --fg-secondary: #b3b8c6; --fg-muted: #8a90a6; --fg-on-accent: #101322; /* dark ink on light dark-mode fills — ≥4.5:1 */
   --border: #252a35; --border-strong: #333a48;
-  --accent: #7c85ff; --accent-soft: #232852; --accent-text: #a3a9ff;
+  --accent: #34c79c; --accent-soft: #123a33; --accent-text: #5ee0b8;
   --success: #3ccf7e; --success-soft: #133322; --warning: #f5b544; --warning-soft: #3a2c10; --danger: #ff6b6f; --danger-soft: #3d1a1c;
   --success-text: #3ccf7e; --warning-text: #f5b544; --warning-strong: #f5b544;
   --shadow-sm: 0 1px 2px rgba(0,0,0,.4); --shadow-md: 0 2px 10px rgba(0,0,0,.45); --shadow-lg: 0 16px 40px rgba(0,0,0,.55);
