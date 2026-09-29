@@ -33,6 +33,21 @@ function defaultProjectDir(name = 'default') {
 const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 const id = (p) => `${p}_${crypto.randomBytes(4).toString('hex')}`;
 
+// Chat attachments: the renderer uploads bytes once, the file lands under <dir>/attachments/ and
+// only its {path,name,mime,size} travels through messages/tasks — never the bytes (no base64).
+const ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024;
+const ATTACHMENT_FIELDS = ['path', 'name', 'mime', 'size'];
+// Basename + safe-char filter so a hostile name ("../../x", "a/b") can never escape attachments/.
+function cleanAttachmentName(name) {
+  const safe = path.basename(String(name || '')).replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^[.-]+|[.-]+$/g, '').slice(0, 128);
+  return safe || 'file';
+}
+function sanitizeAttachments(list) {
+  if (!Array.isArray(list) || !list.length) return null;
+  const out = list.filter((a) => a && a.path).map((a) => pick({ path: String(a.path), name: String(a.name || ''), mime: String(a.mime || ''), size: Number(a.size) || 0 }, ATTACHMENT_FIELDS));
+  return out.length ? out : null;
+}
+
 class Store {
   // teamId: which team graph this store edits. Without it, getTeam() returns the union of all
   // teams in the project (used by the orchestrator and MCP server: node ids are globally unique).
@@ -391,10 +406,12 @@ class Store {
     return ts;
   }
   getTask(tid) { this._ensureBoard(); return this._readTaskFile(tid + '.json') || undefined; }
-  createTask({ title, description = '', assignee = null, createdBy = 'human', parentId = null, blockedBy = [], priority }) {
+  createTask({ title, description = '', assignee = null, createdBy = 'human', parentId = null, blockedBy = [], priority, attachments = null }) {
     if (!title) throw new Error('title required');
     const now = new Date().toISOString();
     const task = { id: id('t'), title, description, assignee, status: 'todo', priority: C.normalizePriority(priority), createdBy, parentId, blockedBy: [], comments: [], createdAt: now, updatedAt: now };
+    const atts = sanitizeAttachments(attachments);
+    if (atts) task.attachments = atts;
     this._withTasks((tasks) => { task.blockedBy = C.validateDeps(task.id, blockedBy, tasks); tasks.push(task); });
     return task;
   }
@@ -532,6 +549,25 @@ class Store {
     });
   }
 
+  // ---- attachments (main-process save; renderer gets {path,name,mime,size}|{error}) ----
+  attachmentsDir() { return path.join(this.dir, 'attachments'); }
+  saveAttachment({ name, mime, bytes }) {
+    try {
+      const buf = Buffer.isBuffer(bytes) ? bytes
+        : bytes instanceof ArrayBuffer ? Buffer.from(bytes)
+        : ArrayBuffer.isView(bytes) ? Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+        : null;
+      if (!buf || !buf.length) return { error: 'attachment has no bytes (send the file content as bytes)' };
+      if (buf.length > ATTACHMENT_MAX_BYTES) return { error: `attachment too large: ${name} is ${(buf.length / 1048576).toFixed(1)} MB (limit is 10 MB)` };
+      const clean = cleanAttachmentName(name);
+      const dir = this.attachmentsDir();
+      const file = path.join(dir, `${Date.now()}-${crypto.randomBytes(4).toString('hex')}-${clean}`);
+      if (!file.startsWith(dir + path.sep)) return { error: 'attachment name escaped the attachments directory' };
+      this._writeFileSync(file, buf);
+      return { path: file, name: clean, mime: String(mime || ''), size: buf.length };
+    } catch (e) { return { error: 'attachment save failed: ' + e.message }; }
+  }
+
   // ---- messages (agent to agent, scope checked in board-tools) ----
   listMessages(filter = {}) {
     let ms = this.read('messages', { messages: [] }).messages;
@@ -539,9 +575,11 @@ class Store {
     if (filter.from) ms = ms.filter((m) => m.from === filter.from);
     return ms;
   }
-  sendMessage({ from, to, text, taskId = null }) {
+  sendMessage({ from, to, text, taskId = null, attachments = null }) {
     if (!text) throw new Error('text required');
     const m = { id: id('m'), from, to, text, taskId, at: new Date().toISOString(), read: false };
+    const atts = sanitizeAttachments(attachments);
+    if (atts) m.attachments = atts;
     this.update('messages', { messages: [] }, (d) => { d.messages.push(m); });
     return m;
   }

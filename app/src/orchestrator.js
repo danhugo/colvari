@@ -86,6 +86,7 @@ function buildPrompt(team, node, task, extra = {}) {
     '',
     `Your current task (id=${task.id}): ${task.title}`,
     task.description ? `Description:\n${task.description}` : '',
+    task.attachments && task.attachments.length ? attachedFilesLines(task.attachments) : '',
     (task.blockedBy || []).length ? `This task depended on: ${task.blockedBy.join(', ')} (all done now; read their comments with list_tasks if useful).` : '',
     task.comments.length ? `Comments so far:\n${task.comments.map((c) => `- ${c.author}: ${c.text}`).join('\n')}` : '',
     '',
@@ -99,9 +100,18 @@ function buildPrompt(team, node, task, extra = {}) {
   ].filter((l) => l !== '').join('\n');
 }
 
+// Prompt lines for files already saved under <store>/attachments: absolute paths only. The agent
+// reads them from disk with its own file tools (claude gets the dir via --add-dir); bytes never
+// travel through the prompt.
+function attachedFilesLines(atts) {
+  const list = (atts || []).filter((a) => a && a.path);
+  if (!list.length) return '';
+  return list.map((a) => `Attached files: ${a.path}${a.mime ? ` (${a.mime}, ${a.size} bytes)` : ''}`).join('\n');
+}
+
 // Prompt for a resumed run that delivers a human message (base is included when there is no session to resume).
-function humanPrompt(text, base = null) {
-  return [base, `Message from the human operator (answer or act on it, then continue your task):\n${text}`].filter(Boolean).join('\n\n');
+function humanPrompt(text, base = null, attachments = null) {
+  return [base, `Message from the human operator (answer or act on it, then continue your task):\n${text}`, attachedFilesLines(attachments)].filter(Boolean).join('\n\n');
 }
 
 // Short 'continue' prompt for a stalled run resumed in the same session (the session already holds
@@ -120,7 +130,7 @@ function wakePrompt(team, node, msgs) {
     'Coordinate ONLY through the "board" MCP tools.',
     '',
     'Unread messages:',
-    ...msgs.map((m) => `- from ${nm(m.from)}: ${m.text}`),
+    ...msgs.map((m) => ['- from ' + nm(m.from) + ': ' + m.text, attachedFilesLines(m.attachments)].filter(Boolean).join('\n')),
   ].join('\n');
 }
 
@@ -323,11 +333,12 @@ class Orchestrator extends EventEmitter {
     return true;
   }
   // Human -> agent message. Stored in the agent's inbox; if the agent is running, the current run is
-  // interrupted and resumed in the same session with the message as the next prompt.
-  sendToAgent(nodeId, text, taskId = null) {
+  // interrupted and resumed in the same session with the message as the next prompt. extra.attachments
+  // are already-saved files ({path,name,mime,size}); only the records travel, never the bytes.
+  sendToAgent(nodeId, text, taskId = null, extra = null) {
     if (!String(text || '').trim()) throw new Error('text required');
     const a = this.agent(nodeId);
-    const m = this.store.sendMessage({ from: 'human', to: nodeId, text: String(text).trim(), taskId: taskId || a.taskId || null });
+    const m = this.store.sendMessage({ from: 'human', to: nodeId, text: String(text).trim(), taskId: taskId || a.taskId || null, attachments: extra && extra.attachments });
     const live = a.status === 'working' && this.procs.has(nodeId) && this.running;
     if (live) { a.pendingHuman.push(m); this.log(nodeId, 'system', `✉ human message queued; interrupting to deliver: ${m.text.slice(0, 200)}`); this.procs.get(nodeId).kill('SIGTERM'); }
     else this.log(nodeId, 'system', `✉ human message stored in inbox: ${m.text.slice(0, 200)}`);
@@ -435,7 +446,10 @@ class Orchestrator extends EventEmitter {
       const resume = this.lastSession(node.id);
       this.log(node.id, 'system', `▶ ${node.name} wakes to handle messages in ${cwd}${resume ? ' [resume ' + resume + ']' : ''}`);
       let args = null;
-      try { args = RT.getRuntime(cfg.runtime).buildArgs(cfg, wakePrompt(team, node, msgs), settings, this.mcpConfig(node), { resume, cwd, env }); }
+      // Wake messages can carry attachments (their paths are in wakePrompt): pass the dir like the
+      // task-run path does, or the agent gets a path it cannot read.
+      const wakeAtts = msgs.flatMap((m) => m.attachments || []);
+      try { args = RT.getRuntime(cfg.runtime).buildArgs(cfg, wakePrompt(team, node, msgs), settings, this.mcpConfig(node), { resume, cwd, env, ...(wakeAtts.length ? { attachDir: this.store.attachmentsDir() } : {}) }); }
       catch (e) { this.log(node.id, 'error', 'bad agent settings: ' + e.message); }
       const r = await this.spawnRun(node, args, cwd, env, settings, { ...meta, resumedFrom: args && resume ? resume : null });
       a.status = 'idle'; a.iteration = 0; a.activity = null;
@@ -848,7 +862,7 @@ class Orchestrator extends EventEmitter {
       a.runtime = meta.runtime; a.model = cfg.model || '';
       let resume = task.sessionId || (m.continueSession ? this.lastSession(node.id) : null);
       this.log(node.id, 'system', `▶ ${node.name} starts "${task.title}" in ${cwd} [mode=${m.mode}${resume ? ', resume ' + resume : ''}]`);
-      let code = 1; let judge = null; let i = 0; let reason = ''; let human = null; let recover = false;
+      let code = 1; let judge = null; let i = 0; let reason = ''; let human = null; let recover = false; let humanAtts = [];
       a.stopRequested = false; a.pendingHuman = [];
       for (;;) {
         // The run was killed for a self-update restart (haltProcs): no further iterations, human
@@ -859,12 +873,15 @@ class Orchestrator extends EventEmitter {
         if (base !== null) {
           const b = m.mode === 'loop' && !isLastLoop(m, i) ? baseDefer : base;
           const prompt = human ? humanPrompt(human, resume || wf ? null : b) : recover ? stallPrompt(task) : iterationPrompt(m, b, i, { reason: judge && judge.reason, task: wf ? (this.store.getTask(task.id) || task) : null });
-          try { args = RT.getRuntime(cfg.runtime).buildArgs(runCfg, prompt, settings, mcp, { resume, cwd, env }); }
+          // Only runs that actually carry attachments get the attachments dir passed (claude maps it
+          // to --add-dir; profile runtimes work from the paths in the prompt).
+          const runAtts = (task.attachments || []).concat(humanAtts);
+          try { args = RT.getRuntime(cfg.runtime).buildArgs(runCfg, prompt, settings, mcp, { resume, cwd, env, ...(runAtts.length ? { attachDir: this.store.attachmentsDir() } : {}) }); }
           catch (e) { this.log(node.id, 'error', 'bad agent settings: ' + e.message); }
         }
         if (i > 0) this.log(node.id, 'system', `↻ ${node.name} iteration ${i + 1} (${m.mode})`);
         const r = await this.spawnRun(node, args, cwd, env, settings, { ...meta, iteration: i + 1, resumedFrom: args && resume ? resume : null });
-        code = r.code; i++; human = null; recover = false;
+        code = r.code; i++; human = null; recover = false; humanAtts = [];
         if (r.sessionId) { resume = r.sessionId; this.store.updateTask(task.id, { sessionId: r.sessionId, iterations: i }); }
         // A run that got through (exit 0) is real progress: the stall counter resets (persisted on the task,
         // so it survives app restarts — otherwise a restart would re-arm the recovery budget).
@@ -902,7 +919,9 @@ class Orchestrator extends EventEmitter {
         if (msgs.length && this.running && !a.stopRequested) {
           try { this.store.markMessagesRead(msgs.map((x) => x.id)); } catch {}
           if (this.runs >= settings.maxRuns) { reason = 'maxRuns reached'; break; }
-          human = msgs.map((x) => x.text).join('\n\n'); this.runs++; a.runs++;
+          humanAtts = msgs.flatMap((x) => x.attachments || []);
+          human = [msgs.map((x) => x.text).join('\n\n'), attachedFilesLines(humanAtts)].filter(Boolean).join('\n\n');
+          this.runs++; a.runs++;
           this.log(node.id, 'system', `↻ ${node.name} resumes with the human message`);
           const tt = this.store.getTask(task.id); if (tt && tt.status !== 'in_progress') this.store.updateTask(task.id, { status: 'in_progress' });
           continue;
@@ -1157,4 +1176,4 @@ class Orchestrator extends EventEmitter {
     }
   }
 }
-module.exports = { Orchestrator, buildPrompt, humanPrompt, wakePrompt, stallPrompt, WAKE, STALL, autoCompactEnv };
+module.exports = { Orchestrator, buildPrompt, humanPrompt, wakePrompt, stallPrompt, attachedFilesLines, WAKE, STALL, autoCompactEnv };
