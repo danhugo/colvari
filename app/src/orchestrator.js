@@ -68,6 +68,13 @@ const STALL = { SWEEP_MS: 5000, SIGKILL_GRACE_MS: 8000, MAX_RECOVERIES: 2 };
 // ready review pickup waited).
 const SCHED = { TICK_MS: 1000 };
 
+// Core-agent watch (plan t_42f310cf item 2): every watchIntervalMin (setting, default 10) while work
+// is active the protected core agent gets a digest wake — but only when the digest changed since the
+// wake before, and only once the per-agent wake gap (WAKE.MIN_GAP_MS, same anchor the nudges use) has
+// passed. LONG_TASK_MIN is how long an in_progress task may sit untouched before the digest calls it
+// long-running.
+const WATCH = { LONG_TASK_MIN: 45 };
+
 function buildPrompt(team, node, task, extra = {}) {
   node = { ...normalizeNode(applyPreset(node, extra.presets)), id: node.id };
   const nm = (id) => { const n = team.nodes.find((x) => x.id === id); return n ? `${n.name} (${n.role}, id=${n.id})` : id; };
@@ -176,6 +183,10 @@ class Orchestrator extends EventEmitter {
     this.wakeLastAt = new Map(); // nodeId -> ts of the agent's last agent->agent wake dispatch (nudge throttle anchor)
     this._wakeTimer = setInterval(() => this.sweepWakes(), WAKE.SWEEP_MS);
     if (this._wakeTimer.unref) this._wakeTimer.unref();
+    // Core watch state (sweepWatch): lastWatchAt/lastDigest advance on every due tick; wokeDigest is
+    // the digest the core was last woken for (a change wakes, sameness does not); active flips the
+    // UI indicator without ticking.
+    this.watch = { lastWatchAt: null, lastDigest: '', wokeDigest: null, active: null };
     // Stall watchdog state: last seen cumulative CPU time of each run's CLI process (nodeId -> {pid, cpuMs}),
     // and the pending SIGKILL grace timers for stalled runs that ignore SIGTERM.
     this._stallCpu = new Map();
@@ -769,6 +780,82 @@ class Orchestrator extends EventEmitter {
     }
   }
 
+  // ---- core-agent watch: a periodic digest wake for the protected core agent, driven from the
+  // dispatch sweep (so it exists only while the Run is up) and interval-gated by watchIntervalMin.
+  // Fully idle/off (no live run anywhere) means no ticks at all. Every due tick stamps lastWatchAt
+  // and logs the digest as a kind:'watch' line; the wake itself fires only when the digest differs
+  // from the one the core was last woken for AND the per-agent wake gap has passed — deferred or
+  // busy-suppressed digests stay pending and re-fire on a later tick. The delivery reuses the nudge
+  // path (system message + wakeForHuman), so the single-run, budget and usage-pause guards all apply.
+  sweepWatch() {
+    const st = this.watch ||= { lastWatchAt: null, lastDigest: '', wokeDigest: null, active: null };
+    const active = !!(this.running && !this.userStopped && !this.dispatchPaused && this.procs.size > 0);
+    if (st.active !== active) {
+      st.active = active;
+      // Activation arms the first interval (a digest the moment work starts duplicates what the core
+      // just dispatched itself); idle-off keeps lastWatchAt stale so the next activation re-arms.
+      if (active) st.lastWatchAt = Date.now();
+      this.emit('watch-status', this.watchStatus());
+    }
+    if (!active) return;
+    const intervalMin = Math.max(1, Number(this.store.getSettings().watchIntervalMin ?? 10) || 10);
+    const now = Date.now();
+    if (st.lastWatchAt && now - st.lastWatchAt < intervalMin * 60000) return;
+    st.lastWatchAt = now;
+    const digest = this.watchDigest();
+    st.lastDigest = digest;
+    const core = IDLE.coreNode(this.store.getTeam());
+    this.log(core ? core.id : null, 'watch', digest);
+    this.emit('watch-status', this.watchStatus());
+    if (!core || digest === st.wokeDigest) return; // nothing changed since the last wake: log only
+    const gap = (this.wakeLastAt.get(core.id) || 0) + WAKE.MIN_GAP_MS - now;
+    if (gap > 0) return; // wake gap: deferred, not dropped — a still-pending change re-fires later
+    st.wokeDigest = digest;
+    const m = this.store.sendMessage({ from: 'system', to: core.id, text: digest + '\nThis is the periodic watch digest. Act on anything that needs it (nudge an idle agent, reassign, comment, schedule a restart); if nothing needs action, stop.' });
+    this.wakeForHuman(core.id, [m], { reason: 'watch digest', taskIds: [], action: 'wake core' })
+      .catch((e) => this.log(core.id, 'error', 'watch wake: ' + e.message));
+  }
+
+  // What the core may want to act on, as stable text: pending restarts (restart scheduling may not
+  // exist yet — read defensively), who is working/stalled/idle, and the tasks blocked, awaiting the
+  // human, stuck in a failed merge, or running long. Deliberately timestamp-free: the text must be
+  // identical across ticks when nothing changed, or every tick would read as a change.
+  watchDigest() {
+    const team = this.store.getTeam();
+    const tasks = this.store.listTasks();
+    const now = Date.now();
+    const title = (t) => `"${String(t.title || t.id).slice(0, 40)}"`;
+    const list = (arr, fmt) => (arr.length ? arr.slice(0, 4).map(fmt).join(', ') + (arr.length > 4 ? ` +${arr.length - 4} more` : '') : 'none');
+    const lines = [];
+    const rp = (this.store.meta() || {}).restartPending || {};
+    lines.push(`restarts pending: ${Number(rp.count || 0)}${rp.afterTaskId ? `, scheduled after ${rp.afterTaskId}` : ''}`);
+    const working = (team.nodes || []).filter((n) => this.procs.has(n.id));
+    lines.push(`working: ${list(working, (n) => { const a = this.agent(n.id); return a.taskId ? `${n.name} (${a.taskId})` : n.name; })}`);
+    const stallOf = (n) => { const a = this.agents[n.id]; return (a && (a.stall || (a.currentRun && a.currentRun.stall))) || null; };
+    const stalled = (team.nodes || []).filter((n) => stallOf(n));
+    lines.push(`stalled: ${list(stalled, (n) => { const s = stallOf(n); return `${n.name}${s.state ? ` (${s.state}${s.attempt != null ? ` ${s.attempt}/${s.max ?? '?'}` : ''})` : ''}`; })}`);
+    const open = tasks.filter((t) => t.status !== 'done');
+    const blocked = open.filter((t) => t.status === 'todo' && C.isBlocked(t, tasks));
+    lines.push(`blocked: ${list(blocked, (t) => `${t.id} ${title(t)}`)}`);
+    const forHuman = open.filter((t) => t.status === 'waiting_for_human');
+    lines.push(`awaiting human: ${list(forHuman, (t) => `${t.id} ${title(t)}`)}`);
+    const conflicts = open.filter((t) => t.status === 'merge_conflict');
+    lines.push(`merge failures: ${list(conflicts, (t) => `${t.id} ${title(t)}`)}`);
+    const long = open.filter((t) => t.status === 'in_progress' && now - new Date(t.updatedAt).getTime() > WATCH.LONG_TASK_MIN * 60000);
+    lines.push(`long-running (>${WATCH.LONG_TASK_MIN}m): ${list(long, (t) => `${t.id} ${title(t)}`)}`);
+    const idle = (team.nodes || []).filter((n) => !this.procs.has(n.id));
+    lines.push(`idle agents: ${list(idle, (n) => n.name)}`);
+    return lines.join('\n');
+  }
+
+  // UI status (getWatchStatus / 'watch-status' push): lastWatchAt ISO, whether the watch is ticking,
+  // the last computed digest, and the effective interval.
+  watchStatus() {
+    const st = this.watch ||= { lastWatchAt: null, lastDigest: '', wokeDigest: null, active: null };
+    const intervalMin = Math.max(1, Number(this.store.getSettings().watchIntervalMin ?? 10) || 10);
+    return { lastWatchAt: st.lastWatchAt ? new Date(st.lastWatchAt).toISOString() : null, active: !!st.active, digest: st.lastDigest || '', intervalMin };
+  }
+
   // Tasks left in review that never got picked back up (their reviewer's process crashed/exited, or
   // the run stopped mid-way) are dispatched to their reviewer. With no reviewer configured for the
   // assignee the task STAYS in review: done requires reviewer/owner verification (t_699b67b7), so the
@@ -831,6 +918,7 @@ class Orchestrator extends EventEmitter {
       this.runTask(node, task, team, s).catch((e) => this.log(node.id, 'error', 'agent run crashed: ' + e.message));
     }
     try { this.nudgeIdle(); } catch (e) { this.log(null, 'error', 'idle nudge: ' + e.message); }
+    try { this.sweepWatch(); } catch (e) { this.log(null, 'error', 'watch sweep: ' + e.message); }
     if (this.procs.size === 0) {
       // UpdateWatcher is draining for a restart: hold the run session open (no dispatches while
       // paused) so the watcher's wasRunning stays true and bootResume can restart the Run after the
@@ -1351,4 +1439,4 @@ class Orchestrator extends EventEmitter {
     }
   }
 }
-module.exports = { Orchestrator, buildPrompt, humanPrompt, wakePrompt, stallPrompt, attachedFilesLines, WAKE, STALL, SCHED, autoCompactEnv };
+module.exports = { Orchestrator, buildPrompt, humanPrompt, wakePrompt, stallPrompt, attachedFilesLines, WAKE, WATCH, STALL, SCHED, autoCompactEnv };
