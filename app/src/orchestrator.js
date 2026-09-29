@@ -90,6 +90,7 @@ function buildPrompt(team, node, task, extra = {}) {
     task.comments.length ? `Comments so far:\n${task.comments.map((c) => `- ${c.author}: ${c.text}`).join('\n')}` : '',
     '',
     `Board files: every task is one pretty-JSON file at .squad/board/tasks/<id>.json and every wiki page one markdown file at .squad/wiki/<slug>.md${extra.boardDir ? ` — this project's store dir: ${extra.boardDir}` : ''}. Read them freely with cat/grep/jq; write only via the board tools — never create or edit these files directly. Private data (direct messages, inbox) is kept outside .squad/.`,
+    `Never pkill/killall/pgrep-kill by name (Electron, electron, agents-squad, node) — patterns match the user's live app and its helper processes, not just yours. To stop your own background job, kill the PID you started ($!, or kill the process group) or use your tool's job stop.`,
     `Coordinate ONLY through the "board" MCP tools (${tools.join(', ')}).`,
     tools.includes('update_task_status') && extra.deferDone ? `This task runs in loop mode (${extra.deferDone}). Do NOT call update_task_status with status="done" in this pass${tools.includes('comment_task') ? '; you may add a short comment on what you did' : ''}. The orchestrator repeats the task and you will be told when the final pass comes.` : '',
     tools.includes('update_task_status') && !extra.deferDone ? `When you have finished your part, ${tools.includes('comment_task') ? 'add a short comment summarising what you did and ' : ''}call update_task_status with taskId=${task.id} and status="done".` : '',

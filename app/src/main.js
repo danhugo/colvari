@@ -10,6 +10,7 @@ const PF = require('./preflight');
 const RT = require('./runtimes');
 const CAP = require('./capabilities');
 const SU = require('./self-update');
+const { allowReload } = require('./renderer-reload');
 const { introspectRuntime: runIntrospectRuntime } = require('./introspector');
 // The app repo (main checkout): what the UpdateWatcher polls and fast-forwards.
 const APP_ROOT = path.join(__dirname, '..', '..');
@@ -173,7 +174,15 @@ function createWindow() {
     try { console.log('[smoke]', JSON.stringify(await win.webContents.executeJavaScript(js))); } catch (e) { console.error('[smoke] failed', e); }
     app.exit(0);
   });
-  win.webContents.on('render-process-gone', (_e, d) => console.error('[agents-squad] renderer gone', d.reason));
+  // A killed renderer (e.g. a stray pkill hitting helper processes) must not leave a dead window:
+  // reload it, rate-limited so a crash loop cannot spin (clean exit means the user closed it).
+  const rendererReloads = [];
+  win.webContents.on('render-process-gone', (_e, d) => {
+    console.error('[agents-squad] renderer gone', d.reason);
+    if (d.reason === 'clean-exit' || win.isDestroyed()) return;
+    if (allowReload(rendererReloads, Date.now())) win.webContents.reload();
+    else console.error('[agents-squad] renderer reload rate-limited');
+  });
   win.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
 }
 // GUI e2e: drive the real UI with clicks, run a PM -> Dev team, screenshot each tab.
