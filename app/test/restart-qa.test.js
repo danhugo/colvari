@@ -148,7 +148,13 @@ test('qa: the fired schedule survives every sweep of the old process and is cons
   const o2 = new Orchestrator(s);
   clearInterval(o2._wakeTimer); clearInterval(o2._stallTimer); clearInterval(o2._tickTimer);
   assert.equal(s.restartPending(), null, 'only the boot of the new process consumes it');
-  assert.deepEqual(o2.restartState(), { pendingCount: 0, since: null, scheduledAfter: null, scheduledNow: false, gating: [] });
+  const st = o2.restartState();
+  assert.equal(st.pendingCount, 0);
+  assert.equal(st.scheduledAfter, null);
+  assert.equal(st.scheduledNow, false);
+  assert.deepEqual(st.gating, []);
+  assert.deepEqual(st.busyAgents, []);
+  assert.match(st.blockedReason, /no schedule armed/);
 });
 
 // ---- case 5 (t_b1939389): the busy→idle loop — pending while busy, fires on idle, clears on boot ----

@@ -108,7 +108,7 @@ test('orchestrator: armed schedule gates new dispatch (anchor exempt) and fires 
   assert.equal(rp.firedCount, 0);
   assert.equal(o._restartGate, true, 'the gate stays armed until the relaunch (no dispatch window)');
   const st = o.restartState();
-  assert.deepEqual(st, { pendingCount: 0, since: rp.since, scheduledAfter: anchor.id, scheduledNow: false, gating: [other.id] });
+  assert.deepEqual(st, { pendingCount: 0, since: rp.since, scheduledAfter: anchor.id, scheduledNow: false, gating: [other.id], busyAgents: [], blockedReason: null });
   assert.ok(pushed.length >= 1, 'restart-state is pushed when it changes');
 });
 
@@ -141,6 +141,78 @@ test('orchestrator: without an updater the schedule stays armed instead of being
   const rp = s.restartPending();
   assert.ok(!rp.firedAt && rp.scheduledNow, 'nothing to relaunch with: keep the schedule');
   assert.ok(s.readLogs(20).some((l) => /self-update is unavailable/.test(l.text)));
+});
+
+// ---- idle trigger (t_acae4863): tick() is dead once the Run ends, so an armed schedule sat
+// unevaluated for hours while the company was idle. The always-on _restartTimer sweeps it. ----
+test('orchestrator: a schedule armed while idle fires via the idle sweep, no Run needed', async () => {
+  const d = tmp('squad-restart-');
+  const prevMs = RESTART.IDLE_SWEEP_MS;
+  RESTART.IDLE_SWEEP_MS = 20;
+  let o = null;
+  try {
+    const res = setup(d); // constructed after the mutation, so the timer runs at 20ms
+    o = res.o;
+    o.updater = fakeUpdater();
+    assert.equal(o.running, false, 'the company is idle: no Run is active');
+    res.s.scheduleRestart({ now: true });
+    await waitFor(() => o.updater.calls.length === 1, 2000);
+    assert.equal(o.running, false, 'the fire never needed the Run loop');
+    assert.ok(res.s.restartPending().firedAt);
+  } finally {
+    RESTART.IDLE_SWEEP_MS = prevMs;
+    if (o) clearInterval(o._restartTimer);
+  }
+});
+
+test('orchestrator: the cap crossing while idle also auto-arms and fires via the sweep', async () => {
+  const d = tmp('squad-restart-');
+  const prevMs = RESTART.IDLE_SWEEP_MS;
+  RESTART.IDLE_SWEEP_MS = 20;
+  let o = null;
+  try {
+    o = setup(d).o;
+    o.updater = fakeUpdater();
+    const s = o.store;
+    s.saveSettings({ restartCap: 2 });
+    s.bumpRestartPending(); s.bumpRestartPending();
+    await waitFor(() => o.updater.calls.length === 1, 2000);
+    assert.equal(s.restartPending().scheduledNow, true, 'the sweep armed the cap restart');
+    assert.ok(s.restartPending().firedAt, 'and fired it without any tick');
+  } finally {
+    RESTART.IDLE_SWEEP_MS = prevMs;
+    if (o) clearInterval(o._restartTimer);
+  }
+});
+
+test('orchestrator: a busy agent holds the fire; restartState exposes who and why', () => {
+  const d = tmp('squad-restart-');
+  const { s, o, a } = setup(d);
+  const up = fakeUpdater();
+  o.updater = up;
+  o.running = false;
+  s.scheduleRestart({ now: true });
+  o.procs.set(a.id, { kill() {} }); // busy agent while no Run loop is active
+  o.sweepRestart();
+  assert.equal(up.calls.length, 0, 'busy: not invoked');
+  let st = o.restartState();
+  assert.deepEqual(st.busyAgents, ['A']);
+  assert.match(st.blockedReason, /waiting for 1 running agent: A/);
+  o.procs.clear();
+  o.sweepRestart();
+  assert.equal(up.calls.length, 1, 'true idle: invoked');
+  st = o.restartState();
+  assert.equal(st.blockedReason, null);
+  assert.deepEqual(st.busyAgents, []);
+});
+
+test('orchestrator: restartState says when no schedule is armed', () => {
+  const d = tmp('squad-restart-');
+  const { s, o } = setup(d);
+  s.bumpRestartPending(); s.bumpRestartPending();
+  const st = o.restartState();
+  assert.equal(st.pendingCount, 2);
+  assert.match(st.blockedReason, /no schedule armed/);
 });
 
 test('orchestrator: human pill — restartNow fires when idle; cancel disarms and aborts the flow', () => {
