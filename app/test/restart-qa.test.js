@@ -28,7 +28,7 @@ const setup = (d) => {
   const a = s.addNode({ name: 'A', role: 'Dev' });
   s.addEdge(pm.id, a.id);
   const o = new Orchestrator(s);
-  clearInterval(o._wakeTimer); clearInterval(o._stallTimer); clearInterval(o._tickTimer);
+  clearInterval(o._wakeTimer); clearInterval(o._stallTimer); clearInterval(o._tickTimer); clearInterval(o._restartTimer);
   return { s, o, pm, a };
 };
 // Stand-in for the project's UpdateWatcher, wired like main.js: restartScheduled pauses dispatch
@@ -202,6 +202,8 @@ test('qa: schedule while an agent is busy stays pending; the agent idling fires 
   let st = o.restartState();
   assert.equal(st.scheduledNow, true, 'chip: armed');
   assert.equal(st.pendingCount, 1);
+  assert.deepEqual(st.busyAgents, ['A'], 'the chip names the busy agent');
+  assert.match(st.blockedReason, /agent still running: A/, 'the chip says why the restart waits');
   assert.ok(pushed.some((x) => x.scheduledNow), 'the renderer heard the armed state');
 
   // New work must not start while the schedule waits (the gate, under live conditions).
@@ -220,11 +222,19 @@ test('qa: schedule while an agent is busy stays pending; the agent idling fires 
   assert.equal(rp.scheduledNow, true, 'the chip stays up until the new process boots');
   assert.equal(up.phase, 'draining');
   assert.equal(o._restartGate, true, 'the gate survives the fire until the relaunch');
+  assert.equal(o.restartState().blockedReason, 'updater: draining', 'after the fire the chip names the drain');
   // dispatchPaused (set by the wired updater, like main.js) holds tick() before its stop path.
   const o2 = new Orchestrator(s);
-  clearInterval(o2._wakeTimer); clearInterval(o2._stallTimer); clearInterval(o2._tickTimer);
+  clearInterval(o2._wakeTimer); clearInterval(o2._stallTimer); clearInterval(o2._tickTimer); clearInterval(o2._restartTimer);
   assert.equal(s.restartPending(), null, 'boot consumed the fired schedule');
-  assert.deepEqual(o2.restartState(), { pendingCount: 0, since: null, scheduledAfter: null, scheduledNow: false, gating: [] }, 'chip cleared');
+  const st2 = o2.restartState();
+  assert.equal(st2.pendingCount, 0);
+  assert.equal(st2.scheduledAfter, null);
+  assert.equal(st2.scheduledNow, false, 'chip cleared');
+  assert.deepEqual(st2.gating, []);
+  assert.deepEqual(st2.busyAgents, []);
+  assert.deepEqual(st2.waitingReasons, []);
+  assert.equal(st2.blockedReason, null, 'chip cleared');
   o2.runTask = o.runTask; o2.wakeRun = async () => {}; o2.updater = up; o2.running = true;
   o2.tick();
   assert.deepEqual(up.calls, ['scheduled restart (now)'], 'the cleared schedule never re-fires');
@@ -238,7 +248,7 @@ test('qa: an anchor still in review blocks the fire; completing the anchor fires
   o.running = true;
 
   // The company is mid-work: agent A holds a live run while the PM arms an anchored restart.
-  // (A fully idle company would stop the run loop here — tick() only sweeps while running.)
+  // (Production shape: an anchored restart waits for its anchor AND for busy agents to drain.)
   const work = s.createTask({ title: 'work', assignee: a.id, createdBy: 'human' });
   s.updateTask(work.id, { status: 'in_progress' });
   o.procs.set(a.id, { kill() {} });
@@ -253,8 +263,10 @@ test('qa: an anchor still in review blocks the fire; completing the anchor fires
 
   assert.ok(!s.restartPending().firedAt, 'an in-review anchor blocks the fire');
   assert.deepEqual(up.calls, []);
-  assert.equal(o.restartState().scheduledAfter, anchor.id, 'the chip names what the restart waits on');
-  assert.deepEqual(o.restartState().gating, [other.id], 'new work is held while the anchor runs');
+  const st = o.restartState();
+  assert.equal(st.scheduledAfter, anchor.id, 'the chip names what the restart waits on');
+  assert.match(st.blockedReason, new RegExp(`anchor ${anchor.id} is review`), 'the chip says the anchor is why');
+  assert.deepEqual(st.gating, [other.id], 'new work is held while the anchor runs');
 
   // The anchor lands and the last agent idles: the next sweep fires.
   s.updateTask(anchor.id, { status: 'done' });
