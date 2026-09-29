@@ -1662,6 +1662,7 @@ function renderUsage() {
     .map((x) => ({ ...x, sub: `${x.models} model key${x.models === 1 ? '' : 's'}`, title: `${x.runs} run${x.runs === 1 ? '' : 's'} · cost only — tokens would cross models here` }));
   const agBars = Object.entries(led.byAgent).map(([name, rows2]) => { const top = rows2.slice().sort((a, b) => rowTokTotal(b) - rowTokTotal(a))[0];
     return { name, cost: rows2.some((r) => r.costUsd != null) ? rows2.reduce((a, r) => a + (r.costUsd || 0), 0) : null, sub: `${rows2.length} key${rows2.length === 1 ? '' : 's'} · top: ${top && top.model}`, title: `${name}: per-key rows under Detailed tables` }; });
+  if (!RUNS.length) { $('#us-summary').innerHTML = '<div class="us-empty"><b>No runs yet</b><p>Cost, token and model breakdowns appear here after an agent finishes its first run.</p></div>'; $('#us-runs').innerHTML = ''; renderDiscovery(); renderUsageLimits(); return; }
   $('#us-summary').innerHTML = usageHero(rs, led, { global: globalCost, filtered }) + `
   <div class="us-vendor"><small>One row per account — where the money actually goes (billing source + its detail: which login, API key or endpoint) — with each account's model keys nested beneath. Token columns stay strictly per key (never summed across models); cost is the only grand total. "—" marks keys whose cost is unknown, "est" marks list-price estimates.</small><h4>By account</h4>${accounts.length ? accountTable(accounts) : '<p class="muted">No usage recorded yet.</p>'}</div>
   <div class="cards">
