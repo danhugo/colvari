@@ -1084,24 +1084,28 @@ const presence = (id) => (S.orch.idle ? S.orch.idle.includes(id) : !runningIds()
 // Wake-run: an agent running without an in_progress task because a message woke it. One selector so
 // Board, Team and Overview can't disagree. Reads the backend's live-run activity fields
 // (a.activity: {trigger:'message', fromNodeId, excerpt, taskId, count}); null when the run isn't a wake, the
-// agent isn't actually running, or it picked up a task (the task badge wins).
+// agent isn't actually running, or the live run IS the task run (a.taskId set — the task badge wins; a
+// wake keeps taskId null even when an in_progress task sits assigned, so the wake label shows there).
 function wakeRun(id) {
   const a = S.orch.agents[id] || {};
   const r = a.activity && typeof a.activity === 'object' ? a.activity : (a.run && typeof a.run === 'object' ? a.run : a);
   const w = a.wake && typeof a.wake === 'object' ? { ...r, ...a.wake } : (r.trigger === 'message' ? r : null);
   if (!w) return null;
   if (a.status !== 'working' && presence(id) !== 'busy') return null;
-  if (S.tasks.some((t) => t.status === 'in_progress' && t.assignee === id)) return null;
+  if (a.taskId && S.tasks.some((t) => t.status === 'in_progress' && t.assignee === id)) return null;
   return { from: nodeName(w.fromNodeId || w.from || ''), excerpt: String(w.excerpt || ''), taskId: w.taskId || w.relatedTaskId || null, queued: Math.max(0, (w.count || 1) - 1) };
 }
 const wakeLabel = (id) => { const w = wakeRun(id); return w ? `Working — woken by message from ${w.from}: "${w.excerpt}"${w.queued ? ` (+${w.queued} queued)` : ''}` : ''; };
+// Short badge text for drawWakeBadge: sender first, so the 30-char clip keeps WHO woke the agent
+// (t_0cd29f4d); the linked task title trails and at that width usually survives only in the tooltip.
+const wakeBadgeText = (w, task) => `${w.from} ✉ "${w.excerpt}"${w.queued ? ` (+${w.queued})` : ''}${task ? ` · ${task}` : ''}`;
 // Shared badge drawing for the Team and Overview node SVGs: a strip just below the node card
 // (inside the card there is no free row — the chip row and ctx bar own the bottom edge).
 function drawWakeBadge(g, w, onclick) {
   const full = `Working — woken by message from ${w.from}: "${w.excerpt}"${w.queued ? ` (+${w.queued} queued)` : ''}`;
   const bg = el('g', { class: 'wakerunbadge' + (w.taskId ? ' linked' : ''), transform: `translate(4,${H + 3})` }, g);
   el('rect', { width: W - 8, height: 13, rx: 6 }, bg);
-  el('text', { x: (W - 8) / 2, y: 9.5, 'text-anchor': 'middle' }, bg).textContent = clipText(full, 30);
+  el('text', { x: (W - 8) / 2, y: 9.5, 'text-anchor': 'middle' }, bg).textContent = clipText(wakeBadgeText(w, w.taskId ? taskTitle(w.taskId) : null), 30);
   el('title', {}, bg).textContent = full;
   if (w.taskId && onclick) bg.onclick = onclick;
 }
@@ -2065,7 +2069,7 @@ function renderChat() {
   const ev = Chat.roomEvents(L, S.tasks, S.messages, S.inbox, Chat.MAX, subRecOf); // capped to the last Chat.MAX (500) events
   CH.ev = ev;
   CH.asks = ev.filter((e) => e.type === 'question').map((e) => e.who);
-  $('#chat-typing').innerHTML = [...working].map((id) => `<span class="typing"><span class="spin"></span>${esc(who(id).name)} is working<span class="dots"></span></span>`).join(' · ');
+  $('#chat-typing').innerHTML = [...working].map((id) => { const wk = wakeLabel(id); return `<span class="typing"><span class="spin"></span>${esc(clipText(wk || `${who(id).name} is working`, 64))}<span class="dots"></span></span>`; }).join(' · ');
   renderYourTurn(ev);
   const room = $('#chat-room'); const atBottom = room.scrollHeight - room.scrollTop - room.clientHeight < 40;
   const prevH = room.scrollHeight, prevTop = room.scrollTop;

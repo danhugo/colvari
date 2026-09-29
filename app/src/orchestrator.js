@@ -390,7 +390,7 @@ class Orchestrator extends EventEmitter {
     a.status = 'working'; a.lastError = null; a.taskId = null; a.task = null; a.iteration = 0; a.stopRequested = false;
     // Live-run reason/activity, shown by Board/Team/Overview via snapshot: what woke the agent, from
     // whom, and the first unread message as the excerpt. Cleared when the run ends.
-    a.activity = { trigger: 'message', messageId: msgs[0].id, fromNodeId: msgs[0].from, excerpt: msgs[0].text.slice(0, 200), taskId: (msgs.find((m) => m.taskId) || {}).taskId || null, startedAt: Date.now() };
+    a.activity = { trigger: 'message', messageId: msgs[0].id, fromNodeId: msgs[0].from, excerpt: msgs[0].text.slice(0, 200), taskId: (msgs.find((m) => m.taskId) || {}).taskId || null, count: msgs.length, startedAt: Date.now() };
     a.runs++; this.runs++;
     this.procs.set(node.id, { kill() {} }); // reserve the slot synchronously
     try {
