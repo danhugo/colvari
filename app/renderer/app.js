@@ -2005,7 +2005,7 @@ function renderUsage() {
     .map((x) => ({ ...x, sub: `${x.models} model key${x.models === 1 ? '' : 's'}`, title: `${x.runs} run${x.runs === 1 ? '' : 's'} · cost only — tokens would cross models here` }));
   const agBars = Object.entries(led.byAgent).map(([name, rows2]) => { const top = rows2.slice().sort((a, b) => rowTokTotal(b) - rowTokTotal(a))[0];
     return { name, cost: rows2.some((r) => r.costUsd != null) ? rows2.reduce((a, r) => a + (r.costUsd || 0), 0) : null, sub: `${rows2.length} key${rows2.length === 1 ? '' : 's'} · top: ${top && top.model}`, title: `${name}: per-key rows under Detailed tables` }; });
-  if (!RUNS.length) { $('#us-summary').innerHTML = '<div class="us-empty"><b>No runs yet</b><p>Cost, token and model breakdowns appear here after an agent finishes its first run.</p></div>'; $('#us-runs').innerHTML = ''; renderDiscovery(); renderUsageLimits(); return; }
+  if (!RUNS.length) { $('#us-summary').innerHTML = '<div class="us-empty"><svg class="us-empty-ico" viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M4 20V10M11 20V4M18 20v-7"/></svg><b>No runs yet</b><p>Cost, token and model breakdowns appear here after an agent finishes its first run.</p><button type="button" class="primary" id="us-run-goal">Run a goal</button></div>'; $('#us-runs').innerHTML = ''; { const b = $('#us-run-goal'); if (b) b.onclick = () => showTab('chat'); } renderDiscovery(); renderUsageLimits(); return; }
   $('#us-summary').innerHTML = usageHero(rs, led, { global: globalCost, filtered }) + `
   <div class="us-vendor"><small>One row per account — where the money actually goes (billing source + its detail: which login, API key or endpoint) — with each account's model keys nested beneath. Token columns stay strictly per key (never summed across models); cost is the only grand total. "—" marks keys whose cost is unknown, "est" marks list-price estimates.</small><h4>By account</h4>${accounts.length ? accountTable(accounts) : '<p class="muted">No usage recorded yet.</p>'}</div>
   <div class="cards">
@@ -2040,7 +2040,7 @@ async function renderDiscovery() {
   const cnt = (n) => n > 0 ? String(n) : '—';
   const reason = (!st || (!st.fiveHour.limit && !st.weekly.limit)) ? await noLimitDataReason() : null;
   const limPart = (label, u) => {
-    if (!u || !u.limit) return `<span class="lm-part lm-pending" title="No ${esc(label)} limit set or reported yet"><b>${esc(label)}</b> <small>${reason ? `– no limit data: ${esc(reason)}` : '– no limit set'}</small></span>`;
+    if (!u || !u.limit) return `<span class="lm-part lm-pending" title="${esc(label)}: ${reason ? `no limit data — ${esc(reason)}` : 'no limit set or reported yet'}"><b>${esc(label)}</b> <small>— ${reason ? 'no data' : 'not set'}</small></span>`;
     const pct = Math.min(100, Math.round(u.pct * 100)); const cls = u.pause ? 'danger' : u.warn ? 'warn' : 'ok';
     const ms = u.resetsAt ? new Date(u.resetsAt).getTime() - Date.now() : 0;
     const resetTitle = ms > 0 ? ` · resets in ${fmtCountdown(ms)}` : '';
@@ -2061,7 +2061,7 @@ async function renderDiscovery() {
 }
 // ---------- usage limits (5h/weekly for subscription, tokens/cost for API) ----------
 function usageLimitBar(label, u, fmt) {
-  if (!u || !u.limit) return `<div class="stat"><small>${esc(label)}</small><b>${fmt((u && u.used) || 0)}</b><small class="muted">no limit set</small></div>`;
+  if (!u || !u.limit) return `<div class="stat"><small>${esc(label)}</small><b>${u && u.used ? fmt(u.used) : '—'}</b><small class="muted">no limit set</small></div>`;
   const pct = Math.min(100, Math.round((u.pct != null ? u.pct : (u.used / u.limit)) * 100));
   const cls = u.pause ? 'danger' : u.warn ? 'warn' : 'ok';
   return `<div class="stat"><small>${esc(label)}</small><b>${fmt(u.used)} <span class="muted">/ ${fmt(u.limit)}</span></b>
@@ -2076,12 +2076,12 @@ async function renderUsageLimits() {
   const provs = limitProviders(st);
   $('#us-limits').innerHTML = `<h3>Usage limits</h3><p class="muted">The top bar shows only the worst provider as one summary chip; every provider's limit windows are listed here (5h/weekly budgets settable below).</p>${st && st.warn ? `<p class="warn">Approaching a usage limit.</p>` : ''}${st && st.pause ? `<p class="warn">A usage limit has been reached; new runs may be paused.</p>` : ''}
     ${provs.length ? `<div class="limitmeter us-list">${provs.map((p) => providerChipHtml(p, false)).join('')}</div>` : ''}
-    <div class="toolbar" style="align-items:flex-start">
+    <div class="lim-wrap">
     <div class="cards">
       ${usageLimitBar('API key/proxy, reported cost', st && st.cost, money)}
       ${usageLimitBar('API key/proxy, tokens', st && st.tokens, fmtTok)}
     </div>
-    <form id="lim-form" class="toolbar" style="flex-wrap:wrap">
+    <form id="lim-form" class="lim-grid">
       <label>5h limit, $ <input id="lim-5h" type="number" min="0" step="1" value="${lim.fiveHourLimit || ''}" placeholder="none"></label>
       <label>Weekly limit, $ <input id="lim-7d" type="number" min="0" step="1" value="${lim.weeklyLimit || ''}" placeholder="none"></label>
       <label>API cost limit, $ <input id="lim-apiusd" type="number" min="0" step="1" value="${lim.costLimit || ''}" placeholder="none"></label>
@@ -2094,6 +2094,13 @@ async function renderUsageLimits() {
     refresh();
   });
 }
+function usageSub(name) {
+  const ids = { summary: ['#us-summary'], discovery: ['#us-discovery'], limits: ['#us-limits'], runs: ['#us-runs-wrap'] };
+  for (const k in ids) $(ids[k][0]).hidden = k !== name;
+  $('#us-anchors').querySelectorAll('button').forEach((b) => { const on = b.dataset.sub === name; b.classList.toggle('on', on); b.setAttribute('aria-selected', on); });
+}
+$('#us-anchors').onclick = (ev) => { const b = ev.target.closest('button[data-sub]'); if (b) usageSub(b.dataset.sub); };
+usageSub('summary');
 $('#us-agent').onchange = renderUsage; $('#us-billing').onchange = renderUsage;
 const download = (name, text, type) => { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], { type })); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000); };
 $('#us-export').onclick = act(async () => download(`usage-${(S.project.name || 'project').replace(/[^\w-]+/g, '_')}.csv`, await call('usageCSV', false), 'text/csv'));
