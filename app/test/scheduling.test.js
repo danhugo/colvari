@@ -194,3 +194,86 @@ test('orchestrator: clean exit without status hands off to review without mergin
   assert.ok(r2.comments.some((c) => c.author === 'orchestrator' && /auto-advanced/.test(c.text)));
   assert.ok(fs.existsSync(path.join(b.repo, 'work.txt')), 'the hand-off still lands the merge once done');
 });
+
+// ---- session id per agent+runtime ----
+
+const SRESULT = (sid) => `echo '{"type":"result","subtype":"success","total_cost_usd":0,"num_turns":1,"usage":{},"session_id":"${sid}"}'`;
+const readCalls = (argsLog) => fs.readFileSync(argsLog, 'utf8').split(/(?=^-p )/m).filter((x) => x.trim());
+
+function setupArgsLog(script) {
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'squad-sesskey-'));
+  const argsLog = path.join(d, 'args.txt');
+  const fake = fakeClaude(d, `echo "$*" >> ${argsLog}\n${script}`);
+  const s = new Store(path.join(d, 'p'));
+  s.saveSettings({ claudePath: fake, maxConcurrency: 1 });
+  return { s, argsLog };
+}
+
+test('orchestrator: task sessions are stored per agent+runtime; another agent never resumes them', async () => {
+  const { s, argsLog } = setupArgsLog(SRESULT('sess-1'));
+  const a = s.addNode({ name: 'A', role: 'Dev' });
+  const b = s.addNode({ name: 'B', role: 'Dev' });
+  const t = s.createTask({ title: 'shared', assignee: a.id });
+  const o = new Orchestrator(s); o.running = true;
+  await o.runTask(s.getTeam().nodes.find((n) => n.id === a.id), s.getTask(t.id), s.getTeam(), s.getSettings());
+  const t1 = s.getTask(t.id);
+  assert.equal(t1.sessions[`${a.id}:claude`], 'sess-1', 'the run reports its session under the agent+runtime key');
+  assert.equal(t1.sessionId, undefined, 'the legacy shared field is no longer written');
+
+  s.updateTask(t.id, { status: 'todo', assignee: b.id }); // hand the same task to a different agent
+  await o.runTask(s.getTeam().nodes.find((n) => n.id === b.id), s.getTask(t.id), s.getTeam(), s.getSettings());
+  const calls = readCalls(argsLog);
+  assert.equal(calls.length, 2);
+  assert.ok(!calls[1].includes('--resume'), 'agent B must start fresh, never resume agent A\'s session');
+  assert.equal(s.getTask(t.id).sessions[`${b.id}:claude`], 'sess-1', 'B stores its own key');
+});
+
+test('orchestrator: lastSession is keyed by runtime, not just assignee', () => {
+  const { s } = setup();
+  const n = s.addNode({ name: 'D', role: 'Dev' });
+  const t = s.createTask({ title: 'x', assignee: n.id });
+  s.updateTask(t.id, { sessions: { [`${n.id}:claude`]: 'c-1', [`${n.id}:codex`]: 'x-1' } });
+  const o = new Orchestrator(s);
+  assert.equal(o.lastSession(n.id, 'claude'), 'c-1');
+  assert.equal(o.lastSession(n.id, 'codex'), 'x-1');
+  assert.equal(o.lastSession(n.id, 'gemini'), null);
+});
+
+test('orchestrator: stale resume failing with "No conversation found" retries once from a fresh session', async () => {
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'squad-sessretry-'));
+  const argsLog = path.join(d, 'args.txt');
+  const count = path.join(d, 'calls');
+  const fake = fakeClaude(d, `n=$(cat ${count} 2>/dev/null || echo 0); n=$((n+1)); echo $n > ${count}
+echo "$*" >> ${argsLog}
+if [ "$n" = 1 ]; then echo 'No conversation found with session ID: stale-1' >&2; exit 1; fi
+${SRESULT('sess-2')}`);
+  const s = new Store(path.join(d, 'p'));
+  s.saveSettings({ claudePath: fake, maxConcurrency: 1 });
+  const n = s.addNode({ name: 'D', role: 'Dev' });
+  const t = s.createTask({ title: 'resume me', assignee: n.id });
+  s.updateTask(t.id, { sessions: { [`${n.id}:claude`]: 'stale-1' } });
+  const o = new Orchestrator(s); o.running = true;
+  await o.runTask(s.getTeam().nodes.find((x) => x.id === n.id), s.getTask(t.id), s.getTeam(), s.getSettings());
+  const calls = readCalls(argsLog);
+  assert.equal(calls.length, 2, 'exactly one fresh retry after the failed resume');
+  assert.match(calls[0], /--resume stale-1/);
+  assert.ok(!calls[1].includes('--resume'), 'the retry spawns without --resume');
+  assert.match(calls[1], /resume me/, 'the retry carries the full base prompt (task text), not a continue prompt');
+  const after = s.getTask(t.id);
+  assert.equal(after.sessions[`${n.id}:claude`], 'sess-2', 'the fresh run stores its own session id');
+  assert.equal(after.iterations, 2, 'the retry counts as the spawn it was');
+});
+
+test('orchestrator: an unrelated failed run with a stale resume is not retried fresh', async () => {
+  const { s, argsLog } = setupArgsLog("echo 'some other error' >&2\nexit 1\n");
+  const n = s.addNode({ name: 'D', role: 'Dev' });
+  const t = s.createTask({ title: 'fails', assignee: n.id });
+  s.updateTask(t.id, { sessions: { [`${n.id}:claude`]: 'stale-1' } });
+  const o = new Orchestrator(s); o.running = true;
+  await o.runTask(s.getTeam().nodes.find((x) => x.id === n.id), s.getTask(t.id), s.getTeam(), s.getSettings());
+  assert.equal(readCalls(argsLog).length, 1, 'no fresh retry for unrelated failures');
+  const after = s.getTask(t.id);
+  assert.equal(after.status, 'review');
+  assert.equal(after.parkedForHuman, true);
+  assert.equal(after.sessions[`${n.id}:claude`], 'stale-1', 'the stored key survives for a same-session stall recovery');
+});

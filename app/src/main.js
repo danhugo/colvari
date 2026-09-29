@@ -1732,7 +1732,7 @@ async function guiE2E() {
     if (!process.env.SKIP_USAGEPM) await usagePerModelShots();
     nativeTheme.themeSource = 'system';
     const tasks = store.listTasks();
-    console.log('[gui-e2e]', JSON.stringify({ edges: store.getTeam().edges.length, tasks: tasks.map((t) => [t.title, t.status, t.iterations || 0, !!t.sessionId]), cost: orch.snapshot().totalCost }));
+    console.log('[gui-e2e]', JSON.stringify({ edges: store.getTeam().edges.length, tasks: tasks.map((t) => [t.title, t.status, t.iterations || 0, !!t.sessions]), cost: orch.snapshot().totalCost }));
   } catch (e) { if (e !== null) { console.error('[gui-e2e] failed', e); failures.push('exception: ' + e.message); } }
   console.log(failures.length ? `[gui-e2e] FAIL (${failures.length}): ${failures.join('; ')}` : '[gui-e2e] PASS');
   app.exit(failures.length ? 1 : 0);
