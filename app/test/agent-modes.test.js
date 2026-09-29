@@ -184,3 +184,14 @@ test('buildPrompt keeps node id and lists outgoing teammates', () => {
   const p = buildPrompt(s.getTeam(), s.getTeam().nodes[0], s.createTask({ title: 'x', assignee: a.id }));
   assert.match(p, new RegExp(`node id: ${a.id}`)); assert.match(p, /assign tasks to: Dave/);
 });
+
+test('buildPrompt worktree rule: only when the run actually got a worktree', () => {
+  const { buildPrompt } = require('../src/orchestrator');
+  const s = new Store(fs.mkdtempSync(path.join(os.tmpdir(), 'squad-bp-')));
+  const a = s.addNode({ name: 'Pam', role: 'Dev' });
+  const t = s.createTask({ title: 'x', assignee: a.id });
+  const team = s.getTeam(); const node = team.nodes.find((n) => n.id === a.id);
+  const wt = buildPrompt(team, node, t, { worktree: true });
+  assert.match(wt, /Write code only in your task worktree \(your cwd\)\. Never edit the main checkout; only the merge step changes it\./);
+  assert.ok(!buildPrompt(team, node, t).includes('Never edit the main checkout'), 'no worktree rule for runs in the shared dir');
+});

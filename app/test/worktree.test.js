@@ -23,10 +23,12 @@ test('creates worktree on squad/<taskId> and reuses it', () => {
   assert.deepStrictEqual(ensureWorktree(d, 't_2'), r);
 });
 
-test('useWorktrees defaults off', () => {
+test('useWorktrees defaults on (t_064066e5: code tasks get worktrees unless a project opts out)', () => {
   const Store = require('../src/store');
   const S = Store.Store || Store;
   const s = new S(fs.mkdtempSync(path.join(os.tmpdir(), 'wt-')));
+  assert.strictEqual(s.getSettings().useWorktrees, true);
+  s.saveSettings({ useWorktrees: false });
   assert.strictEqual(s.getSettings().useWorktrees, false);
 });
 
