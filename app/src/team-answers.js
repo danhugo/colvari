@@ -17,22 +17,27 @@ function applyAnsweredChange(store, orch, item, answer) {
   let req;
   try { req = JSON.parse(live.change); } catch { req = null; } // `change` is the stable-JSON fingerprint AND the payload
   if (!req || typeof req.tool !== 'string' || !req.tool) return false;
+  // The notice must name its subject (the gui-e2e contract greps for it, and the core should not
+  // have to cross-reference): recruit carries `name`; retire/update carry the target's id, resolved
+  // to a name while the node still exists (a retire removes it during the apply).
+  const target = (store.getTeam().nodes || []).find((n) => n.id === req.nodeId);
+  const who = req.name || (target ? `${target.name} (${target.id})` : req.nodeId) || 'unknown target';
   const say = (text) => {
     try { orch.sendToAgent(live.nodeId, text, live.taskId); }
     catch (e) { try { store.appendLog({ nodeId: live.nodeId, kind: 'team.change', taskId: live.taskId || null, text: `${text} (notice not delivered: ${e.message})` }); } catch {} }
   };
   if (String(answer ?? '').trim() !== 'approve') {
     store.consumeInbox(live.id);
-    say(`Your ${req.tool} request was declined by the human; nothing was changed.`);
+    say(`Your ${req.tool} request for ${who} was declined by the human; nothing was changed.`);
     return true;
   }
   try {
     const tool = makeTools(store, live.nodeId)[req.tool];
     if (typeof tool !== 'function') throw new Error(`unknown tool "${req.tool}"`);
     tool({ ...req, reason: live.reason || 'approved by the human in the Inbox' });
-    say(`Your ${req.tool} request was approved by the human and applied.`);
+    say(`Your ${req.tool} request for ${who} was approved by the human and applied.`);
   } catch (e) {
-    say(`Your ${req.tool} request was approved but not applied: ${e.message}`);
+    say(`Your ${req.tool} request for ${who} was approved but not applied: ${e.message}`);
   }
   return true;
 }

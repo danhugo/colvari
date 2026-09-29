@@ -312,6 +312,7 @@ test('answer handler: approve applies the stored change directly — node exists
   assert.equal(orch.sent.length, 1, 'core messaged once');
   assert.equal(orch.sent[0].nodeId, core.id);
   assert.match(orch.sent[0].text, /approved/);
+  assert.match(orch.sent[0].text, /Rookie/, 'the notice names its subject');
   assert.equal(orch.sent[0].taskId, task.id);
 });
 
@@ -326,6 +327,7 @@ test('answer handler: decline consumes the item, applies nothing, messages the c
   assert.ok(s.listInbox().find((i) => i.id === item.id).consumed, 'declined item consumed without a re-call');
   assert.equal(orch.sent.length, 1);
   assert.match(orch.sent[0].text, /declined/);
+  assert.match(orch.sent[0].text, /Nope/, 'the decline notice names its subject');
 });
 
 test('answer handler: double answer is idempotent — second answer throws, stale re-apply is a no-op', () => {
