@@ -13,6 +13,7 @@ const PF = require('./preflight');
 const C = require('./controls');
 const IDLE = require('./idle');
 const WT = require('./worktree');
+const MG = require('./merge-gate');
 const RT = require('./runtimes');
 const CAP = require('./capabilities');
 const { SubagentTracker, isSubagentTool } = require('./subagents');
@@ -286,7 +287,18 @@ class Orchestrator extends EventEmitter {
   // When per-key usage tracking started (older runs are dropped on migration — store.migrateUsageLedger);
   // null when the project predates the field or has no meta yet.
   usageSince() { try { const m = this.store.meta(); return (m && m.usageTrackingSince) || null; } catch { return null; } }
-  snapshot() { return { runtimeState: this.runtimeState, running: this.running, totalCost: this.totalCost, billedCost: this.billedCost || 0, subCost: this.subCost || 0, runs: this.runs, active: [...this.procs.keys()].map((id) => ({ nodeId: id, taskId: this.agent(id).taskId, cwd: this.cwds && this.cwds.get(id) || null })), runCost: this.runCost || 0, budgetStop: this.budgetStop || null, agents: Object.fromEntries(Object.entries(this.agents).map(([k, a]) => [k, this.agentView(a)])), ledger: this.ledger(), usageSince: this.usageSince(), modelStats: this.modelStats(), timeline: this.timeline(), logs: this.logs(), wiki: this.wiki(), nodeTeams: this.nodeTeams() }; }
+  // Renderer banner state for a red base branch (t_f72708fd). Memoized on the board signature:
+  // snapshot() runs on every changed(), so it must not re-scan the task files each time.
+  redMasterView() {
+    try {
+      const sig = typeof this.store.sigFile === 'function' ? this.store.sigFile('board') : null;
+      if (sig != null && this._redMasterCache && this._redMasterCache.sig === sig) return this._redMasterCache.view;
+      const view = MG.redMasterSnapshot(this.store);
+      if (sig != null) this._redMasterCache = { sig, view };
+      return view;
+    } catch { return null; }
+  }
+  snapshot() { return { runtimeState: this.runtimeState, redMaster: this.redMasterView(), running: this.running, totalCost: this.totalCost, billedCost: this.billedCost || 0, subCost: this.subCost || 0, runs: this.runs, active: [...this.procs.keys()].map((id) => ({ nodeId: id, taskId: this.agent(id).taskId, cwd: this.cwds && this.cwds.get(id) || null })), runCost: this.runCost || 0, budgetStop: this.budgetStop || null, agents: Object.fromEntries(Object.entries(this.agents).map(([k, a]) => [k, this.agentView(a)])), ledger: this.ledger(), usageSince: this.usageSince(), modelStats: this.modelStats(), timeline: this.timeline(), logs: this.logs(), wiki: this.wiki(), nodeTeams: this.nodeTeams() }; }
   // Renderer-facing snapshot: the UI reads only agents + run scalars, so the file-backed display parts
   // (modelStats/timeline/logs/wiki/nodeTeams) are pure IPC payload — ~1.4MB per change on a large
   // project. Kept out of getAll and state pushes; snapshot() stays whole for other consumers.
@@ -647,6 +659,17 @@ class Orchestrator extends EventEmitter {
     // by agents' own board MCP servers are invisible to this process until the next look.
     this._tickTimer = setInterval(() => { try { this.tick(); } catch {} }, SCHED.TICK_MS);
     if (this._tickTimer.unref) this._tickTimer.unref();
+    // Red-master sweep (t_897cca56): the merge gate keeps master green through merges, but a base
+    // branch can also go red OUTSIDE the gate (direct commits). Detect that at startup and surface
+    // it (master.red log + P0 fix task); a no-op unless the base tree differs from the last tree
+    // the gate proved green. Runs in a DETACHED CHILD: the check spawns the real suite when the
+    // tree is unproven, and app startup must never block on it — results land through the store.
+    try {
+      if (this.store && this.store.dir) {
+        const script = `try{const MG=require(${JSON.stringify(require.resolve('./merge-gate'))});const {Store}=require(${JSON.stringify(require.resolve('./store'))});MG.checkMasterHealth(new Store(${JSON.stringify(this.store.dir)}));}catch(e){}process.exit(0)`;
+        spawn(process.execPath, ['-e', script], { detached: true, stdio: 'ignore' }).unref();
+      }
+    } catch {}
   }
   stop() {
     this.running = false;

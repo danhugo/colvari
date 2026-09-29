@@ -2043,7 +2043,7 @@ const api = {
   inboxCounts: () => Object.fromEntries(pm.list().map((p) => [p.id, pm.store(p.id).listInbox({ status: 'open' }).length])),
   approveTask: (c, id, ok, note) => ST(c).approveTask(id, ok, note), getLogs: (c, n) => ST(c).readLogs(n || 2000), clearLogs: (c) => ST(c).clearLogs(),
   taskDiff: (c, id) => WT.worktreeDiff(wtTask(c, id)),
-  taskMerge: (c, id) => { const r = WT.worktreeMerge(wtTask(c, id)); ST(c).commentTask(id, 'human', r.refused ? WT.dirtyMergeMessage(r.dirty) : r.merged ? `merged ${r.branch} into ${r.base}` : `nothing merged: no commits on ${r.branch} ahead of ${r.base}`); return r; },
+  taskMerge: (c, id, opts) => ST(c).mergeTask(id, opts),
   taskDiscard: (c, id) => { const r = WT.worktreeDiscard(wtTask(c, id)); ST(c).updateTask(id, { worktreePath: null, worktreeBranch: null }); return r; },
   unmergedBranches: (c) => ST(c).listUnmergedBranches(),
   pickDir: async () => { const { dialog } = require('electron'); const r = await dialog.showOpenDialog(win, { properties: ['openDirectory', 'createDirectory'] }); return r.canceled ? null : r.filePaths[0]; },

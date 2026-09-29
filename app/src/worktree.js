@@ -83,4 +83,4 @@ function unmergedSquadBranches(root) {
     .map((branch) => ({ root, base, branch }));
 }
 
-module.exports = { ensureWorktree, worktreeDiff, worktreeMerge, worktreeDiscard, unmergedSquadBranches, dirtyMergeMessage };
+module.exports = { ensureWorktree, worktreeDiff, worktreeMerge, worktreeDiscard, unmergedSquadBranches, dirtyMergeMessage, dirtyMainFiles };
