@@ -46,6 +46,7 @@ esac
   const orch = new Orchestrator(store);
   orch.runAlive = () => false;
   clearInterval(orch._stallTimer); clearInterval(orch._wakeTimer); // fake clock: sweeps are manual
+  if (orch._tickTimer) clearInterval(orch._tickTimer); // dispatch sweep only exists once start() armed it
   return { root, store, node, task, orch };
 }
 
