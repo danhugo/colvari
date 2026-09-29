@@ -143,7 +143,9 @@ function buildClaudeArgs(node, prompt, settings, mcpConfig, opts = {}) {
   const capNote = n.enabledCapabilities.length ? `Enabled capabilities for this agent: ${n.enabledCapabilities.join(', ')}. Use them when relevant.` : '';
   const sysPrompt = [n.appendSystemPrompt, capNote].filter(Boolean).join('\n\n');
   if (sysPrompt) args.push('--append-system-prompt', sysPrompt);
-  for (const d of n.addDirs) args.push('--add-dir', d);
+  // opts.attachDir (the project's attachments dir, set only for runs that carry attachments) rides
+  // the same --add-dir loop as the node's own addDirs.
+  for (const d of (opts.attachDir ? [...n.addDirs, opts.attachDir] : n.addDirs)) args.push('--add-dir', d);
   args.push(...splitArgs(n.extraArgs));
   return args;
 }

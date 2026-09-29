@@ -1823,6 +1823,9 @@ const api = {
   addEdge: (c, a, b, type) => TS(c).addEdge(a, b, type), updateEdge: (c, id, p) => TS(c).updateEdge(id, p),
   savePreset: (c, p) => ST(c).savePreset(p), deletePreset: (c, name) => ST(c).deletePreset(name), removeEdge: (c, id) => TS(c).removeEdge(id),
   createTask: (c, t) => ST(c).createTask(t), updateTask: (c, id, p) => ST(c).updateTask(id, p), deleteTask: (c, id) => ST(c).deleteTask(id),
+  // Paste/upload: bytes land on disk under <store>/attachments and only {path,name,mime,size} comes
+  // back ({error} on rejection) — messages.json never holds base64.
+  saveAttachment: (c, input) => ST(c).saveAttachment(input || {}),
   commentTask: (c, id, text) => ST(c).commentTask(id, 'human', text),
   writeWiki: (c, t, x) => ST(c).writeWiki(t, x, 'human'), deleteWiki: (c, t) => ST(c).deleteWiki(t),
   listWikiSummaries: (c) => ST(c).listWikiSummaries(), searchWiki: (c, q) => ST(c).searchWiki(q),
@@ -1901,7 +1904,7 @@ const api = {
     return capabilities;
   },
   testAgent, testTeam,
-  stopAgent: (c, nodeId) => orchFor(c.p).stopAgent(nodeId), sendToAgent: (c, nodeId, text, taskId) => orchFor(c.p).sendToAgent(nodeId, text, taskId),
+  stopAgent: (c, nodeId) => orchFor(c.p).stopAgent(nodeId), sendToAgent: (c, nodeId, text, taskId, extra) => orchFor(c.p).sendToAgent(nodeId, text, taskId, extra),
   listInbox: (c) => ST(c).listInbox({ status: 'open' }),
   // Recording the answer is not enough for askGate approvals (recruit/retire/update): the core is
   // idle by then, so team-answers.js applies/consumes the answered item right here and messages the
