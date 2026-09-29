@@ -8,7 +8,7 @@ A desktop app for running a small team of Claude Code agents. Agents coordinate 
 npm install
 npm start          # Electron app (data root ~/.agents-squad, override with AGENTS_SQUAD_HOME=<dir>; AGENTS_SQUAD_PROJECT=<dir> is an equivalent alias, used by gui-e2e)
 npm test           # unit + integration tests with a fake claude CLI (includes a real stdio MCP round trip)
-npm run e2e        # real claude CLI in a temp dir: preflight, PM -> Dev team, then haiku loop + workflow agents (costs about $0.50 API-equivalent)
+npm run e2e        # real claude CLI in a temp dir: preflight, PM -> Dev team, then haiku loop + workflow agents; the driver approves the review hand-off before asserting (clean runs end in review, not done) (costs about $0.50 API-equivalent)
 npm run gui-e2e    # drives the real UI (templates, agent panel, preflight, Run, usage, F6), asserts every check, exits 1 on failure;
                    # screenshots go to e2e-shots/. Uses a fresh temp project dir via AGENTS_SQUAD_PROJECT (set by the script).
                    # Test instances (gui-e2e / smoke) never touch real data: an explicit AGENTS_SQUAD_PROJECT beats an inherited
