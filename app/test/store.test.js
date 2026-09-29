@@ -23,10 +23,20 @@ test('new nodes without coordinates get a free position (no stacking)', () => {
   const b = s.addNode({ name: 'UI Dev', role: 'Dev' });
   assert.notDeepEqual([a.x, a.y], [b.x, b.y]);
   assert.ok(Math.abs(a.x - b.x) >= 200 || Math.abs(a.y - b.y) >= 110, 'node cards must not overlap');
-  const seed = s.addNode({ name: 'Pinned', role: 'PM', x: 80, y: 80 });
-  assert.deepEqual([seed.x, seed.y], [80, 80]); // explicit x/y is kept
+  const seed = s.addNode({ name: 'Pinned', role: 'PM', x: 80, y: 360 });
+  assert.deepEqual([seed.x, seed.y], [80, 360]); // explicit x/y with no collision is kept
   const next = s.addNode({ name: 'Next', role: 'Dev' });
   assert.ok(Math.abs(next.x - seed.x) >= 200 || Math.abs(next.y - seed.y) >= 110, 'placed nodes are skipped');
+});
+
+test('explicit x/y that overlaps a placed node claims a free spot instead', () => {
+  const s = tmp();
+  const a = s.addNode({ name: 'First', role: 'Dev', x: 420, y: 300 });
+  // toolbar add staggers by (count%3)*20, so back-to-back adds are 20px apart
+  const b = s.addNode({ name: 'Second', role: 'Dev', x: 440, y: 300 });
+  assert.ok(Math.abs(a.x - b.x) >= 200 || Math.abs(a.y - b.y) >= 110, 'back-to-back adds must not overlap');
+  const free = s.addNode({ name: 'Free', role: 'Dev', x: 700, y: 300 });
+  assert.deepEqual([free.x, free.y], [700, 300]); // a collision-free explicit spot is still kept
 });
 
 test('board tasks: create, status, comment, persistence', () => {

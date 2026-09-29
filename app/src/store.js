@@ -289,20 +289,23 @@ class Store {
     const presets = this.getSettings().rolePresets;
     const node = { id: n.id || id('n'), ...normalizeNode(applyPreset(n, presets)), x: n.x, y: n.y };
     this.update(this.teamFile(), { nodes: [], edges: [] }, (t) => {
-      // Explicit x/y (context menu, toolbar add, duplicate, seeds, recruit offsets) is kept; otherwise
-      // claim the first free grid cell inside the lock so nodes created back-to-back never stack at (80,80).
-      if (!Number.isFinite(node.x) || !Number.isFinite(node.y)) Object.assign(node, this.freeSpot(t.nodes));
+      // Explicit x/y (context menu, toolbar add, duplicate, seeds) is kept; otherwise claim the first
+      // free grid cell inside the lock so nodes created back-to-back never stack at (80,80). An
+      // explicit spot that lands on a placed node (toolbar add staggers by only 20px) is not free
+      // either — it falls through to the same search so cards never overlap.
+      if (!Number.isFinite(node.x) || !Number.isFinite(node.y) || this.overlaps(node.x, node.y, t.nodes)) Object.assign(node, this.freeSpot(t.nodes));
       t.nodes.push(node);
     });
     return node;
   }
+  // Agent cards are ~200x110: points closer than that on BOTH axes read as overlapping cards.
+  overlaps(x, y, nodes) { return nodes.some((n) => Number.isFinite(n.x) && Number.isFinite(n.y) && Math.abs(n.x - x) < 200 && Math.abs(n.y - y) < 110); }
   // First cell of a 220x140-step grid (agent card ~200x110) that clears every placed node;
   // row-major from (80,80), so new agents flow left-to-right, top-to-bottom.
   freeSpot(nodes) {
-    const placed = nodes.filter((n) => Number.isFinite(n.x) && Number.isFinite(n.y));
     for (let row = 0; ; row++) for (let col = 0; col < 8; col++) {
       const x = 80 + col * 220, y = 80 + row * 140;
-      if (!placed.some((n) => Math.abs(n.x - x) < 200 && Math.abs(n.y - y) < 110)) return { x, y };
+      if (!this.overlaps(x, y, nodes)) return { x, y };
     }
   }
   // Changing the role to a preset's name fills the node's empty prompt / tools / permission mode from that preset.
