@@ -92,7 +92,7 @@ async function refresh() {
   renderAll();
 }
 const nodeName = (id) => (S.allNodes.find((n) => n.id === id) || {}).name || (id ? id : 'unassigned');
-function renderAll() { renderSidebar(); renderRtbar(); renderGraph(); renderPreflightBar(); renderNodeForm(); renderBoard(); renderWiki(); renderObs(); renderSettings(); renderHeader(); renderSelfUpdate(); renderLimitMeter(); renderUsage(); renderOverview(); renderInbox(); renderGuide(); renderChat(); }
+function renderAll() { renderSidebar(); renderRtbar(); renderRedbar(); renderGraph(); renderPreflightBar(); renderNodeForm(); renderBoard(); renderWiki(); renderObs(); renderSettings(); renderHeader(); renderSelfUpdate(); renderLimitMeter(); renderUsage(); renderOverview(); renderInbox(); renderGuide(); renderChat(); }
 const fmtTok = (n) => { n = n || 0; return n >= 1e6 ? (n / 1e6).toFixed(2) + 'M' : n >= 1e4 ? (n / 1e3).toFixed(1) + 'k' : String(n); };
 const COST_NOTE = { subscription: 'Covered by subscription — not billed per token', other: 'API-equivalent (reported by Claude CLI)' };
 const VENDOR = { claude: 'Claude', codex: 'Codex', opencode: 'OpenCode' };
@@ -487,9 +487,10 @@ const normWatch = (d) => { d = d || {}; return {
   digest: String(d.digest || ''),
   intervalMin: Number(d.intervalMin) > 0 ? Number(d.intervalMin) : 10,
 }; };
+let rstSeen = false; // any successful pull or push proves the backend exists; a failed pull after that must not re-stub (buttons would vanish while real state is on screen)
 async function loadCoreState() {
-  try { let d; try { d = await squad.call('getRestartState', ctx); } catch { d = await squad.call('getRestartState'); } rst = { ...normRestart(d), stub: false }; }
-  catch { rst = { ...rst, stub: true }; } // no backend yet: keep the last known (stub) state
+  try { let d; try { d = await squad.call('getRestartState', ctx); } catch { d = await squad.call('getRestartState'); } rst = { ...normRestart(d), stub: false }; rstSeen = true; }
+  catch { if (!rstSeen) rst = { ...rst, stub: true }; } // no backend yet: keep the last known (stub) state
   try { let d; try { d = await squad.call('getWatchStatus', ctx); } catch { d = await squad.call('getWatchStatus'); } watch = { ...normWatch(d), stub: false }; }
   catch { watch = { ...watch, stub: true }; }
 }
@@ -508,12 +509,42 @@ function renderRestartPill() {
   if (n) bits.push(`${n} change${n === 1 ? '' : 's'}`);
   if (rst.scheduledAfter) bits.push(`after ${shortTaskId(rst.scheduledAfter)}`);
   else if (rst.scheduledNow) bits.push('once agents drain');
-  c.textContent = bits.join(' · ');
+  const label = document.createElement('span');
+  label.textContent = bits.join(' · ');
+  c.replaceChildren(label);
+  // Human escape hatch (Cato t_42f310cf #7). Hidden while stubbed: without the core-restart
+  // backend the calls are guaranteed no-ops, so showing buttons would just invite dead clicks.
+  if (!rst.stub) {
+    c.appendChild(rstBtn('Restart now', 'Restart immediately — in-flight tasks finish, then the app relaunches with the merged changes.', () => rstAction('now'), rstBusy === 'now'));
+    if (armed) c.appendChild(rstBtn('Cancel schedule', 'Cancel the scheduled restart — the landed changes stay pending until the core schedules one again.', () => rstAction('cancel'), rstBusy === 'cancel'));
+    if (rstErr) { const e = document.createElement('span'); e.className = 'rsterr'; e.textContent = rstErr; c.appendChild(e); }
+  }
   c.title = ['Merged changes wait for a core-scheduled restart — dispatch keeps running meanwhile.',
     n ? `${n} change${n === 1 ? '' : 's'} landed since the last restart${rst.since ? ` (first ${agoTxt(rst.since)})` : ''}.` : '',
     rst.scheduledAfter ? `Restarts once ${rst.scheduledAfter} is done and in-flight tasks drain.` : (rst.scheduledNow ? 'Restarts as soon as running agents finish.' : 'No restart armed yet — only the core agent (PM) can schedule one.'),
     rst.gating.length ? `${rst.gating.length} not-yet-started task${rst.gating.length === 1 ? '' : 's'} held until then.` : '',
     rst.stub ? 'backend pending' : ''].filter(Boolean).join(' ');
+}
+const rstBtn = (txt, tip, fn, busy) => { const b = document.createElement('button'); b.className = 'rstact'; b.textContent = busy ? '…' : txt; b.title = tip; b.disabled = !!rstBusy; b.onclick = fn; return b; };
+// restartNow / cancelRestart (Devon, t_20d5a23c contract): the state push re-renders this pill;
+// if the push is missed we re-pull getRestartState. Failure surfaces briefly and inline.
+let rstBusy = null; let rstErr = null;
+async function rstAction(kind) {
+  if (rstBusy || rst.stub) return;
+  rstBusy = kind; renderRestartPill();
+  const names = kind === 'now' ? ['restartNow', 'restartPendingNow'] : ['cancelRestart', 'cancelScheduledRestart'];
+  let ok = false, err = null;
+  for (const nm of names) {
+    try { let r; try { r = await squad.call(nm, ctx); } catch { r = await squad.call(nm); } if (r && r.error) throw new Error(r.error); ok = true; break; }
+    catch (e) { err = e; }
+  }
+  rstBusy = null;
+  if (ok) { rstErr = null; loadCoreState().then(renderHeader).catch(() => {}); }
+  else {
+    rstErr = (err && err.message) || 'not available';
+    renderRestartPill();
+    setTimeout(() => { if (rstErr === ((err && err.message) || 'not available')) { rstErr = null; renderRestartPill(); } }, 4000);
+  }
 }
 function renderWatchPill() {
   const c = $('#watchst'); if (!c) return;
@@ -1346,6 +1377,56 @@ function renderRtbar() {
   $('#rt-dismiss').onclick = () => { rtuHidden = true; renderRtbar(); };
 }
 
+// ---------- red-master banner (t_f72708fd) ----------
+// Contract with Devon (t_897cca56, pre-merge test gate): the orchestrator snapshot carries
+// `redMaster` — null/absent/{red:false} means master is green. Shown on every tab with no
+// dismiss: master being red blocks every merge, so it stays up until the state itself clears.
+// Shape: { red, since, failingTests: [name | {name}], testOutput, fixTaskId,
+//          lastMergedTaskId, gateBlocks: [{taskId, tests, at}] }
+// failingTests entries and gateBlocks.tests accept plain strings or {name} so minor shape drift
+// on Devon's side still renders; gateBlocks is optional (gate rejections before the field lands
+// are still visible as task comments, which the board already shows).
+function normRedMaster(d) {
+  if (!d || !d.red) return null;
+  const names = (v) => (Array.isArray(v) ? v : []).map((t) => (typeof t === 'string' ? t : (t || {}).name || '')).filter(Boolean);
+  return {
+    since: +d.since || 0,
+    tests: names(d.failingTests),
+    output: String(d.testOutput || d.output || ''),
+    fixTaskId: d.fixTaskId || null,
+    lastMergedTaskId: d.lastMergedTaskId || null,
+    blocks: (Array.isArray(d.gateBlocks) ? d.gateBlocks : []).map((b) => ({ taskId: b.taskId, tests: names(b.tests), at: +b.at || 0 })).filter((b) => b.taskId),
+  };
+}
+function renderRedbar() {
+  const b = $('#redbar'); if (!b) return;
+  const rm = normRedMaster((S.orch || {}).redMaster);
+  if (!rm) { b.innerHTML = ''; b.classList.add('hidden'); return; }
+  const when = rm.since ? ` <span class="rb-when">since ${new Date(rm.since).toLocaleTimeString()}</span>` : '';
+  const shown = rm.tests.slice(0, 4);
+  const chips = shown.map((t) => `<code class="rb-test" title="${esc(t)}">${esc(t)}</code>`).join('')
+    + (rm.tests.length > shown.length ? `<span class="rb-more">+${rm.tests.length - shown.length} more</span>` : '');
+  const rtask = (id) => (S.tasks || []).find((t) => t.id === id);
+  const fix = rm.fixTaskId
+    ? `<button id="rb-fix" class="primary">${esc(shortTaskId(rm.fixTaskId))}${rtask(rm.fixTaskId) ? ': ' + esc(clipText(rtask(rm.fixTaskId).title, 44)) : ' — open fix task'}</button>`
+    : '<span class="rb-nofix">no fix task yet</span>';
+  const owner = rm.lastMergedTaskId
+    ? `<span class="rb-owner" title="last task merged before master went red — likely cause, not confirmed">likely from ${esc(shortTaskId(rm.lastMergedTaskId))}${rtask(rm.lastMergedTaskId) ? ` (${esc(clipText(rtask(rm.lastMergedTaskId).title, 44))})` : ''}</span>`
+    : '';
+  const blocks = rm.blocks.slice(0, 3).map((bl) => {
+    const t = rtask(bl.taskId);
+    return `<div class="rb-block">⛔ Gate blocked the merge of ${esc(shortTaskId(bl.taskId))}${t ? ` — ${esc(clipText(t.title, 50))}` : ''} (${bl.tests.length} failing test${bl.tests.length === 1 ? '' : 's'})${t ? ` — sent back to ${esc(nodeName(t.assignee))}` : ''}</div>`;
+  }).join('');
+  const out = rm.output ? `<details class="rb-out"><summary>output</summary><pre>${esc(rm.output)}</pre></details>` : '';
+  b.innerHTML = `<span class="rb-ico" aria-hidden="true">●</span>
+    <div class="rb-body"><b>MASTER IS RED${when}</b>
+    <span class="rb-sub">the shared branch is failing tests — merges are blocked until it is green again</span>
+    ${rm.tests.length ? `<div class="rb-tests">${chips}</div>` : ''}${blocks}${out}</div>
+    <span class="spacer"></span>${owner}${fix}`;
+  b.classList.remove('hidden');
+  if ($('#rb-fix')) $('#rb-fix').onclick = () => { sel.task = rm.fixTaskId; showTab('board'); renderBoard(); };
+}
+
 // Subagent chip on an agent card (Team graph + Overview): count + compact total tokens for the current
 // run's subagents. Per contract t_c33656ba the parent's own totals ALREADY include these — the badge is
 // a breakdown, never something to add on top. Hidden when the agent spawned nothing. y places it in the
@@ -1419,7 +1500,7 @@ function renderBoard() {
   sa.innerHTML = S.allNodes.map((n) => `<option value="${n.id}">${esc(n.name)} (${n.role})</option>`).join('') || '<option value="">(add agents first)</option>';
   if (cur) sa.value = cur;
   renderIdle();
-  $('#columns').innerHTML = ['todo', 'in_progress', 'waiting_for_human', 'review', 'merge_conflict', 'done'].map((st) => { const total = S.tasks.filter((t) => t.status === st).length; const fold = st === 'done' && !doneOpen; return `<div class="col ${st}${fold ? ' folded' : ''}"><h3 ${st === 'done' ? 'id="done-h" style="cursor:pointer" title="Toggle done"' : ''}>${st === 'done' ? (fold ? '▸ ' : '▾ ') : ''}${st === 'done' && !showAllDone && total > 20 ? `done (20 of ${total})` : `${st.replaceAll('_', ' ')} (${total})`}</h3>${st === 'todo' && !S.tasks.length ? '<div class="hint-first">Create a goal task, assign it to an agent (usually the PM), then press Run.</div>' : ''}${
+  $('#columns').innerHTML = ['todo', 'in_progress', 'waiting_for_human', 'review', 'merge_conflict', 'done'].map((st) => { const total = S.tasks.filter((t) => t.status === st).length; const fold = st === 'done' && !doneOpen; return `<div class="col ${st}${fold ? ' folded' : ''}"><h3 ${st === 'done' ? 'id="done-h" style="cursor:pointer" title="Toggle done"' : ''}>${st === 'done' ? (fold ? '▸ ' : '▾ ') : ''}${st === 'done' && !showAllDone && total > 20 ? `done 20/${total}` : `${st.replaceAll('_', ' ')} (${total})`}</h3>${st === 'todo' && !S.tasks.length ? '<div class="hint-first">Create a goal task, assign it to an agent (usually the PM), then press Run.</div>' : ''}${
     (fold ? [] : st === 'done' ? doneCards() : S.tasks.filter((t) => t.status === st).slice().sort(byPriorityThenTitle)).map((t) => { const bl = openBlockers(t); const w = (S.orch.agents[t.assignee] || {});
       // Worker state must match reality: an agent with a live run is busy — on THIS task (or an
       // unattributed wake run for it) reads "live", on another task reads "working elsewhere",
@@ -2476,7 +2557,7 @@ if (squad.onSelfUpdateStatus) squad.onSelfUpdateStatus(onUpdPush);
 else { squad.on('selfUpdateStatus', onUpdPush); squad.on('self-update-status', onUpdPush); }
 // Restart/watch pushes: prefer dedicated bridge helpers, fall back to plausible channel names
 // (Devon adds the preload helpers when the backend lands — see contract on t_20d5a23c).
-const onRestartPush = (d) => { rst = { ...normRestart(d), stub: false }; renderHeader(); boardSig = null; renderBoard(); };
+const onRestartPush = (d) => { rst = { ...normRestart(d), stub: false }; rstSeen = true; renderHeader(); boardSig = null; renderBoard(); };
 const onWatchPush = (d) => { watch = { ...normWatch(d), stub: false }; renderHeader(); };
 if (squad.onRestartState) squad.onRestartState(onRestartPush);
 else { squad.on('restart-state', onRestartPush); squad.on('restartStatus', onRestartPush); }

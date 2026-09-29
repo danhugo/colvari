@@ -17,6 +17,7 @@ const MG = require('./merge-gate');
 const RT = require('./runtimes');
 const CAP = require('./capabilities');
 const { SubagentTracker, isSubagentTool } = require('./subagents');
+const FQ = require('./failures');
 
 const MCP_SERVER = path.join(__dirname, 'mcp-server.js');
 
@@ -68,6 +69,13 @@ const STALL = { SWEEP_MS: 5000, SIGKILL_GRACE_MS: 8000, MAX_RECOVERIES: 2 };
 // waits for the next run to end even though slots are free (t_9e4b4805: 1/4 agents running while a
 // ready review pickup waited).
 const SCHED = { TICK_MS: 1000 };
+
+// Core-agent watch (plan t_42f310cf item 2): every watchIntervalMin (setting, default 10) while work
+// is active the protected core agent gets a digest wake — but only when the digest changed since the
+// wake before, and only once the per-agent wake gap (WAKE.MIN_GAP_MS, same anchor the nudges use) has
+// passed. LONG_TASK_MIN is how long an in_progress task may sit untouched before the digest calls it
+// long-running.
+const WATCH = { LONG_TASK_MIN: 45 };
 
 function buildPrompt(team, node, task, extra = {}) {
   node = { ...normalizeNode(applyPreset(node, extra.presets)), id: node.id };
@@ -172,11 +180,18 @@ class Orchestrator extends EventEmitter {
     // out instead of iterating/resuming them, and the run's task stays in_progress for the post-restart
     // reconcile. Per-node (not global) so a halt that spares one agent does not poison another's run.
     this.drainCutNodes = new Set();
+    // Runtime breaker (t_419062e2): per-runtime unavailability + failure streak state.
+    this.runtimeState = {};
+    this._rtFailures = new Map(); // runtime -> { signature, count }
     this.wakeTimers = new Map(); // nodeId -> { timer, dueAt } — at most one pending wake per agent
     this.wakePairs = new Map(); // 'from>to' -> {count, since}
     this.wakeLastAt = new Map(); // nodeId -> ts of the agent's last agent->agent wake dispatch (nudge throttle anchor)
     this._wakeTimer = setInterval(() => this.sweepWakes(), WAKE.SWEEP_MS);
     if (this._wakeTimer.unref) this._wakeTimer.unref();
+    // Core watch state (sweepWatch): lastWatchAt/lastDigest advance on every due tick; wokeDigest is
+    // the digest the core was last woken for (a change wakes, sameness does not); active flips the
+    // UI indicator without ticking.
+    this.watch = { lastWatchAt: null, lastDigest: '', wokeDigest: null, active: null };
     // Stall watchdog state: last seen cumulative CPU time of each run's CLI process (nodeId -> {pid, cpuMs}),
     // and the pending SIGKILL grace timers for stalled runs that ignore SIGTERM.
     this._stallCpu = new Map();
@@ -272,7 +287,18 @@ class Orchestrator extends EventEmitter {
   // When per-key usage tracking started (older runs are dropped on migration — store.migrateUsageLedger);
   // null when the project predates the field or has no meta yet.
   usageSince() { try { const m = this.store.meta(); return (m && m.usageTrackingSince) || null; } catch { return null; } }
-  snapshot() { return { running: this.running, totalCost: this.totalCost, billedCost: this.billedCost || 0, subCost: this.subCost || 0, runs: this.runs, active: [...this.procs.keys()].map((id) => ({ nodeId: id, taskId: this.agent(id).taskId, cwd: this.cwds && this.cwds.get(id) || null })), runCost: this.runCost || 0, budgetStop: this.budgetStop || null, agents: Object.fromEntries(Object.entries(this.agents).map(([k, a]) => [k, this.agentView(a)])), ledger: this.ledger(), usageSince: this.usageSince(), modelStats: this.modelStats(), timeline: this.timeline(), logs: this.logs(), wiki: this.wiki(), nodeTeams: this.nodeTeams() }; }
+  // Renderer banner state for a red base branch (t_f72708fd). Memoized on the board signature:
+  // snapshot() runs on every changed(), so it must not re-scan the task files each time.
+  redMasterView() {
+    try {
+      const sig = typeof this.store.sigFile === 'function' ? this.store.sigFile('board') : null;
+      if (sig != null && this._redMasterCache && this._redMasterCache.sig === sig) return this._redMasterCache.view;
+      const view = MG.redMasterSnapshot(this.store);
+      if (sig != null) this._redMasterCache = { sig, view };
+      return view;
+    } catch { return null; }
+  }
+  snapshot() { return { runtimeState: this.runtimeState, redMaster: this.redMasterView(), running: this.running, totalCost: this.totalCost, billedCost: this.billedCost || 0, subCost: this.subCost || 0, runs: this.runs, active: [...this.procs.keys()].map((id) => ({ nodeId: id, taskId: this.agent(id).taskId, cwd: this.cwds && this.cwds.get(id) || null })), runCost: this.runCost || 0, budgetStop: this.budgetStop || null, agents: Object.fromEntries(Object.entries(this.agents).map(([k, a]) => [k, this.agentView(a)])), ledger: this.ledger(), usageSince: this.usageSince(), modelStats: this.modelStats(), timeline: this.timeline(), logs: this.logs(), wiki: this.wiki(), nodeTeams: this.nodeTeams() }; }
   // Renderer-facing snapshot: the UI reads only agents + run scalars, so the file-backed display parts
   // (modelStats/timeline/logs/wiki/nodeTeams) are pure IPC payload — ~1.4MB per change on a large
   // project. Kept out of getAll and state pushes; snapshot() stays whole for other consumers.
@@ -636,8 +662,14 @@ class Orchestrator extends EventEmitter {
     // Red-master sweep (t_897cca56): the merge gate keeps master green through merges, but a base
     // branch can also go red OUTSIDE the gate (direct commits). Detect that at startup and surface
     // it (master.red log + P0 fix task); a no-op unless the base tree differs from the last tree
-    // the gate proved green. Fire-and-forget: must never block or break startup.
-    setImmediate(() => { try { MG.checkMasterHealth(this.store); } catch {} });
+    // the gate proved green. Runs in a DETACHED CHILD: the check spawns the real suite when the
+    // tree is unproven, and app startup must never block on it — results land through the store.
+    try {
+      if (this.store && this.store.dir) {
+        const script = `try{const MG=require(${JSON.stringify(require.resolve('./merge-gate'))});const {Store}=require(${JSON.stringify(require.resolve('./store'))});MG.checkMasterHealth(new Store(${JSON.stringify(this.store.dir)}));}catch(e){}process.exit(0)`;
+        spawn(process.execPath, ['-e', script], { detached: true, stdio: 'ignore' }).unref();
+      }
+    } catch {}
   }
   stop() {
     this.running = false;
@@ -775,6 +807,82 @@ class Orchestrator extends EventEmitter {
     }
   }
 
+  // ---- core-agent watch: a periodic digest wake for the protected core agent, driven from the
+  // dispatch sweep (so it exists only while the Run is up) and interval-gated by watchIntervalMin.
+  // Fully idle/off (no live run anywhere) means no ticks at all. Every due tick stamps lastWatchAt
+  // and logs the digest as a kind:'watch' line; the wake itself fires only when the digest differs
+  // from the one the core was last woken for AND the per-agent wake gap has passed — deferred or
+  // busy-suppressed digests stay pending and re-fire on a later tick. The delivery reuses the nudge
+  // path (system message + wakeForHuman), so the single-run, budget and usage-pause guards all apply.
+  sweepWatch() {
+    const st = this.watch ||= { lastWatchAt: null, lastDigest: '', wokeDigest: null, active: null };
+    const active = !!(this.running && !this.userStopped && !this.dispatchPaused && this.procs.size > 0);
+    if (st.active !== active) {
+      st.active = active;
+      // Activation arms the first interval (a digest the moment work starts duplicates what the core
+      // just dispatched itself); idle-off keeps lastWatchAt stale so the next activation re-arms.
+      if (active) st.lastWatchAt = Date.now();
+      this.emit('watch-status', this.watchStatus());
+    }
+    if (!active) return;
+    const intervalMin = Math.max(1, Number(this.store.getSettings().watchIntervalMin ?? 10) || 10);
+    const now = Date.now();
+    if (st.lastWatchAt && now - st.lastWatchAt < intervalMin * 60000) return;
+    st.lastWatchAt = now;
+    const digest = this.watchDigest();
+    st.lastDigest = digest;
+    const core = IDLE.coreNode(this.store.getTeam());
+    this.log(core ? core.id : null, 'watch', digest);
+    this.emit('watch-status', this.watchStatus());
+    if (!core || digest === st.wokeDigest) return; // nothing changed since the last wake: log only
+    const gap = (this.wakeLastAt.get(core.id) || 0) + WAKE.MIN_GAP_MS - now;
+    if (gap > 0) return; // wake gap: deferred, not dropped — a still-pending change re-fires later
+    st.wokeDigest = digest;
+    const m = this.store.sendMessage({ from: 'system', to: core.id, text: digest + '\nThis is the periodic watch digest. Act on anything that needs it (nudge an idle agent, reassign, comment, schedule a restart); if nothing needs action, stop.' });
+    this.wakeForHuman(core.id, [m], { reason: 'watch digest', taskIds: [], action: 'wake core' })
+      .catch((e) => this.log(core.id, 'error', 'watch wake: ' + e.message));
+  }
+
+  // What the core may want to act on, as stable text: pending restarts (restart scheduling may not
+  // exist yet — read defensively), who is working/stalled/idle, and the tasks blocked, awaiting the
+  // human, stuck in a failed merge, or running long. Deliberately timestamp-free: the text must be
+  // identical across ticks when nothing changed, or every tick would read as a change.
+  watchDigest() {
+    const team = this.store.getTeam();
+    const tasks = this.store.listTasks();
+    const now = Date.now();
+    const title = (t) => `"${String(t.title || t.id).slice(0, 40)}"`;
+    const list = (arr, fmt) => (arr.length ? arr.slice(0, 4).map(fmt).join(', ') + (arr.length > 4 ? ` +${arr.length - 4} more` : '') : 'none');
+    const lines = [];
+    const rp = (this.store.meta() || {}).restartPending || {};
+    lines.push(`restarts pending: ${Number(rp.count || 0)}${rp.afterTaskId ? `, scheduled after ${rp.afterTaskId}` : ''}`);
+    const working = (team.nodes || []).filter((n) => this.procs.has(n.id));
+    lines.push(`working: ${list(working, (n) => { const a = this.agent(n.id); return a.taskId ? `${n.name} (${a.taskId})` : n.name; })}`);
+    const stallOf = (n) => { const a = this.agents[n.id]; return (a && (a.stall || (a.currentRun && a.currentRun.stall))) || null; };
+    const stalled = (team.nodes || []).filter((n) => stallOf(n));
+    lines.push(`stalled: ${list(stalled, (n) => { const s = stallOf(n); return `${n.name}${s.state ? ` (${s.state}${s.attempt != null ? ` ${s.attempt}/${s.max ?? '?'}` : ''})` : ''}`; })}`);
+    const open = tasks.filter((t) => t.status !== 'done');
+    const blocked = open.filter((t) => t.status === 'todo' && C.isBlocked(t, tasks));
+    lines.push(`blocked: ${list(blocked, (t) => `${t.id} ${title(t)}`)}`);
+    const forHuman = open.filter((t) => t.status === 'waiting_for_human');
+    lines.push(`awaiting human: ${list(forHuman, (t) => `${t.id} ${title(t)}`)}`);
+    const conflicts = open.filter((t) => t.status === 'merge_conflict');
+    lines.push(`merge failures: ${list(conflicts, (t) => `${t.id} ${title(t)}`)}`);
+    const long = open.filter((t) => t.status === 'in_progress' && now - new Date(t.updatedAt).getTime() > WATCH.LONG_TASK_MIN * 60000);
+    lines.push(`long-running (>${WATCH.LONG_TASK_MIN}m): ${list(long, (t) => `${t.id} ${title(t)}`)}`);
+    const idle = (team.nodes || []).filter((n) => !this.procs.has(n.id));
+    lines.push(`idle agents: ${list(idle, (n) => n.name)}`);
+    return lines.join('\n');
+  }
+
+  // UI status (getWatchStatus / 'watch-status' push): lastWatchAt ISO, whether the watch is ticking,
+  // the last computed digest, and the effective interval.
+  watchStatus() {
+    const st = this.watch ||= { lastWatchAt: null, lastDigest: '', wokeDigest: null, active: null };
+    const intervalMin = Math.max(1, Number(this.store.getSettings().watchIntervalMin ?? 10) || 10);
+    return { lastWatchAt: st.lastWatchAt ? new Date(st.lastWatchAt).toISOString() : null, active: !!st.active, digest: st.lastDigest || '', intervalMin };
+  }
+
   // Tasks left in review that never got picked back up (their reviewer's process crashed/exited, or
   // the run stopped mid-way) are dispatched to their reviewer. With no reviewer configured for the
   // assignee the task STAYS in review: done requires reviewer/owner verification (t_699b67b7), so the
@@ -814,7 +922,7 @@ class Orchestrator extends EventEmitter {
     const todo = all.filter((t) => t.status === 'todo' && team.nodes.some((n) => n.id === t.assignee));
     // The subscription usage pause is about the Claude subscription: agents on other runtimes keep working.
     // dispatchPaused (UpdateWatcher) pauses every runtime: the restart waits for agents to finish.
-    const paused = (node) => this.dispatchPaused || (this.usagePaused && (!node || (node.runtime || 'claude') === 'claude'));
+    const paused = (node) => this.dispatchPaused || (this.usagePaused && (!node || (node.runtime || 'claude') === 'claude')) || this.runtimeUnavailableFor(node);
     const readyTodo = todo.map((t) => ({ task: t, node: team.nodes.find((n) => n.id === t.assignee) }))
       .filter(({ task, node }) => !C.isBlocked(task, all) && !this.agent(task.assignee).budgetStop && !paused(node));
     const readyReview = reviewReady.filter(({ task, node }) => !C.isBlocked(task, all) && !this.agent(node.id).budgetStop && !paused(node));
@@ -836,7 +944,14 @@ class Orchestrator extends EventEmitter {
       this._dispatchHoldLog?.delete(task.id);
       this.runTask(node, task, team, s).catch((e) => this.log(node.id, 'error', 'agent run crashed: ' + e.message));
     }
+    // Tasks held ONLY by a paused runtime never enter `ready`, so say why (same dedupe as above).
+    for (const t of todo) {
+      const node = team.nodes.find((n) => n.id === t.assignee);
+      if (!node || ready.some((x) => x.task.id === t.id)) continue;
+      if (this.runtimeUnavailableFor(node)) holdLog(t, node, `runtime ${(node.runtime || 'claude')} is unavailable (paused); fix it and resume`);
+    }
     try { this.nudgeIdle(); } catch (e) { this.log(null, 'error', 'idle nudge: ' + e.message); }
+    try { this.sweepWatch(); } catch (e) { this.log(null, 'error', 'watch sweep: ' + e.message); }
     if (this.procs.size === 0) {
       // UpdateWatcher is draining for a restart: hold the run session open (no dispatches while
       // paused) so the watcher's wasRunning stays true and bootResume can restart the Run after the
@@ -1046,6 +1161,8 @@ class Orchestrator extends EventEmitter {
         const usedResume = !!(args && resume);
         const r = await this.spawnRun(node, args, cwd, env, settings, { ...meta, iteration: i + 1, resumedFrom: usedResume ? resume : null });
         code = r.code; i++; human = null; recover = false; humanAtts = [];
+        if (code !== 0) this.noteRuntimeFailure(node.id, meta.runtime, r);
+        else this._rtFailures.delete(meta.runtime); // real progress resets the streak
         if (r.sessionId) {
           resume = r.sessionId;
           const tp = this.store.getTask(task.id);
@@ -1159,6 +1276,55 @@ class Orchestrator extends EventEmitter {
     }
     setImmediate(() => this.tick());
     setImmediate(() => this.tick());
+  }
+
+  // A run on `runtime` exited non-zero: log the real (redacted) error tail, classify, and maybe
+  // trip the breaker: one classified auth/model failure, or FAIL_STREAK fast consecutive failures
+  // with the same signature. Fails open otherwise. One ask_human + one event per episode.
+  noteRuntimeFailure(nodeId, rt, r) {
+    if (!rt || rt === 'unknown' || r.stalled) return;
+    const a = this.agents[nodeId];
+    if (a && (a.stopRequested || this.drainCutNodes.has(nodeId))) return;
+    const raw = [r.stderr, r.result].filter(Boolean).join('\n').trim();
+    const text = FQ.redactError(raw) || `exit ${r.code}`;
+    this.log(nodeId, 'error', `runtime ${rt} run failed (exit ${r.code}): ${text.slice(0, 500)}`);
+    const kind = FQ.classifyFailure(raw);
+    const dur = r.usage && r.usage.durationMs;
+    const f = this._rtFailures.get(rt) || { signature: null, count: 0 };
+    this._rtFailures.set(rt, f);
+    if (!kind) {
+      if (!(Number.isFinite(dur) && dur < FQ.FAIL.FAST_MS)) return;
+      const sig = text.split('\n')[0].slice(0, 200);
+      if (f.signature !== sig) { f.signature = sig; f.count = 0; }
+      f.count++;
+      if (f.count < FQ.FAIL.STREAK_MAX) return;
+    }
+    if (this.runtimeState[rt] && this.runtimeState[rt].state === 'unavailable') return; // episode active
+    f.signature = null; f.count = 0;
+    const agents = this.store.getTeam().nodes.filter((n) => ((n.runtime || 'claude') === rt)).map((n) => n.id);
+    this.runtimeState[rt] = { state: 'unavailable', error: text, agents, since: Date.now() };
+    this.log(nodeId, 'error', `runtime ${rt} unavailable (${kind || 'repeated fast failures'}): dispatch paused; tasks stay queued`);
+    if (a && a.taskId) { try { this.store.commentTask(a.taskId, 'orchestrator', `Runtime ${rt} failed (${kind || 'fast failures'}): ${text}`); } catch {} }
+    const q = `Runtime "${rt}" is unavailable — dispatch to it is paused and its tasks stay queued. Real error: ${text.slice(0, 1200)}. Fix it (e.g. log in again / pick a valid model), then resume the runtime.`;
+    try { this.store.askHuman({ nodeId, question: q, choices: ['resume'] }); } catch {}
+    this.emit('runtime.unavailable', { runtime: rt, error: text, agents, since: this.runtimeState[rt].since });
+    this.changed();
+  }
+  // Human says the runtime is fixed (banner "I fixed it — resume"): clear the breaker and let
+  // queued work flow again — including restarting dispatch if the Run had stopped.
+  async resumeRuntime(rt) {
+    if (!this.runtimeState || !this.runtimeState[rt]) throw new Error(`runtime "${rt}" is not unavailable`);
+    delete this.runtimeState[rt];
+    this._rtFailures.delete(rt);
+    this.log(null, 'system', `runtime ${rt} resumed by human: breaker cleared, queued tasks re-dispatch`);
+    this.emit('runtime.available', { runtime: rt });
+    this.changed();
+    if (!this.running) this.start(); else this.tick();
+    return { ok: true };
+  }
+  runtimeUnavailableFor(node) {
+    const rt = (node && node.runtime) || 'claude';
+    return !!(this.runtimeState && this.runtimeState[rt] && this.runtimeState[rt].state === 'unavailable');
   }
 
   mcpConfig(node) { return { mcpServers: { board: { type: 'stdio', command: process.execPath, args: [MCP_SERVER, '--project', this.store.dir, '--node', node.id], env: { ELECTRON_RUN_AS_NODE: '1' } } } }; }
@@ -1357,4 +1523,4 @@ class Orchestrator extends EventEmitter {
     }
   }
 }
-module.exports = { Orchestrator, buildPrompt, humanPrompt, wakePrompt, stallPrompt, attachedFilesLines, WAKE, STALL, SCHED, autoCompactEnv };
+module.exports = { Orchestrator, buildPrompt, humanPrompt, wakePrompt, stallPrompt, attachedFilesLines, WAKE, WATCH, STALL, SCHED, autoCompactEnv };

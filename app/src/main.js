@@ -5,7 +5,6 @@ const { ProjectManager, TEMPLATES, isolateTestRoot } = require('./projects');
 const { pickChanged } = require('./store');
 const AC = require('./agent-config');
 const WT = require('./worktree');
-const MG = require('./merge-gate');
 const U = require('./usage');
 const PF = require('./preflight');
 const RT = require('./runtimes');
@@ -49,6 +48,10 @@ function orchFor(pid) {
     o.on('run.stalled', (e) => send('run-stalled', { ...e, projectId: pid }));
     o.on('run.recovering', (e) => send('run-recovering', { ...e, projectId: pid }));
     o.on('run.recovery_failed', (e) => send('run-recovery-failed', { ...e, projectId: pid }));
+    o.on('watch-status', (w) => send('watch-status', { ...w, projectId: pid }));
+    // Runtime breaker (t_419062e2): banner push + clear, consumed by Uma's syncRtu (t_d33685f3).
+    o.on('runtime.unavailable', (e) => send('runtime-unavailable', { ...e, projectId: pid }));
+    o.on('runtime.available', (e) => send('runtime-available', { ...e, projectId: pid }));
     orchs.set(pid, o);
   }
   return o;
@@ -1257,6 +1260,44 @@ async function guiE2E() {
     await shot('monitor-log');
     console.log('[gui-e2e] monitorlog', JSON.stringify(rows));
   };
+  // Red-master banner (t_f72708fd): S.orch.redMaster is seeded exactly as Devon's pre-merge gate
+  // (t_897cca56) will publish it on the orchestrator snapshot (contract recorded on that task):
+  // { red, since, failingTests:[name|{name}], testOutput, fixTaskId, lastMergedTaskId,
+  //   gateBlocks:[{taskId, tests, at}] }. Checks the solid banner content, the fix-task link,
+  //   the gate-block line, persistence across tabs, and the green (red:false) clear.
+  const redbarShots = async () => {
+    await waitFor(`return !!document.querySelector('#tpl-select option')`); await ex(`await refresh();`);
+    const cur = await ex(`return { p: ctx.p, t: S.teamId }`);
+    const ps = pm.store(cur.p || pid(), cur.t); let nodes = ps.getTeam().nodes;
+    if (nodes.length < 2) { ps.addNode({ name: 'Pia', role: 'PM', x: 60, y: 60 }); ps.addNode({ name: 'Devon', role: 'Dev', x: 320, y: 160 }); nodes = ps.getTeam().nodes; }
+    const [pmN, dev] = nodes;
+    const fix = ps.createTask({ title: 'P0: fix red master — usage invariants', assignee: dev.id, priority: 'P0' });
+    const bounced = ps.createTask({ title: 'Logs team filter polish', assignee: dev.id });
+    await ex(`await refresh(); await w(200);`);
+    // Re-seed right before every read: a background refresh() replaces S (and S.orch) at any time.
+    const seed = `S.orch.redMaster = { red: true, since: Date.now() - 42 * 60000,
+      failingTests: ['usage-invariants.test.js › vendorTable resolves in renderer/app.js', { name: 'orchestrator.test.js › drain lets long tasks finish' }, 'store.test.js › auto-merge blocked by gate'],
+      testOutput: 'FAIL app/test/usage-invariants.test.js\\n  ● vendorTable resolves in renderer/app.js\\n    expect(received).toBeTruthy()\\n\\nFAIL app/test/orchestrator.test.js\\n  ● drain lets long tasks finish',
+      fixTaskId: '${fix.id}', lastMergedTaskId: '${bounced.id}',
+      gateBlocks: [{ taskId: '${bounced.id}', tests: ['usage-invariants.test.js › vendorTable resolves'], at: Date.now() - 5 * 60000 }] };
+      renderRedbar();`;
+    await ex(`$('#tabs button[data-tab=board]').click(); await w(200);`);
+    const on = await ex(`${seed} await w(100); return { vis: !$('#redbar').classList.contains('hidden'), title: ($('#redbar b') || {}).textContent || '', chips: document.querySelectorAll('#redbar .rb-test').length, fix: ($('#rb-fix') || {}).textContent || '', block: ($('.rb-block') || {}).textContent || '', out: !!$('#redbar .rb-out') }`);
+    expect('redbar: solid banner with red title, failing-test chips (string + {name}), fix task, gate block, output toggle',
+      on.vis && /MASTER IS RED/.test(on.title) && /since/.test(on.title) && on.chips === 3 && on.fix.includes(fix.id.slice(0, 6)) && on.fix.includes('P0: fix red master') && /Gate blocked the merge of/.test(on.block) && on.block.includes('Logs team filter polish') && on.block.includes('sent back to Devon') && on.out, on);
+    await shot('redbar-board');
+    await ex(`$('#rb-fix').click(); await w(400);`);
+    const opened = await ex(`return { boardTab: $('#tab-board').classList.contains('active'), detail: ($('#taskdetail h3') || {}).textContent || '', sel: sel.task === '${fix.id}' }`);
+    expect('redbar: fix-task link opens the board task detail for the fix task', opened.boardTab && opened.detail.includes('P0: fix red master') && opened.sel, opened);
+    await shot('redbar-fixtask');
+    await ex(`$('#tabs button[data-tab=chat]').click(); await w(200);`);
+    const cross = await ex(`${seed} await w(100); return { vis: !$('#redbar').classList.contains('hidden') }`);
+    expect('redbar: banner persists on other tabs (chat)', cross.vis, cross);
+    await shot('redbar-chat');
+    const off = await ex(`S.orch.redMaster = { red: false }; renderRedbar(); await w(100); return { hidden: $('#redbar').classList.contains('hidden') }`);
+    expect('redbar: red:false clears the banner (master green again)', off.hidden, off);
+    console.log('[gui-e2e] redbar', JSON.stringify({ on, opened, cross, off }));
+  };
   // Wake run on an agent that ALSO has an in_progress task (t_8af586bc) — the case that used to
   // render bare "working": the backend keeps a.taskId null for the whole wake, so the old
   // wakeRun() veto on any in_progress task hid the wake info everywhere. Same seeded activity
@@ -1617,6 +1658,7 @@ async function guiE2E() {
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'wake') { await wakeShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'wakebusy') { await wakeBusyShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'monitorlog') { await monitorShots(); throw null; }
+    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'redbar') { await redbarShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'subagents') { await subagentShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'dynamicteam') { await dynamicTeamShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'recruitinbox') { await recruitInboxShots(); throw null; }
@@ -2001,12 +2043,7 @@ const api = {
   inboxCounts: () => Object.fromEntries(pm.list().map((p) => [p.id, pm.store(p.id).listInbox({ status: 'open' }).length])),
   approveTask: (c, id, ok, note) => ST(c).approveTask(id, ok, note), getLogs: (c, n) => ST(c).readLogs(n || 2000), clearLogs: (c) => ST(c).clearLogs(),
   taskDiff: (c, id) => WT.worktreeDiff(wtTask(c, id)),
-  taskMerge: async (c, id) => {
-    const s = ST(c);
-    const r = await MG.gateMerge(wtTask(c, id), s);
-    s.commentTask(id, 'human', r.refused ? WT.dirtyMergeMessage(r.dirty) : r.merged ? `merged ${r.branch} into ${r.base} (merge gate: npm test ${r.gate.state}${r.gate.tests ? `, ${r.gate.tests} tests` : ''})` : r.gate && r.gate.state !== 'skipped' ? `merge gate blocked the merge (${r.gate.state}); the task was reopened` : `nothing merged: no commits on ${r.branch} ahead of ${r.base}`);
-    return r;
-  },
+  taskMerge: (c, id, opts) => ST(c).mergeTask(id, opts),
   taskDiscard: (c, id) => { const r = WT.worktreeDiscard(wtTask(c, id)); ST(c).updateTask(id, { worktreePath: null, worktreeBranch: null }); return r; },
   unmergedBranches: (c) => ST(c).listUnmergedBranches(),
   pickDir: async () => { const { dialog } = require('electron'); const r = await dialog.showOpenDialog(win, { properties: ['openDirectory', 'createDirectory'] }); return r.canceled ? null : r.filePaths[0]; },
@@ -2017,6 +2054,11 @@ const api = {
       status: inbox.some((i) => i.nodeId === n.id) ? 'needs-human' : (ag[n.id] || {}).status === 'working' || st[n.id] === 'busy' ? 'working' : 'idle' }])); },
   crossEdges: (c) => TS(c).incomingCrossEdges(), setViewport: (c, v) => TS(c).setViewport(v), getViewport: (c) => TS(c).getViewport(), setPositions: (c, pos) => TS(c).setPositions(pos),
   run: (c) => orchFor(c.p).start(), stop: (c) => orchFor(c.p).stop(),
+  // Core-agent watch (plan t_42f310cf item 2): pull the watch indicator state; live updates arrive on the 'watch-status' push channel.
+  getWatchStatus: (c) => orchFor(c.p).watchStatus(),
+  // Runtime breaker resume (t_419062e2): clears the unavailable state and re-dispatches the queued
+  // tasks. Throws the reason on failure — the renderer shows it inline in the banner.
+  resumeRuntime: (c, runtime) => orchFor(c.p).resumeRuntime(runtime),
   getSelfUpdateStatus: (c) => ({ ...watcherFor(c.p).status(), devMode: DEV_MODE }),
   setAutoRestart: (c, on) => { if (DEV_MODE) ST(c).saveSettings({ autoRestart: !!on }); return { ...watcherFor(c.p).status(), devMode: DEV_MODE }; },
   restartSelfUpdate: (c) => { watcherFor(c.p).restartNow(); return { ...watcherFor(c.p).status(), devMode: DEV_MODE }; },

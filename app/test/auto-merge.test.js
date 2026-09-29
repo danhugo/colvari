@@ -31,7 +31,7 @@ function settle(s, id, from) {
     const check = () => {
       const t = s.getTask(id);
       const cs = (t && t.comments) || [];
-      if (cs.length > from && !/^merge gate: running npm test/.test(cs[cs.length - 1].text)) return resolve(s.getTask(id));
+      if (cs.length > from && !/^merge gate: running the unit suite/.test(cs[cs.length - 1].text)) return resolve(s.getTask(id));
       if (Date.now() - t0 > 30000) return reject(new Error('gate did not settle: ' + JSON.stringify(cs.map((c) => c.text)).slice(0, 400)));
       setTimeout(check, 20);
     };
