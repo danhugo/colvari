@@ -1225,6 +1225,7 @@ const byPriorityThenTitle = (a, b) => PRIORITIES.indexOf(priorityOf(a)) - PRIORI
 // activation (sig reset in the tab-click handler).
 let boardSig = null, logSig = null, obsSig = null, usageSig = null;
 const agentStamp = () => Object.entries(S.orch.agents || {}).map(([k, a]) => `${k}${a.status}${a.taskId || ''}${a.iteration || 0}${a.stall ? '!' : ''}${a.run && a.run.stall ? '!' : ''}`).join();
+let showAllDone = false;
 function renderBoard() {
   if (!$('#tab-board').classList.contains('active')) return;
   const bkey = [S.v && S.v.board, sel.task, S.orch.running, Math.floor(Date.now() / 6e4), agentStamp()].join('|');
@@ -1234,13 +1235,15 @@ function renderBoard() {
   if (cur) sa.value = cur;
   renderIdle();
   $('#columns').innerHTML = STATUSES.map((st) => `<div class="col"><h3>${st.replaceAll('_', ' ')} (${S.tasks.filter((t) => t.status === st).length})</h3>${
-    S.tasks.filter((t) => t.status === st).slice().sort(byPriorityThenTitle).map((t) => { const bl = openBlockers(t); const w = (S.orch.agents[t.assignee] || {}); const live = (w.status === 'working' && w.taskId === t.id) || (!w.status && t.status === 'in_progress' && runningIds().includes(t.assignee));
+    (st === 'done' && !showAllDone ? S.tasks.filter((t) => t.status === st).slice().sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || ''))).slice(0, 20) : S.tasks.filter((t) => t.status === st).slice().sort(byPriorityThenTitle)).map((t) => { const bl = openBlockers(t); const w = (S.orch.agents[t.assignee] || {}); const live = (w.status === 'working' && w.taskId === t.id) || (!w.status && t.status === 'in_progress' && runningIds().includes(t.assignee));
       const ready = !bl.length && ['todo', 'backlog'].includes(t.status);
       const noWorker = t.status === 'in_progress' && t.assignee && !live;
-      return `<div class="card ${sel.task === t.id ? 'sel' : ''}${t.awaitingApproval ? ' approval' : ''}" data-id="${t.id}">${priorityBadge(t)} <b>${esc(t.title)}</b>${live ? '<span class="tag live">live</span>' : ''}${noWorker ? `<span class="tag noworker" title="in_progress but no live agent process for ${esc(nodeName(t.assignee))}">No worker</span>` : ''}${stallTag(t)}${bl.length ? `<span class="tag blocked" title="waits for: ${esc(bl.map(taskTitle).join(', '))}">Blocked by ${esc(taskTitle(bl[0]).slice(0, 28))}${bl.length > 1 ? ` +${bl.length - 1}` : ''}</span>` : ready ? '<span class="tag ready">Ready</span>' : ''}${t.awaitingApproval ? '<span class="tag approval">needs approval</span>' : ''}<small>${esc(nodeName(t.assignee))} · ${t.comments.length} comments</small></div>`; }).join('')}</div>`).join('');
+      return `<div class="card ${sel.task === t.id ? 'sel' : ''}${t.awaitingApproval ? ' approval' : ''}" data-id="${t.id}">${priorityBadge(t)} <b>${esc(t.title)}</b>${live ? '<span class="tag live">live</span>' : ''}${noWorker ? `<span class="tag noworker" title="in_progress but no live agent process for ${esc(nodeName(t.assignee))}">No worker</span>` : ''}${stallTag(t)}${bl.length ? `<span class="tag blocked" title="waits for: ${esc(bl.map(taskTitle).join(', '))}">Blocked by ${esc(taskTitle(bl[0]).slice(0, 28))}${bl.length > 1 ? ` +${bl.length - 1}` : ''}</span>` : ready ? '<span class="tag ready">Ready</span>' : ''}${t.awaitingApproval ? '<span class="tag approval">needs approval</span>' : ''}<small>${esc(nodeName(t.assignee))} · ${t.comments.length} comments</small></div>`; }).join('')}${st === 'done' && S.tasks.filter((t) => t.status === st).length > 20 ? `<button class="ghost" id="toggle-done">${showAllDone ? 'Show recent only' : 'Show all done'}</button>` : ''}</div>`).join('');
+  if ($('#toggle-done')) $('#toggle-done').onclick = () => { showAllDone = !showAllDone; boardSig = ''; renderBoard(); };
   document.querySelectorAll('.card').forEach((c) => c.onclick = () => { sel.task = c.dataset.id; renderBoard(); });
   const d = $('#taskdetail'); const t = S.tasks.find((x) => x.id === sel.task);
-  if (!t) { d.innerHTML = '<p class="muted">Create a goal task, assign it to an agent (usually the PM), then press Run.</p>'; return; }
+  d.hidden = !t;
+  if (!t) { d.innerHTML = ''; return; }
   const keep = Object.fromEntries(['td-msg', 'td-note', 'td-comment'].map((k) => [k, $('#' + k) && $('#' + k).value])); const focused = document.activeElement && document.activeElement.id;
   const ag = S.orch.agents[t.assignee] || {}; const live = ag.status === 'working' && ag.taskId === t.id; const bl = openBlockers(t); const deps = new Set(t.blockedBy || []);
   const cmtCut = Math.max(0, t.comments.length - 200); const cmts = t.comments.slice(-200); // cap long comment threads
