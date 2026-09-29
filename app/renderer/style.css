@@ -471,12 +471,17 @@ header .pill { border:none; background:none; color:var(--fg-muted); font-size:va
 #graph .stallbadge.linked, #ov-graph .stallbadge.linked { cursor:pointer; }
 .tag.stall { background:var(--warning-soft); color:var(--warning-text); border-color:transparent; }
 .tag.stall.fail { background:var(--danger-soft); color:var(--danger); border-color:transparent; }
+/* pending wake (messages held by the wake gap): calm dashed neutral — information, not an alarm */
+#graph .pendingwakebadge, #ov-graph .pendingwakebadge { cursor:default; }
+#graph .pendingwakebadge rect, #ov-graph .pendingwakebadge rect { fill:var(--bg); stroke:var(--border-strong); stroke-dasharray:3,2; }
+#graph .pendingwakebadge text, #ov-graph .pendingwakebadge text { fill:var(--fg-muted); font-size:9px; font-weight:var(--fw-semibold); }
 
 /* self-update: header status chip + restart history (t_506c0cb0) */
 .pill.upd-pending, .pill.upd-draining { color:var(--warn); border-color:var(--warn); }
 .pill.upd-testing { color:var(--acc); border-color:var(--acc); }
 .pill.upd-restarting { background:var(--ok); color:var(--fg-on-accent); border-color:var(--ok); }
 .pill.upd-failed { background:var(--danger); color:var(--fg-on-accent); border-color:var(--danger); }
+.pill.upd-deferred { color:var(--fg-muted); border-color:var(--border-strong); } /* restart deferred by a guard: calm, nothing is stuck */
 .updhist { width:100%; margin:6px 0; } .updhist td, .updhist th { padding:3px 6px; font-size:12px; }
 .updhist code { font-family:var(--font-mono); font-size:11px; }
 .updres.ok { color:var(--ok); } .updres.bad { color:var(--danger); font-weight:600; }
