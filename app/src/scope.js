@@ -43,9 +43,9 @@ const AGENT_PATCH_FIELDS = ['role', 'prompt', 'runtime', 'model', 'effort'];
 // with more power than the agent that created it. plan (read-only) < default < acceptEdits < bypass.
 const PERMISSION_RANK = { plan: 0, default: 1, acceptEdits: 2, bypassPermissions: 3 };
 const capPermissionMode = (coreMode, mode) => ((PERMISSION_RANK[mode] ?? PERMISSION_RANK.default) > (PERMISSION_RANK[coreMode] ?? PERMISSION_RANK.default) ? coreMode : mode);
-// A core may retire/update ONLY agents it recruited itself: never itself, never a core node, never a
-// human-made node (createdBy empty). Nodes of other teams never reach this check — they are not
-// resolvable in the core's team-scoped store.
-const canManageAgent = (core, target) => !!core && !!target && target.id !== core.id && target.core !== true && target.createdBy === core.id;
+// A core may retire/update ANY teammate except cores: never itself, never a core node (human-made
+// teammates included). Nodes of other teams never reach this check — they are not resolvable in the
+// core's team-scoped store.
+const canManageAgent = (core, target) => !!core && !!target && target.id !== core.id && target.core !== true;
 
 module.exports = { outgoing, incoming, canAssign, canMessage, canReviewTask, reviewees, visibleTask, canModifyTask, canSetStatus, typeOf, AGENT_PATCH_FIELDS, PERMISSION_RANK, capPermissionMode, canManageAgent };

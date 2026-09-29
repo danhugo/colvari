@@ -34,14 +34,13 @@ test('non-core refused by all three team tools; guard is re-checked at call time
   assert.throws(() => makeTools(s, 'ghost').recruit_agent({ name: 'X', role: 'Dev', reason: 'r' }), /unknown caller/);
 });
 
-test('core cannot touch self, another core, a human-made node, or another team', () => {
+test('core cannot touch self, another core, or another team; human-made teammates are manageable', () => {
   const { s, core, human, tools } = setup({ teams: 2 });
   const otherCore = s.addNode({ name: 'Core2', role: 'PM', core: true });
   assert.throws(() => tools.retire_agent({ nodeId: core.id, reason: 'r' }), /cannot manage itself/);
   assert.throws(() => tools.update_agent({ nodeId: core.id, patch: { role: 'QA' }, reason: 'r' }), /cannot manage itself/);
   assert.throws(() => tools.retire_agent({ nodeId: otherCore.id, reason: 'r' }), /core node can never/);
-  assert.throws(() => tools.retire_agent({ nodeId: human.id, reason: 'r' }), /not recruited/);
-  assert.throws(() => tools.update_agent({ nodeId: human.id, patch: { role: 'QA' }, reason: 'r' }), /not recruited/);
+  assert.equal(tools.update_agent({ nodeId: human.id, patch: { role: 'QA' }, reason: 'adopt the human-made teammate' }).role, 'QA', 'human-made teammate manageable');
   const outsider = s.forTeam('b').getTeam().nodes.find((n) => n.name === 'Outsider');
   assert.throws(() => tools.retire_agent({ nodeId: outsider.id, reason: 'r' }), /unknown agent/);
   assert.throws(() => tools.update_agent({ nodeId: outsider.id, patch: { role: 'QA' }, reason: 'r' }), /unknown agent/);
@@ -226,8 +225,58 @@ test('scope helpers: capPermissionMode and canManageAgent (pure)', () => {
   assert.equal(canManageAgent(core, { id: 'r', core: false, createdBy: 'c' }), true);
   assert.equal(canManageAgent(core, { id: 'c', core: true, createdBy: 'c' }), false, 'never self');
   assert.equal(canManageAgent(core, { id: 'x', core: true, createdBy: 'c' }), false, 'never a core node');
-  assert.equal(canManageAgent(core, { id: 'x', core: false, createdBy: '' }), false, 'never a human-made node');
+  assert.equal(canManageAgent(core, { id: 'x', core: false, createdBy: '' }), true, 'human-made teammate manageable');
   assert.equal(canManageAgent(null, { id: 'r', createdBy: 'c' }), false);
+});
+
+test('recruit/update/retire require a non-empty reason (expected gain vs cost)', () => {
+  const { recruited, tools } = setup({ approval: 'auto' });
+  for (const call of [
+    () => tools.recruit_agent({ name: 'X', role: 'Dev' }),
+    () => tools.recruit_agent({ name: 'X', role: 'Dev', reason: '   ' }),
+    () => tools.retire_agent({ nodeId: recruited.id }),
+    () => tools.retire_agent({ nodeId: recruited.id, reason: '' }),
+    () => tools.update_agent({ nodeId: recruited.id, patch: { role: 'QA' } }),
+    () => tools.update_agent({ nodeId: recruited.id, patch: { role: 'QA' }, reason: '  ' }),
+  ]) assert.throws(call, /reason required/);
+});
+
+// The gate sums the same totals the orchestrator passes to projectBudgetExceeded: reportedCostUsd
+// and input+output tokens over non-preflight records since the last "Orchestrator started" log
+// (its counters reset there); pre-start and preflight records stay out.
+test('recruit refused at >=80% of either project budget over the orchestrator\'s run scope; update/retire never gated', () => {
+  const { s, tools } = setup({ approval: 'auto' });
+  s.appendLog({ nodeId: null, kind: 'system', text: 'Orchestrator started', at: 1000 });
+  const after = new Date(2000).toISOString(), before = new Date(500).toISOString();
+  s.addRun({ kind: 'agent', startedAt: after, reportedCostUsd: 0.3, inputTokens: 300, outputTokens: 100 });
+  s.addRun({ kind: 'preflight', startedAt: after, reportedCostUsd: 9, inputTokens: 900000, outputTokens: 900000 });
+  s.addRun({ kind: 'agent', startedAt: before, reportedCostUsd: 9, inputTokens: 900000, outputTokens: 900000 });
+  s.saveSettings({ budgetUsd: 1, budgetTokens: 10000 });
+  const under = tools.recruit_agent({ name: 'Under', role: 'Dev', reason: 'r' });
+  assert.ok(under.id, '30% of the cost budget: allowed');
+  s.addRun({ kind: 'agent', startedAt: after, reportedCostUsd: 0.55, inputTokens: 3000, outputTokens: 1000 }); // 85% cost, 44% tokens
+  assert.throws(() => tools.recruit_agent({ name: 'Over', role: 'Dev', reason: 'r' }), /80%/);
+  assert.ok(tools.update_agent({ nodeId: under.id, patch: { role: 'QA' }, reason: 'r' }), 'update never gated');
+  assert.equal(tools.retire_agent({ nodeId: under.id, reason: 'r' }).retired, true, 'retire never gated');
+  // token dimension alone (cost budget off)
+  const { s: s2, tools: tools2 } = setup({ approval: 'auto' });
+  s2.appendLog({ nodeId: null, kind: 'system', text: 'Orchestrator started', at: 1000 });
+  s2.addRun({ kind: 'agent', startedAt: after, reportedCostUsd: 0.01, inputTokens: 4400, outputTokens: 0 });
+  s2.saveSettings({ budgetTokens: 5000 }); // 88% of the token budget, cost budget disabled
+  assert.throws(() => tools2.recruit_agent({ name: 'Tok', role: 'Dev', reason: 'r' }), /token budget/);
+});
+
+test('ask mode: the budget gate is re-checked after the human approves', () => {
+  const { s, tools } = setup({ approval: 'ask' });
+  s.saveSettings({ budgetUsd: 1 });
+  s.appendLog({ nodeId: null, kind: 'system', text: 'Orchestrator started', at: 1000 });
+  s.addRun({ kind: 'agent', startedAt: new Date(2000).toISOString(), reportedCostUsd: 0.5, inputTokens: 1, outputTokens: 1 });
+  const req = { name: 'Late', role: 'Dev', reason: 'r' };
+  assert.equal(tools.recruit_agent(req).pending, true, '50% at ask time: request filed');
+  s.addRun({ kind: 'agent', startedAt: new Date(2000).toISOString(), reportedCostUsd: 0.4, inputTokens: 1, outputTokens: 1 }); // 90% while pending
+  s.answerInbox(s.listInbox({ status: 'open' })[0].id, 'approve');
+  assert.throws(() => tools.recruit_agent(req), /80%/);
+  assert.equal(s.listInbox().some((i) => i.kind === 'question' && !i.consumed && i.status === 'open'), false, 'the approval was consumed by the refused re-call');
 });
 
 test('real stdio MCP server lists the team tools only for a core node', async () => {

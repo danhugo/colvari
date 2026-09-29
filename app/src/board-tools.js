@@ -66,8 +66,35 @@ function makeTools(store, nodeId) {
     return { pending: true, result: { pending: true, note: 'pending approval: the request is in the human Inbox; nothing changes until it is approved and you call this tool again' } };
   };
   const refuseManage = (tool, core, target) => {
-    const why = target.id === core.id ? 'a core agent cannot manage itself' : target.core ? 'a core node can never be retired or updated' : `"${target.name}" was not recruited by this core agent`;
+    const why = target.id === core.id ? 'a core agent cannot manage itself' : 'a core node can never be retired or updated';
     return new Error(`scope violation: ${tool}: ${why}`);
+  };
+  // Recruit is refused at >=80% of either project budget (the orchestrator hard-stops runs at 100%):
+  // a new agent multiplies spend, so the bar for ADDING spend is lower. Totals are a store-side
+  // replica of what the orchestrator accumulates in record() and passes to projectBudgetExceeded —
+  // reportedCostUsd and input+output tokens over non-preflight records since the last "Orchestrator
+  // started" log line (its counters reset there); those records are exactly what store.addRun
+  // persists. Not shared code: if the two ever drift, this gate and the hard-stop disagree.
+  // The readLogs(2000) cap can evict the started marker on very log-heavy runs; since=0 then counts
+  // ALL persisted runs, so the gate errs toward refusing — the safe side for a spend decision.
+  const runTotals = (s) => {
+    let since = 0;
+    for (const l of s.readLogs(2000)) if (l.text === 'Orchestrator started') since = l.at;
+    let cost = 0, tokens = 0;
+    for (const r of s.listRuns()) {
+      if (r.kind === 'preflight' || Date.parse(r.startedAt) < since) continue;
+      cost += r.reportedCostUsd || 0; tokens += (r.inputTokens || 0) + (r.outputTokens || 0);
+    }
+    return { cost, tokens };
+  };
+  const recruitBudgetBlock = (s) => {
+    const st = store.getSettings();
+    const usd = Number(st.budgetUsd) || 0, tok = Number(st.budgetTokens) || 0;
+    if (!(usd > 0) && !(tok > 0)) return null;
+    const { cost, tokens } = runTotals(s);
+    if (usd > 0 && cost >= 0.8 * usd) return `refused: project budget $${usd} is >=80% used ($${cost.toFixed(4)}); retire an agent or raise the budget before recruiting`;
+    if (tok > 0 && tokens >= 0.8 * tok) return `refused: project token budget ${tok} is >=80% used (${tokens}); retire an agent or raise the budget before recruiting`;
+    return null;
   };
   const impl = {
     list_team() {
@@ -169,13 +196,18 @@ function makeTools(store, nodeId) {
     recruit_agent({ name, role, prompt, runtime, model, effort, reason = '' } = {}) {
       if (!String(name || '').trim()) throw new Error('name required');
       if (!String(role || '').trim()) throw new Error('role required');
+      if (!String(reason || '').trim()) throw new Error('reason required: state the expected gain vs cost of this change');
       const { core, s } = coreStore();
       getRuntime(runtime); // runtimes.js is the registry: unknown id -> error (model stays free text)
+      const blocked = recruitBudgetBlock(s);
+      if (blocked) throw new Error(blocked);
       const g = askGate({ tool: 'recruit_agent', name, role, prompt, runtime, model, effort }, `Core agent "${core.name}" requests a new agent "${name}" (role ${role})${reason ? ` — ${reason}` : ''}. Approve?`);
       if (!g.proceed) { if (g.declined) announce(`recruit of "${name}" declined by the human`); return g.result; }
       // Counted again after approval too: the team may have grown while the request was pending.
       const max = Math.max(1, parseInt(store.getSettings().maxAgents, 10) || 6);
       if (s.getTeam().nodes.length >= max) throw new Error(`refused: maxAgents ${max} reached (team has ${s.getTeam().nodes.length} agents)`);
+      const blocked2 = recruitBudgetBlock(s);
+      if (blocked2) throw new Error(blocked2);
       // The node is built ONLY from the request's allowed fields; core/createdBy/recruitedAt are set
       // here and never taken from the caller.
       const k = s.getTeam().nodes.filter((x) => x.createdBy === nodeId).length;
@@ -194,10 +226,11 @@ function makeTools(store, nodeId) {
       s.addEdge(nodeId, node.id);
       s.addEdge(node.id, nodeId, 'message');
       node = s.getTeam().nodes.find((x) => x.id === node.id);
-      announce(`recruited agent "${node.name}" (${node.role}) as ${node.id}`);
+      announce(`recruited agent "${node.name}" (${node.role}) as ${node.id} — ${reason.trim()}`);
       return node;
     },
     retire_agent({ nodeId: ref, reason = '' } = {}) {
+      if (!String(reason || '').trim()) throw new Error('reason required: state the expected gain vs cost of this change');
       const { core, s } = coreStore();
       const target = resolve(s.getTeam(), ref, 'agent');
       if (!canManageAgent(core, target)) throw refuseManage('retire_agent', core, target);
@@ -208,10 +241,11 @@ function makeTools(store, nodeId) {
       // Reassign BEFORE removeNode, while the core -> target edges still exist.
       for (const tk of store.listTasks({ assignee: target.id, status: 'todo' })) store.updateTask(tk.id, { assignee: nodeId });
       s.removeNode(target.id);
-      announce(`retired agent "${target.name}" (${target.id})`);
+      announce(`retired agent "${target.name}" (${target.id}) — ${reason.trim()}`);
       return { retired: true, nodeId: target.id };
     },
     update_agent({ nodeId: ref, patch, reason = '' } = {}) {
+      if (!String(reason || '').trim()) throw new Error('reason required: state the expected gain vs cost of this change');
       const { core, s } = coreStore();
       const target = resolve(s.getTeam(), ref, 'agent');
       if (!canManageAgent(core, target)) throw refuseManage('update_agent', core, target);
@@ -224,7 +258,7 @@ function makeTools(store, nodeId) {
       const storePatch = {};
       for (const k of Object.keys(patch)) storePatch[k === 'prompt' ? 'systemPrompt' : k] = patch[k];
       const n = s.updateNode(target.id, storePatch);
-      announce(`updated agent "${n.name}" (${Object.keys(patch).join(', ')})`);
+      announce(`updated agent "${n.name}" (${Object.keys(patch).join(', ')}) — ${reason.trim()}`);
       return n;
     },
   };
