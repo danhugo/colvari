@@ -527,6 +527,29 @@ header .pill { border:none; background:none; color:var(--fg-muted); font-size:va
 .rtbar .rt-resume-err { font-size:11px; color:var(--warning-strong); }
 .rtbar .spacer { flex:1; }
 
+/* red-master banner (t_f72708fd): solid danger strip above the runtime banner — the shared branch
+   fails tests and every merge is blocked. Solid fill (unlike the soft .rtbar) reads as a team-wide
+   emergency rather than an agent-local one; the pulsing dot keeps it noticeable in peripheral vision. */
+.redbar { display:flex; align-items:center; gap:10px; padding:9px 12px; background:var(--danger); color:#fff; flex:none; }
+.redbar.hidden { display:none; }
+.redbar .rb-ico { font-size:15px; animation:rb-pulse 1.6s ease-in-out infinite; }
+@keyframes rb-pulse { 0%, 100% { opacity:1; } 50% { opacity:.3; } }
+.redbar .rb-body { display:flex; flex-direction:column; gap:3px; min-width:0; }
+.redbar .rb-body b { font-size:13px; letter-spacing:.4px; color:#fff; }
+.redbar .rb-when { font-weight:400; font-size:11.5px; opacity:.85; letter-spacing:0; }
+.redbar .rb-sub { font-size:11.5px; opacity:.92; }
+.redbar .rb-tests { display:flex; flex-wrap:wrap; gap:4px; }
+.redbar .rb-test { font-family:var(--font-mono); font-size:10.5px; padding:1px 6px; border-radius:4px; background:rgba(255,255,255,.18); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:360px; }
+.redbar .rb-more { font-size:10.5px; opacity:.85; align-self:center; }
+.redbar .rb-block { font-size:11.5px; }
+.redbar .rb-out summary { font-size:11px; cursor:pointer; opacity:.85; }
+.redbar .rb-out pre { margin:4px 0 0; font-size:10.5px; max-height:140px; overflow:auto; background:rgba(0,0,0,.28); padding:6px 8px; border-radius:4px; white-space:pre-wrap; word-break:break-word; }
+.redbar .rb-owner { font-size:11px; opacity:.9; white-space:nowrap; }
+.redbar .rb-nofix { font-size:11px; opacity:.85; }
+.redbar .spacer { flex:1; }
+.redbar button.primary { background:#fff; color:var(--danger); }
+.redbar button.primary:hover { background:rgba(255,255,255,.86); }
+
 /* self-update: header status chip + restart history (t_506c0cb0) */
 .pill.upd-pending, .pill.upd-draining { color:var(--warn); border-color:var(--warn); }
 .pill.upd-testing { color:var(--acc); border-color:var(--acc); }
