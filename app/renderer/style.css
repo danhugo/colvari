@@ -334,7 +334,7 @@ header .pill { border:none; background:none; color:var(--fg-muted); font-size:va
 #graph.panning { cursor:grabbing; } #graph.linking, #graph.linking * { cursor:crosshair !important; }
 #graph text { fill:var(--fg-primary); pointer-events:none; font-family:var(--font-sans); }
 #graph .node { cursor:move; } #graph .node .card { fill:var(--bg-raised); stroke:var(--border-strong); stroke-width:1; filter:drop-shadow(0 1px 2px rgba(16,20,40,.10)); transition:stroke var(--dur-fast); }
-#graph .node:hover .card { stroke:var(--accent); } #graph .node.sel .card { stroke:var(--accent); stroke-width:2.5; }
+#graph .node:hover .card { stroke:var(--accent); } #graph .node.sel .card { stroke:var(--selection); stroke-width:2.5; }
 #graph .node.droptarget .card { stroke:var(--accent); stroke-width:3; stroke-dasharray:5 3; }
 #graph .node.st-working .card { stroke:var(--success); stroke-width:2; } #graph .node.st-needs-human .card { stroke:var(--warning-strong); stroke-width:2; }
 #graph .avtext { fill:#fff; font-size:11px; font-weight:var(--fw-bold); } #graph .nname { font-size:13px; font-weight:var(--fw-semibold); } #graph .nrole { font-size:11px; fill:var(--fg-muted); }
@@ -365,8 +365,8 @@ header .pill { border:none; background:none; color:var(--fg-muted); font-size:va
 #graph .ghost rect { fill:none; stroke:var(--border-strong); stroke-width:1.5; stroke-dasharray:6 4; } #graph .ghost text { fill:var(--fg-muted); }
 #graph .edge { fill:none; stroke:var(--edge); stroke-width:1.75; pointer-events:none; } #graph .edgehit { fill:none; stroke:transparent; stroke-width:14; cursor:pointer; }
 #graph .edge-assign { stroke:var(--accent); } #graph .edge-message { stroke:var(--info); } #graph .edge-review { stroke:var(--warning-strong); }
-#graph .edge.cross { stroke-dasharray:7 5; } #graph .edge.sel { stroke:var(--fg-primary); stroke-width:3; } #graph .edge.linking { stroke:var(--accent); stroke-dasharray:4 4; }
-#graph .arrow-assign { fill:var(--accent); } #graph .arrow-message { fill:var(--info); } #graph .arrow-review { fill:var(--warning-strong); } #graph .arrow-sel { fill:var(--fg-primary); }
+#graph .edge.cross { stroke-dasharray:7 5; } #graph .edge.sel { stroke:var(--selection); stroke-width:3; } #graph .edge.linking { stroke:var(--accent); stroke-dasharray:4 4; }
+#graph .arrow-assign { fill:var(--accent); } #graph .arrow-message { fill:var(--info); } #graph .arrow-review { fill:var(--warning-strong); } #graph .arrow-sel { fill:var(--selection); }
 #graph .epill { cursor:pointer; } #graph .epill rect { fill:var(--bg-raised); stroke:var(--border-strong); } #graph .epill text { font-size:10px; fill:var(--fg-secondary); font-weight:var(--fw-medium); }
 #graph .epill-assign rect { stroke:var(--accent); } #graph .epill-message rect { stroke:var(--info); } #graph .epill-review rect { stroke:var(--warning-strong); } #graph .epill.sel rect { fill:var(--accent-soft); stroke-width:2; }
 .gcontrols { position:absolute; left:12px; bottom:12px; display:flex; align-items:center; gap:2px; padding:3px; background:var(--bg-raised); border:1px solid var(--border); border-radius:var(--radius-sm); box-shadow:var(--shadow-md); }
