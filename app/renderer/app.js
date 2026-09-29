@@ -2799,6 +2799,8 @@ squad.on('notify', (n) => {
   if (n.projectId && n.projectId !== ctx.p) return;
   const d = document.createElement('div'); d.className = 'toast'; d.innerHTML = `<b>${esc(n.title)}</b><br>${esc(n.body)}`;
   if (n.inbox) refresh();
+  // In Chat the "Your turn" bar already carries the question; a toast there would cover the composer's Send.
+  if (n.inbox && document.querySelector('button[data-tab="chat"].active')) return;
   d.onclick = () => { if (n.inbox) { showTab('inbox'); d.remove(); return; } if (n.taskId) { sel.task = n.taskId; showTab('board'); renderBoard(); } d.remove(); };
   $('#toasts').appendChild(d); setTimeout(() => d.remove(), 8000);
 });
