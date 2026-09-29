@@ -44,11 +44,11 @@ function autoCompactEnv(pct) {
 
 // Wake-on-message: how often the orchestrator looks for unread agent->agent messages, how long a burst
 // may coalesce into one dispatch, and the ping-pong guard (max auto-wakes per sender->recipient pair
-// per window). MIN_GAP_MS is the per-recipient wake debounce: after an agent-to-agent wake, that
-// agent is not auto-woken again for at least this long — further messages accumulate unread in its
-// inbox until the interval passes (or the agent is dispatched for a task, whose prompt carries them).
-// Human wakes (ask_human answers, chat) and task dispatch bypass the interval; nudge wakes (idle/
-// stale watchdog) defer to it in nudgeIdle — a changed idle set must not re-wake a just-woken core.
+// per window). An idle agent with unread agent messages is woken on every sweep — message wakes are
+// never held back by a suppression window (t_9e4b4805: the old 5-min per-agent gap delayed teammate
+// messages while the agent sat idle); DEBOUNCE_MS coalesces a burst and the pair cap is the loop
+// protection. MIN_GAP_MS now only anchors the idle/stale nudge throttle in nudgeIdle — a changed idle
+// set must not re-wake a just-woken core. Task dispatch never waits on the gap.
 // Exported so tests can shorten the timings.
 const WAKE = { SWEEP_MS: 1000, DEBOUNCE_MS: 1500, MIN_GAP_MS: 5 * 60 * 1000, MAX_PER_PAIR: 3, PAIR_WINDOW_MS: 10 * 60 * 1000 };
 
@@ -61,6 +61,12 @@ const isBoardHelper = (r) => !!r.command && /mcp-server\.js/.test(r.command) && 
 // Stall watchdog: how often a working agent is checked for silence, how long a SIGTERM'd stalled run
 // gets to exit before SIGKILL, and the max automatic stop+resume recoveries per task (persisted there).
 const STALL = { SWEEP_MS: 5000, SIGKILL_GRACE_MS: 8000, MAX_RECOVERIES: 2 };
+
+// Dispatch sweep: task changes written outside this process (an agent's own board MCP calls create,
+// unblock or move tasks) carry no in-process event to tick on — without this cadence a ready todo
+// waits for the next run to end even though slots are free (t_9e4b4805: 1/4 agents running while a
+// ready review pickup waited).
+const SCHED = { TICK_MS: 1000 };
 
 function buildPrompt(team, node, task, extra = {}) {
   node = { ...normalizeNode(applyPreset(node, extra.presets)), id: node.id };
@@ -167,8 +173,7 @@ class Orchestrator extends EventEmitter {
     this.drainCutNodes = new Set();
     this.wakeTimers = new Map(); // nodeId -> { timer, dueAt } — at most one pending wake per agent
     this.wakePairs = new Map(); // 'from>to' -> {count, since}
-    this.wakeLastAt = new Map(); // nodeId -> ts of the agent's last agent->agent wake dispatch
-    this.wakeSuppressedLogged = new Map(); // nodeId -> ts the current suppression window was logged at
+    this.wakeLastAt = new Map(); // nodeId -> ts of the agent's last agent->agent wake dispatch (nudge throttle anchor)
     this._wakeTimer = setInterval(() => this.sweepWakes(), WAKE.SWEEP_MS);
     if (this._wakeTimer.unref) this._wakeTimer.unref();
     // Stall watchdog state: last seen cumulative CPU time of each run's CLI process (nodeId -> {pid, cpuMs}),
@@ -373,33 +378,22 @@ class Orchestrator extends EventEmitter {
         const unread = this.wakeUnread(node.id, team);
         if (!unread.length) {
           if (a.wakePending) { a.wakePending = null; this.changed(); }
-          this.wakeSuppressedLogged.delete(node.id);
           continue;
         }
         // Per-agent wake debounce: while an agent runs (task or wake), messages stay queued unread —
-        // never a parallel run. Once idle, an agent->agent wake fires at most once per
-        // WAKE.MIN_GAP_MS; further messages accumulate in the inbox until the interval passes.
-        // Task dispatch is NOT debounced (an assigned/unblocked task reaches the agent right away and
-        // its prompt carries the unread count), and human/system wakes never enter this sweep.
-        const cooldown = (this.wakeLastAt.get(node.id) || 0) + WAKE.MIN_GAP_MS - now;
-        const suppressing = cooldown > 0;
+        // never a parallel run. Once idle, unread agent->agent messages wake the agent on every sweep,
+        // burst-coalesced by the debounce timer below: message wakes are never suppressed (t_9e4b4805 —
+        // the old MIN_GAP_MS window delayed teammate messages while the agent sat idle; the pair cap in
+        // dispatchWake is the ping-pong guard). Task dispatch is NOT debounced either (an assigned/
+        // unblocked task reaches the agent right away and its prompt carries the unread count), and
+        // human/system wakes never enter this sweep.
         const prev = a.wakePending;
-        if (!prev || prev.count !== unread.length || prev.suppressed !== suppressing) {
-          // nextWakeAt is the armed timer's due time or the interval's end; recomputed only on a
-          // transition so an unchanged pending state does not churn a state push every sweep.
-          a.wakePending = { count: unread.length, suppressed: suppressing, nextWakeAt: suppressing ? (this.wakeLastAt.get(node.id) || 0) + WAKE.MIN_GAP_MS : ((prev && !prev.suppressed && prev.nextWakeAt) || now + WAKE.DEBOUNCE_MS) };
+        if (!prev || prev.count !== unread.length) {
+          // nextWakeAt is the armed timer's due time; recomputed only on a transition so an unchanged
+          // pending state does not churn a state push every sweep.
+          a.wakePending = { count: unread.length, suppressed: false, nextWakeAt: (prev && prev.nextWakeAt) || now + WAKE.DEBOUNCE_MS };
           this.changed();
         }
-        if (suppressing) {
-          // Evidence over silence (one line per suppression window, not per sweep): the messages are
-          // deliberately held back and WILL wake on the timer.
-          if (!this.wakeSuppressedLogged.has(node.id)) {
-            this.wakeSuppressedLogged.set(node.id, now);
-            this.log(node.id, 'system', `✉ wake suppressed for another ${Math.ceil(cooldown / 60000)}min (last agent wake < ${Math.round(WAKE.MIN_GAP_MS / 60000)}min ago); ${unread.length} message(s) wait in the inbox and wake on the timer`);
-          }
-          continue;
-        }
-        this.wakeSuppressedLogged.delete(node.id);
         // Debounce: a burst of messages coalesces into the one dispatch this timer fires. At most one
         // pending wake per agent: the wakeTimers entry IS the dedupe key.
         if (!this.wakeTimers.has(node.id)) {
@@ -423,9 +417,6 @@ class Orchestrator extends EventEmitter {
     if (!node || this.userStopped || this.dispatchPaused || this.procs.has(nodeId)) return;
     const a = this.agent(nodeId);
     if (a.status === 'working' || a.budgetStop) return; // busy (or over budget): stay unread, the next sweep retries
-    // Re-check the debounce at fire time (the sweep armed this timer before it expired): still inside
-    // the per-agent interval — leave the messages unread, the sweep re-arms once the interval passes.
-    if (Date.now() - (this.wakeLastAt.get(nodeId) || 0) < WAKE.MIN_GAP_MS) return;
     const settings = this.store.getSettings();
     if (settings.maxConcurrency > 0 && this.procs.size >= settings.maxConcurrency) return;
     const msgs = this.wakeUnread(nodeId, team);
@@ -439,8 +430,7 @@ class Orchestrator extends EventEmitter {
       if (!e || now - e.since >= WAKE.PAIR_WINDOW_MS) this.wakePairs.set(k, { count: 1, since: now });
       else { e.count++; if (e.count === WAKE.MAX_PER_PAIR) this.log(nodeId, 'system', `wake cap reached for messages from ${f}: no more auto-wakes from this pair for a while`); }
     }
-    this.wakeLastAt.set(nodeId, now); // starts the agent's next wake-debounce interval
-    this.wakeSuppressedLogged.delete(nodeId);
+    this.wakeLastAt.set(nodeId, now); // nudge-throttle anchor: a just-woken agent is not re-nudged at once
     a.wakePending = null;
     this.store.markMessagesRead(msgs.map((m) => m.id)); // delivered verbatim in the prompt below
     this.emit('woken_by_message', { nodeId, by: senders, messageIds: msgs.map((m) => m.id) });
@@ -524,8 +514,9 @@ class Orchestrator extends EventEmitter {
       // Released however the bookkeeping above ends: a leaked slot leaves a self-update
       // drain waiting forever for an agent that already exited.
       this.procs.delete(node.id); this.cwds.delete(node.id);
-      // The gap anchors at the wake-run END (not just the dispatch): a long wake run was busy
-      // working, not churning, so the next burst waits WAKE.MIN_GAP_MS from when it went idle.
+      // The nudge-throttle anchor stays at the wake-run END (not just the dispatch): a long wake run
+      // was busy working, not churning, so nudgeIdle defers a fresh watchdog nudge from when it went
+      // idle. Message wakes never consult this anchor (t_9e4b4805).
       this.wakeLastAt.set(node.id, Date.now());
     }
     if (this.running) setImmediate(() => this.tick());
@@ -637,10 +628,15 @@ class Orchestrator extends EventEmitter {
     this.log(null, 'system', 'Orchestrator started');
     this.changed();
     this.tick();
+    // Dispatch sweep (t_9e4b4805): tick() on a cadence, not only at run ends — task changes written
+    // by agents' own board MCP servers are invisible to this process until the next look.
+    this._tickTimer = setInterval(() => { try { this.tick(); } catch {} }, SCHED.TICK_MS);
+    if (this._tickTimer.unref) this._tickTimer.unref();
   }
   stop() {
     this.running = false;
     this.userStopped = true; // a human pressed stop: no wake dispatches behind their back
+    if (this._tickTimer) { clearInterval(this._tickTimer); this._tickTimer = null; }
     for (const t of this.wakeTimers.values()) clearTimeout(t.timer); this.wakeTimers.clear();
     this.log(null, 'system', 'Orchestrator stopped');
     this.changed();
@@ -748,16 +744,17 @@ class Orchestrator extends EventEmitter {
       const key = kind === 'stale' ? [...n.taskIds].sort().join(',') : n.text;
       const mk = `${n.pmId}|${kind}`;
       if (this.nudged.get(mk) === key) continue;
-      // Nudge wakes respect the per-agent wake gap too (t_cb6663f7): the text-key debounce re-arms
+      // Nudge wakes respect the per-agent wake anchor (t_cb6663f7): the text-key debounce re-arms
       // whenever the idle set changes — any report flipping busy<->idle — and each "new" nudge would
-      // otherwise wake the core through wakeForHuman's human bypass seconds after the last wake,
-      // even right after the sweep logged "wake suppressed" for the same agent. Deferred, not
-      // dropped: the key is recorded only when the wake actually fires, so the condition re-fires
-      // on a later tick once the interval passes (a newer condition supersedes it meanwhile).
+      // otherwise wake the core through wakeForHuman's human bypass seconds after the last wake.
+      // Message wakes no longer defer to it (t_9e4b4805), but a watchdog that re-nudged a core that
+      // was woken moments ago would still churn. Deferred, not dropped: the key is recorded only when
+      // the wake actually fires, so the condition re-fires on a later tick once the interval passes
+      // (a newer condition supersedes it meanwhile).
       const cooldown = (this.wakeLastAt.get(n.pmId) || 0) + WAKE.MIN_GAP_MS - now;
       if (cooldown > 0) {
         const last = (this.nudgeDeferredLogged ||= new Map()).get(n.pmId) || 0;
-        if (now - last >= WAKE.MIN_GAP_MS) { // one line per gap window, like the sweep's suppression line
+        if (now - last >= WAKE.MIN_GAP_MS) { // one line per gap window
           this.nudgeDeferredLogged.set(n.pmId, now);
           this.log(n.pmId, 'system', `nudge deferred for another ${Math.ceil(cooldown / 60000)}min (last wake < ${Math.round(WAKE.MIN_GAP_MS / 60000)}min ago); it re-fires once the interval passes: ${n.text}`);
         }
@@ -773,28 +770,26 @@ class Orchestrator extends EventEmitter {
   }
 
   // Tasks left in review that never got picked back up (their reviewer's process crashed/exited, or
-  // the run stopped mid-way). With no reviewer configured for the assignee, auto-advances the task to
-  // done (once) so its dependents unblock, instead of leaving it stranded forever. Returns the
-  // (possibly stale) tasks still in review that DO have a reviewer, ready for dispatch.
+  // the run stopped mid-way) are dispatched to their reviewer. With no reviewer configured for the
+  // assignee the task STAYS in review: done requires reviewer/owner verification (t_699b67b7), so the
+  // sweep surfaces the stranded task once instead of finishing unreviewed work. Returns the
+  // (possibly stale) tasks in review that DO have a reviewer, ready for dispatch.
   autoAdvanceReviews(team) {
     const out = [];
     for (const t of this.store.listTasks()) {
       if (t.status !== 'review' || t.awaitingApproval || t.parkedForHuman) continue;
       const reviewer = outgoing(team, t.assignee, ['review']).map((id) => team.nodes.find((n) => n.id === id)).find(Boolean);
       if (reviewer) { out.push({ task: t, node: reviewer }); continue; }
-      (this._autoAdvanced ||= new Set());
-      if (this._autoAdvanced.has(t.id)) continue;
-      this._autoAdvanced.add(t.id);
-      const g = C.gateStatus('done', team.nodes.find((n) => n.id === t.assignee), this.store.getSettings());
-      if (g.status === 'done') {
-        this.store.updateTask(t.id, { status: 'done' });
-        this.store.commentTask(t.id, 'orchestrator', 'auto-advanced to done: no reviewer is configured for this task (no review edge from the assignee).');
-        this.log(t.assignee, 'system', `↷ "${t.title}" auto-advanced to done (no reviewer)`);
-      } else {
-        // Approval-gated project with no reviewer: a silent exit may not become done unattended.
-        this.store.updateTask(t.id, g);
-        this.store.commentTask(t.id, 'orchestrator', 'no reviewer is configured for this task and the project requires approval: waiting for a human to approve it as done.');
+      (this._noReviewerNoted ||= new Set());
+      if (this._noReviewerNoted.has(t.id)) continue;
+      this._noReviewerNoted.add(t.id);
+      // An approval-gated project also records the human gate: with no reviewer, only a human can
+      // approve it as done. Either way the task stays in review (t_699b67b7), surfaced once.
+      if (C.needsApproval(team.nodes.find((n) => n.id === t.assignee), this.store.getSettings())) {
+        this.store.updateTask(t.id, { status: 'review', awaitingApproval: true });
       }
+      this.store.commentTask(t.id, 'orchestrator', 'staying in review: no reviewer is configured for this task (no review edge from the assignee). Done requires reviewer/owner verification — add a reviewer or move it to done yourself.');
+      this.log(t.assignee, 'system', `⏸ "${t.title}" stays in review (no reviewer configured); it will not auto-advance to done`);
     }
     return out;
   }
@@ -819,10 +814,20 @@ class Orchestrator extends EventEmitter {
     const readyReview = reviewReady.filter(({ task, node }) => !C.isBlocked(task, all) && !this.agent(node.id).budgetStop && !paused(node));
     // Highest priority first (P0..P3); stable sort, so same-priority tasks keep arrival order.
     const ready = [...readyTodo, ...readyReview].sort((a, b) => C.priorityRank(a.task) - C.priorityRank(b.task));
+    // Dispatch decisions (t_9e4b4805): a ready task that cannot start logs WHY, once per (task,
+    // reason) — the sweep ticks every second, so a repeated identical wait must not churn the log;
+    // the entry clears when the task finally dispatches.
+    const holdLog = (task, node, why) => {
+      const m = this._dispatchHoldLog ||= new Map();
+      if (m.get(task.id) === why) return;
+      m.set(task.id, why);
+      this.log(node.id, 'system', `⏳ "${task.title}" ready but not dispatched: ${why}`);
+    };
     for (const { task, node } of ready) {
-      if (s.maxConcurrency > 0 && this.procs.size >= s.maxConcurrency) break; // 0 = unlimited
-      if (this.procs.has(node.id)) continue;
+      if (s.maxConcurrency > 0 && this.procs.size >= s.maxConcurrency) { holdLog(task, node, `maxConcurrency (${s.maxConcurrency}) slots in use`); break; } // 0 = unlimited
+      if (this.procs.has(node.id)) { holdLog(task, node, `${node.name} already has a live run (single run per agent)`); continue; }
       if (this.runs >= s.maxRuns) { this.log(null, 'system', `maxRuns (${s.maxRuns}) reached`); break; }
+      this._dispatchHoldLog?.delete(task.id);
       this.runTask(node, task, team, s).catch((e) => this.log(node.id, 'error', 'agent run crashed: ' + e.message));
     }
     try { this.nudgeIdle(); } catch (e) { this.log(null, 'error', 'idle nudge: ' + e.message); }
@@ -1116,9 +1121,9 @@ class Orchestrator extends EventEmitter {
         this.store.commentTask(task.id, 'orchestrator', judge.inconclusive ? `Goal check was inconclusive after ${i} iteration(s): ${judge.reason}. Check the result yourself.` : `Goal condition not met after ${i} iteration(s) (${reason}): ${judge.reason}`);
       } else if (t && t.status === 'in_progress' && !this.drainCutNodes.has(node.id)) {
         // Agent ended without updating status: a normal dispatch hands off to review —
-        // autoAdvanceReviews() then moves it to the reviewer, or straight to done when none is
-        // configured — so nothing merges unreviewed. A run dispatched to review that ends clean
-        // approves the hand-off (done); a failed/stopped run parks for a human instead.
+        // autoAdvanceReviews() then moves it to the reviewer, or leaves it in review (surfaced)
+        // when none is configured — so nothing merges unreviewed. A run dispatched to review that
+        // ends clean approves the hand-off (done); a failed/stopped run parks for a human instead.
         // (A run killed by the self-update drain cutoff skips this: its task stays in_progress so the
         // post-restart reconcile re-dispatches it instead of parking it for a human.)
         const ok = code === 0 && this.running && !stoppedWhy && !(m.mode === 'goal' && !(judge && judge.met));
@@ -1346,4 +1351,4 @@ class Orchestrator extends EventEmitter {
     }
   }
 }
-module.exports = { Orchestrator, buildPrompt, humanPrompt, wakePrompt, stallPrompt, attachedFilesLines, WAKE, STALL, autoCompactEnv };
+module.exports = { Orchestrator, buildPrompt, humanPrompt, wakePrompt, stallPrompt, attachedFilesLines, WAKE, STALL, SCHED, autoCompactEnv };

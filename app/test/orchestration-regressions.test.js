@@ -5,14 +5,14 @@
 // (b) self-update drain during a long task under repeated merges — the default drain grace is the
 //     ~30min hard cap (not the old 5min cut); commits landing mid-drain coalesce into the same
 //     restart; a task cut by a drain is never cut again.
-// (c) burst of agent pings — a per-agent minimum gap between auto-wakes (5min in prod, shrunk
-//     here); suppressed wakes are logged; human wake paths bypass the gap.
+// (c) burst of agent pings — an idle agent with unread agent messages is woken on the next sweep,
+//     never suppressed (t_9e4b4805 removed the 5-min per-agent gap); the per-pair cap stays the
+//     ping-pong guard; human wake paths bypass every auto-wake gate.
 // (d) restart skipped by a guard — dispatch stays unpaused, the skipped sha is deferred (not
 //     consumed) and retried, and the skip is logged once.
-// Seam contract with Devon's orchestrator fix (t_ace9a3b1), agreed on the task:
-// - WAKE.MIN_GAP_MS: per-agent minimum ms between auto-wakes (default 5min). Undefined on master,
-//   where only the 1.5s debounce and the per-pair cap exist.
-// - a suppressed auto-wake is logged for the agent (kind 'system', text matching /suppress/i).
+// Seam contract with Devon's orchestrator fix (t_ace9a3b1, amended by t_9e4b4805), agreed on the tasks:
+// - WAKE.MIN_GAP_MS anchors only the nudge throttle now; message wakes never consult it.
+// - a wake for unread agent messages is never suppressed: no log line matching /suppress/i for it.
 // - the drain records its decisions so a task killed by a drain grace is not killed by the next one.
 const test = require('node:test');
 const assert = require('node:assert');
@@ -23,7 +23,6 @@ const { UpdateWatcher, readHistory } = require('../src/self-update');
 const { makeTools } = require('../src/board-tools');
 
 // Short timings so sweeps fire quickly; the semantics under test are unchanged.
-// MIN_GAP_MS is the t_ace9a3b1 seam: undefined on master (no per-agent gap -> (c) fails there).
 WAKE.SWEEP_MS = 25; WAKE.DEBOUNCE_MS = 35; WAKE.MIN_GAP_MS = 400;
 const WAKE0 = { SWEEP_MS: WAKE.SWEEP_MS, DEBOUNCE_MS: WAKE.DEBOUNCE_MS, MIN_GAP_MS: WAKE.MIN_GAP_MS };
 test.after(() => {
@@ -248,7 +247,7 @@ test('(b) the resumed task is never cut again by the next update', async (tt) =>
 
 // ---- (c) burst of agent pings / wake churn ----
 
-test('(c) ping bursts: auto-wakes respect a per-agent gap, suppression is logged, human wakes bypass the gap', async () => {
+test('(c) ping bursts: a burst inside the old gap still wakes the idle agent (no suppression window); the pair cap stays the loop guard', async () => {
   const d = tmp('squad-reg-c-');
   const fake = quickClaude(d);
   const s = new Store(path.join(d, 'p')); s.saveSettings({ claudePath: fake });
@@ -263,28 +262,34 @@ test('(c) ping bursts: auto-wakes respect a per-agent gap, suppression is logged
   await waitFor(() => s.listRuns({ nodeId: b.id }).length === 1); // wake #1
   await waitFor(() => o.agent(b.id).status === 'idle'); // ...and it finished (fake exits at once)
 
-  // Second burst immediately after: inside the per-agent gap it must be suppressed, not woken.
+  // Second burst immediately after: wake #1 has just reset the old per-agent gap — it wakes anyway
+  // (t_9e4b4805: the 5-min suppression window delayed teammate messages while the agent sat idle).
   ta.send_message({ to: 'B', text: 'burst two 1' });
   ta.send_message({ to: 'B', text: 'burst two 2' });
   ta.send_message({ to: 'B', text: 'burst two 3' });
-  await sleep(250); // sweeps + debounce have all fired by now
-  assert.equal(s.listRuns({ nodeId: b.id }).length, 1, 'no second auto-wake inside the per-agent gap');
-  assert.ok(s.listMessages({ to: b.id }).some((m) => !m.read), 'the burst stays queued in the inbox');
-  assert.ok(s.readLogs(Infinity).some((l) => l.nodeId === b.id && /suppress/i.test(l.text)), 'the suppressed wake is logged');
-
-  // The gap elapses: one wake delivers the whole suppressed batch.
-  await sleep(300); // total 550ms > WAKE.MIN_GAP_MS (400)
-  await waitFor(() => s.listRuns({ nodeId: b.id }).length === 2);
-  await waitFor(() => s.listMessages({ to: b.id }).every((m) => m.read));
+  await waitFor(() => s.listRuns({ nodeId: b.id }).length === 2, 'the second burst wakes inside the old gap');
+  await waitFor(() => s.listMessages({ to: b.id }).every((m) => m.read), 'one wake delivers the whole burst');
   assert.ok(fs.readFileSync(path.join(d, 'args.txt'), 'utf8').includes('burst two 1'));
+  assert.ok(!s.readLogs(Infinity).some((l) => l.nodeId === b.id && /suppress/i.test(l.text)), 'message wakes are never suppressed');
   await sleep(250);
   assert.equal(s.listRuns({ nodeId: b.id }).length, 2, 'no repeat wakes after delivery');
 
-  // Human wake paths bypass the per-agent gap.
-  o.running = true; // under test is the gap bypass, not the Run lifecycle (wakeForHuman requires a live Run)
+  // The ping-pong guard is the per-pair cap: burst three reaches it, burst four stays queued.
+  ta.send_message({ to: 'B', text: 'burst three 1' });
+  await waitFor(() => s.listRuns({ nodeId: b.id }).length === 3, 'burst three wakes (pair cap hit on this wake)');
+  await waitFor(() => s.listMessages({ to: b.id }).every((m) => m.read));
+  await waitFor(() => o.agent(b.id).status === 'idle');
+  ta.send_message({ to: 'B', text: 'burst four 1' });
+  await sleep(400); // sweeps + debounce have all fired by now
+  assert.equal(s.listRuns({ nodeId: b.id }).length, 3, 'the pair cap holds the fourth burst (loop protection)');
+  assert.ok(s.listMessages({ to: b.id }).some((m) => !m.read), 'the capped burst stays queued in the inbox');
+  assert.ok(s.readLogs(Infinity).some((l) => l.nodeId === b.id && /wake cap reached/.test(l.text)), 'the cap is logged');
+
+  // Human wake paths bypass the auto-wake gates entirely.
+  o.running = true; // under test is the human bypass, not the Run lifecycle (wakeForHuman requires a live Run)
   const hm = s.sendMessage({ from: 'human', to: b.id, text: 'human asks now' });
-  assert.equal(await o.wakeForHuman(b.id, [hm], { reason: 'human message' }), true, 'human wake bypasses the gap');
-  await waitFor(() => s.listRuns({ nodeId: b.id }).length === 3);
+  assert.equal(await o.wakeForHuman(b.id, [hm], { reason: 'human message' }), true, 'human wake bypasses the gates');
+  await waitFor(() => s.listRuns({ nodeId: b.id }).length === 4);
 });
 
 // ---- (d) restart skipped by a guard must not stall dispatch (the 22:00 incident) ----

@@ -87,11 +87,12 @@ async function refresh() {
   }
   if (runsChanged) await loadRuns(); // runs.json (796KB) is re-read only when its file actually changed
   await loadLogs(ctx.p); await loadSelfUpdate(); await loadCoreState();
+  syncRtu(); // banner follows the snapshot across reloads / missed pushes
   try { localStorage.setItem('ctx', JSON.stringify(ctx)); } catch {}
   renderAll();
 }
 const nodeName = (id) => (S.allNodes.find((n) => n.id === id) || {}).name || (id ? id : 'unassigned');
-function renderAll() { renderSidebar(); renderGraph(); renderPreflightBar(); renderNodeForm(); renderBoard(); renderWiki(); renderObs(); renderSettings(); renderHeader(); renderSelfUpdate(); renderLimitMeter(); renderUsage(); renderOverview(); renderInbox(); renderGuide(); renderChat(); }
+function renderAll() { renderSidebar(); renderRtbar(); renderRedbar(); renderGraph(); renderPreflightBar(); renderNodeForm(); renderBoard(); renderWiki(); renderObs(); renderSettings(); renderHeader(); renderSelfUpdate(); renderLimitMeter(); renderUsage(); renderOverview(); renderInbox(); renderGuide(); renderChat(); }
 const fmtTok = (n) => { n = n || 0; return n >= 1e6 ? (n / 1e6).toFixed(2) + 'M' : n >= 1e4 ? (n / 1e3).toFixed(1) + 'k' : String(n); };
 const COST_NOTE = { subscription: 'Covered by subscription — not billed per token', other: 'API-equivalent (reported by Claude CLI)' };
 const VENDOR = { claude: 'Claude', codex: 'Codex', opencode: 'OpenCode' };
@@ -882,7 +883,7 @@ function renderGraph() {
   for (const n of nodes) {
     if (n.ghost) { const g = el('g', { class: 'ghost', transform: `translate(${n.x},${n.y})` }, nL); el('rect', { width: W, height: H, rx: 12 }, g); el('text', { x: 14, y: 28, class: 'nname' }, g).textContent = clipText(n.name, 22); el('text', { x: 14, y: 46, class: 'nrole' }, g).textContent = 'in another team'; continue; }
     const live = nodeLive(n); const ns = (S.nstat || {})[n.id] || {}; const c = agentColor(n.id);
-    const g = el('g', { class: 'node' + (sel.node === n.id || connectFrom === n.id ? ' sel' : '') + ' st-' + live + (live === 'working' ? ' working' : ''), transform: `translate(${n.x},${n.y})`, 'data-id': n.id }, nL);
+    const g = el('g', { class: 'node' + (sel.node === n.id || connectFrom === n.id ? ' sel' : '') + ' st-' + live + (live === 'working' ? ' working' : '') + (rtuFor(n.id) ? ' rtpaused' : ''), transform: `translate(${n.x},${n.y})`, 'data-id': n.id }, nL);
     el('rect', { class: 'card', width: W, height: H, rx: 12 }, g);
     el('rect', { class: 'stripe', width: 4, height: H - 20, x: 0, y: 10, rx: 2, style: `fill:var(--agent-${c})` }, g);
     el('circle', { class: 'avatar', cx: 30, cy: 26, r: 14, style: `fill:var(--agent-${c})` }, g);
@@ -905,7 +906,7 @@ function renderGraph() {
     const capsSt = !n.capabilities ? 'none' : (n.capabilities.error || n.capabilities.ok === false) ? 'error' : 'ok';
     const cb = el('g', { class: 'capsdot caps-' + capsSt, transform: `translate(7,${H - 8})` }, g); el('circle', { r: 4 }, cb);
     el('title', {}, cb).textContent = capsSt === 'none' ? 'Capabilities not probed yet' : capsSt === 'error' ? 'Capability probe failed' : `Capabilities probed${n.capabilitiesProbedAt ? ' ' + new Date(n.capabilitiesProbedAt).toLocaleString() : ''}`;
-    const sg = el('g', { class: 'status s-' + live, transform: `translate(${W - 16},16)` }, g); el('circle', { r: 5 }, sg); el('title', {}, sg).textContent = live;
+    const sg = el('g', { class: 'status s-' + live, transform: `translate(${W - 16},16)` }, g); el('circle', { r: 6 }, sg); el('title', {}, sg).textContent = live;
     const pres = el('g', { class: 'pres ' + presence(n.id), transform: `translate(${W - 16},16)` }, g); el('circle', { r: 8 }, pres);
     const pf = pfState(n);
     const badge = el('g', { class: 'pfbadge pf-' + pf, transform: `translate(${W - 34},16)` }, g);
@@ -926,8 +927,9 @@ function renderGraph() {
     }
     // wake badge is gated by wakeRun itself, not `live`: nodeLive trusts the possibly stale nstat status
     // stall badge outranks it: a stalled run must not read as one still working; pending-wake is lowest rank
-    const st = stallState(n.id);
+    const st = stallState(n.id); const pu = rtuFor(n.id);
     if (st) drawStallBadge(g, st, () => openWakeTask(st.taskId));
+    else if (pu) drawRtuBadge(g, pu);
     else { const wk = wakeRun(n.id); if (wk) drawWakeBadge(g, wk, () => openWakeTask(wk.taskId)); else { const wp = wakePending(n.id); if (wp) drawPendingBadge(g, wp); } }
     drawSubBadge(g, S.orch.agents[n.id] || {}, 46);
     el('title', {}, g).textContent = `${n.name} (${n.role}) — ${live}`;
@@ -1299,6 +1301,132 @@ function drawStallBadge(g, st, onclick) {
   el('title', {}, bg).textContent = full;
   if (st.taskId && onclick) bg.onclick = onclick;
 }
+// ---------- runtime unavailable (contract with Devon, t_419062e2 / t_d33685f3) ----------
+// When a runtime's runs fail fast with auth/model errors, core trips a per-runtime breaker: it stops
+// dispatching to that runtime (queued tasks wait) and emits runtime.unavailable; a successful resume
+// or a healthy run emits runtime.available. Push channels 'runtime-unavailable' / 'runtime-available'
+// match the dash style of the stall channels (camelCase variants registered until the preload grows
+// helpers, same as restart/watch above). Payload {runtime, error, agents, since, projectId}; error is
+// the redacted stderr tail (core caps ~2KB). Snapshot fallback: snapshotSlim carries orch.runtimeState
+// so the banner survives a page reload. Resume: call('resumeRuntime', runtime) clears the breaker and
+// re-dispatches the queued tasks.
+let rtu = null, rtuBusy = false, rtuErr = '', rtuHidden = false;
+function setRtu(d) {
+  if (!d || !d.runtime) return;
+  rtu = { runtime: d.runtime, error: String(d.error || ''), agents: Array.isArray(d.agents) ? d.agents : null, at: +d.since || +d.at || Date.now() };
+  rtuHidden = false; rtuErr = '';
+  renderRtbar(); renderGraph(); renderOverview();
+}
+function clearRtu(runtime) {
+  if (!rtu || (runtime && rtu.runtime !== runtime)) return;
+  rtu = null; rtuErr = '';
+  renderRtbar(); renderGraph(); renderOverview();
+}
+// Is this agent affected? Core's agents list wins when present; otherwise affected = agent's runtime
+// (nstat overrides the node config, same precedence as the Team chip row) matches the broken runtime.
+function rtuFor(id) {
+  if (!rtu) return null;
+  if (rtu.agents) return rtu.agents.includes(id) ? rtu : null;
+  const n = S.allNodes.find((x) => x.id === id); if (!n) return null;
+  return (((S.nstat || {})[id] || {}).runtime || n.runtime || 'claude') === rtu.runtime ? rtu : null;
+}
+// Reload / missed-push fallback: adopt unavailable state from the orchestrator snapshot, and drop our
+// copy once the snapshot reports the runtime healthy again (core recovered without a resume call).
+function syncRtu() {
+  const rs = (S.orch || {}).runtimeState || {};
+  const seen = new Set();
+  for (const [id, st] of Object.entries(rs)) {
+    seen.add(id);
+    if (st && st.state === 'unavailable') { if (!rtu || rtu.runtime !== id || (+st.since || 0) > rtu.at) setRtu({ runtime: id, error: st.error, agents: st.agents, since: st.since }); }
+  }
+  if (rtu && !seen.has(rtu.runtime)) clearRtu(rtu.runtime); // snapshot dropped the entry: healthy again
+}
+// Red strip below the card for agents whose runtime is unavailable — same slot as the wake/stall
+// badges, ranked under stall (a hung run is a distinct live problem) but above wake/pending: those
+// claim the agent is working or about to, which it cannot be on a broken runtime.
+function drawRtuBadge(g, r) {
+  const label = runtimeLabel(r.runtime);
+  const bg = el('g', { class: 'rtubadge', transform: `translate(4,${H + 3})` }, g);
+  el('rect', { width: W - 8, height: 13, rx: 6 }, bg);
+  el('text', { x: (W - 8) / 2, y: 9.5, 'text-anchor': 'middle' }, bg).textContent = clipText(`⏸ paused — ${label} unavailable`, 30);
+  el('title', {}, bg).textContent = r.error ? `${label} unavailable: ${r.error}` : `${label} unavailable — fix it, then resume from the banner`;
+}
+// Banner under the header, visible on every tab: names the runtime, the paused agents, the real error,
+// and offers the resume action (Cato's plan conditions: say if other runtimes exist; never imply work
+// moved to them). Resume failure text shows inline; the banner only clears on resume or core recovery.
+function renderRtbar() {
+  const b = $('#rtbar'); if (!b) return;
+  if (!rtu || rtuHidden) return b.classList.add('hidden');
+  const names = (rtu.agents ? rtu.agents.map((id) => nodeName(id)) : S.team.nodes.filter((n) => rtuFor(n.id)).map((n) => n.name)).filter(Boolean);
+  const others = Object.entries((S.config || {}).runtimes || {}).filter(([id, r]) => id !== rtu.runtime && r.installed !== false).map(([id]) => runtimeLabel(id));
+  const err = rtu.error ? `<div class="rt-err" title="${esc(rtu.error)}">${esc(clipText(rtu.error, 220))}</div>` : '';
+  const rerr = rtuErr ? `<div class="rt-resume-err">Resume failed: ${esc(rtuErr)}</div>` : '';
+  b.innerHTML = `<span class="rt-ico" aria-hidden="true">⏸</span>
+    <div class="rt-body"><b>Runtime “${esc(runtimeLabel(rtu.runtime))}” unavailable</b>
+    <span class="muted">${names.length ? esc(names.join(', ')) + ' paused' : 'no agents on it'} — new work to it waits${others.length ? ` · other runtimes still available: ${esc(others.join(', '))}` : ''}</span>${err}${rerr}</div>
+    <span class="spacer"></span>
+    <button id="rt-resume" class="primary"${rtuBusy ? ' disabled' : ''}>${rtuBusy ? 'Resuming…' : 'I fixed it — resume'}</button>
+    <button id="rt-dismiss" title="Hide until the state changes">✕</button>`;
+  b.classList.remove('hidden');
+  $('#rt-resume').onclick = async () => {
+    rtuBusy = true; rtuErr = ''; renderRtbar();
+    try { await call('resumeRuntime', rtu.runtime); clearRtu(rtu.runtime); await refresh(); }
+    catch (e) { rtuErr = String(e.message || e).replace(/^Error invoking remote method 'api':\s*(Error:\s*)?/, ''); }
+    finally { rtuBusy = false; renderRtbar(); }
+  };
+  $('#rt-dismiss').onclick = () => { rtuHidden = true; renderRtbar(); };
+}
+
+// ---------- red-master banner (t_f72708fd) ----------
+// Contract with Devon (t_897cca56, pre-merge test gate): the orchestrator snapshot carries
+// `redMaster` — null/absent/{red:false} means master is green. Shown on every tab with no
+// dismiss: master being red blocks every merge, so it stays up until the state itself clears.
+// Shape: { red, since, failingTests: [name | {name}], testOutput, fixTaskId,
+//          lastMergedTaskId, gateBlocks: [{taskId, tests, at}] }
+// failingTests entries and gateBlocks.tests accept plain strings or {name} so minor shape drift
+// on Devon's side still renders; gateBlocks is optional (gate rejections before the field lands
+// are still visible as task comments, which the board already shows).
+function normRedMaster(d) {
+  if (!d || !d.red) return null;
+  const names = (v) => (Array.isArray(v) ? v : []).map((t) => (typeof t === 'string' ? t : (t || {}).name || '')).filter(Boolean);
+  return {
+    since: +d.since || 0,
+    tests: names(d.failingTests),
+    output: String(d.testOutput || d.output || ''),
+    fixTaskId: d.fixTaskId || null,
+    lastMergedTaskId: d.lastMergedTaskId || null,
+    blocks: (Array.isArray(d.gateBlocks) ? d.gateBlocks : []).map((b) => ({ taskId: b.taskId, tests: names(b.tests), at: +b.at || 0 })).filter((b) => b.taskId),
+  };
+}
+function renderRedbar() {
+  const b = $('#redbar'); if (!b) return;
+  const rm = normRedMaster((S.orch || {}).redMaster);
+  if (!rm) { b.innerHTML = ''; b.classList.add('hidden'); return; }
+  const when = rm.since ? ` <span class="rb-when">since ${new Date(rm.since).toLocaleTimeString()}</span>` : '';
+  const shown = rm.tests.slice(0, 4);
+  const chips = shown.map((t) => `<code class="rb-test" title="${esc(t)}">${esc(t)}</code>`).join('')
+    + (rm.tests.length > shown.length ? `<span class="rb-more">+${rm.tests.length - shown.length} more</span>` : '');
+  const rtask = (id) => (S.tasks || []).find((t) => t.id === id);
+  const fix = rm.fixTaskId
+    ? `<button id="rb-fix" class="primary">${esc(shortTaskId(rm.fixTaskId))}${rtask(rm.fixTaskId) ? ': ' + esc(clipText(rtask(rm.fixTaskId).title, 44)) : ' — open fix task'}</button>`
+    : '<span class="rb-nofix">no fix task yet</span>';
+  const owner = rm.lastMergedTaskId
+    ? `<span class="rb-owner" title="last task merged before master went red — likely cause, not confirmed">likely from ${esc(shortTaskId(rm.lastMergedTaskId))}${rtask(rm.lastMergedTaskId) ? ` (${esc(clipText(rtask(rm.lastMergedTaskId).title, 44))})` : ''}</span>`
+    : '';
+  const blocks = rm.blocks.slice(0, 3).map((bl) => {
+    const t = rtask(bl.taskId);
+    return `<div class="rb-block">⛔ Gate blocked the merge of ${esc(shortTaskId(bl.taskId))}${t ? ` — ${esc(clipText(t.title, 50))}` : ''} (${bl.tests.length} failing test${bl.tests.length === 1 ? '' : 's'})${t ? ` — sent back to ${esc(nodeName(t.assignee))}` : ''}</div>`;
+  }).join('');
+  const out = rm.output ? `<details class="rb-out"><summary>output</summary><pre>${esc(rm.output)}</pre></details>` : '';
+  b.innerHTML = `<span class="rb-ico" aria-hidden="true">●</span>
+    <div class="rb-body"><b>MASTER IS RED${when}</b>
+    <span class="rb-sub">the shared branch is failing tests — merges are blocked until it is green again</span>
+    ${rm.tests.length ? `<div class="rb-tests">${chips}</div>` : ''}${blocks}${out}</div>
+    <span class="spacer"></span>${owner}${fix}`;
+  b.classList.remove('hidden');
+  if ($('#rb-fix')) $('#rb-fix').onclick = () => { sel.task = rm.fixTaskId; showTab('board'); renderBoard(); };
+}
+
 // Subagent chip on an agent card (Team graph + Overview): count + compact total tokens for the current
 // run's subagents. Per contract t_c33656ba the parent's own totals ALREADY include these — the badge is
 // a breakdown, never something to add on top. Hidden when the agent spawned nothing. y places it in the
@@ -1372,7 +1500,7 @@ function renderBoard() {
   sa.innerHTML = S.allNodes.map((n) => `<option value="${n.id}">${esc(n.name)} (${n.role})</option>`).join('') || '<option value="">(add agents first)</option>';
   if (cur) sa.value = cur;
   renderIdle();
-  $('#columns').innerHTML = ['todo', 'in_progress', 'waiting_for_human', 'review', 'merge_conflict', 'done'].map((st) => { const total = S.tasks.filter((t) => t.status === st).length; const fold = st === 'done' && !doneOpen; return `<div class="col ${st}${fold ? ' folded' : ''}"><h3 ${st === 'done' ? 'id="done-h" style="cursor:pointer" title="Toggle done"' : ''}>${st === 'done' ? (fold ? '▸ ' : '▾ ') : ''}${st === 'done' && !showAllDone && total > 20 ? `done (20 of ${total})` : `${st.replaceAll('_', ' ')} (${total})`}</h3>${st === 'todo' && !S.tasks.length ? '<div class="hint-first">Create a goal task, assign it to an agent (usually the PM), then press Run.</div>' : ''}${
+  $('#columns').innerHTML = ['todo', 'in_progress', 'waiting_for_human', 'review', 'merge_conflict', 'done'].map((st) => { const total = S.tasks.filter((t) => t.status === st).length; const fold = st === 'done' && !doneOpen; return `<div class="col ${st}${fold ? ' folded' : ''}"><h3 ${st === 'done' ? 'id="done-h" style="cursor:pointer" title="Toggle done"' : ''}>${st === 'done' ? (fold ? '▸ ' : '▾ ') : ''}${st === 'done' && !showAllDone && total > 20 ? `done 20/${total}` : `${st.replaceAll('_', ' ')} (${total})`}</h3>${st === 'todo' && !S.tasks.length ? '<div class="hint-first">Create a goal task, assign it to an agent (usually the PM), then press Run.</div>' : ''}${
     (fold ? [] : st === 'done' ? doneCards() : S.tasks.filter((t) => t.status === st).slice().sort(byPriorityThenTitle)).map((t) => { const bl = openBlockers(t); const w = (S.orch.agents[t.assignee] || {});
       // Worker state must match reality: an agent with a live run is busy — on THIS task (or an
       // unattributed wake run for it) reads "live", on another task reads "working elsewhere",
@@ -1466,12 +1594,15 @@ function renderWiki() {
   const titles = Object.keys(S.wiki).sort().filter((t) => !q || t.toLowerCase().includes(q) || (S.wiki[t].content || '').toLowerCase().includes(q));
   const all = Object.keys(S.wiki).length;
   $('#wikipages').innerHTML = titles.length
-    ? titles.map((t) => `<div class="${t === sel.page ? 'sel' : ''}" data-t="${esc(t)}"><b>${esc(t)}</b><br><small class="muted">by ${esc(S.wiki[t].author)}</small></div>`).join('')
+    ? titles.map((t) => `<div class="${t === sel.page ? 'sel' : ''}" data-t="${esc(t)}"><b>${esc(t)}</b><small class="wk-meta">${esc(S.wiki[t].author)}${agoTxt(S.wiki[t].updatedAt) ? ' · ' + agoTxt(S.wiki[t].updatedAt) : ''}</small></div>`).join('')
     : all ? '<p class="muted wk-empty-body">No pages match your search.</p>' : '<p class="muted wk-empty-body">No pages yet. Click + New page to write your first one — e.g. a runbook, a glossary, or notes for the team.</p>';
   document.querySelectorAll('#wikipages div[data-t]').forEach((d) => d.onclick = () => { sel.page = d.dataset.t; wikiEdit = false; loadPage(); renderWiki(); });
   if (sel.page && S.wiki[sel.page] && !wikiEdit) loadPage();
-  else if (!sel.page) $('#wk-view').innerHTML = all ? '<p class="muted wk-empty-body">Pick a page on the left, or start a new one.</p>' : '<p class="muted wk-empty-body">No wiki pages yet. Click + New page on the left to write the first one — a runbook, a glossary, or anything the team should share.</p>';
+  const empty = !sel.page && !wikiEdit;
+  $('#wk-empty').classList.toggle('hidden', !empty); $('#wk-editor').classList.toggle('hidden', empty);
+  $('#wk-empty h3').textContent = all ? 'No page selected' : 'No wiki pages yet';
 }
+$('#wk-empty-new').onclick = () => $('#wk-new').click();
 $('#wk-new').onclick = () => { sel.page = null; wikiEdit = true; $('#wk-title').value = ''; $('#wk-content').value = ''; showWiki(); renderWiki(); };
 $('#wk-search').oninput = renderWiki;
 function loadPage() { const p = S.wiki[sel.page]; if (!p) return; $('#wk-title').value = p.title; $('#wk-content').value = p.content; showWiki(); }
@@ -1485,7 +1616,7 @@ function showWiki() {
 }
 $('#wk-edit').onclick = () => { wikiEdit = !wikiEdit; showWiki(); };
 $('#wk-save').onclick = async () => { const t = $('#wk-title').value.trim(); if (!t) return; await call('writeWiki', t, $('#wk-content').value); sel.page = t; wikiEdit = false; refresh(); };
-$('#wk-del').onclick = async () => { if (sel.page && confirm('Delete page?')) { await call('deleteWiki', sel.page); sel.page = null; $('#wk-title').value = ''; $('#wk-content').value = ''; refresh(); } };
+$('#wk-del').onclick = async () => { $('#wk-more').open = false; if (sel.page && confirm(`Delete page "${sel.page}"? This can't be undone.`)) { await call('deleteWiki', sel.page); sel.page = null; $('#wk-title').value = ''; $('#wk-content').value = ''; refresh(); } };
 
 // ---------- observability ----------
 const logTeamNodes = () => sel.logTeam ? S.allNodes.filter((n) => n.teamId === sel.logTeam) : S.allNodes;
@@ -1918,26 +2049,35 @@ $('#us-clear').onclick = act(async () => { if (!confirm('Clear the usage history
 function renderSettings() {
   const s = S.settings;
   const tplCur = $('#tpl-select') ? $('#tpl-select').value : '';
-  $('#settingsform').innerHTML = `<h3>Settings</h3><p class="muted">Project data: ${esc(S.dir)}</p>
-    <label>Template for new project/team</label><select id="tpl-select">${Object.entries(P.templates).map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join('')}</select>
-    <label>Claude CLI path</label><input id="st-claude" value="${esc(s.claudePath)}">
-    <label>Max concurrent agents</label><input id="st-conc" type="number" min="1" max="8" value="${s.maxConcurrency}">
-    <label>Max agent runs per Run (safety cap)</label><input id="st-runs" type="number" min="1" value="${s.maxRuns}">
-    <label>Max agents per team <span class="muted">(core agent recruit limit)</span></label><input id="st-maxagents" type="number" min="1" value="${s.maxAgents ?? 6}">
-    <label>Core team changes <span class="muted">(recruit / retire / update — ask the human first, or apply automatically)</span></label><select id="st-tcappr">${['ask', 'auto'].map((m) => `<option ${m === (s.teamChangeApproval ?? 'ask') ? 'selected' : ''}>${m}</option>`).join('')}</select>
-    <label>Default permission mode (agents can override)</label><select id="st-perm">${['bypassPermissions', 'acceptEdits', 'default', 'plan'].map((m) => `<option ${m === s.permissionMode ? 'selected' : ''}>${m}</option>`).join('')}</select>
-    <label>Project budget per Run, $ <span class="muted">(stops all agents; 0 = none)</span></label><input id="st-budgetusd" type="number" min="0" step="0.01" value="${s.budgetUsd || 0}">
-    <label>Project token budget per Run <span class="muted">(input + output; 0 = none)</span></label><input id="st-budgettok" type="number" min="0" step="1000" value="${s.budgetTokens || 0}">
-    <label>Stuck warning after N minutes without output</label><input id="st-stuck" type="number" min="1" value="${s.stuckMinutes || 5}">
-    <label>Stall timeout — stop + auto-resume a silent run after N minutes <span class="muted">(max 2 recoveries, then the task is marked recovery failed)</span></label><input id="st-stall" type="number" min="1" value="${s.stallTimeoutMin ?? 10}">
-    <label>Auto-compact at % <span class="muted">(context usage that triggers /compact; 0 = off)</span></label><input id="st-autocompactpct" type="number" min="0" max="95" value="${s.autoCompactPct ?? 40}">
-    <label class="inline"><input type="checkbox" id="st-approval" ${s.requireApproval ? 'checked' : ''}> Require human approval for every agent's "done"</label>
-    <label class="inline"><input type="checkbox" id="st-notify" ${s.notifications === false ? '' : 'checked'}> Desktop notifications (approval needed, budget reached, run finished)</label>
-    <p><button id="st-save" class="primary">Save settings</button></p>
-    ${upd.devMode === false ? '' : `<hr><h3>App updates</h3>
+  $('#settingsform').innerHTML = `<h3 class="set-pagetitle">Settings</h3>
+    <div class="set-path"><span>Project data</span><code title="${esc(S.dir)}">${esc(S.dir)}</code><button id="st-copydir" title="Copy path">Copy</button></div>
+    <section class="set-sec"><h3>Runtime</h3><div class="set-rows">
+    <div class="set-row stack"><div class="set-lab"><label for="st-claude">Claude CLI path</label><p class="set-hint">Binary used to launch agents. Leave as-is unless your CLI lives outside PATH.</p></div><input id="st-claude" value="${esc(s.claudePath)}"></div>
+    <div class="set-row"><div class="set-lab"><label for="tpl-select">Template for new project / team</label></div><div class="set-ctl"><select id="tpl-select">${Object.entries(P.templates).map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join('')}</select></div></div>
+    <div class="set-row"><div class="set-lab"><label for="st-perm">Default permission mode</label><p class="set-hint">Agents can override this per node.</p></div><div class="set-ctl"><select id="st-perm">${['bypassPermissions', 'acceptEdits', 'default', 'plan'].map((m) => `<option ${m === s.permissionMode ? 'selected' : ''}>${m}</option>`).join('')}</select></div></div>
+    </div></section>
+    <section class="set-sec"><h3>Limits &amp; budgets</h3><div class="set-rows">
+    <div class="set-row"><div class="set-lab"><label for="st-conc">Max concurrent agents</label><p class="set-hint">How many agents may run at the same time.</p></div><div class="set-num"><input id="st-conc" type="number" min="1" max="8" value="${s.maxConcurrency}"><span class="set-unit">agents</span></div></div>
+    <div class="set-row"><div class="set-lab"><label for="st-maxagents">Max agents per team</label><p class="set-hint">Core agent recruit limit.</p></div><div class="set-num"><input id="st-maxagents" type="number" min="1" value="${s.maxAgents ?? 6}"><span class="set-unit">agents</span></div></div>
+    <div class="set-row"><div class="set-lab"><label for="st-runs">Max agent runs per Run</label><p class="set-hint">Safety cap for the scheduler.</p></div><div class="set-num"><input id="st-runs" type="number" min="1" value="${s.maxRuns}"><span class="set-unit">runs</span></div></div>
+    <div class="set-row"><div class="set-lab"><label for="st-budgetusd">Project budget per Run</label><p class="set-hint">Stops all agents when reached. 0 = no limit.</p></div><div class="set-num"><span class="set-unit">$</span><input id="st-budgetusd" type="number" min="0" step="0.01" value="${s.budgetUsd || 0}"></div></div>
+    <div class="set-row"><div class="set-lab"><label for="st-budgettok">Project token budget per Run</label><p class="set-hint">Input + output. 0 = no limit.</p></div><div class="set-num"><input id="st-budgettok" type="number" min="0" step="1000" value="${s.budgetTokens || 0}"><span class="set-unit">tokens</span></div></div>
+    <div class="set-row"><div class="set-lab"><label for="st-autocompactpct">Auto-compact at</label><p class="set-hint">Context usage that triggers /compact. 0 = off.</p></div><div class="set-num"><input id="st-autocompactpct" type="number" min="0" max="95" value="${s.autoCompactPct ?? 40}"><span class="set-unit">%</span></div></div>
+    </div></section>
+    <section class="set-sec"><h3>Recovery</h3><div class="set-rows">
+    <div class="set-row"><div class="set-lab"><label for="st-stuck">Stuck warning after</label><p class="set-hint">Flag a run that has been silent this long.</p></div><div class="set-num"><input id="st-stuck" type="number" min="1" value="${s.stuckMinutes || 5}"><span class="set-unit">min</span></div></div>
+    <div class="set-row"><div class="set-lab"><label for="st-stall">Stall timeout</label><p class="set-hint">Stop + auto-resume a silent run. Max 2 recoveries, then the task is marked recovery failed.</p></div><div class="set-num"><input id="st-stall" type="number" min="1" value="${s.stallTimeoutMin ?? 10}"><span class="set-unit">min</span></div></div>
+    </div></section>
+    <section class="set-sec"><h3>Approvals</h3><div class="set-rows">
+    <div class="set-row"><div class="set-lab"><label>Require approval for every agent's "done"</label><p class="set-hint">A human confirms before a task counts as done.</p></div><div class="set-ctl"><input type="checkbox" id="st-approval" ${s.requireApproval ? 'checked' : ''}></div></div>
+    <div class="set-row"><div class="set-lab"><label for="st-tcappr">Core team changes</label><p class="set-hint">Recruit / retire / update — ask the human first, or apply automatically.</p></div><div class="set-ctl"><select id="st-tcappr">${['ask', 'auto'].map((m) => `<option ${m === (s.teamChangeApproval ?? 'ask') ? 'selected' : ''}>${m}</option>`).join('')}</select></div></div>
+    <div class="set-row"><div class="set-lab"><label>Desktop notifications</label><p class="set-hint">Approval needed, budget reached, run finished.</p></div><div class="set-ctl"><input type="checkbox" id="st-notify" ${s.notifications === false ? '' : 'checked'}></div></div>
+    </div></section>
+    <p class="set-actions"><button id="st-save" class="primary">Save settings</button></p>
+    ${upd.devMode === false ? '' : `<hr><section class="set-sec"><h3>App updates</h3>
     <label class="inline"><input type="checkbox" id="st-autorestart" ${upd.enabled ? 'checked' : ''}> Auto-restart on new merged code</label>
     <p class="muted">When new commits land on this app's base branch: pause the scheduler, wait for running agents to finish, test the new code, then relaunch and resume the run. Failed tests cancel the restart.</p>
-    <div id="upd-history"></div>`}
+    <div id="upd-history"></div></section>`}
     <h3>Role presets (this project)</h3><p class="muted">Presets appear as role suggestions. A new agent whose role matches a preset gets its prompt, tools and permission mode.</p>
     <table id="presettable"><tr><th>Name</th><th>Permission</th><th>Allowed</th><th>Disallowed</th><th></th></tr>${(s.rolePresets || []).map((p) => `<tr><td>${esc(p.name)}</td><td>${esc(p.permissionMode || 'default')}</td><td>${esc(p.allowedTools.join(', '))}</td><td>${esc(p.disallowedTools.join(', '))}</td><td><button data-editp="${esc(p.name)}">Edit</button><button data-delp="${esc(p.name)}">Delete</button></td></tr>`).join('')}</table>
     <div id="presetform"><label>Name</label><input id="pr-name"><label>Default system prompt</label><textarea id="pr-prompt" rows="3"></textarea>
@@ -1946,6 +2086,10 @@ function renderSettings() {
     <p><button id="pr-save">Save preset</button></p></div>
     <hr>${renderRuntimesSection()}`;
   const ts = $('#tpl-select'); if (ts && tplCur) ts.value = tplCur;
+  $('#st-copydir').onclick = async () => {
+    try { await navigator.clipboard.writeText(S.dir); } catch { const t = document.createElement('textarea'); t.value = S.dir; document.body.appendChild(t); t.select(); document.execCommand('copy'); t.remove(); }
+    $('#st-copydir').textContent = 'Copied'; setTimeout(() => { const b = $('#st-copydir'); if (b) b.textContent = 'Copy'; }, 1200);
+  };
   wireRuntimesSection(); wireDraftForm();
   document.querySelectorAll('[data-delp]').forEach((b) => b.onclick = act(async () => { await call('deletePreset', b.dataset.delp); refresh(); }));
   document.querySelectorAll('[data-editp]').forEach((b) => b.onclick = () => { const p = s.rolePresets.find((x) => x.name === b.dataset.editp); $('#pr-name').value = p.name; $('#pr-prompt').value = p.systemPrompt; $('#pr-allowed').value = p.allowedTools.join(', '); $('#pr-disallowed').value = p.disallowedTools.join(', '); $('#pr-perm').value = p.permissionMode; });
@@ -2123,16 +2267,17 @@ function renderOverview() {
   }
   for (const n of ovNodes) {
     const live = (S.orch.agents[n.id] || {}).status === 'working' ? 'working' : nodeLive(n); const isStuck = stuck.has(n.id); const c = agentColor(n.id);
-    const g = el('g', { class: 'node' + (live === 'working' ? ' working st-working' : '') + (isStuck ? ' stuck' : ''), transform: `translate(${n.x},${n.y})`, 'data-id': n.id }, svg);
+    const g = el('g', { class: 'node' + (live === 'working' ? ' working st-working' : '') + (isStuck ? ' stuck' : '') + (rtuFor(n.id) ? ' rtpaused' : ''), transform: `translate(${n.x},${n.y})`, 'data-id': n.id }, svg);
     el('rect', { class: 'card', width: W, height: H, rx: 12 }, g);
     el('rect', { class: 'stripe', width: 4, height: H - 20, x: 0, y: 10, rx: 2, style: `fill:var(--agent-${c})` }, g);
     el('circle', { class: 'avatar', cx: 26, cy: 24, r: 13, style: `fill:var(--agent-${c})` }, g);
     el('text', { x: 26, y: 28.5, class: 'avtext', 'text-anchor': 'middle' }, g).textContent = initials(n.name);
     el('text', { x: 47, y: 21, class: 'nname' }, g).textContent = clipText(n.name, 16);
-    el('text', { x: 47, y: 36, class: 'nrole' }, g).textContent = isStuck ? '⚠ stuck' : `${clipText(n.role, 14)}${live === 'working' ? ' · working' : ''}`;
+    el('text', { x: 47, y: 36, class: 'nrole' }, g).textContent = isStuck ? '⚠ stuck' : `${clipText(n.role, 14)} · ${live === 'working' ? 'Working' : humanStatus(live)}`;
     el('text', { x: 47, y: 50, 'font-size': 10, opacity: 0.8, class: 'ov-vendor' }, g).textContent = clipText(`${VENDOR[n.runtime || 'claude'] || n.runtime} · ${n.model || 'default'}`, 26);
-    const st = stallState(n.id);
+    const st = stallState(n.id); const pu = rtuFor(n.id);
     if (st) drawStallBadge(g, st, () => openWakeTask(st.taskId));
+    else if (pu) drawRtuBadge(g, pu);
     else if (live === 'working') { const wk = wakeRun(n.id); if (wk) drawWakeBadge(g, wk, () => openWakeTask(wk.taskId)); }
     else { const wp = wakePending(n.id); if (wp) drawPendingBadge(g, wp); }
     drawSubBadge(g, S.orch.agents[n.id] || {});
@@ -2160,7 +2305,7 @@ function renderOverview() {
   const ATTN_BADGE = { waiting_for_human: '⏳', blocked: '⛔', error: '❗' };
   const tlbox = $('#ov-timeline'); tlbox.innerHTML = '';
   if (hiddenCount) { const note = document.createElement('div'); note.className = 'ovtl-note'; note.textContent = `${hiddenCount} idle lane${hiddenCount > 1 ? 's' : ''} hidden (no activity in the last 15m)`; tlbox.appendChild(note); }
-  if (!ids.length) { const empty = document.createElement('p'); empty.className = 'muted ovtl-empty'; empty.textContent = 'No agent activity in the last 15 minutes.'; tlbox.appendChild(empty); }
+  if (!ids.length) { const empty = document.createElement('p'); empty.className = 'muted ovtl-empty'; empty.textContent = 'No activity in the last 15m'; tlbox.appendChild(empty); }
   else {
     const tl = el('svg', { width: LW + PX + 10, height: ids.length * LH + 18 }, null);
     const defs = el('defs', {}, tl);
@@ -2186,8 +2331,10 @@ function renderOverview() {
   else {
     ts.classList.remove('hidden');
     const as = byId[t.assignee]; const ac = as ? agentColor(as.id) : 0;
-    head.innerHTML = `<div class="ovth-title">${esc(t.title)}</div><div class="ovth-meta"><span class="ovth-status ${esc(t.status)}">${esc(t.status)}</span>${as ? `<span class="ovth-assignee"><span class="ovth-av" style="background:var(--agent-${ac})">${esc(initials(as.name))}</span>${esc(as.name)}</span>` : '<span class="muted">Unassigned</span>'}</div>`;
+    head.innerHTML = `<div class="ovth-title">${esc(t.title)}</div><div class="ovth-meta"><span class="ovth-status ${esc(t.status)}">${esc(humanStatus(t.status))}</span>${as ? `<span class="ovth-assignee"><span class="ovth-av" style="background:var(--agent-${ac})">${esc(initials(as.name))}</span>${esc(as.name)}</span>` : '<span class="muted">Unassigned</span>'}</div>`;
   }
+  function humanStatus(s) { const w = String(s || '').replaceAll('_', ' '); return w.charAt(0).toUpperCase() + w.slice(1); }
+  const ovAvatar = (id) => { const n = byId[id]; return n ? `<span class="ovth-av" style="background:var(--agent-${agentColor(id)})">${esc(initials(n.name))}</span>` : `<span class="ovth-av sys">${id === 'human' ? 'H' : '•'}</span>`; };
   // Collapsible nested block for a subagent's tool activity inside the task thread (native <details>,
   // open state preserved via data-k like the tool chips).
   const ovSubBlock = (it, depth) => {
@@ -2200,9 +2347,9 @@ function renderOverview() {
   };
   // Task thread capped to the latest 300 entries before nesting; older history stays on the Board.
   const threadItems = t ? Overview.taskThread(t, L, S.messages) : []; const cut = Math.max(0, threadItems.length - 300); const shown = cut ? threadItems.slice(-300) : threadItems;
-  $('#ov-thread').innerHTML = !t ? '<p class="muted empty">No tasks yet.</p>' : (cut ? `<p class="muted empty">${cut} earlier entries hidden — open the task on the Board for the full history.</p>` : '') + (Subagents.nestRows(shown, subRecOf, t.assignee).map((it, k) => it.kind === 'sub' ? ovSubBlock(it, 0) : it.l.type === 'tool'
+  $('#ov-thread').innerHTML = !t ? '<p class="muted empty">No tasks yet — create one on the Board and messages will appear here.</p>' : (cut ? `<p class="muted empty">${cut} earlier entries hidden — open the task on the Board for the full history.</p>` : '') + (Subagents.nestRows(shown, subRecOf, t.assignee).map((it, k) => it.kind === 'sub' ? ovSubBlock(it, 0) : it.l.type === 'tool'
     ? `<details data-k="${k}" ${open.has(String(k)) ? 'open' : ''}><summary class="chip">🔧 ${esc(it.l.summary)}</summary><pre>${esc(it.l.text)}</pre></details>`
-    : `<div class="comment ${it.l.type === 'message' ? 'msg' : ''}"><b>${esc(it.l.type === 'message' ? `${nodeName(it.l.who)} → ${nodeName(it.l.to)}` : it.l.who === 'human' || it.l.who === 'orchestrator' ? it.l.who : nodeName(it.l.who))}</b> <small class="muted">${new Date(it.l.at).toLocaleTimeString()}</small><br>${esc(it.l.text)}</div>`).join('') || '<p class="muted empty">Nothing yet.</p>');
+    : `<div class="comment ${it.l.type === 'message' ? 'msg' : ''}">${ovAvatar(it.l.who)}<b>${esc(it.l.type === 'message' ? `${nodeName(it.l.who)} → ${nodeName(it.l.to)}` : it.l.who === 'human' || it.l.who === 'orchestrator' ? it.l.who : nodeName(it.l.who))}</b> <small class="muted">${new Date(it.l.at).toLocaleTimeString()}</small><br>${esc(it.l.text)}</div>`).join('') || '<p class="muted empty">No messages yet — the assignee\'s updates will appear here.</p>');
   ovLive = stuck.size > 0 || hot.size > 0 || Object.values(lanes).some((l) => l.runs.some((r) => r.live));
 }
 $('#ov-task').onchange = renderOverview;
@@ -2233,7 +2380,11 @@ function bubble(e) {
     return `<details class="cchip subagent"><summary>🤖 ${esc(rec.description || 'Subagent')} <span class="substatus ss-${esc(rec.status || 'unknown')}">${esc(rec.status || 'unknown')}</span> <span class="submeta">${esc(meta)}</span> <span class="subcount">${e.total}</span></summary><div class="subevents">${sevHtml(e)}${(e.children || []).map(childHtml).join('')}</div></details>${tl ? `<span class="bubble linked"${link}>${tl}</span>` : ''}<br>`;
   }
   if (e.type === 'question') return `<div class="bubble question" data-iid="${e.inboxId}">❓ <b>Question for you</b>${tl}<br>${esc(e.text)}<br>${e.choices.map((c) => `<button class="primary ch-choice" data-v="${esc(c)}">${esc(c)}</button>`).join('')}<textarea class="ch-ans" rows="1" placeholder="Or type an answer"></textarea><button class="ch-send">Answer</button></div>`;
-  const text = e.type === 'handoff' ? `📋 assigned “${e.text}” to @${who(e.to).name}` : e.type === 'message' ? `✉ @${who(e.to).name} ${e.text}` : e.type === 'comment' ? `💬 ${e.text}` : e.text;
+  const ico = (p) => `<svg viewBox="0 0 24 24" aria-hidden="true">${p}</svg>`;
+  const IC = { handoff: '<path d="M5 12h14M13 6l6 6-6 6"/>', message: '<path d="M4 6h16v12H4zM4 7l8 6 8-6"/>', comment: '<path d="M4 5h16v11H8l-4 4z"/>' };
+  if (IC[e.type]) { const t = e.type === 'handoff' ? `assigned “${e.text}” to @${who(e.to).name}` : e.type === 'message' ? `@${who(e.to).name} ${e.text}` : e.text;
+    return `<div class="bubble evrow ${e.type}${link ? ' linked' : ''}"${link}>${ico(IC[e.type])}<span>${esc(t)}</span>${tl}${rep}</div>`; }
+  const text = e.text;
   const attsHtml = Chat.attThumbs(e.atts);
   return `<div class="bubble ${e.type}${link ? ' linked' : ''}"${link}>${esc(text)}${attsHtml}${tl}${rep}</div>`;
 }
@@ -2241,8 +2392,11 @@ function bubble(e) {
 const mergeGroups = (gs) => gs.reduce((out, g) => { const p = out[out.length - 1]; if (p && p.who === g.who && g.items[0].type !== 'question' && p.items[0].type !== 'question') p.items.push(...g.items); else out.push({ ...g, items: [...g.items] }); return out; }, []).map((g) => ({ ...g, items: Chat.collapseRepeats(g.items) }));
 const needsYou = () => new Set([...(S.inbox || []).map((i) => i.nodeId), ...CH.asks]);
 const avatarHtml = (id, working, ask) => { const w = who(id); return `<div class="avatar${w.human ? ' human' : ''}${working.has(id) ? ' working' : ''}${ask.has(id) ? ' ask' : ''}" style="background:${w.color}" title="${esc(w.name)}${working.has(id) ? ' · working' : ask.has(id) ? ' · needs you' : ''}">${esc(w.ini)}</div>`; };
+// ≥3 consecutive handoffs from one actor fold into one expandable "assigned N tasks" row.
+const bubbleRuns = (items) => { const out = []; for (let i = 0; i < items.length;) { let j = i; while (j < items.length && items[j].type === 'handoff') j++;
+  if (j - i >= 3) { const run = items.slice(i, j); out.push(`<details class="evrun"><summary class="evrow"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg><span>assigned ${run.length} tasks</span></summary>${run.map(bubble).join('')}</details>`); i = j; } else { j = Math.max(j, i + 1); out.push(...items.slice(i, j).map(bubble)); i = j; } } return out.join(''); };
 const renderGroups = (events, working) => { const ask = needsYou(); return mergeGroups(Chat.group(events)).map((g) => { const w = who(g.who);
-  return `<div class="cgroup${w.human ? ' self' : ''}">${avatarHtml(g.who, working, ask)}<div class="cbody"><div class="cname">${esc(w.name)}${w.role ? `<span class="role">${esc(w.role)}</span>` : ''}${w.human ? '' : vbadge((S.allNodes || []).find((n) => n.id === g.who))}<time>${new Date(g.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time></div>${g.items.map(bubble).join('')}</div></div>`; }).join(''); };
+  return `<div class="cgroup${w.human ? ' self' : ''}">${avatarHtml(g.who, working, ask)}<div class="cbody"><div class="cname">${esc(w.name)}${w.role ? `<span class="role">${esc(w.role)}</span>` : ''}${w.human ? '' : vbadge((S.allNodes || []).find((n) => n.id === g.who))}<time>${new Date(g.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time></div>${bubbleRuns(g.items)}</div></div>`; }).join(''); };
 // Sticky "Your turn" bar above the composer: every pending ask_human question/approval.
 function renderYourTurn(ev) {
   const seen = new Set((S.inbox || []).map((i) => i.id)); const items = [...(S.inbox || []), ...ev.filter((e) => e.type === 'question' && !seen.has(e.inboxId)).map((e) => ({ id: e.inboxId, nodeId: e.who, question: e.text, choices: e.choices, kind: 'question' }))]; const bar = $('#chat-yourturn'); bar.classList.toggle('hidden', !items.length);
@@ -2409,6 +2563,11 @@ if (squad.onRestartState) squad.onRestartState(onRestartPush);
 else { squad.on('restart-state', onRestartPush); squad.on('restartStatus', onRestartPush); }
 if (squad.onWatchStatus) squad.onWatchStatus(onWatchPush);
 else { squad.on('watch-status', onWatchPush); squad.on('watchStatus', onWatchPush); }
+// Runtime unavailable/resumed pushes (contract on t_d33685f3); dash channels are primary.
+const onRtuPush = (d) => { if (d && d.projectId && d.projectId !== ctx.p) return; setRtu(d); };
+const onRtaPush = (d) => { if (d && d.projectId && d.projectId !== ctx.p) return; clearRtu(d && d.runtime); };
+squad.on('runtime-unavailable', onRtuPush); squad.on('runtimeUnavailable', onRtuPush);
+squad.on('runtime-available', onRtaPush); squad.on('runtimeAvailable', onRtaPush);
 squad.on('log', (l) => { logs.push(l); if (logs.length > 8000) logs.splice(0, 1000); renderLog(); renderLive(); });
 // In-app toast for orchestrator notifications (desktop notifications are shown by the main process).
 squad.on('notify', (n) => {
