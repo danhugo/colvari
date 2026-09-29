@@ -836,8 +836,12 @@ function treeLayout(nodes, edges) {
     const first = pos[ks[0]].x, last = pos[ks[ks.length - 1]].x; pos[id] = { x: (first + last) / 2, y }; return Math.max(GX, x - x0);
   };
   const roots = nodes.filter((n) => !hasParent.has(n.id)).sort((p, q) => (q.core ? 1 : 0) - (p.core ? 1 : 0)); let x = 40;
-  for (const r of roots) x += place(r.id, x, 40);
-  for (const n of nodes) if (!pos[n.id]) { pos[n.id] = { x, y: 40 }; x += GX; }
+  // Unconnected agents wrap into a near-landscape grid instead of one long row (a row of 12 fits at 25% zoom).
+  const loners = roots.filter((r) => !(kids[r.id] || []).length);
+  for (const r of roots) if ((kids[r.id] || []).length) x += place(r.id, x, 40);
+  const rest = loners.concat(nodes.filter((n) => !pos[n.id] && !loners.includes(n))).filter((n) => !pos[n.id]);
+  const cols = rest.length > 4 ? Math.ceil(Math.sqrt(rest.length * 1.6)) : rest.length;
+  rest.forEach((n, i) => { pos[n.id] = { x: x + (i % cols) * GX, y: 40 + Math.floor(i / cols) * (H + 40) }; });
   return pos;
 }
 function buildView() {
