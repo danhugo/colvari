@@ -108,7 +108,7 @@ test('orchestrator: armed schedule gates new dispatch (anchor exempt) and fires 
   assert.equal(rp.firedCount, 0);
   assert.equal(o._restartGate, true, 'the gate stays armed until the relaunch (no dispatch window)');
   const st = o.restartState();
-  assert.deepEqual(st, { pendingCount: 0, since: rp.since, scheduledAfter: anchor.id, scheduledNow: false, gating: [other.id], busyAgents: [], blockedReason: null });
+  assert.deepEqual(st, { pendingCount: 0, since: rp.since, scheduledAfter: anchor.id, scheduledNow: false, gating: [other.id], busyAgents: [], blockedReason: null, waitingReasons: [] });
   assert.ok(pushed.length >= 1, 'restart-state is pushed when it changes');
 });
 
@@ -197,22 +197,30 @@ test('orchestrator: a busy agent holds the fire; restartState exposes who and wh
   assert.equal(up.calls.length, 0, 'busy: not invoked');
   let st = o.restartState();
   assert.deepEqual(st.busyAgents, ['A']);
-  assert.match(st.blockedReason, /waiting for 1 running agent: A/);
+  assert.match(st.blockedReason, /1 agent still running: A/);
+  assert.deepEqual(st.waitingReasons, ['1 agent still running: A']);
   o.procs.clear();
   o.sweepRestart();
   assert.equal(up.calls.length, 1, 'true idle: invoked');
   st = o.restartState();
   assert.equal(st.blockedReason, null);
   assert.deepEqual(st.busyAgents, []);
+  assert.deepEqual(st.waitingReasons, []);
 });
 
-test('orchestrator: restartState says when no schedule is armed', () => {
+test('orchestrator: restartState says when changes are pending but nothing is armed', () => {
   const d = tmp('squad-restart-');
   const { s, o } = setup(d);
+  s.saveSettings({ restartCap: 20 });
   s.bumpRestartPending(); s.bumpRestartPending();
   const st = o.restartState();
   assert.equal(st.pendingCount, 2);
-  assert.match(st.blockedReason, /no schedule armed/);
+  assert.match(st.blockedReason, /not armed — 2 changes pending \(cap 20\)/);
+  assert.deepEqual(st.waitingReasons, [st.blockedReason]);
+  s.scheduleRestart({ now: true });
+  const st2 = o.restartState();
+  assert.equal(st2.blockedReason, null, 'armed and drained: nothing blocks (next sweep fires)');
+  assert.deepEqual(st2.waitingReasons, []);
 });
 
 test('orchestrator: human pill — restartNow fires when idle; cancel disarms and aborts the flow', () => {
