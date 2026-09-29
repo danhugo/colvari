@@ -741,7 +741,23 @@ $('#stop').onclick = async () => { await call('stop'); refresh(); };
 const W = 184, H = 80, SVGNS = 'http://www.w3.org/2000/svg';
 function el(tag, attrs, parent) { const e = document.createElementNS(SVGNS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); parent && parent.appendChild(e); return e; }
 let VP = { x: 20, y: 20, zoom: 1 }, vpTeam = null, vpSave = null, lastEdgeType = 'assign', linkDrag = null;
-const agentColor = (id) => { let h = 0; for (const c of String(id)) h = (h * 31 + c.charCodeAt(0)) >>> 0; return (h % 8) + 1; };
+// Team-tied colour system (t_300e8fd2): the hue belongs to the TEAM (hash of teamId), so a
+// screenshot reads team clustering, not noise; members within a team step toward --agent-mix
+// (80% / 62%) so teammates are distinguishable while staying in the team's hue family.
+const agentColor = (id) => {
+  const n = S.allNodes.find((x) => x.id === id);
+  const key = n && n.teamId ? n.teamId : String(id);
+  let h = 0; for (const c of String(key)) h = (h * 31 + c.charCodeAt(0)) >>> 0; return (h % 8) + 1;
+};
+const agentStep = (id) => {
+  const n = S.allNodes.find((x) => x.id === id);
+  if (!n || !n.teamId) return 0;
+  const i = S.allNodes.filter((x) => x.teamId === n.teamId).findIndex((x) => x.id === id);
+  return i < 0 ? 0 : i % 3;
+};
+const agentVar = (id) => { const s = agentStep(id); return s ? `color-mix(in srgb, var(--agent-${agentColor(id)}) ${s === 1 ? 80 : 62}%, var(--agent-mix))` : `var(--agent-${agentColor(id)})`; };
+// Leads/PMs read as circles vs the member squircle (avatarHtml adds the class).
+const isLeadRole = (role) => /\b(pm|lead|manager|chief|director|head)\b/i.test(String(role || ''));
 const edgeSeed = (e) => { let h = 0; for (const c of String(e.id || '')) h = (h * 31 + c.charCodeAt(0)) >>> 0; return h; };
 const initials = (s) => String(s || '?').split(/\s+/).map((w) => w[0]).join('').slice(0, 2).toUpperCase();
 const nodeLive = (n) => ((S.nstat || {})[n.id] || {}).status || ((S.orch.agents[n.id] || {}).status === 'working' ? 'working' : 'idle');
@@ -884,11 +900,11 @@ function renderGraph() {
   }
   for (const n of nodes) {
     if (n.ghost) { const g = el('g', { class: 'ghost', transform: `translate(${n.x},${n.y})` }, nL); el('rect', { width: W, height: H, rx: 12 }, g); el('text', { x: 14, y: 28, class: 'nname' }, g).textContent = clipText(n.name, 22); el('text', { x: 14, y: 46, class: 'nrole' }, g).textContent = 'in another team'; continue; }
-    const live = nodeLive(n); const ns = (S.nstat || {})[n.id] || {}; const c = agentColor(n.id);
+    const live = nodeLive(n); const ns = (S.nstat || {})[n.id] || {};
     const g = el('g', { class: 'node' + (sel.node === n.id || connectFrom === n.id ? ' sel' : '') + ' st-' + live + (live === 'working' ? ' working' : '') + (rtuFor(n.id) ? ' rtpaused' : ''), transform: `translate(${n.x},${n.y})`, 'data-id': n.id }, nL);
     el('rect', { class: 'card', width: W, height: H, rx: 12 }, g);
-    el('rect', { class: 'stripe', width: 4, height: H - 20, x: 0, y: 10, rx: 2, style: `fill:var(--agent-${c})` }, g);
-    el('circle', { class: 'avatar', cx: 30, cy: 26, r: 14, style: `fill:var(--agent-${c})` }, g);
+    el('rect', { class: 'stripe', width: 4, height: H - 20, x: 0, y: 10, rx: 2, style: `fill:${agentVar(n.id)}` }, g);
+    el('circle', { class: 'avatar', cx: 30, cy: 26, r: 14, style: `fill:${agentVar(n.id)}` }, g);
     el('text', { x: 30, y: 30.5, class: 'avtext', 'text-anchor': 'middle' }, g).textContent = initials(n.name);
     el('text', { x: 52, y: 23, class: 'nname' }, g).textContent = clipText(n.name, Math.max(6, Math.round(16 / Math.max(1, 11 / (13 * VP.zoom)))));
     el('text', { x: 52, y: 38, class: 'nrole' }, g).textContent = clipText(n.role, 20);
@@ -972,7 +988,7 @@ function renderMinimap() {
   if (fits) return;
   const x0 = Math.min(b.x, view.x) - 20, y0 = Math.min(b.y, view.y) - 20, x1 = Math.max(b.x + b.w, view.x + view.w) + 20, y1 = Math.max(b.y + b.h, view.y + view.h) + 20;
   mm.setAttribute('viewBox', `${x0} ${y0} ${x1 - x0} ${y1 - y0}`);
-  for (const n of nodes) el('rect', { x: n.x, y: n.y, width: W, height: H, rx: 12, class: n.ghost ? 'mghost' : 'mnode', style: n.ghost ? '' : `fill:var(--agent-${agentColor(n.id)})` }, mm);
+  for (const n of nodes) el('rect', { x: n.x, y: n.y, width: W, height: H, rx: 12, class: n.ghost ? 'mghost' : 'mnode', style: n.ghost ? '' : `fill:${agentVar(n.id)}` }, mm);
   el('rect', { ...view, width: view.w, height: view.h, class: 'mview' }, mm);
   mm.onmousedown = (ev) => { const go = (e) => { const mr = mm.getBoundingClientRect(); const s = Math.max((x1 - x0) / mr.width, (y1 - y0) / mr.height); const wx = x0 + (e.clientX - mr.left - (mr.width - (x1 - x0) / s) / 2) * s, wy = y0 + (e.clientY - mr.top - (mr.height - (y1 - y0) / s) / 2) * s; VP.x = r.width / 2 - wx * VP.zoom; VP.y = r.height / 2 - wy * VP.zoom; const v = $('#graph > g.viewport'); v && v.setAttribute('transform', `translate(${VP.x},${VP.y}) scale(${VP.zoom})`); };
     go(ev); const up = () => { window.removeEventListener('mousemove', go); window.removeEventListener('mouseup', up); applyVP(); saveVP(); }; window.addEventListener('mousemove', go); window.addEventListener('mouseup', up); };
@@ -2269,11 +2285,11 @@ function renderOverview() {
     el('path', { d: edgeGeom(a, b, off).d, class: `edge edge-${type}` + (hot.has(e.id) ? ' flash' : ''), 'marker-end': `url(#ovarr-${type})` }, svg);
   }
   for (const n of ovNodes) {
-    const live = (S.orch.agents[n.id] || {}).status === 'working' ? 'working' : nodeLive(n); const isStuck = stuck.has(n.id); const c = agentColor(n.id);
+    const live = (S.orch.agents[n.id] || {}).status === 'working' ? 'working' : nodeLive(n); const isStuck = stuck.has(n.id);
     const g = el('g', { class: 'node' + (live === 'working' ? ' working st-working' : '') + (isStuck ? ' stuck' : '') + (rtuFor(n.id) ? ' rtpaused' : ''), transform: `translate(${n.x},${n.y})`, 'data-id': n.id }, svg);
     el('rect', { class: 'card', width: W, height: H, rx: 12 }, g);
-    el('rect', { class: 'stripe', width: 4, height: H - 20, x: 0, y: 10, rx: 2, style: `fill:var(--agent-${c})` }, g);
-    el('circle', { class: 'avatar', cx: 26, cy: 24, r: 13, style: `fill:var(--agent-${c})` }, g);
+    el('rect', { class: 'stripe', width: 4, height: H - 20, x: 0, y: 10, rx: 2, style: `fill:${agentVar(n.id)}` }, g);
+    el('circle', { class: 'avatar', cx: 26, cy: 24, r: 13, style: `fill:${agentVar(n.id)}` }, g);
     el('text', { x: 26, y: 28.5, class: 'avtext', 'text-anchor': 'middle' }, g).textContent = initials(n.name);
     el('text', { x: 47, y: 21, class: 'nname' }, g).textContent = clipText(n.name, 16);
     el('text', { x: 47, y: 36, class: 'nrole' }, g).textContent = isStuck ? '⚠ stuck' : `${clipText(n.role, 14)} · ${live === 'working' ? 'Working' : humanStatus(live)}`;
@@ -2333,11 +2349,11 @@ function renderOverview() {
   if (!t) { head.innerHTML = ''; ts.classList.add('hidden'); }
   else {
     ts.classList.remove('hidden');
-    const as = byId[t.assignee]; const ac = as ? agentColor(as.id) : 0;
-    head.innerHTML = `<div class="ovth-title">${esc(t.title)}</div><div class="ovth-meta"><span class="ovth-status ${esc(t.status)}">${esc(humanStatus(t.status))}</span>${as ? `<span class="ovth-assignee"><span class="ovth-av" style="background:var(--agent-${ac})">${esc(initials(as.name))}</span>${esc(as.name)}</span>` : '<span class="muted">Unassigned</span>'}</div>`;
+    const as = byId[t.assignee];
+    head.innerHTML = `<div class="ovth-title">${esc(t.title)}</div><div class="ovth-meta"><span class="ovth-status ${esc(t.status)}">${esc(humanStatus(t.status))}</span>${as ? `<span class="ovth-assignee"><span class="ovth-av" style="background:${agentVar(as.id)}">${esc(initials(as.name))}</span>${esc(as.name)}</span>` : '<span class="muted">Unassigned</span>'}</div>`;
   }
   function humanStatus(s) { const w = String(s || '').replaceAll('_', ' '); return w.charAt(0).toUpperCase() + w.slice(1); }
-  const ovAvatar = (id) => { const n = byId[id]; return n ? `<span class="ovth-av" style="background:var(--agent-${agentColor(id)})">${esc(initials(n.name))}</span>` : `<span class="ovth-av sys">${id === 'human' ? 'H' : '•'}</span>`; };
+  const ovAvatar = (id) => { const n = byId[id]; return n ? `<span class="ovth-av" style="background:${agentVar(id)}">${esc(initials(n.name))}</span>` : `<span class="ovth-av sys">${id === 'human' ? 'H' : '•'}</span>`; };
   // Collapsible nested block for a subagent's tool activity inside the task thread (native <details>,
   // open state preserved via data-k like the tool chips).
   const ovSubBlock = (it, depth) => {
@@ -2366,7 +2382,7 @@ setInterval(renderOverview, 1000);
 
 // ---------- chat: #company room, task threads, working indicator, composer ----------
 const CH = { thread: null, key: '', mi: 0, asks: [] };
-const who = (id) => { const n = S.allNodes.find((x) => x.id === id); return n ? { name: n.name, role: n.role, color: Chat.avatarColor(n.id), ini: Chat.initials(n.name) } : id === 'human' ? { name: 'You', role: '', color: 'transparent', ini: '', human: true } : { name: id || 'system', role: '', color: '#3a3f4b', ini: '⚙' }; };
+const who = (id) => { const n = S.allNodes.find((x) => x.id === id); return n ? { name: n.name, role: n.role, color: agentVar(n.id), ini: Chat.initials(n.name), lead: isLeadRole(n.role) } : id === 'human' ? { name: 'You', role: '', color: 'transparent', ini: '', human: true } : { name: id || 'system', role: '', color: '#3a3f4b', ini: '⚙' }; };
 function bubble(e) {
   const link = e.taskId && !CH.thread ? ` data-thread="${e.taskId}"` : ''; const tl = link ? `<span class="tlink">↳ ${esc(taskTitle(e.taskId).slice(0, 40))}</span>` : '';
   const rep = e.count > 1 ? `<span class="repeat" title="repeated ${e.count} times">×${e.count}</span>` : '';
@@ -2394,7 +2410,7 @@ function bubble(e) {
 // Collapse repeats moved to Chat.collapseRepeats (pure, unit-tested); merge adjacent same-author groups (no repeated "You" headers); questions stay separate.
 const mergeGroups = (gs) => gs.reduce((out, g) => { const p = out[out.length - 1]; if (p && p.who === g.who && g.items[0].type !== 'question' && p.items[0].type !== 'question') p.items.push(...g.items); else out.push({ ...g, items: [...g.items] }); return out; }, []).map((g) => ({ ...g, items: Chat.collapseRepeats(g.items) }));
 const needsYou = () => new Set([...(S.inbox || []).map((i) => i.nodeId), ...CH.asks]);
-const avatarHtml = (id, working, ask) => { const w = who(id); return `<div class="avatar${w.human ? ' human' : ''}${working.has(id) ? ' working' : ''}${ask.has(id) ? ' ask' : ''}" style="background:${w.color}" title="${esc(w.name)}${working.has(id) ? ' · working' : ask.has(id) ? ' · needs you' : ''}">${esc(w.ini)}</div>`; };
+const avatarHtml = (id, working, ask) => { const w = who(id); return `<div class="avatar${w.lead ? ' is-lead' : ''}${w.human ? ' human' : ''}${working.has(id) ? ' working' : ''}${ask.has(id) ? ' ask' : ''}" style="background:${w.color}" title="${esc(w.name)}${working.has(id) ? ' · working' : ask.has(id) ? ' · needs you' : ''}">${esc(w.ini)}</div>`; };
 // ≥3 consecutive handoffs from one actor fold into one expandable "assigned N tasks" row.
 const bubbleRuns = (items) => { const out = []; for (let i = 0; i < items.length;) { let j = i; while (j < items.length && items[j].type === 'handoff') j++;
   if (j - i >= 3) { const run = items.slice(i, j); out.push(`<details class="evrun"><summary class="evrow"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg><span>assigned ${run.length} tasks</span></summary>${run.map(bubble).join('')}</details>`); i = j; } else { j = Math.max(j, i + 1); out.push(...items.slice(i, j).map(bubble)); i = j; } } return out.join(''); };
@@ -2460,7 +2476,7 @@ function chatPreview() {
   pv.textContent = Chat.preview(p); pv.className = p ? p.kind : 'muted';
   const ms = Chat.mentionMatches(v, S.team.nodes); const box = $('#chat-mentions'); box.classList.toggle('hidden', !ms || !ms.length);
   CH.mi = Math.min(CH.mi, Math.max(0, (ms || []).length - 1));
-  box.innerHTML = (ms || []).map((n, i) => `<div data-name="${esc(n.name)}" class="${i === CH.mi ? 'sel' : ''}"><span class="avatar" style="background:${Chat.avatarColor(n.id)}">${esc(Chat.initials(n.name))}</span>${esc(n.name)} <span class="role">${esc(n.role)}</span></div>`).join('');
+  box.innerHTML = (ms || []).map((n, i) => `<div data-name="${esc(n.name)}" class="${i === CH.mi ? 'sel' : ''}"><span class="avatar${isLeadRole(n.role) ? ' is-lead' : ''}" style="background:${agentVar(n.id)}">${esc(Chat.initials(n.name))}</span>${esc(n.name)} <span class="role">${esc(n.role)}</span></div>`).join('');
   box.querySelectorAll('div').forEach((d) => d.onmousedown = (e) => { e.preventDefault(); pickMention(d.dataset.name); });
 }
 function pickMention(name) { const i = $('#chat-input'); i.value = i.value.replace(/@(\w*)$/, '@' + name + ' '); i.focus(); CH.mi = 0; chatPreview(); }
