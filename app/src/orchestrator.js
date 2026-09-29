@@ -75,6 +75,11 @@ const SCHED = { TICK_MS: 1000 };
 // long-running.
 const WATCH = { LONG_TASK_MIN: 45 };
 
+// Scheduled restarts (plan t_42f310cf item 1): merges only count toward a restart; a schedule
+// (core tool / human pill / cap) arms it. CAP is the safety valve — that many landed changes with
+// no schedule auto-arm a drain-and-restart (overridable via the restartCap setting).
+const RESTART = { CAP: 20 };
+
 function buildPrompt(team, node, task, extra = {}) {
   node = { ...normalizeNode(applyPreset(node, extra.presets)), id: node.id };
   const nm = (id) => { const n = team.nodes.find((x) => x.id === id); return n ? `${n.name} (${n.role}, id=${n.id})` : id; };
@@ -187,6 +192,23 @@ class Orchestrator extends EventEmitter {
     // the digest the core was last woken for (a change wakes, sameness does not); active flips the
     // UI indicator without ticking.
     this.watch = { lastWatchAt: null, lastDigest: '', wokeDigest: null, active: null };
+    // Scheduled restarts (sweepRestart): dispatch gate for the armed schedule, and the last state
+    // pushed on 'restart-state' so the renderer only hears changes. updater is the project's
+    // UpdateWatcher (wired in main.js) — the fire path reuses its drain/test/relaunch flow.
+    this._restartGating = [];
+    this._restartGate = false;
+    this._restartAfter = null;
+    this._restartPushed = null;
+    this._noUpdaterLogged = false;
+    // A fired marker here means the previous process relaunched itself: the schedule did its job.
+    // Consume it now (Cato t_42f310cf #4: cleared only after the new process boots — never before
+    // the restart, or a crash mid-relaunch loses it; never left set, or state reads stale).
+    const bootRp = (store.meta() || {}).restartPending;
+    if (bootRp && bootRp.firedAt) {
+      const n = Number(bootRp.firedCount) || 0;
+      store.clearRestartPending();
+      this.log(null, 'system', `restart: completed after boot — cleared the consumed schedule (${n} change(s) had landed)`);
+    }
     // Stall watchdog state: last seen cumulative CPU time of each run's CLI process (nodeId -> {pid, cpuMs}),
     // and the pending SIGKILL grace timers for stalled runs that ignore SIGTERM.
     this._stallCpu = new Map();
@@ -856,6 +878,105 @@ class Orchestrator extends EventEmitter {
     return { lastWatchAt: st.lastWatchAt ? new Date(st.lastWatchAt).toISOString() : null, active: !!st.active, digest: st.lastDigest || '', intervalMin };
   }
 
+  // ---- scheduled restarts (plan t_42f310cf item 1) ----
+  // UI state (getRestartState / 'restart-state' push, Uma's contract t_5a1661d5): how many landed
+  // changes wait, the armed schedule, and the not-yet-started tasks the gate is holding.
+  restartState() {
+    const rp = (this.store.meta() || {}).restartPending || {};
+    return {
+      pendingCount: Math.max(0, Number(rp.count) || 0),
+      since: rp.since || null,
+      scheduledAfter: rp.afterTaskId || null,
+      scheduledNow: !!rp.scheduledNow,
+      gating: this._restartGating || [],
+    };
+  }
+  _pushRestartState() {
+    const k = JSON.stringify(this.restartState());
+    if (k === this._restartPushed) return;
+    this._restartPushed = k;
+    this.emit('restart-state', this.restartState());
+  }
+
+  // Per tick: cap auto-schedule, anchor failover, dispatch gating, and the fire itself. Eligible
+  // means armed with {now} or a done anchor, every agent drained, and the updater idle. The actual
+  // relaunch is the UpdateWatcher's flow (drain grace with halt, tests on the target sha,
+  // relaunch, boot resume). The gate STAYS on after firing — the one-second tick window before the
+  // watcher pauses dispatch must not start new work; boot-clear releases it after the relaunch.
+  sweepRestart() {
+    let rp = (this.store.meta() || {}).restartPending;
+    const scheduled = !!rp && !!(rp.scheduledNow || rp.afterTaskId);
+    const armed = scheduled && !rp.firedAt;
+    const tasks = this.store.listTasks();
+    const after = scheduled && rp.afterTaskId ? tasks.find((t) => t.id === rp.afterTaskId) : null;
+    if (rp && !scheduled) {
+      // Cap safety (while nothing is armed yet): too many landed changes auto-arm a
+      // drain-and-restart and tell the core once per crossing (re-notify only if the count moved).
+      const cap = Math.max(1, Number(this.store.getSettings().restartCap) || RESTART.CAP);
+      if (Number(rp.count) >= cap && Number(rp.capNotifiedCount || -1) !== Number(rp.count)) {
+        this.store.setRestartPending({ scheduledNow: true, capNotifiedCount: Number(rp.count) });
+        const core = IDLE.coreNode(this.store.getTeam());
+        if (core) this.store.sendMessage({ from: 'system', to: core.id, text: `${rp.count} merged changes are pending a restart (cap ${cap}); a restart is now scheduled for once agents drain. Reschedule with schedule_restart if this timing is wrong.` });
+        this.log(null, 'system', `restart: ${rp.count} pending changes hit the cap (${cap}); auto-scheduled a restart once agents drain`);
+        rp = (this.store.meta() || {}).restartPending;
+      }
+    }
+    if (armed) {
+      // Anchor failover: a deleted anchor can never complete — fall back to drain-and-restart.
+      if (rp.afterTaskId && !tasks.some((t) => t.id === rp.afterTaskId)) {
+        this.store.setRestartPending({ scheduledNow: true });
+        this.log(null, 'system', `restart: anchor task ${rp.afterTaskId} no longer exists; restarting once agents drain`);
+        rp = (this.store.meta() || {}).restartPending;
+      }
+    }
+    // Gate: while a schedule is armed (or fired), no NEW task starts (reviews included); the anchor
+    // itself is exempt — it must run to completion for the restart to become due.
+    this._restartGate = scheduled;
+    this._restartAfter = scheduled ? rp.afterTaskId : null;
+    this._restartGating = scheduled ? tasks.filter((t) => t.status === 'todo' && t.id !== rp.afterTaskId).map((t) => t.id) : [];
+    const eligible = armed && (rp.scheduledNow || (after && after.status === 'done'));
+    if (eligible && this.procs.size === 0 && (!this.updater || this.updater.phase === 'idle')) {
+      this._fireRestart(rp.scheduledNow ? 'scheduled restart (now)' : `anchor ${rp.afterTaskId} done`);
+    }
+    this._pushRestartState();
+  }
+
+  _fireRestart(why) {
+    if (!this.updater || typeof this.updater.restartScheduled !== 'function') {
+      // No watcher (tests, or a non-dev build with nothing able to relaunch): keep the schedule
+      // armed instead of consuming it into a restart that can never happen.
+      if (!this._noUpdaterLogged) { this._noUpdaterLogged = true; this.log(null, 'system', 'restart: self-update is unavailable here; the schedule stays armed'); }
+      return;
+    }
+    const rp = this.store.setRestartPending({ firedAt: new Date().toISOString(), firedCount: Number(((this.store.meta() || {}).restartPending || {}).count) || 0 });
+    this.log(null, 'system', `restart: ${why} — ${rp.firedCount} change(s) landed since the last restart; agents drain, tests run, then the app relaunches`);
+    this.updater.restartScheduled(why);
+    this._pushRestartState();
+  }
+
+  // Human escape hatch (Uma's pill, Cato t_42f310cf #7): arm a restart-now — in-flight tasks
+  // finish, then the watcher's flow takes over. Works while stopped too (no tick loop then): an
+  // idle board fires immediately; a board with lingering procs fires from the next start()'s tick.
+  restartNow() {
+    this.store.setRestartPending({ scheduledNow: true });
+    this.log(null, 'system', 'restart: manual restart armed — in-flight tasks finish first');
+    if (this.running) this.sweepRestart();
+    else if (this.procs.size === 0) this._fireRestart('manual restart');
+    this._pushRestartState();
+  }
+
+  // Cancel the armed schedule (the pending count stays). A restart flow already in flight is
+  // aborted too — cancel must stop the veil, not only the future schedule.
+  cancelRestart() {
+    const rp = (this.store.meta() || {}).restartPending || {};
+    if (rp.scheduledNow || rp.afterTaskId) {
+      this.store.setRestartPending({ scheduledNow: false, afterTaskId: null, firedAt: null, firedCount: null });
+      this.log(null, 'system', 'restart: schedule cancelled — landed changes stay pending');
+    }
+    if (this.updater && typeof this.updater.cancel === 'function') this.updater.cancel();
+    this._pushRestartState();
+  }
+
   // Tasks left in review that never got picked back up (their reviewer's process crashed/exited, or
   // the run stopped mid-way) are dispatched to their reviewer. With no reviewer configured for the
   // assignee the task STAYS in review: done requires reviewer/owner verification (t_699b67b7), so the
@@ -901,6 +1022,7 @@ class Orchestrator extends EventEmitter {
     const readyReview = reviewReady.filter(({ task, node }) => !C.isBlocked(task, all) && !this.agent(node.id).budgetStop && !paused(node));
     // Highest priority first (P0..P3); stable sort, so same-priority tasks keep arrival order.
     const ready = [...readyTodo, ...readyReview].sort((a, b) => C.priorityRank(a.task) - C.priorityRank(b.task));
+    try { this.sweepRestart(); } catch (e) { this.log(null, 'error', 'restart sweep: ' + e.message); }
     // Dispatch decisions (t_9e4b4805): a ready task that cannot start logs WHY, once per (task,
     // reason) — the sweep ticks every second, so a repeated identical wait must not churn the log;
     // the entry clears when the task finally dispatches.
@@ -913,6 +1035,7 @@ class Orchestrator extends EventEmitter {
     for (const { task, node } of ready) {
       if (s.maxConcurrency > 0 && this.procs.size >= s.maxConcurrency) { holdLog(task, node, `maxConcurrency (${s.maxConcurrency}) slots in use`); break; } // 0 = unlimited
       if (this.procs.has(node.id)) { holdLog(task, node, `${node.name} already has a live run (single run per agent)`); continue; }
+      if (this._restartGate && task.id !== this._restartAfter) { holdLog(task, node, `restart scheduled${this._restartAfter ? ` after ${this._restartAfter}` : ''}: new work waits`); continue; }
       if (this.runs >= s.maxRuns) { this.log(null, 'system', `maxRuns (${s.maxRuns}) reached`); break; }
       this._dispatchHoldLog?.delete(task.id);
       this.runTask(node, task, team, s).catch((e) => this.log(node.id, 'error', 'agent run crashed: ' + e.message));
@@ -1439,4 +1562,4 @@ class Orchestrator extends EventEmitter {
     }
   }
 }
-module.exports = { Orchestrator, buildPrompt, humanPrompt, wakePrompt, stallPrompt, attachedFilesLines, WAKE, WATCH, STALL, SCHED, autoCompactEnv };
+module.exports = { Orchestrator, buildPrompt, humanPrompt, wakePrompt, stallPrompt, attachedFilesLines, WAKE, WATCH, STALL, SCHED, RESTART, autoCompactEnv };

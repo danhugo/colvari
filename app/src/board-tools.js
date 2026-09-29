@@ -198,6 +198,19 @@ function makeTools(store, nodeId) {
       fs.writeFileSync(SU.requestFile(store.dir), JSON.stringify({ reason: String(reason || '').slice(0, 500), from: nodeId, ts: new Date().toISOString() }));
       return { requested: true, note: 'Picked up on the next watcher poll if auto-restart is on; the result appears in the activity feed.' };
     },
+    // PM-only (the protected core agent; enforced by caller role here, not by prompt omission —
+    // Cato t_42f310cf #3): arm a restart, after a given task completes or once agents drain.
+    // Merges never restart the app on their own — they only count toward the pending total the
+    // cap watches. afterTaskId is validated in the store (a task that may never finish is refused).
+    schedule_restart({ afterTaskId = null, now = false, reason = '' } = {}) {
+      const t = me();
+      const n = t.nodes.find((x) => x.id === nodeId);
+      if (!n || String(n.role).toLowerCase() !== 'pm') throw new Error('scope violation: schedule_restart is PM-only (the protected core agent)');
+      const rp = store.scheduleRestart({ afterTaskId, now });
+      const what = now ? 'restart once agents drain' : `restart after ${afterTaskId}`;
+      announce(`scheduled ${what} — ${Number(rp.count) || 0} change(s) pending${String(reason || '').trim() ? ` — ${String(reason).trim()}` : ''}`);
+      return { scheduled: true, pendingCount: Number(rp.count) || 0, scheduledAfter: rp.afterTaskId || null, scheduledNow: !!rp.scheduledNow };
+    },
     recruit_agent({ name, role, prompt, runtime, model, effort, reason = '' } = {}) {
       if (!String(name || '').trim()) throw new Error('name required');
       if (!String(role || '').trim()) throw new Error('role required');

@@ -164,6 +164,67 @@ class Store {
     return this.withLock(() => { const d = this.read(name, dflt); const r = fn(d); this.write(name, d); return r; });
   }
 
+  // ---- scheduled restarts (plan t_42f310cf item 1) ----
+  // Merges only bump the pending counter; a restart happens solely through an armed schedule
+  // (schedule_restart tool, human pill, or the cap). The state lives in project.json so it
+  // survives relaunches and is writable from every process that holds the store.
+  restartPending() { return (this.meta() || {}).restartPending || null; }
+  // withLock + explicit read/write (not update('project', null, fn)): a fresh project has no
+  // project.json yet, and update() writes the object it read — a null dflt would clobber the file.
+  setRestartPending(patch) {
+    return this.withLock(() => {
+      const m = this.read('project', null) || {};
+      m.restartPending = { ...(m.restartPending || { count: 0 }), ...patch };
+      this.write('project', m);
+      return m.restartPending;
+    });
+  }
+  // One more landed merge waits for the next restart. `since` anchors the first change that the
+  // running process has not picked up yet.
+  bumpRestartPending() {
+    return this.withLock(() => {
+      const m = this.read('project', null) || {};
+      const rp = m.restartPending || {};
+      m.restartPending = { ...rp, count: (Number(rp.count) || 0) + 1, since: rp.since || new Date().toISOString() };
+      this.write('project', m);
+      return m.restartPending;
+    });
+  }
+  // Consumed by the orchestrator AFTER the relaunch (a fired marker proves the new process booted):
+  // clearing before the restart would lose the schedule if the relaunch crashed; never clearing
+  // would restart-loop.
+  clearRestartPending() {
+    return this.withLock(() => {
+      const m = this.read('project', null);
+      const rp = (m && m.restartPending) || null;
+      if (m) { delete m.restartPending; this.write('project', m); }
+      return rp;
+    });
+  }
+  // Arm a restart. afterTaskId must reference a task that can actually finish: already-done is
+  // fine (eligible immediately), but waiting_for_human or a blocked todo may stall forever, so
+  // those are rejected at schedule time (Cato t_42f310cf #2).
+  scheduleRestart({ afterTaskId = null, now = false } = {}) {
+    if (!afterTaskId && !now) throw new Error('nothing requested: pass {afterTaskId} or {now:true}');
+    if (afterTaskId && now) throw new Error('pass afterTaskId or now:true, not both');
+    return this.withLock(() => {
+      if (afterTaskId) {
+        const t = this._readTaskFile(afterTaskId + '.json');
+        if (!t) throw new Error('unknown afterTaskId ' + afterTaskId);
+        if (t.status === 'waiting_for_human') throw new Error(`afterTaskId ${afterTaskId} is waiting_for_human and may never finish; resolve it first or schedule {now:true}`);
+        if (t.status === 'todo' && C.isBlocked(t, this.listTasks())) throw new Error(`afterTaskId ${afterTaskId} is blocked by unfinished dependencies; pick a reachable task or schedule {now:true}`);
+      }
+      const m = this.read('project', null) || {};
+      const rp = m.restartPending || { count: 0 };
+      if (afterTaskId) rp.afterTaskId = afterTaskId;
+      if (now) rp.scheduledNow = true;
+      if (!rp.since) rp.since = new Date().toISOString();
+      m.restartPending = rp;
+      this.write('project', m);
+      return rp;
+    });
+  }
+
   // ---- board/wiki file layout (.squad/) ----
   // tmp is created in the TARGET directory (rename is only atomic within one filesystem) and
   // fsynced before rename, so a crash never leaves a truncated file at the real path.
@@ -470,6 +531,9 @@ class Store {
         this.commentTask(t.id, 'system', WT.dirtyMergeMessage(r.dirty));
         return this.getTask(t.id);
       }
+      // A landed merge no longer restarts the app; it only counts toward the next scheduled one
+      // (conflicts/refusals are not landed work — the count covers merges that actually merged).
+      if (r.merged) this.bumpRestartPending();
       this.commentTask(t.id, 'system', r.merged ? `auto-merged ${t.worktreeBranch} into base` : `nothing merged: no commits on ${t.worktreeBranch} ahead of ${r.base}`);
       return this.getTask(t.id);
     } catch (e) {

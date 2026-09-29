@@ -8,4 +8,6 @@ contextBridge.exposeInMainWorld('squad', {
   on: (ch, fn) => ipcRenderer.on(ch, (_e, d) => fn(d)),
   // Core-agent watch (plan t_42f310cf item 2): direct helper for the 'watch-status' push channel.
   onWatchStatus: (fn) => ipcRenderer.on('watch-status', (_e, d) => fn(d)),
+  // Scheduled restarts (plan t_42f310cf item 1): direct helper for the 'restart-state' push channel.
+  onRestartState: (fn) => ipcRenderer.on('restart-state', (_e, d) => fn(d)),
 });
