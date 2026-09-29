@@ -862,12 +862,12 @@ function renderGraph() {
     const type = e.type || 'assign'; const cross = !!(e.crossTeam || a.ghost || b.ghost); const g = edgeGeom(a, b, off, blocks, edgeSeed(e));
     const isSel = sel.edge === e.id;
     const L = cross ? xL : eL; const hit = el('path', { d: g.d, class: 'edgehit' }, L);
-    const ep = el('path', { d: g.d, class: `edge edge-${type}` + (cross ? ' cross' : '') + (isSel ? ' sel' : ''), 'marker-end': `url(#arr-${isSel ? 'sel' : type})`, 'data-id': e.id }, L);
+    const ep = el('path', { d: g.d, class: `edge edge-${type}` + (type === 'assign' ? ' primary' : ' secondary') + (byId[e.to] && nodeLive(byId[e.to]) === 'working' && !byId[e.to].ghost ? ' active' : '') + (cross ? ' cross' : '') + (isSel ? ' sel' : ''), 'marker-end': `url(#arr-${isSel ? 'sel' : type})`, 'data-id': e.id }, L);
     // Label pill at the curve midpoint, nudged along the normal until it clears nodes and other pills.
     // At far zoom (lod-far, <0.6) every pill is one more strand in the tangle — the edge colour and the
     // legend already carry the type, so pills drop out unless the edge is selected (t_1c907493).
     const pick = (ev) => { ev.stopPropagation(); hideMenus(); sel = { ...sel, edge: e.id, node: null }; renderGraph(); renderNodeForm(); };
-    const pg = VP.zoom >= 0.6 || isSel ? (() => {
+    const pg = isSel ? (() => { // label pills only for the selected edge: colour + legend carry the type, hover reveals the rest
       const label = type + (cross ? ' · cross-team' : ''); const pw = 10 + label.length * 5.8, ph = 16;
       let [px, py] = g.mid; for (let s = 0, r = { x: px - pw / 2, y: py - ph / 2, w: pw, h: ph }; s < 12 && [...blocks, ...pills].some((q) => overlaps(r, q)); s++) { const d = (s % 2 ? -1 : 1) * Math.ceil((s + 1) / 2) * 12; px = g.mid[0] + g.n[0] * d; py = g.mid[1] + g.n[1] * d; r = { x: px - pw / 2, y: py - ph / 2, w: pw, h: ph }; }
       pills.push({ x: px - pw / 2, y: py - ph / 2, w: pw, h: ph });
@@ -950,6 +950,8 @@ function renderGraph() {
     });
     const h = el('circle', { class: 'handle', cx: W, cy: H / 2, r: 6 }, g); el('title', {}, h).textContent = 'Drag to connect';
     h.onmousedown = (ev) => startLink(ev, n);
+    const hl = (on) => { svg.classList.toggle('focusing', on); for (const it of edgeLayout.per) if (it.a === n || it.b === n) it.path.classList.toggle('hl', on); g.classList.toggle('hl', on); };
+    g.onmouseenter = () => hl(true); g.onmouseleave = () => hl(false);
     g.onmousedown = (ev) => { if (ev.button === 0) startDrag(ev, n, g); else if (ev.button === 2) { ev.stopPropagation(); selectNode(n.id); nodeMenu(ev, n); } };
     g.oncontextmenu = (ev) => { ev.preventDefault(); ev.stopPropagation(); if ($('#ctxmenu').classList.contains('hidden')) { selectNode(n.id); nodeMenu(ev, n); } };
   }
