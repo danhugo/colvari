@@ -17,6 +17,18 @@ test('team nodes and edges', () => {
   assert.deepEqual(s.getTeam().edges, []);
 });
 
+test('new nodes without coordinates get a free position (no stacking)', () => {
+  const s = tmp();
+  const a = s.addNode({ name: 'Brand Designer', role: 'Dev' });
+  const b = s.addNode({ name: 'UI Dev', role: 'Dev' });
+  assert.notDeepEqual([a.x, a.y], [b.x, b.y]);
+  assert.ok(Math.abs(a.x - b.x) >= 200 || Math.abs(a.y - b.y) >= 110, 'node cards must not overlap');
+  const seed = s.addNode({ name: 'Pinned', role: 'PM', x: 80, y: 80 });
+  assert.deepEqual([seed.x, seed.y], [80, 80]); // explicit x/y is kept
+  const next = s.addNode({ name: 'Next', role: 'Dev' });
+  assert.ok(Math.abs(next.x - seed.x) >= 200 || Math.abs(next.y - seed.y) >= 110, 'placed nodes are skipped');
+});
+
 test('board tasks: create, status, comment, persistence', () => {
   const s = tmp();
   const t = s.createTask({ title: 'Goal', assignee: 'n1' });
