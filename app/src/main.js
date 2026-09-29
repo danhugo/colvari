@@ -1159,6 +1159,25 @@ async function guiE2E() {
     await shot('wake-board-cleared');
     console.log('[gui-e2e] wake', JSON.stringify({ board, team, ov, off }));
   };
+  // Monitor log lines (t_43243765, plan t_a4ceb629/C): the core's watchdog decisions render as
+  // accent "Monitor" rows — badge + action — reason with plain taskIds; a line persisted without
+  // the structured fields falls back to its raw text.
+  const monitorShots = async () => {
+    await waitFor(`return !!document.querySelector('#tpl-select option')`); await ex(`await refresh();`);
+    const cur = await ex(`return { p: ctx.p, t: S.teamId }`);
+    const ps = pm.store(cur.p || pid(), cur.t); let nodes = ps.getTeam().nodes;
+    if (!nodes.length) { ps.addNode({ name: 'Root', role: 'PM', x: 60, y: 60 }); nodes = ps.getTeam().nodes; }
+    const core = nodes[0];
+    await ex(`$('#tabs button[data-tab=obs]').click(); await refresh(); await w(300);`);
+    await ex(`logs.push({ projectId: ctx.p, nodeId: '${core.id}', kind: 'monitor', text: 'woke the core', reason: '2 open tasks with all agents idle', taskIds: ['t_1','t_2'], action: 'woke core', at: Date.now() - 1000 });
+      logs.push({ projectId: ctx.p, nodeId: '${core.id}', kind: 'monitor', text: 'legacy monitor line without fields', at: Date.now() - 500 });
+      renderLog(); await w(300);`);
+    const rows = await ex(`return [...document.querySelectorAll('#log .logrow.lv-monitor')].map((r) => ({ badge: r.querySelector('.loglevel').textContent, text: r.querySelector('.logtext').textContent }))`);
+    expect('monitor: badge + action — reason with plain taskIds', rows[0] && rows[0].badge === 'Monitor' && rows[0].text === 'woke core — 2 open tasks with all agents idle (t_1, t_2)', rows);
+    expect('monitor: line without structured fields falls back to raw text', rows[1] && rows[1].badge === 'Monitor' && rows[1].text === 'legacy monitor line without fields', rows);
+    await shot('monitor-log');
+    console.log('[gui-e2e] monitorlog', JSON.stringify(rows));
+  };
   // Wake run on an agent that ALSO has an in_progress task (t_8af586bc) — the case that used to
   // render bare "working": the backend keeps a.taskId null for the whole wake, so the old
   // wakeRun() veto on any in_progress task hid the wake info everywhere. Same seeded activity
@@ -1512,6 +1531,7 @@ async function guiE2E() {
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'critique') { await critiqueShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'wake') { await wakeShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'wakebusy') { await wakeBusyShots(); throw null; }
+    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'monitorlog') { await monitorShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'subagents') { await subagentShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'dynamicteam') { await dynamicTeamShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'recruitinbox') { await recruitInboxShots(); throw null; }
