@@ -29,7 +29,7 @@
   /* colour — light (warm paper) */
   --bg-app: #f6f4ef; --bg-sidebar: #efede6; --bg-surface: #fffefb; --bg-raised: #ffffff; --bg-hover: #ebe8e0; --bg-active: #dff0eb;
   --bg-bubble: #fffefb; --bg-bubble-self: #0e7d70; --bg-code: #f2efe8;
-  --fg-primary: #1c1b18; --fg-secondary: #47453f; --fg-muted: #6d6a61; --fg-on-accent: #ffffff;
+  --fg-primary: #1c1b18; --fg-secondary: #47453f; --fg-muted: #67645b; --fg-on-accent: #ffffff;
   --border: #e5e2d9; --border-strong: #d3cfc3;
   --accent: #0e7d70; --accent-soft: #dcf0ea; --accent-text: #0a6156; --accent-deep: #0a5a50;
   --success: #257a4d; --success-soft: #def0e4; --warning: #c98a00; --warning-soft: #f8ebcc; --danger: #c73e32; --danger-soft: #f8e0da; --info: #33619e;
