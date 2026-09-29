@@ -244,14 +244,14 @@ async function guiE2E() {
     // (b) the Dev asks the human; badge, Inbox item, answer through the UI.
     let q = null; for (let i = 0; i < 150 && !q; i++) { await new Promise((r) => setTimeout(r, 2000)); q = fstore.listInbox({ status: 'open' }).find((x) => x.kind === 'question'); }
     const ib = { asked: !!q, question: q && q.question, choices: q && q.choices, taskStatus: q && q.taskId && fstore.getTask(q.taskId).status };
-    ib.badge = await ex(`await refresh(); return $('#inbox-badge').textContent`);
+    ib.badge = await ex(`await refresh(); return $('#inbox-tab-badge').textContent`);
     await ex(`$('#tabs button[data-tab=inbox]').click(); await w(400);`); await shot('15-inbox-question');
     ib.clicked = await ex(`const b = [...document.querySelectorAll('.ib-choice')].find((x) => x.dataset.v === 'blue'); if (!b) return false; b.click(); await w(800); return true;`);
     ib.statusAfterAnswer = q && q.taskId && fstore.getTask(q.taskId).status; ib.answer = q && fstore.getInboxItem(q.id).answer;
     await shot('15-inbox-answered');
     for (let i = 0; i < 150; i++) { await new Promise((r) => setTimeout(r, 2000)); if (!forch.running) break; }
     ib.color = fs.existsSync(path.join(work, 'color.txt')) ? fs.readFileSync(path.join(work, 'color.txt'), 'utf8').trim() : null;
-    ib.badgeAfter = await ex(`await refresh(); return $('#inbox-badge').textContent`);
+    ib.badgeAfter = await ex(`await refresh(); return $('#inbox-tab-badge').textContent`);
     // (c) an approval request (requireApproval puts finished tasks in review + awaitingApproval) shows in the Inbox.
     const at = fstore.createTask({ title: 'Ship first run', assignee: dev.id }); fstore.updateTask(at.id, { status: 'review', awaitingApproval: true });
     ib.approvalShown = await ex(`await refresh(); await w(300); return [...document.querySelectorAll('.inboxitem')].some((d) => d.textContent.includes('Ship first run') && d.querySelector('.ib-choice[data-v=approve]'))`);
@@ -1339,7 +1339,7 @@ async function guiE2E() {
     const req1 = tools.recruit_agent({ name: 'Rookie', role: 'Dev', reason: 'e2e: an extra pair of hands for the goal' });
     const item1 = openItem(/Rookie/);
     await ex(`await refresh(); await w(300); $('#tabs button[data-tab=inbox]').click(); await w(400);`);
-    const asked = { pending: !!req1.pending, item: !!item1, badge: await ex(`return $('#inbox-badge').textContent`), parked: ts.getTask(task.id).status, nodes: ts.getTeam().nodes.length };
+    const asked = { pending: !!req1.pending, item: !!item1, badge: await ex(`return $('#inbox-tab-badge').textContent`), parked: ts.getTask(task.id).status, nodes: ts.getTeam().nodes.length };
     expect('recruit ask: pending result, open item, badge 1, task parked, no node yet', asked.pending && asked.item && asked.badge === '1' && asked.parked === 'waiting_for_human' && asked.nodes === nodesBefore, asked);
     await shot('41-recruitinbox-request');
     // (b) Approve in the Inbox: the node joins the graph live — marker proves no reload happened.
@@ -1352,7 +1352,7 @@ async function guiE2E() {
       dom: await ex(`return { nodes: document.querySelectorAll('#graph .node').length, rookie: [...document.querySelectorAll('#graph .node')].some((n) => n.textContent.includes('Rookie')) }`),
       createdBy: rookie.createdBy || null, edges: ts.getTeam().edges.filter((e) => (e.from === corey.id && e.to === rookie.id) || (e.from === rookie.id && e.to === corey.id)).map((e) => e.type).sort(),
       itemClosed: !!item1 && proj.getInboxItem(item1.id).status !== 'open',
-      badgeAfter: await ex(`await refresh(); $('#tabs button[data-tab=inbox]').click(); await w(300); return $('#inbox-badge').textContent`),
+      badgeAfter: await ex(`await refresh(); $('#tabs button[data-tab=inbox]').click(); await w(300); return $('#inbox-tab-badge').textContent`),
       task: ts.getTask(task.id).status,
       toldCore: proj.listMessages({ to: corey.id }).some((m) => /Rookie/.test(m.text)),
     };
@@ -1371,7 +1371,7 @@ async function guiE2E() {
     const declined = {
       pending: !!req2.pending, answered: it2 ? it2.status === 'answered' && it2.answer : null,
       nodes: ts.getTeam().nodes.length, task: ts.getTask(task.id).status,
-      badge: await ex(`return $('#inbox-badge').textContent`),
+      badge: await ex(`return $('#inbox-tab-badge').textContent`),
       toldCore: proj.listMessages({ to: corey.id }).some((m) => /Nova/.test(m.text)),
     };
     expect('recruit declined: no node, item answered, badge 0, task back, core told',

@@ -371,8 +371,6 @@ function renderSidebar() {
   sidebarSig = sig;
   $('#projectlist').innerHTML = P.projects.map((p) => `<div data-pid="${p.id}" class="${p.id === ctx.p ? 'sel' : ''}">${esc(p.name)}${p.running ? '<span class="dot" title="running"></span>' : ''}</div>`).join('');
   $('#teamlist').innerHTML = teams.map((t) => `<div data-tid="${t.id}" class="${t.id === ctx.t ? 'sel' : ''}">${esc(t.name)}</div>`).join('');
-  const ts = $('#tpl-select'); const cur = ts.value;
-  ts.innerHTML = Object.entries(P.templates).map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join(''); if (cur) ts.value = cur;
 }
 function switchTo(c) {
   if (c.p !== ctx.p) { sel = { node: null, edge: null, task: null, page: null, logTeam: '' }; wikiEdit = false; $('#wk-title').value = ''; $('#wk-content').value = ''; }
@@ -752,15 +750,22 @@ function renderGraph() {
     const isSel = sel.edge === e.id;
     const L = cross ? xL : eL; const hit = el('path', { d: g.d, class: 'edgehit' }, L);
     const ep = el('path', { d: g.d, class: `edge edge-${type}` + (cross ? ' cross' : '') + (isSel ? ' sel' : ''), 'marker-end': `url(#arr-${isSel ? 'sel' : type})`, 'data-id': e.id }, L);
-    // label pill at the curve midpoint, nudged along the normal until it clears nodes and other pills
-    const label = type + (cross ? ' · cross-team' : ''); const pw = 10 + label.length * 5.8, ph = 16;
-    let [px, py] = g.mid; for (let s = 0, r = { x: px - pw / 2, y: py - ph / 2, w: pw, h: ph }; s < 12 && [...blocks, ...pills].some((q) => overlaps(r, q)); s++) { const d = (s % 2 ? -1 : 1) * Math.ceil((s + 1) / 2) * 12; px = g.mid[0] + g.n[0] * d; py = g.mid[1] + g.n[1] * d; r = { x: px - pw / 2, y: py - ph / 2, w: pw, h: ph }; }
-    pills.push({ x: px - pw / 2, y: py - ph / 2, w: pw, h: ph });
-    const pg = el('g', { class: `epill epill-${type}` + (isSel ? ' sel' : ''), transform: `translate(${px - pw / 2},${py - ph / 2})` }, lL);
-    el('rect', { width: pw, height: ph, rx: ph / 2 }, pg); el('text', { x: pw / 2, y: 11.5, 'text-anchor': 'middle' }, pg).textContent = label;
-    edgeLayout.per.push({ e, a, b, off, geo: g, pw, ph, hit, path: ep, pill: pg });
+    // Label pill at the curve midpoint, nudged along the normal until it clears nodes and other pills.
+    // At far zoom (lod-far, <0.6) every pill is one more strand in the tangle — the edge colour and the
+    // legend already carry the type, so pills drop out unless the edge is selected (t_1c907493).
     const pick = (ev) => { ev.stopPropagation(); hideMenus(); sel = { ...sel, edge: e.id, node: null }; renderGraph(); renderNodeForm(); };
-    hit.onclick = pick; pg.onclick = pick; hit.oncontextmenu = pg.oncontextmenu = (ev) => { pick(ev); ev.preventDefault(); edgeMenu(ev, e); };
+    const pg = VP.zoom >= 0.6 || isSel ? (() => {
+      const label = type + (cross ? ' · cross-team' : ''); const pw = 10 + label.length * 5.8, ph = 16;
+      let [px, py] = g.mid; for (let s = 0, r = { x: px - pw / 2, y: py - ph / 2, w: pw, h: ph }; s < 12 && [...blocks, ...pills].some((q) => overlaps(r, q)); s++) { const d = (s % 2 ? -1 : 1) * Math.ceil((s + 1) / 2) * 12; px = g.mid[0] + g.n[0] * d; py = g.mid[1] + g.n[1] * d; r = { x: px - pw / 2, y: py - ph / 2, w: pw, h: ph }; }
+      pills.push({ x: px - pw / 2, y: py - ph / 2, w: pw, h: ph });
+      const pg = el('g', { class: `epill epill-${type}` + (isSel ? ' sel' : ''), transform: `translate(${px - pw / 2},${py - ph / 2})` }, lL);
+      el('rect', { width: pw, height: ph, rx: ph / 2 }, pg); el('text', { x: pw / 2, y: 11.5, 'text-anchor': 'middle' }, pg).textContent = label;
+      return pg;
+    })() : null;
+    edgeLayout.per.push({ e, a, b, off, geo: g, pw: 0, ph: 0, hit, path: ep, pill: pg });
+    hit.onclick = pick; if (pg) pg.onclick = pick;
+    hit.oncontextmenu = (ev) => { pick(ev); ev.preventDefault(); edgeMenu(ev, e); };
+    if (pg) pg.oncontextmenu = hit.oncontextmenu;
   }
   for (const n of nodes) {
     if (n.ghost) { const g = el('g', { class: 'ghost', transform: `translate(${n.x},${n.y})` }, nL); el('rect', { width: W, height: H, rx: 12 }, g); el('text', { x: 14, y: 28, class: 'nname' }, g).textContent = clipText(n.name, 22); el('text', { x: 14, y: 46, class: 'nrole' }, g).textContent = 'in another team'; continue; }
@@ -933,10 +938,12 @@ function dragEdges(n) {
   const pills = [];
   for (const it of edgeLayout.per) {
     it.geo = edgeGeom(it.a, it.b, it.off, edgeLayout.blocks, edgeSeed(it.e));
-    let [px, py] = it.geo.mid; for (let s = 0, r = { x: px - it.pw / 2, y: py - it.ph / 2, w: it.pw, h: it.ph }; s < 12 && [...edgeLayout.blocks, ...pills].some((q) => overlaps(r, q)); s++) { const d = (s % 2 ? -1 : 1) * Math.ceil((s + 1) / 2) * 12; px = it.geo.mid[0] + it.geo.n[0] * d; py = it.geo.mid[1] + it.geo.n[1] * d; r = { x: px - it.pw / 2, y: py - it.ph / 2, w: it.pw, h: it.ph }; }
-    pills.push({ x: px - it.pw / 2, y: py - it.ph / 2, w: it.pw, h: it.ph });
+    if (it.pill) {
+      let [px, py] = it.geo.mid; for (let s = 0, r = { x: px - it.pw / 2, y: py - it.ph / 2, w: it.pw, h: it.ph }; s < 12 && [...edgeLayout.blocks, ...pills].some((q) => overlaps(r, q)); s++) { const d = (s % 2 ? -1 : 1) * Math.ceil((s + 1) / 2) * 12; px = it.geo.mid[0] + it.geo.n[0] * d; py = it.geo.mid[1] + it.geo.n[1] * d; r = { x: px - it.pw / 2, y: py - it.ph / 2, w: it.pw, h: it.ph }; }
+      pills.push({ x: px - it.pw / 2, y: py - it.ph / 2, w: it.pw, h: it.ph });
+      it.pill.setAttribute('transform', `translate(${px - it.pw / 2},${py - it.ph / 2})`);
+    }
     it.hit.setAttribute('d', it.geo.d); it.path.setAttribute('d', it.geo.d);
-    it.pill.setAttribute('transform', `translate(${px - it.pw / 2},${py - it.ph / 2})`);
   }
 }
 function startDrag(ev, n, g) {
@@ -1218,6 +1225,9 @@ const PRIORITIES = ['P0', 'P1', 'P2', 'P3'];
 const priorityOf = (t) => PRIORITIES.includes(t.priority) ? t.priority : 'P2';
 const priorityBadge = (t) => `<span class="tag prio prio-${priorityOf(t)}" title="Priority ${priorityOf(t)}">${priorityOf(t)}</span>`;
 const byPriorityThenTitle = (a, b) => PRIORITIES.indexOf(priorityOf(a)) - PRIORITIES.indexOf(priorityOf(b)) || a.title.localeCompare(b.title);
+// Relative age for card meta ("2h", "3d") — a card's freshness is part of scanning a board.
+const ago = (ts) => { if (!ts) return ''; const sec = (Date.now() - new Date(ts).getTime()) / 1000;
+  return sec < 60 ? 'now' : sec < 3600 ? `${Math.floor(sec / 60)}m` : sec < 86400 ? `${Math.floor(sec / 3600)}h` : `${Math.floor(sec / 86400)}d`; };
 // Skip-no-op renders (t_9315f18a): the storm profile showed every run push re-rendering ALL heavy
 // sections (503-card board, 200-row log window, 300-run usage table) even when their inputs were
 // unchanged, and even while their tab was hidden — p95 100ms frames at run cadence. Each gate is a
@@ -1237,17 +1247,33 @@ function renderBoard() {
   if (cur) sa.value = cur;
   renderIdle();
   $('#columns').innerHTML = STATUSES.map((st) => { const total = S.tasks.filter((t) => t.status === st).length; return `<div class="col"><h3>${st === 'done' && !showAllDone && total > 20 ? `done (20 of ${total})` : `${st.replaceAll('_', ' ')} (${total})`}</h3>${st === 'todo' && !S.tasks.length ? '<div class="hint-first">Create a goal task, assign it to an agent (usually the PM), then press Run.</div>' : ''}${
-    (st === 'done' ? doneCards() : S.tasks.filter((t) => t.status === st).slice().sort(byPriorityThenTitle)).map((t) => { const bl = openBlockers(t); const w = (S.orch.agents[t.assignee] || {}); const live = (w.status === 'working' && w.taskId === t.id) || (!w.status && t.status === 'in_progress' && runningIds().includes(t.assignee));
+    (st === 'done' ? doneCards() : S.tasks.filter((t) => t.status === st).slice().sort(byPriorityThenTitle)).map((t) => { const bl = openBlockers(t); const w = (S.orch.agents[t.assignee] || {});
+      // Worker state must match reality: an agent with a live run is busy — on THIS task (or an
+      // unattributed wake run for it) reads "live", on another task reads "working elsewhere",
+      // and only an assignee with no live process at all earns "No worker".
+      const running = t.assignee && runningIds().includes(t.assignee);
+      const busy = w.status === 'working' || (!w.status && running);
+      const ip = t.status === 'in_progress';
+      const live = ip && busy && (w.taskId == null || w.taskId === t.id);
+      const busyOther = ip && busy && !live;
+      const noWorker = ip && t.assignee && !busy;
       const ready = !bl.length && ['todo', 'backlog'].includes(t.status);
-      const noWorker = t.status === 'in_progress' && t.assignee && !live;
-      return `<div class="card ${sel.task === t.id ? 'sel' : ''}${t.awaitingApproval ? ' approval' : ''}" data-id="${t.id}"><b>${esc(t.title)}</b>${live ? '<span class="tag live">live</span>' : ''}${noWorker ? `<span class="tag noworker" title="in_progress but no live agent process for ${esc(nodeName(t.assignee))}">No worker</span>` : ''}${stallTag(t)}${bl.length ? `<span class="tag blocked" title="waits for: ${esc(bl.map(taskTitle).join(', '))}">Blocked by ${esc(taskTitle(bl[0]).slice(0, 28))}${bl.length > 1 ? ` +${bl.length - 1}` : ''}</span>` : ready ? '<span class="tag ready">Ready</span>' : ''}${t.awaitingApproval ? '<span class="tag approval">needs approval</span>' : ''}<small>${priorityBadge(t)} ${esc(nodeName(t.assignee))} · ${t.comments.length} comments</small></div>`; }).join('')}${st === 'done' && total > 20 ? `<button class="ghost" id="toggle-done">${showAllDone ? 'Show recent only' : 'Show all done'}</button>` : ''}</div>`; }).join('');
+      const ac = t.assignee ? agentColor(t.assignee) : 0;
+      const tags = [live ? '<span class="tag live">live</span>' : '',
+        busyOther ? `<span class="tag elsewhere" title="${esc(nodeName(t.assignee))} is working on ${esc(taskTitle(w.taskId))}">working elsewhere</span>` : '',
+        noWorker ? `<span class="tag noworker" title="in_progress but no live agent process for ${esc(nodeName(t.assignee))}">No worker</span>` : '',
+        stallTag(t),
+        bl.length ? `<span class="tag blocked" title="waits for: ${esc(bl.map(taskTitle).join(', '))}">Blocked by ${esc(taskTitle(bl[0]).slice(0, 28))}${bl.length > 1 ? ` +${bl.length - 1}` : ''}</span>` : ready ? '<span class="tag ready">Ready</span>' : '',
+        t.awaitingApproval ? '<span class="tag approval">needs approval</span>' : ''].join('');
+      const snippet = String(t.description || '').replace(/\s+/g, ' ').trim();
+      return `<div class="card ${sel.task === t.id ? 'sel' : ''}${t.awaitingApproval ? ' approval' : ''}" data-id="${t.id}"><b>${esc(t.title)}</b>${snippet && snippet !== t.title ? `<span class="cdesc" title="${esc(snippet)}">${esc(clipText(snippet, 100))}</span>` : ''}${tags ? `<span class="ctags">${tags}</span>` : ''}<span class="cmeta">${priorityBadge(t)}${t.assignee ? `<i class="adot" style="background:var(--agent-${ac})"></i>${esc(nodeName(t.assignee))}` : '<span class="muted">unassigned</span>'}<span class="spacer"></span>💬 ${t.comments.length} · ${ago(t.updatedAt) || '—'}</span></div>`; }).join('')}${st === 'done' && total > 20 ? `<button class="ghost" id="toggle-done">${showAllDone ? 'Show recent only' : 'Show all done'}</button>` : ''}</div>`; }).join('');
   if ($('#toggle-done')) $('#toggle-done').onclick = () => { showAllDone = !showAllDone; boardSig = ''; renderBoard(); };
   document.querySelectorAll('.card').forEach((c) => c.onclick = () => { sel.task = c.dataset.id; renderBoard(); });
   const d = $('#taskdetail'); const t = S.tasks.find((x) => x.id === sel.task);
   if (!t) { d.innerHTML = ''; d.classList.add('closed'); return; }
   d.classList.remove('closed');
   const keep = Object.fromEntries(['td-msg', 'td-note', 'td-comment'].map((k) => [k, $('#' + k) && $('#' + k).value])); const focused = document.activeElement && document.activeElement.id;
-  const ag = S.orch.agents[t.assignee] || {}; const live = ag.status === 'working' && ag.taskId === t.id; const bl = openBlockers(t); const deps = new Set(t.blockedBy || []);
+  const ag = S.orch.agents[t.assignee] || {}; const live = ag.status === 'working' && (ag.taskId == null || ag.taskId === t.id); const bl = openBlockers(t); const deps = new Set(t.blockedBy || []);
   const cmtCut = Math.max(0, t.comments.length - 200); const cmts = t.comments.slice(-200); // cap long comment threads
   d.innerHTML = `<div class="td-inner"><h3>${priorityBadge(t)} ${esc(t.title)}</h3><p class="muted">${t.id} · by ${esc(t.createdBy === 'human' ? 'human' : nodeName(t.createdBy))}</p>
     ${t.awaitingApproval ? `<div class="approvebox"><b>Waiting for your approval.</b> The agent marked this task done.<textarea id="td-note" rows="2" placeholder="Note (optional; required context when requesting changes)"></textarea><p><button id="td-approve" class="primary">Approve → done</button> <button id="td-reject">Request changes → todo</button></p></div>` : ''}
@@ -1758,7 +1784,9 @@ $('#us-clear').onclick = act(async () => { if (!confirm('Clear the usage history
 // ---------- settings ----------
 function renderSettings() {
   const s = S.settings;
+  const tplCur = $('#tpl-select') ? $('#tpl-select').value : '';
   $('#settingsform').innerHTML = `<h3>Settings</h3><p class="muted">Project data: ${esc(S.dir)}</p>
+    <label>Template for new project/team</label><select id="tpl-select">${Object.entries(P.templates).map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join('')}</select>
     <label>Claude CLI path</label><input id="st-claude" value="${esc(s.claudePath)}">
     <label>Max concurrent agents</label><input id="st-conc" type="number" min="1" max="8" value="${s.maxConcurrency}">
     <label>Max agent runs per Run (safety cap)</label><input id="st-runs" type="number" min="1" value="${s.maxRuns}">
@@ -1784,6 +1812,7 @@ function renderSettings() {
     <label>Permission mode</label><select id="pr-perm"><option value="">project default</option>${(S.config.permissionModes || []).map((m) => `<option>${m}</option>`).join('')}</select>
     <p><button id="pr-save">Save preset</button></p></div>
     <hr>${renderRuntimesSection()}`;
+  const ts = $('#tpl-select'); if (ts && tplCur) ts.value = tplCur;
   wireRuntimesSection(); wireDraftForm();
   document.querySelectorAll('[data-delp]').forEach((b) => b.onclick = act(async () => { await call('deletePreset', b.dataset.delp); refresh(); }));
   document.querySelectorAll('[data-editp]').forEach((b) => b.onclick = () => { const p = s.rolePresets.find((x) => x.name === b.dataset.editp); $('#pr-name').value = p.name; $('#pr-prompt').value = p.systemPrompt; $('#pr-allowed').value = p.allowedTools.join(', '); $('#pr-disallowed').value = p.disallowedTools.join(', '); $('#pr-perm').value = p.permissionMode; });
@@ -2206,7 +2235,7 @@ composerEl.addEventListener('drop', (e) => { e.preventDefault(); composerEl.clas
 // ---------- human inbox (ask_human questions + approvals) ----------
 function renderInbox() {
   const items = S.inbox || []; const n = items.length ? String(items.length) : '';
-  $('#inbox-badge').textContent = n; $('#inbox-tab-badge').textContent = n;
+  $('#inbox-tab-badge').textContent = n;
   const taskTitle = (id) => (S.tasks.find((t) => t.id === id) || {}).title || '';
   $('#inboxlist').innerHTML = items.length ? items.map((i) => `<div class="inboxitem" data-iid="${i.id}">
     <small>${i.kind === 'approval' ? 'Approval' : 'Question'} from <b>${esc(nodeName(i.nodeId))}</b>${i.taskId ? ' · task: ' + esc(taskTitle(i.taskId)) : ''} · ${esc(new Date(i.at).toLocaleString())}</small>
@@ -2220,7 +2249,6 @@ function renderInbox() {
     d.querySelector('.ib-send').onclick = () => answer(d.querySelector('.ib-text').value.trim());
   });
 }
-$('#inbox-side').onclick = () => showTab('inbox');
 
 // ---------- live updates ----------
 let pending = null, pendingP = null;

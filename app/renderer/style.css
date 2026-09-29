@@ -7,6 +7,16 @@ nav .navicon { width:14px; height:14px; flex:0 0 auto; stroke:currentColor; fill
 button, input, select, textarea { font:inherit; color:var(--fg); background:var(--card); border:1px solid var(--line); border-radius:6px; padding:5px 9px; }
 button { cursor:pointer; } button.primary { background:var(--acc); color:var(--fg-on-accent); border-color:var(--acc); } button.on { outline:2px solid var(--acc); }
 main { flex:1; overflow:hidden; } .tab { display:none; height:100%; padding:10px; flex-direction:column; gap:8px; } .tab.active { display:flex; }
+/* Usage (t_1c907493): the fixed-height flex tab clipped the hero/account tables with no way to
+   scroll — the whole tab is one scrolling page now, and the runs table header sticks while the
+   page scrolls (its .scroll wrapper goes transparent so it doesn't trap the sticky context). */
+#tab-usage.active { display:block; overflow-y:auto; }
+#tab-usage.active > .toolbar { margin-bottom:8px; }
+#tab-usage .scroll { overflow:visible; flex:none; }
+#us-runs th { position:sticky; top:0; background:var(--bg-surface); z-index:1; box-shadow:0 1px 0 var(--border-strong); }
+/* Settings (t_1c907493): a centred, readable column instead of a 340px strip hugging the left edge. */
+#tab-settings.active { align-items:center; overflow-y:auto; }
+#settingsform { width:100%; max-width:760px; flex:none; }
 .toolbar { display:flex; gap:6px; align-items:center; flex-wrap:wrap; } .muted { color:var(--muted); } .hidden { display:none; }
 .toolbar label.inline { display:inline-flex; gap:4px; align-items:center; } .toolbar label.inline input { width:auto; }
 #logsearch { min-width:160px; }
@@ -14,7 +24,9 @@ main { flex:1; overflow:hidden; } .tab { display:none; height:100%; padding:10px
 .panel.narrow { width:220px; } .panel.grow { flex:1; width:auto; display:flex; flex-direction:column; gap:8px; }
 #wikilist { display:flex; flex-direction:column; overflow:hidden; }
 .panel label { display:block; margin:8px 0 2px; color:var(--muted); } .panel input, .panel select, .panel textarea { width:100%; }
-#columns { flex:1; display:grid; grid-template-columns:repeat(4,1fr); gap:8px; overflow:auto; } .col { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:8px; }
+/* All six statuses share one row, Trello-style (t_1c907493) — done and merge_conflict used to wrap
+   onto a second row of orphan columns. Narrow windows scroll horizontally instead. */
+#columns { flex:1; display:grid; grid-template-columns:repeat(6,minmax(175px,1fr)); gap:8px; overflow:auto; } .col { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:8px; min-height:0; }
 .col h3 { margin:0 0 8px; font-size:12px; text-transform:uppercase; color:var(--muted); } .card { border:1px solid var(--line); border-radius:6px; padding:7px; margin-bottom:6px; cursor:pointer; background:var(--bg); } .card.sel { border-color:var(--acc); }
 .card small { color:var(--muted); display:block; } .comment { border-left:3px solid var(--line); padding:2px 8px; margin:6px 0; white-space:pre-wrap; }
 .wk-toolbar { margin-bottom:6px; } .wk-toolbar button { width:100%; } #wk-search { width:100%; margin-bottom:8px; }
@@ -167,7 +179,6 @@ header .pill { font-variant-numeric:tabular-nums; } .pill.quiet { color:var(--mu
 #ov-thread details pre { white-space:pre-wrap; word-break:break-word; font-size:11px; margin:2px 0 6px; }
 
 .badge { display:inline-block; min-width:16px; padding:0 5px; border-radius:8px; background:var(--danger); color:var(--fg-on-accent); font-size:11px; text-align:center; } .badge:empty { display:none; }
-.inbox-side { cursor:pointer; padding:4px 6px; border:1px solid var(--muted); border-radius:6px; margin-bottom:6px; }
 .inboxitem { border:1px solid var(--accent); border-radius:6px; padding:8px; margin:0 0 8px; } .inboxitem textarea { width:100%; }
 #guide { position: fixed; right: 16px; bottom: 16px; width: 380px; max-height: 80vh; overflow: auto; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; box-shadow: var(--shadow-lg); z-index: 50; }
 #guide .gstep { border-top: 1px solid var(--border); padding: 8px 0; } #guide .gstep.off { opacity: .45; pointer-events: none; }
@@ -220,6 +231,12 @@ button:focus-visible, input:focus, select:focus, textarea:focus { outline:none; 
 .card.approval { border-color:transparent; box-shadow:var(--ring-warn); }
 .card b { display:block; font-size:var(--text-md); font-weight:var(--fw-semibold); line-height:var(--lh-tight); color:var(--fg-primary); }
 .card small { color:var(--fg-muted); font-size:var(--text-xs); margin-top:var(--space-1); }
+/* Dense cards (t_1c907493): one-line description snippet + a compact meta row (priority, assignee
+   colour dot, comment count, age) so a card answers what/who/how-old without being opened. */
+.card .cdesc { display:block; color:var(--fg-secondary); font-size:var(--text-xs); line-height:1.35; margin-top:2px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.card .ctags { display:flex; flex-wrap:wrap; gap:4px; margin-top:var(--space-1); }
+.card .cmeta { display:flex; align-items:center; flex-wrap:wrap; gap:2px 6px; margin-top:2px; color:var(--fg-muted); font-size:var(--text-xs); }
+.adot { width:8px; height:8px; border-radius:50%; display:inline-block; flex:none; }
 .col:not(:has(.card)):not(:has(.hint-first))::after { content:'Nothing here yet'; display:block; color:var(--fg-muted); font-size:var(--text-xs); text-align:center; padding:var(--space-6) 0; }
 .hint-first { margin-top:var(--space-2); padding:var(--space-6) var(--space-3); border:1px dashed var(--border-strong); border-radius:var(--radius-md); color:var(--fg-muted); font-size:var(--text-xs); text-align:center; }
 /* tags read as quiet text; only alert states keep a tinted chip */
@@ -229,6 +246,7 @@ button:focus-visible, input:focus, select:focus, textarea:focus { outline:none; 
 .tag.blocked { color:var(--warning-text); background:var(--warning-soft); padding:0 var(--space-2); }
 .tag.noworker { background:var(--danger-soft); color:var(--danger); padding:0 var(--space-2); }
 .tag.stall { padding:0 var(--space-2); }
+.tag.elsewhere { background:var(--warning-soft); color:var(--warning-text); padding:0 var(--space-2); }
 .tag.approval { background:var(--warning-soft); color:var(--warning-text); padding:0 var(--space-2); }
 .tag.prio { margin-left:0; margin-right:var(--space-2); font-weight:var(--fw-semibold); }
 .tag.prio-P0 { color:var(--danger); }
@@ -237,7 +255,6 @@ button:focus-visible, input:focus, select:focus, textarea:focus { outline:none; 
 .toast { background:var(--bg-raised); border-color:var(--border); border-left-color:var(--accent); border-radius:var(--radius-md); box-shadow:var(--shadow-lg); animation:rise var(--dur-base) var(--ease-spring); }
 @keyframes rise { from { opacity:0; transform:translateY(8px); } }
 /* Human Inbox */
-.inbox-side { border-color:var(--warning); background:var(--warning-soft); color:var(--warning-text); font-weight:var(--fw-semibold); border-radius:var(--radius-sm); }
 .inboxitem { border:1px solid var(--border); border-left:3px solid var(--warning); background:var(--bg-surface); border-radius:var(--radius-md); padding:var(--space-3); box-shadow:var(--shadow-sm); }
 /* First-run guide */
 #guide { background:var(--bg-raised); border:1px solid var(--border); border-radius:var(--radius-lg); box-shadow:var(--shadow-lg); padding:var(--space-4) var(--space-5); animation:rise var(--dur-slow) var(--ease-out); }
