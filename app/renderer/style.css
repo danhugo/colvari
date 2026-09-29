@@ -915,3 +915,21 @@ button, .pchip, .tag, .badge, .pill, .avatar, .cchip summary, .lvchip, .asswitch
 /* Overview legend: absolutely pinned inside the wrap — the sticky float below a block-level
    svg extended the scrollable area and produced phantom scrollbars. */
 #ov-graph-wrap .ov-legend { position: absolute; left: 12px; bottom: 10px; top: auto; float: none; margin: 0; }
+
+/* Usage: one sub-tab at a time, legible chips, 2-col limits grid, equal stat cards */
+.us-anchors button { padding:2px 12px; border:0; border-radius:var(--radius-full); background:transparent; color:var(--fg-secondary); font-size:var(--text-sm,13px); cursor:pointer; }
+.us-anchors button:hover { background:var(--bg-hover); color:var(--fg-primary); }
+.us-anchors button.on { background:var(--accent-soft,var(--bg-hover)); color:var(--fg-primary); font-weight:var(--fw-semibold); }
+#tab-usage [hidden] { display:none !important; }
+#tab-usage .limitmeter { font-size:12px; }
+#tab-usage .limitmeter .lm-part { max-width:40ch; overflow:hidden; text-overflow:ellipsis; }
+#tab-usage .limitmeter .lm-part small, #tab-usage .limitmeter .lm-part.lm-pending { font-size:12px; opacity:1; color:var(--fg-secondary); }
+#tab-usage .cards { display:grid; grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); }
+#tab-usage .stat { min-width:200px; }
+.lim-wrap { display:flex; flex-direction:column; gap:12px; margin-top:8px; }
+.lim-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px 16px; max-width:560px; }
+.lim-grid label { display:flex; flex-direction:column; gap:4px; font-size:12px; color:var(--fg-secondary); }
+.lim-grid input { width:100%; }
+.lim-grid button { grid-column:1 / -1; justify-self:start; }
+.us-empty-ico { display:block; margin:0 auto 8px; opacity:.6; }
+
