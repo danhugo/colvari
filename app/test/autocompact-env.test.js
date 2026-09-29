@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert');
 const { autoCompactEnv } = require('../src/orchestrator.js');
 
-// Bug t_443dd1d4: orchestrator used to send CLAUDE_AUTOCOMPACT_PCT_OVERRIDE as a fraction
+// Bug t_443dd1d4 (fix task t_1c1e515b): orchestrator used to send CLAUDE_AUTOCOMPACT_PCT_OVERRIDE as a fraction
 // (40 -> "0.4"), but claude >=2.1.284 parses the env as a PERCENT (0-100]:
 // threshold = floor(window * pct/100). Verified live on 2.1.284 with a 1M-window model
 // (claude-opus-5-5): env=0.4 auto-compacted at pre_tokens 30414 — 0.4% of 1M is 4k tokens,
