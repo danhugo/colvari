@@ -1,15 +1,39 @@
 const { app, BrowserWindow, ipcMain, Notification, nativeTheme } = require('electron');
 const path = require('path');
 const { Orchestrator } = require('./orchestrator');
-const { ProjectManager, TEMPLATES } = require('./projects');
+const { ProjectManager, TEMPLATES, isolateTestRoot } = require('./projects');
+const { pickChanged } = require('./store');
 const AC = require('./agent-config');
 const WT = require('./worktree');
 const U = require('./usage');
 const PF = require('./preflight');
 const RT = require('./runtimes');
 const CAP = require('./capabilities');
+const SU = require('./self-update');
+const { allowReload } = require('./renderer-reload');
+const { applyAnsweredChange } = require('./team-answers');
+const { introspectRuntime: runIntrospectRuntime } = require('./introspector');
+// The app repo (main checkout): what the UpdateWatcher polls and fast-forwards.
+const APP_ROOT = path.join(__dirname, '..', '..');
+// Self-update (auto-restart on new merged code) is a developer/dogfood feature: only unpackaged
+// runs (electron .) get it. A packaged build — real users — never starts a watcher and shows no
+// update UI; AGENTS_SQUAD_DEV=1 opts a packaged build back into dogfood mode, =0 forces it off
+// from source (e.g. to check the gated-off UX). Exported so agents' MCP servers inherit the gate.
+const DEV_MODE = process.env.AGENTS_SQUAD_DEV ? process.env.AGENTS_SQUAD_DEV !== '0' : !app.isPackaged;
+if (DEV_MODE) process.env.AGENTS_SQUAD_DEV = '1';
 let runtimesCache = null; // detected once per app start (binary + version)
 const runtimes = (settings) => (runtimesCache ||= RT.detectRuntimes(settings, { ...process.env, PATH: [process.env.PATH, require('os').homedir() + '/.local/bin', '/opt/homebrew/bin', '/usr/local/bin'].join(':') }));
+
+// Test instances (gui-e2e / smoke) must never touch real data and never linger: an inherited
+// AGENTS_SQUAD_HOME (the live app's root) loses to an explicit AGENTS_SQUAD_PROJECT, with neither
+// set a throwaway temp root is created, and the whole run is bounded by a force-exit watchdog.
+const TEST_MODE = !!(process.env.AGENTS_SQUAD_GUI_E2E || process.env.AGENTS_SQUAD_SMOKE);
+if (TEST_MODE) {
+  const testRoot = isolateTestRoot();
+  console.log(`[agents-squad] test instance pid=${process.pid} data root=${testRoot}`);
+  const timeoutMs = Number(process.env.AGENTS_SQUAD_TEST_TIMEOUT_MS) || 30 * 60 * 1000;
+  setTimeout(() => { console.error(`[agents-squad] test instance exceeded ${timeoutMs} ms — force exit (pid ${process.pid}, data root ${testRoot})`); app.exit(1); }, timeoutMs);
+}
 
 const pm = new ProjectManager();
 const orchs = new Map(); // projectId -> Orchestrator (projects run independently / concurrently)
@@ -18,11 +42,50 @@ function orchFor(pid) {
   if (!o) {
     o = new Orchestrator(pm.store(pid));
     o.on('log', (l) => send('log', { ...l, projectId: pid }));
-    o.on('state', (s) => send('state', { ...s, projectId: pid }));
+    o.on('state', (s) => send('state', { ...s, projectId: pid })); // slim: the renderer refreshes from the store on receipt
     o.on('notify', (n) => { send('notify', { ...n, projectId: pid }); notify(n, pid); });
+    o.on('woken_by_message', (w) => send('woken_by_message', { ...w, projectId: pid }));
+    o.on('run.stalled', (e) => send('run-stalled', { ...e, projectId: pid }));
+    o.on('run.recovering', (e) => send('run-recovering', { ...e, projectId: pid }));
+    o.on('run.recovery_failed', (e) => send('run-recovery-failed', { ...e, projectId: pid }));
+    o.on('watch-status', (w) => send('watch-status', { ...w, projectId: pid }));
+    // Runtime breaker (t_419062e2): banner push + clear, consumed by Uma's syncRtu (t_d33685f3).
+    o.on('runtime.unavailable', (e) => send('runtime-unavailable', { ...e, projectId: pid }));
+    o.on('runtime.available', (e) => send('runtime-available', { ...e, projectId: pid }));
     orchs.set(pid, o);
   }
   return o;
+}
+// Self-update: one UpdateWatcher per project (polls the repo, safe restart + resume; see self-update.js).
+const watchers = new Map(); // projectId -> UpdateWatcher
+// Outside dev mode there is no watcher at all: status answers a flat "off" and restart requests no-op.
+const updDisabled = () => ({ phase: 'idle', enabled: false, devMode: false, waitingOn: 0, history: [] });
+function watcherFor(pid) {
+  if (!DEV_MODE) return { status: () => updDisabled(), restartNow() {} };
+  let w = watchers.get(pid);
+  if (!w) {
+    const store = pm.store(pid);
+    w = new SU.UpdateWatcher({
+      // git runs at the repo root; npm (build/test) in the package dir (app/).
+      store, repoDir: APP_ROOT, npmDir: path.join(__dirname, '..'),
+      relaunch: () => { app.relaunch(); app.exit(0); },
+      procCount: () => (orchs.get(pid) || { procs: new Map() }).procs.size,
+      runActive: () => (orchs.get(pid) || {}).running || false,
+      // Drain deadline hit: stop the still-running agents so the restart can proceed; their tasks
+      // re-dispatch after the relaunch (reconcileOrphanedTasks), the Run resumes via wasRunning.
+      haltProcs: () => (orchs.get(pid) || { haltProcs: () => Promise.resolve() }).haltProcs(),
+      // Unpausing after an aborted update must re-tick: the drain held the run session open with
+      // nothing dispatched, so only this nudge resumes dispatching. A drain-deadline cut marks the
+      // killed runs per node (drainCutNodes); if the update then aborts, those markers must go with
+      // the pause or every subsequent run of the affected agents would break instantly at its first
+      // iteration.
+      setPaused: (v) => { const o = orchs.get(pid); if (o) { o.dispatchPaused = v; if (!v) { o.clearDrainCuts(); setImmediate(() => o.tick()); } } },
+    });
+    w.on('log', (l) => send('log', { ...l, projectId: pid }));
+    w.on('status', (st) => send('self-update-status', { projectId: pid, ...st }));
+    watchers.set(pid, w);
+  }
+  return w;
 }
 // Startup sweep: any node still showing "not probed yet" (added before capability probing existed, imported
 // from another machine, etc.) gets probed lazily — one setImmediate tick per node so a slow/missing CLI binary
@@ -100,7 +163,8 @@ function applyTheme(theme) {
 function createWindow() {
   const theme = getPrefs().theme; nativeTheme.themeSource = ['light', 'dark'].includes(theme) ? theme : 'system';
   const mac = process.platform === 'darwin';
-  win = new BrowserWindow({ width: 1400, height: 900, title: 'Agents Squad', backgroundColor: BG[nativeTheme.shouldUseDarkColors ? 'dark' : 'light'],
+  if (mac) app.dock?.setIcon(path.join(__dirname, '..', 'build', 'icon.png'));
+  win = new BrowserWindow({ width: 1400, height: 900, title: 'Colvari', icon: path.join(__dirname, '..', 'build', 'icon.png'), backgroundColor: BG[nativeTheme.shouldUseDarkColors ? 'dark' : 'light'],
     ...(mac ? { titleBarStyle: 'hiddenInset', vibrancy: 'sidebar', visualEffectState: 'followWindow' } : { titleBarStyle: 'hidden', titleBarOverlay: true }),
     webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false } });
   win.webContents.on('console-message', (_e, level, message) => { if (level >= 2) console.error('[renderer]', message); });
@@ -117,12 +181,21 @@ function createWindow() {
     try { console.log('[smoke]', JSON.stringify(await win.webContents.executeJavaScript(js))); } catch (e) { console.error('[smoke] failed', e); }
     app.exit(0);
   });
-  win.webContents.on('render-process-gone', (_e, d) => console.error('[agents-squad] renderer gone', d.reason));
+  // A killed renderer (e.g. a stray pkill hitting helper processes) must not leave a dead window:
+  // reload it, rate-limited so a crash loop cannot spin (clean exit means the user closed it).
+  const rendererReloads = [];
+  win.webContents.on('render-process-gone', (_e, d) => {
+    console.error('[agents-squad] renderer gone', d.reason);
+    if (d.reason === 'clean-exit' || win.isDestroyed()) return;
+    if (allowReload(rendererReloads, Date.now())) win.webContents.reload();
+    else console.error('[agents-squad] renderer reload rate-limited');
+  });
   win.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
 }
 // GUI e2e: drive the real UI with clicks, run a PM -> Dev team, screenshot each tab.
 async function guiE2E() {
   const out = process.env.AGENTS_SQUAD_GUI_E2E; const fs = require('fs');
+  win.webContents.setBackgroundThrottling(false); // occluded windows composite rarely; shots would be stale
   const ex = (js) => win.webContents.executeJavaScript(`(async () => { const w = (ms) => new Promise(r => setTimeout(r, ms)); const $ = (s) => document.querySelector(s); ${js} })()`);
   const shot = async (name) => fs.writeFileSync(path.join(out, name + '.png'), (await win.capturePage()).toPNG());
   const click = async (sel) => { const r = await ex(`const b = $('${sel}').getBoundingClientRect(); return [b.x + 20, b.y + 20];`); for (const type of ['mouseDown', 'mouseUp']) win.webContents.sendInputEvent({ type, x: Math.round(r[0]), y: Math.round(r[1]), button: 'left', clickCount: 1 }); await new Promise((r) => setTimeout(r, 400)); };
@@ -176,14 +249,14 @@ async function guiE2E() {
     // (b) the Dev asks the human; badge, Inbox item, answer through the UI.
     let q = null; for (let i = 0; i < 150 && !q; i++) { await new Promise((r) => setTimeout(r, 2000)); q = fstore.listInbox({ status: 'open' }).find((x) => x.kind === 'question'); }
     const ib = { asked: !!q, question: q && q.question, choices: q && q.choices, taskStatus: q && q.taskId && fstore.getTask(q.taskId).status };
-    ib.badge = await ex(`await refresh(); return $('#inbox-badge').textContent`);
-    await ex(`$('#tabs button[data-tab=inbox]').click(); await w(400);`); await shot('15-inbox-question');
+    ib.badge = await ex(`await refresh(); return $('#inbox-tab-badge').textContent`);
+    await ex(`$('#sb-inbox').click(); await w(400);`); await shot('15-inbox-question');
     ib.clicked = await ex(`const b = [...document.querySelectorAll('.ib-choice')].find((x) => x.dataset.v === 'blue'); if (!b) return false; b.click(); await w(800); return true;`);
     ib.statusAfterAnswer = q && q.taskId && fstore.getTask(q.taskId).status; ib.answer = q && fstore.getInboxItem(q.id).answer;
     await shot('15-inbox-answered');
     for (let i = 0; i < 150; i++) { await new Promise((r) => setTimeout(r, 2000)); if (!forch.running) break; }
     ib.color = fs.existsSync(path.join(work, 'color.txt')) ? fs.readFileSync(path.join(work, 'color.txt'), 'utf8').trim() : null;
-    ib.badgeAfter = await ex(`await refresh(); return $('#inbox-badge').textContent`);
+    ib.badgeAfter = await ex(`await refresh(); return $('#inbox-tab-badge').textContent`);
     // (c) an approval request (requireApproval puts finished tasks in review + awaitingApproval) shows in the Inbox.
     const at = fstore.createTask({ title: 'Ship first run', assignee: dev.id }); fstore.updateTask(at.id, { status: 'review', awaitingApproval: true });
     ib.approvalShown = await ex(`await refresh(); await w(300); return [...document.querySelectorAll('.inboxitem')].some((d) => d.textContent.includes('Ship first run') && d.querySelector('.ib-choice[data-v=approve]'))`);
@@ -207,15 +280,15 @@ async function guiE2E() {
     const L = (ago, nodeId, kind, text) => `logs.push({ projectId: ctx.p, nodeId: '${nodeId}', kind: '${kind}', text: ${JSON.stringify(text)}, at: Date.now() - ${ago} });`;
     await ex(`$('#tabs button[data-tab=chat]').click(); ${L(90000, b.id, 'system', '▶ ' + b.name + ' starts "Chat demo" in /x')}${L(80000, b.id, 'text', 'I will add a chat view with bubbles and tool chips.')}
       ${L(70000, b.id, 'tool', 'Read {"file_path":"renderer/app.js"}')}${L(69000, b.id, 'tool_result', '587 lines')}${L(60000, b.id, 'tool', 'Bash {"command":"npm test"}')}${L(59000, b.id, 'tool_result', 'pass 78 fail 0')}
-      await refresh(); CH.key = ''; renderChat(); await w(300); document.querySelector('#chat-room .cchip').open = true; await w(200);`);
+      await refresh(); chatSig = null; renderChat(); await w(300); document.querySelector('#chat-room .cchip').open = true; await w(200);`);
     const room = await ex(`return { groups: document.querySelectorAll('#chat-room .cgroup').length, avatars: document.querySelectorAll('#chat-room .avatar').length, chips: document.querySelectorAll('#chat-room .cchip').length, question: !!document.querySelector('#chat-room .bubble.question .ch-choice'), roles: document.querySelectorAll('#chat-room .role').length, defaultTab: !!$('#tabs button[data-tab=chat]') && TABS[0] === 'chat' }`);
     expect('chat: room with bubbles, avatars, role badges, tool chips, inline question', room.groups >= 2 && room.chips >= 2 && room.question && room.roles >= 2 && room.defaultTab, room);
-    await ex(`await refresh(); CH.key = ''; renderChat(); document.querySelector('#chat-room .cchip').open = true; await w(200);`); await shot('17-chat-room');
+    await ex(`await refresh(); chatSig = null; renderChat(); document.querySelector('#chat-room .cchip').open = true; await w(200);`); await shot('17-chat-room');
     await ex(`document.querySelector('#chat-room [data-thread="${t.id}"]').click(); await w(300);`);
     const th = await ex(`return { open: !$('#chat-thread').classList.contains('hidden'), title: $('#chat-thread .chat-head').textContent, items: document.querySelectorAll('#chat-threadroom .bubble, #chat-threadroom .cchip').length }`);
     expect('chat: thread pane shows the task', th.open && th.title.includes('Chat demo') && th.items >= 3, th);
     await shot('18-chat-thread');
-    const seedWorking = `S.orch = { ...S.orch, running: true, runs: 1, agents: { '${b.id}': { status: 'working', taskId: '${t.id}' } } }; renderHeader(); CH.key = ''; renderChat();`;
+    const seedWorking = `S.orch = { ...S.orch, running: true, runs: 1, agents: { '${b.id}': { status: 'working', taskId: '${t.id}' } } }; renderHeader(); chatSig = null; renderChat();`;
     await ex(`window._refresh = refresh; refresh = async () => {}; if (!$('#tab-chat.active')) $('#tabs button[data-tab=chat]').click(); ${seedWorking} await w(400);`);
     const typing = await ex(`return { typing: $('#chat-typing').textContent, header: $('#runstate').textContent, dot: !!document.querySelector('#chat-room .avatar.working') }`);
     expect('chat: working indicator (text, running header, green dot)', typing.typing.includes(b.name + ' is working') && typing.header.startsWith('running') && typing.dot, typing);
@@ -227,11 +300,54 @@ async function guiE2E() {
     const pv = await ex(`return $('#chat-preview').textContent`); await shot('20-chat-mention');
     await ex(`$('#chat-send').click(); await w(1200);`); api.run = origRun;
     const made = ps.listTasks().find((x) => x.title === 'add a dark theme toggle');
-    await ex(`await refresh(); CH.key = ''; renderChat(); const b = [...document.querySelectorAll('#chat-room .ch-choice')].find((x) => x.dataset.v === 'dark'); b && b.click(); await w(800);`);
+    await ex(`await refresh(); chatSig = null; renderChat(); const b = [...document.querySelectorAll('#chat-room .ch-choice')].find((x) => x.dataset.v === 'dark'); b && b.click(); await w(800);`);
     const cm = { mention, preview: pv, task: made && { assignee: made.assignee, createdBy: made.createdBy }, answered: ps.getInboxItem(q.id).answer };
     console.log('[gui-e2e] chat', JSON.stringify({ room, thread: th, typing, ...cm }));
     expect('chat: @mention autocomplete + preview + creates a task for the agent', mention.includes(b.name) && pv.includes('task for ' + b.name) && made && made.assignee === b.id, cm);
     expect('chat: inline answer to ask_human', cm.answered === 'dark', cm);
+  };
+  // Windowing (t_fb193107): 5k-message fixture, DOM bounded to the latest page, scroll-up prepends
+  // older pages with the anchor held, auto-scroll only at the bottom. Injection-only, no real runs.
+  const windowingShots = async () => {
+    await ex(`window._refresh = refresh; refresh = async () => {}; // keep background refreshes from re-rendering mid-assertion
+      await refresh(); S.allNodes = [{ id: 'a', name: 'Pia', role: 'PM' }, { id: 'b', name: 'Devon', role: 'Dev' }];
+      S.messages = []; S.tasks = []; S.inbox = []; S.orch.agents = {}; RUNS = [];
+      if (!window.__winseed) { window.__winseed = true; const N = 5000, now = Date.now();
+        for (let i = 0; i < N; i++) logs.push({ projectId: ctx.p, nodeId: i % 7 ? 'b' : 'a', kind: ['text','tool','tool_result','text','text'][i % 5], text: 'line-' + i + ' windowing fixture row', at: now - (N - i) * 1000 }); }`);
+    // Chat: latest page only + older bar; render time (median of 5) reported.
+    await ex(`$('#tabs button[data-tab=chat]').click(); await w(200); chatSig = null; renderChat(); await w(200);`);
+    const chat = await ex(`const times = []; for (let i = 0; i < 6; i++) { chatSig = null; const t0 = performance.now(); renderChat(); times.push(performance.now() - t0); }
+      return { med: Math.round([...times.slice(1)].sort((x, y) => x - y)[2] * 10) / 10, bubbles: document.querySelectorAll('#chat-room .bubble').length, nodes: document.querySelectorAll('#chat-room *').length, older: ($('#chat-older') || {}).textContent || '' }`);
+    expect('chat windowing: 5k messages but DOM bounded to the latest page with an older bar', chat.bubbles > 0 && chat.bubbles <= 140 && /earlier/.test(chat.older), chat);
+    // Scroll to the top: older page prepended (older count drops by one page), view anchored (not clamped at 0).
+    await ex(`$('#chat-room').scrollTop = 0; await w(500);`);
+    const chatUp = await ex(`return { bubbles: document.querySelectorAll('#chat-room .bubble').length, top: Math.round($('#chat-room').scrollTop), older: ($('#chat-older') || {}).textContent || '' }`);
+    const olderCount = (t) => +(/(\d+)/.exec(t || '') || [])[1];
+    expect('chat windowing: scroll-up loads older pages and keeps the scroll anchor', chatUp.bubbles > chat.bubbles && chatUp.top > 500 && olderCount(chat.older) - olderCount(chatUp.older) === 100, { chat, chatUp });
+    // New messages while reading history: view stays put, "N new" pill appears; at the bottom it autoscrolls and the window shrinks back.
+    await ex(`const now = Date.now(); for (let i = 0; i < 3; i++) logs.push({ projectId: ctx.p, nodeId: 'b', kind: 'text', text: 'fresh-' + i, at: now + i }); chatSig = null; renderChat(); await w(200);`);
+    const chatKeep = await ex(`return { pill: !$('#chat-newpill').classList.contains('hidden'), top: Math.round($('#chat-room').scrollTop), bubbles: document.querySelectorAll('#chat-room .bubble').length }`);
+    await ex(`$('#chat-room').scrollTop = $('#chat-room').scrollHeight; await w(500);`);
+    const chatBottom = await ex(`return { pill: !$('#chat-newpill').classList.contains('hidden'), bubbles: document.querySelectorAll('#chat-room .bubble').length, atEnd: $('#chat-room').textContent.includes('fresh-2') }`);
+    expect('chat windowing: history view holds with a new-pill, bottom autoscrolls and shrinks the window', chatKeep.pill && chatKeep.top > 500 && chatBottom.bubbles < chatUp.bubbles && chatBottom.atEnd && !chatBottom.pill, { chatKeep, chatBottom });
+    // Logs: same bounds, older bar, agent filter still applies before windowing. Pin to the tail
+    // first — background renderLogs (watcher events) may have run while the tab was hidden, leaving
+    // the box at the top, and scrollTop assignments on a hidden box are no-ops (no scroll event).
+    await ex(`$('#tabs button[data-tab=obs]').click(); await w(200); $('#log').scrollTop = $('#log').scrollHeight; await w(100);`);
+    const log = await ex(`const times = []; for (let i = 0; i < 6; i++) { const t0 = performance.now(); renderLog(); times.push(performance.now() - t0); }
+      return { med: Math.round([...times.slice(1)].sort((x, y) => x - y)[2] * 10) / 10, rows: document.querySelectorAll('#log .logrow').length, older: ($('#log-older') || {}).textContent || '' }`);
+    expect('log windowing: 5k lines but at most one page rendered with an older bar', log.rows > 0 && log.rows <= 200 && /earlier/.test(log.older), log);
+    await ex(`$('#log').scrollTop = 0; await w(500);`);
+    const logUp = await ex(`return { rows: document.querySelectorAll('#log .logrow').length, top: Math.round($('#log').scrollTop), older: ($('#log-older') || {}).textContent || '' }`);
+    expect('log windowing: scroll-up loads older lines and keeps the scroll anchor', logUp.rows > log.rows && logUp.top > 500 && /earlier/.test(logUp.older), logUp);
+    // Back to the tail: the window shrinks again (bounded DOM), then the agent filter still holds.
+    await ex(`$('#log').scrollTop = $('#log').scrollHeight; await w(400); $('#logfilter').innerHTML = '<option value="a">Pia</option>'; $('#logfilter').value = 'a'; renderLog(); await w(200);`);
+    const logF = await ex(`return { rows: document.querySelectorAll('#log .logrow').length, agents: [...new Set([...document.querySelectorAll('#log .logrow .logagent')].map((d) => d.textContent))] }`);
+    expect('log windowing: agent filter bounds the window and selects only that agent', logF.rows > 0 && logF.rows <= 200 && logF.agents.length === 1, logF);
+    console.log('[gui-e2e] windowing', JSON.stringify({ chat, chatUp, chatKeep, chatBottom, log, logUp, logF }));
+    // Drop the fixture so later full-run steps see clean logs, then hand refresh back.
+    await ex(`for (let i = logs.length - 1; i >= 0; i--) if (/windowing fixture row|^fresh-/.test(logs[i].text)) logs.splice(i, 1);
+      logWin = 200; CH.win = null; renderLog(); refresh = window._refresh; await refresh();`);
   };
   // Graph editor (shots 21-24): 12-node team, connect by mouse, cross-team edge, positions/viewport persistence.
   // Zoom/fit, context menu and auto-layout are feature-detected: checked once the UI ships them, logged as pending until then.
@@ -308,13 +424,21 @@ async function guiE2E() {
     fs.writeFileSync(fake, `#!/bin/sh\nsleep 20\necho '{"type":"result","subtype":"success","session_id":"s","total_cost_usd":0,"num_turns":1,"usage":{"input_tokens":1,"output_tokens":1}}'\n`); fs.chmodSync(fake, 0o755);
     const prev = s.getSettings(); s.saveSettings({ claudePath: fake, maxConcurrency: 8 });
     const [a, b] = ['ParA', 'ParB'].map((n) => pm.store(p, t1).addNode({ name: n, role: 'Dev' })); const c = pm.store(p, t2).addNode({ name: 'ParC', role: 'Dev' });
+    // These fresh nodes have no capabilities snapshot yet, which would make the very next getAll() (auto-probe,
+    // main.js probeNodeLater) run a synchronous `--help` probe against the fake claudePath above — a real CLI
+    // returns instantly, but this fake script only ever sleeps, so execFileSync's probe blocks the whole main
+    // process for its full 10s timeout per node (~30s serialized for 3 nodes), starving the child 'close' events
+    // and IPC calls this test's 18s parallel-window check depends on. Stub a capabilities snapshot upfront so the
+    // auto-probe sees them as already probed and skips it, matching what a real prior Refresh/run would leave behind.
+    const stubCaps = { ok: true, probedAt: new Date().toISOString(), source: 'stub', slashCommands: [], commands: [], skills: [], modes: [], categorized: [] };
+    pm.store(p, t1).updateNode(a.id, { capabilities: stubCaps }); pm.store(p, t1).updateNode(b.id, { capabilities: stubCaps }); pm.store(p, t2).updateNode(c.id, { capabilities: stubCaps });
     const ts = [a, b, c].map((n) => s.createTask({ title: 'Parallel ' + n.name, assignee: n.id }));
     const dep = s.createTask({ title: 'Depends on ParA', assignee: c.id, blockedBy: [ts[0].id] });
     const o = orchFor(p); const done = new Promise((r) => o.once('done', r)); o.start();
     await ex(`$('#tabs button[data-tab=board]').click(); await refresh();`);
-    const live = await waitFor(`await refresh(); return /3 in parallel/.test($('#runstate').textContent) && [...document.querySelectorAll('.card')].some((c) => /Depends on ParA/.test(c.textContent) && /Blocked by Parallel ParA/.test((c.querySelector('.tag.blocked') || {}).textContent || ''))`, 18000);
+    const live = await waitFor(`await refresh(); return /3 running/.test($('#runstate').textContent) && [...document.querySelectorAll('.card')].some((c) => /Depends on ParA/.test(c.textContent) && /Blocked by Parallel ParA/.test((c.querySelector('.tag.blocked') || {}).textContent || ''))`, 18000);
     const hdr = await ex(`return $('#runstate').textContent`);
-    expect('parallel: header shows "3 in parallel" and dependent shows Blocked by Parallel ParA', live, hdr);
+    expect('parallel: header shows "3 running" and dependent shows Blocked by Parallel ParA', live, hdr);
     expect('parallel: 3 agents working at once across 2 teams', ts.every((t) => s.getTask(t.id).status === 'in_progress') && s.getTask(dep.id).status === 'todo', ts.map((t) => s.getTask(t.id).status));
     for (const t of ['light', 'dark']) {
       require('electron').nativeTheme.themeSource = t;
@@ -322,7 +446,7 @@ async function guiE2E() {
       await ex(`$('#tabs button[data-tab=overview]').click(); await w(300);`); await shot(`27-parallel-overview-${t}`);
     }
     require('electron').nativeTheme.themeSource = 'system';
-    expect('parallel: still 3 in parallel after shots', /3 in parallel/.test(await ex(`await refresh(); return $('#runstate').textContent`)));
+    expect('parallel: still 3 running after shots', /3 running/.test(await ex(`await refresh(); return $('#runstate').textContent`)));
     await done;
     const win = (tid) => { const r = s.listRuns().find((x) => x.taskId === tid && x.kind === 'agent'); return r ? [Date.parse(r.startedAt), Date.parse(r.endedAt)] : [0, 0]; };
     const [A, B, C] = ts.map((t) => win(t.id)); const D = win(dep.id); const ov = (x, y) => x[0] < y[1] && y[0] < x[1];
@@ -356,8 +480,16 @@ async function guiE2E() {
     const ov = await ex(`return [...document.querySelectorAll('#ov-graph .ov-vendor')].map((t) => t.textContent)`);
     expect('mixed: overview nodes show vendor · model', ov.join() === 'Claude · opus,Codex · gpt-5.6-terra,Claude · haiku', ov);
     for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`$('#tabs button[data-tab=usage]').click(); await refresh(); await w(600);`); await shot(`30-mixed-usage-${t}`); }
-    const us = await ex(`return [...document.querySelectorAll('#us-summary h4')].find((h) => h.textContent === 'By vendor').nextElementSibling.innerText`);
-    expect('mixed: usage By vendor splits Codex (cost —) and Claude ($)', /Codex[^\n]*107[^\n]*—/.test(us) && /Claude[^\n]*\$0\.0/.test(us), us);
+    const us = await ex(`return [...document.querySelectorAll('#us-summary h4')].find((h) => h.textContent === 'By account').nextElementSibling.innerText`);
+    // Per-key usage ledger (t_f8032a7d), re-grouped per account (t_b1115e48): the By-account table is
+    // the visible account>runtime>provider>model table (inside <details> innerText is empty —
+    // unrendered content). Each nested row is one key, so the codex line carries its own per-key
+    // token total (100 in + 7 out + 40 cached reads = 147; the old "107" predates cached_input_tokens
+    // counting as cache-read) and its cost stays "—"; claude keys report real $.
+    const codexRow = us.split('\n').find((l) => l.startsWith('Codex'));
+    // The ledger prices models the CLI leaves uncosted from a small list-price table, so codex shows
+    // an estimate ("est") or "—" — never a bare $0; claude keys carry the CLI's own $.
+    expect('mixed: usage By account splits per-model Codex and Claude rows; claude reports $, codex est or — but never $0', !!codexRow && /\d/.test(codexRow) && !/\$0\.0000/.test(codexRow) && (/est\s*$/.test(codexRow) || /—\s*$/.test(codexRow)) && /Claude[^\n]*\$0\.0/.test(us), us);
     require('electron').nativeTheme.themeSource = 'system';
     const st = [plan, impl, rev].map((t) => s.getTask(t.id).status); expect('mixed: all three tasks done', st.every((x) => x === 'done'), st);
     const rt = [plan, impl, rev].map((t) => (s.listRuns().find((r) => r.taskId === t.id && r.kind === 'agent') || {}).runtime);
@@ -375,8 +507,10 @@ async function guiE2E() {
     const [pm1, dev] = nodes;
     // Stub subscription runs: 6 inside the 5h window (below a limit of 10 -> 60%, under the 80% warn line) plus
     // one stale run from 6h ago that must NOT count (proves the window "resets" rather than accumulating forever).
-    for (let i = 0; i < 6; i++) s.addRun({ id: 'lim-' + i, projectId: p, nodeId: pm1.id, agent: pm1.name, kind: 'agent', billingSource: 'subscription', startedAt: new Date(Date.now() - i * 1000).toISOString(), inputTokens: 10, outputTokens: 5 });
-    s.addRun({ id: 'lim-stale', projectId: p, nodeId: pm1.id, agent: pm1.name, kind: 'agent', billingSource: 'subscription', startedAt: new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString(), inputTokens: 10, outputTokens: 5 });
+    // runtime is set the way the orchestrator stamps real runs — usageProviders attributes runs to
+    // providers by it, so unstamped seeds would leave the provider honestly "unknown".
+    for (let i = 0; i < 6; i++) s.addRun({ id: 'lim-' + i, projectId: p, nodeId: pm1.id, agent: pm1.name, kind: 'agent', runtime: 'claude', billingSource: 'subscription', startedAt: new Date(Date.now() - i * 1000).toISOString(), inputTokens: 10, outputTokens: 5 });
+    s.addRun({ id: 'lim-stale', projectId: p, nodeId: pm1.id, agent: pm1.name, kind: 'agent', runtime: 'claude', billingSource: 'subscription', startedAt: new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString(), inputTokens: 10, outputTokens: 5 });
     const prevLim = s.getSettings().usageLimits; s.saveSettings({ usageLimits: { fiveHourLimit: 10, weeklyLimit: 0, tokenLimit: 0, costLimit: 0, warnPct: 80 } });
     await ex(`$('#tabs button[data-tab=usage]').click(); await refresh(); await w(500);`);
     const meterQ = `{ pct: $('#limitmeter .lm-fill')?.style.width, text: $('#limitmeter').textContent, warn: /near limit/.test($('#limitmeter').textContent), pause: /paused/.test($('#limitmeter').textContent) }`;
@@ -437,6 +571,120 @@ async function guiE2E() {
     console.log('[gui-e2e] limits', JSON.stringify({ under, cli, warn, pause, guardTaskStatus: s.getTask(guardTask.id).status, chips, effortChips, probeBefore: dotBefore, probeAfter: dotAfter, discovered: !!added.capabilities }));
     require('electron').nativeTheme.themeSource = 'system';
   };
+  // Per-provider top-bar limits (three team compositions, stubbed limit data, no model calls): the meter
+  // must follow the providers the team actually uses. Claude-only shows the CLI's own utilization (it
+  // wins outright even when the local run count is higher); a Codex-only team — Codex reports no
+  // rate-limit windows at all — gets an honest per-node reason and never a fabricated 0%; a mixed team
+  // must not let Claude's numbers bleed onto the silent provider. The per-provider CHIP contract
+  // (label per provider, "limits unknown") is feature-gated: it asserts once usageStatus carries
+  // provider-keyed data or the meter renders [data-provider] chips, and until then logs how many
+  // checks it skipped — gating on the feature instead of enshrining the old single-provider wording.
+  const limitsProvidersShots = async () => {
+    await waitFor(`return !!document.querySelector('#tpl-select option')`);
+    const prevCtx = await ex(`return { ...ctx }`);
+    // A stub codex CLI so the Codex-only team counts as installed-but-silent ("codex --version" works,
+    // yet no rate-limit event ever arrives) — the real-world Codex shape today.
+    const cx = path.join(require('os').tmpdir(), 'squad-limits-codex.sh');
+    fs.writeFileSync(cx, `#!/bin/sh\necho 'codex-cli 0.0.0'\n`); fs.chmodSync(cx, 0o755);
+    const rl = (pct, hrs) => ({ pct, resetsAt: new Date(Date.now() + hrs * 3600000).toISOString() });
+    const grab = `(async () => ({ txt: $('#limitmeter').textContent, hidden: $('#limitmeter').classList.contains('hidden'), chips: document.querySelectorAll('#limitmeter [data-provider]').length, st: await call('usageStatus') }))()`;
+    // Chip geometry: the single summary chip must be fully visible and the "· limits unknown" wording
+    // must never shrink-ellipsise ("Codex U… lim…"). This suite runs at the DEFAULT window width
+    // (1400px): since t_db67859d the header holds only fixed-size chrome (the goal composer is a
+    // popover off "New goal"), so the meter must clip NOTHING here — tail clipping is allowed only
+    // in the narrow sweeps of the 'topbar' suite (< 1400px). +1 tolerates sub-pixel flex rounding.
+    const geom = `(async () => { const m = $('#limitmeter');
+      const chips = [...m.querySelectorAll('[data-provider]')].map((c) => { const r = c.getBoundingClientRect(); return { p: c.dataset.provider, l: Math.round(r.left), r: Math.round(r.right) }; });
+      let overlap = null;
+      for (let i = 0; i < chips.length && !overlap; i++) for (let j = i + 1; j < chips.length; j++) { const a = chips[i], b = chips[j]; if (a.l < b.r - 1 && b.l < a.r - 1) overlap = [a.p, b.p]; }
+      const unknown = [...m.querySelectorAll('.lm-unknown')].map((c) => { const s = c.querySelector('small'); return { p: c.dataset.provider, txt: c.textContent.trim(), cut: s ? s.scrollWidth > s.clientWidth + 1 : false }; });
+      const h = document.querySelector('header'); const vis = (s) => { const e = document.querySelector(s); if (!e) return false; const r = e.getBoundingClientRect(); return r.width > 0 && r.left >= -1 && r.right <= window.innerWidth + 1; };
+      return { chips, overlap, unknown, clipped: m.scrollWidth > m.clientWidth + 1, fit: h.scrollWidth <= h.clientWidth + 1, goal: vis('#newgoal'), help: vis('#help') }; })()`;
+    const geomCheck = async (label) => {
+      const g = await ex(`return ${geom}`);
+      expect(`limits-providers: ${label} — chips lay side by side, bounding rects do not overlap`, g.chips.length >= 1 && !g.overlap, g);
+      expect(`limits-providers: ${label} — header fits, New goal/help visible`, g.fit && g.goal && g.help, g);
+      expect(`limits-providers: ${label} — every chip fully visible, meter clips nothing (default width: goal absorbs first)`, !g.clipped, g);
+      expect(`limits-providers: ${label} — every chip keeps a legible width, never squeezed away`, g.chips.every((c) => c.r - c.l >= 100), g);
+      if (g.unknown.length) expect(`limits-providers: ${label} — unknown wording legible ("· limits unknown", never ellipsised)`, g.unknown.every((u) => !u.cut && /· limits unknown/.test(u.txt)), g.unknown);
+      return g;
+    };
+    const go = async (name) => { const pj = pm.create(name); await ex(`P = await call('listProjects'); renderSidebar(); await switchTo({ p: '${pj.id}' }); await w(700);`); return { pj, s: pm.store(pj.id), o: orchFor(pj.id) }; };
+    const scenarios = [];
+    // Claude-only: CLI-reported 42%/13% must show even though the local run count says 60%.
+    {
+      const { pj, s, o } = await go('Limits: Claude only');
+      const a = s.addNode({ name: 'ClaPM', role: 'PM', runtime: 'claude', model: 'opus', x: 60, y: 60 });
+      s.addNode({ name: 'ClaDev', role: 'Dev', runtime: 'claude', model: 'sonnet', x: 320, y: 60 });
+      for (let i = 0; i < 6; i++) s.addRun({ id: 'lp' + i, projectId: pj.id, nodeId: a.id, agent: a.name, kind: 'agent', runtime: 'claude', billingSource: 'subscription', startedAt: new Date(Date.now() - i * 1000).toISOString(), inputTokens: 10, outputTokens: 5 });
+      s.saveSettings({ usageLimits: { fiveHourLimit: 10, weeklyLimit: 0, tokenLimit: 0, costLimit: 0, warnPct: 80 } });
+      o.subscriptionRateLimits = { [a.id]: { fiveHour: rl(0.42, 1), weekly: rl(0.13, 72) } };
+      await ex(`await refresh(); await w(500);`);
+      const m = await ex(`return ${grab}`);
+      const title6 = await ex(`return (document.querySelector('#limitmeter [data-provider]') || {}).title || ''`);
+      expect('limits-providers: Claude-only team shows the CLI-reported 42% (worst window) in the bar, weekly 13% in the detail title, never the higher local 60% count', !m.hidden && m.txt.includes('42%') && !m.txt.includes('60%') && title6.includes('13%'), { m, title6 });
+      expect('limits-providers: Claude-only meter stays calm below the warn line and counts down the reset', !/near limit|paused/.test(m.txt) && /↻/.test(m.txt), m.txt);
+      await shot('limits-providers-claude-only');
+      scenarios.push({ name: 'Claude only', id: pj.id, m, g: await geomCheck('claude-only') });
+      // The stubs stay: the contract loop below re-reads each project's meter and asserts the very
+      // windows seeded here (clearing them made every provider flip to 'unknown' by then).
+    }
+    // Codex-only: nothing ever reports — the meter explains that per agent instead of inventing a %.
+    {
+      const { pj, s, o } = await go('Limits: Codex only');
+      s.addNode({ name: 'CodPM', role: 'PM', runtime: 'codex', model: 'gpt-5.6-terra', x: 60, y: 60 });
+      s.addNode({ name: 'CodDev', role: 'Dev', runtime: 'codex', model: 'gpt-5.6-cipher', x: 320, y: 60 });
+      s.saveSettings({ codexPath: cx });
+      await ex(`await refresh(); await w(500);`);
+      const m = await ex(`return ${grab}`);
+      expect('limits-providers: Codex-only team (Codex reports nothing) shows no fabricated percentage', !m.hidden && !/\d+%/.test(m.txt), m.txt);
+      expect('limits-providers: Codex-only meter explains why there is no data, without warn/pause', /no limit data|limits unknown/.test(m.txt) && !/near limit|paused/.test(m.txt), m.txt);
+      await shot('limits-providers-codex-only');
+      scenarios.push({ name: 'Codex only', id: pj.id, m, g: await geomCheck('codex-only') });
+    }
+    // Mixed: only the Claude node reports — its numbers surface without being attributed to Codex.
+    {
+      const { pj, s, o } = await go('Limits: mixed');
+      const c = s.addNode({ name: 'MixClaude', role: 'PM', runtime: 'claude', model: 'opus', x: 60, y: 60 });
+      s.addNode({ name: 'MixCodex', role: 'Dev', runtime: 'codex', model: 'gpt-5.6-terra', x: 320, y: 60 });
+      s.saveSettings({ codexPath: cx, usageLimits: { fiveHourLimit: 10, weeklyLimit: 0, tokenLimit: 0, costLimit: 0, warnPct: 80 } });
+      o.subscriptionRateLimits = { [c.id]: { fiveHour: rl(0.42, 1), weekly: rl(0.13, 72) } };
+      await ex(`await refresh(); await w(500);`);
+      const m = await ex(`return ${grab}`);
+      expect('limits-providers: mixed team surfaces the Claude-reported 42% while Codex stays silent', !m.hidden && m.txt.includes('42%'), m.txt);
+      await shot('limits-providers-mixed');
+      scenarios.push({ name: 'mixed', id: pj.id, m, g: await geomCheck('mixed') });
+    }
+    // Feature gate for the chip contract: provider-keyed usageStatus (Devon's model) or [data-provider]
+    // chips (Uma's UI). Skipped loudly until then; once active, a mismatch red-lines the case on purpose.
+    const provKeyed = scenarios.some((x) => x.m.st && x.m.st.providers && (Array.isArray(x.m.st.providers) ? x.m.st.providers.length : Object.keys(x.m.st.providers).length));
+    const chipDom = scenarios.some((x) => x.m.chips > 0);
+    if (!(provKeyed || chipDom)) {
+      console.log('[gui-e2e] limits-providers: provider-keyed usageStatus / [data-provider] chips not present yet — 7 per-provider contract checks skipped (self-activate when the provider-keyed model + chips land)');
+    } else {
+      const provsOf = (st) => !st || !st.providers ? [] : (Array.isArray(st.providers) ? st.providers : Object.values(st.providers));
+      const hasPct = (o) => /0\.42\b/.test(JSON.stringify(o)) || /"pct":\s*42\b/.test(JSON.stringify(o));
+      for (const x of scenarios) {
+        await ex(`await switchTo({ p: '${x.id}' }); await w(500);`);
+        const t = (await ex(`return $('#limitmeter').textContent.toLowerCase()`)) || '';
+        const provs = provsOf(x.m.st);
+        if (x.name === 'Claude only') {
+          expect('limits-providers[contract]: Claude-only top bar is labeled for the Claude provider', t.includes('claude'), t);
+          expect('limits-providers[contract]: Claude-only usageStatus carries the CLI window under the claude provider', provs.some((p) => JSON.stringify(p).toLowerCase().includes('claude')) && hasPct(provs), provs);
+        } else if (x.name === 'Codex only') {
+          expect('limits-providers[contract]: Codex-only top bar has no Claude wording anywhere (no claude/5h/weekly)', !/claude|5h|weekly/.test(t), t);
+          expect('limits-providers[contract]: Codex-only shows a "limits unknown" state, never a fabricated 0%', /unknown/.test(t) && !/\d+%/.test(t), t);
+        } else {
+          expect('limits-providers[contract]: mixed top bar names ONLY the worst provider (claude) — one fixed chip', t.includes('claude') && !t.includes('codex'), t);
+          expect('limits-providers[contract]: mixed shows the Claude-reported 42% on the summary chip', t.includes('42%'), t);
+          const codex = provs.filter((p) => JSON.stringify(p).toLowerCase().includes('codex'));
+          expect('limits-providers[contract]: mixed — Claude numbers never bleed onto the Codex entry', codex.length > 0 && codex.every((p) => !hasPct(p)), codex);
+        }
+      }
+    }
+    await ex(`await switchTo(${JSON.stringify(prevCtx)}); await w(300);`);
+    console.log('[gui-e2e] limits-providers', JSON.stringify({ scenarios: scenarios.map((x) => ({ name: x.name, pct: (x.m.txt.match(/\d+%/g) || []).join(','), chips: x.m.chips, providerKeyed: !!(x.m.st && x.m.st.providers), rects: x.g && x.g.chips, overlap: x.g && x.g.overlap, clipped: x.g && x.g.clipped })) }));
+  };
   // Discovery panel regression: the recorded real init event (58 skills / 123 slash commands, incl.
   // goal+loop modes — test/fixtures/real-init-event.json) drives the Usage tab's #us-discovery panel the
   // same way a real Refresh would (discoverCapabilities({initEvent}) -> node.capabilities), so the panel's
@@ -469,6 +717,71 @@ async function guiE2E() {
     expect('discovery panel: reset chip never renders for a resetsAt already in the past (stale window)', !/↻0m|↻NaN/.test(noReset), noReset);
     s.saveSettings({ usageLimits: prevLim });
     console.log('[gui-e2e] discovery', JSON.stringify({ panel, skillsCount: capabilities.skills.length, commandsCount: capabilities.slashCommands.length }));
+  };
+  // Per-model usage accounting (t_14533d6d): seeded runs for three different models (fixtures only, no CLI
+  // runs) must show as separate per-model rows carrying exactly that model's own tokens — never a merged or
+  // cross-model-summed token figure — while cost is the only number with a grand total across models.
+  // On the API side, modelStats() must expose exactly one bucket per model, each holding only its own
+  // tokens/cost. When Uma's per-model Usage rework (t_f8032a7d) changes this view, these are the invariants
+  // it has to keep: one row per model, per-model token cells exact, single cost grand total.
+  const usagePerModelShots = async () => {
+    const up = pm.create('Usage per model'); const s = pm.store(up.id); const o = orchFor(up.id);
+    const now = Date.now();
+    const seeds = [
+      { model: 'claude-opus-4-5', runtime: 'claude', inputTokens: 1100, outputTokens: 220, cacheReadTokens: 330, cacheCreationTokens: 44, reportedCostUsd: 0.0123 },
+      { model: 'claude-sonnet-5', runtime: 'claude', inputTokens: 12000, outputTokens: 3400, cacheReadTokens: 5600, cacheCreationTokens: 700, reportedCostUsd: 0.0456 },
+      { model: 'glm-5.3-flash', runtime: 'helpycode', inputTokens: 500, outputTokens: 150, cacheReadTokens: 60, cacheCreationTokens: 0, reportedCostUsd: 0.0079 },
+    ];
+    seeds.forEach((x, i) => s.addRun({ id: 'usage-seed-' + i, projectId: up.id, nodeId: 'n_seed' + i, agent: 'Seed ' + (i + 1), kind: 'agent',
+      startedAt: new Date(now - (seeds.length - i) * 60000).toISOString(), endedAt: new Date(now - (seeds.length - 1 - i) * 60000).toISOString(),
+      durationMs: 60000, taskId: null, task: '', model: x.model, models: [x.model], runtime: x.runtime,
+      apiKeySource: 'ANTHROPIC_API_KEY', billingMode: 'auto', billingSource: 'api', billingDetail: 'ANTHROPIC_API_KEY',
+      inputTokens: x.inputTokens, outputTokens: x.outputTokens, cacheReadTokens: x.cacheReadTokens, cacheCreationTokens: x.cacheCreationTokens,
+      numTurns: 2, reportedCostUsd: x.reportedCostUsd, exitCode: 0, isError: false, sessionId: 'usage-seed-' + i }));
+    const tot = (x) => x.inputTokens + x.outputTokens + x.cacheReadTokens + x.cacheCreationTokens;
+    // API level: one bucket per model, each carrying only its own tokens and cost — no cross-model token sum.
+    const ms = o.modelStats();
+    expect('usage: modelStats has exactly one bucket per model', JSON.stringify(Object.keys(ms).sort()) === JSON.stringify(seeds.map((x) => x.model).sort()), Object.keys(ms));
+    expect('usage: modelStats buckets hold only their own model tokens/cost', seeds.every((x) => ms[x.model] && ms[x.model].runs === 1 && ms[x.model].tokens === tot(x) && Math.abs(ms[x.model].costUsd - x.reportedCostUsd) < 1e-9), ms);
+    await ex(`await switchTo({ p: '${up.id}' }); await w(500);`);
+    const fmtTok = (n) => { n = n || 0; return n >= 1e6 ? (n / 1e6).toFixed(2) + 'M' : n >= 1e4 ? (n / 1e3).toFixed(1) + 'k' : String(n); };
+    const costTotal = seeds.reduce((a, x) => a + x.reportedCostUsd, 0);
+    const ranked = seeds.slice().sort((a, b) => tot(b) - tot(a));
+    for (const theme of ['light', 'dark']) {
+      require('electron').nativeTheme.themeSource = theme;
+      await ex(`$('#tabs button[data-tab=usage]').click(); await refresh(); await w(500);
+        const g = $('#g-close'); if (g) g.click(); // the Get-started card must not cover the evidence
+        $('#us-summary details').open = true; await w(200);`);
+      const brk = await ex(`const c = document.querySelectorAll('#us-summary .us-breakdowns .us-card')[0]; return [...c.querySelectorAll('.usr')].map((n) => [n.querySelector('.usr-name').childNodes[0].textContent.trim(), n.querySelector('.usr-val b').textContent])`);
+      expect('usage: By-model breakdown has a separate ranked row per model', JSON.stringify(brk.map((r) => r[0])) === JSON.stringify(ranked.map((x) => x.model)), brk);
+      expect('usage: breakdown row tokens are that model own total, not a cross-model sum', JSON.stringify(brk.map((r) => r[1])) === JSON.stringify(ranked.map((x) => fmtTok(tot(x)))), brk);
+      // Detailed By-model table: exact raw per-model cells, no extra merged/total row.
+      const tbl = await ex(`const h = [...document.querySelectorAll('#us-summary details h4')].find((x) => x.textContent === 'By model'); return h ? [...h.nextElementSibling.querySelectorAll('tr')].map((tr) => [...tr.cells].map((td) => td.textContent.trim())) : null`);
+      const byModel = Object.fromEntries((tbl || []).filter((c) => c[0]).map((c) => [c[0], c]));
+      expect('usage: By-model table has exactly one row per model (no merged/total row)', (tbl || []).filter((c) => c[0]).length === seeds.length && seeds.every((x) => byModel[x.model]), (tbl || []).map((c) => c[0]));
+      expect('usage: By-model table cells are exact per-model tokens', seeds.every((x) => { const c = byModel[x.model] || []; return c[1] === '1' && c[2] === String(x.inputTokens) && c[3] === String(x.outputTokens) && c[4] === String(x.cacheReadTokens) && c[5] === String(x.cacheCreationTokens) && c[6] === String(tot(x)); }), byModel);
+      expect('usage: By-model table row cost is that model own', seeds.every((x) => ((byModel[x.model] || [])[7] || '').includes('$' + x.reportedCostUsd.toFixed(4))), byModel);
+      // Cost is the only grand total: #us-cost equals the sum across models; tokens stay per-model above.
+      const cost = await ex(`return { total: $('#us-cost b') ? $('#us-cost b').textContent : null, kpis: document.querySelector('.us-kpis').textContent }`);
+      expect('usage: cost grand total equals the sum of per-model costs', cost.total === '$' + costTotal.toFixed(4), cost);
+      expect('usage: hero cost KPI matches the grand total (2dp)', cost.kpis.includes('$' + costTotal.toFixed(2)), cost.kpis);
+      // Per-run history: one row per run with its own model and cost.
+      const hist = await ex(`return [...document.querySelectorAll('#us-runs tr')].slice(1).map((tr) => [...tr.cells].map((td) => td.textContent.trim()))`);
+      expect('usage: run history shows one row per run with its model and cost', hist.length === seeds.length && hist.every((c) => seeds.some((x) => c[4] === x.model && (c[12].includes('$' + x.reportedCostUsd.toFixed(4)) || c[12] === '—'))), hist.map((c) => [c[4], c[12]]));
+      // Header pill reads the same per-run ledger as this tab: it must agree with the grand total
+      // instead of drifting (the old session-counter pill said "no cost yet" while the tab showed $0.07).
+      // The old ledger pill is gone (t_bc19b2f5): the per-model keys are this tab's job now.
+      const pill = await ex(`return { cost: $('#totalcost').textContent }`);
+      expect('usage: header money pill matches the tab grand total (2dp)', pill.cost.includes('$' + costTotal.toFixed(2)), pill);
+      await shot(`usage-permodel-${theme}`);
+      // Prove the per-model table visually: it lives below the fold — scroll it into view and shoot it.
+      await ex(`const h = [...document.querySelectorAll('#us-summary details h4')].find((x) => x.textContent === 'By model'); if (h) h.scrollIntoView({ block: 'center' }); await w(250);`);
+      await shot(`usage-permodel-bymodel-${theme}`);
+    }
+    require('electron').nativeTheme.themeSource = 'system';
+    const csv = (await api.usageCSV({ p: up.id })).trim().split('\n');
+    expect('usage: CSV has one line per run plus the header, model named', csv.length === seeds.length + 1 && seeds.every((x) => csv.some((l) => l.includes(x.model))), csv.length);
+    console.log('[gui-e2e] usage-permodel', JSON.stringify({ models: seeds.map((x) => x.model), costTotal: '$' + costTotal.toFixed(4) }));
   };
   // Existing-data scenario: a project that predates capability probing, usage limits and reasoning-effort
   // fields (nodes added straight through the store, like a real legacy project.json). Nothing here should
@@ -504,7 +817,9 @@ async function guiE2E() {
     // Default billingMode 'auto' counts as a subscription user (isSubscriptionUser in renderLimitMeter), so
     // the meter stays visible in a "pending" state rather than hidden, even with no limits config yet.
     const meterPendingBefore = await ex(`return { hidden: $('#limitmeter').classList.contains('hidden'), pending: $('#limitmeter').textContent }`);
-    expect('existing-data: limit meter shows pending state (not hidden) with no limits config and no CLI-reported rate limit yet', meterPendingBefore.hidden === false && /–/.test(meterPendingBefore.pending), meterPendingBefore);
+    // The provider-chip era replaced the old "5h – no limit data" pending chips with one honest
+    // "Limits: … · limits unknown" summary chip (t_bc19b2f5) — still visible, never a fabricated %.
+    expect('existing-data: limit meter shows pending state (not hidden) with no limits config and no CLI-reported rate limit yet', meterPendingBefore.hidden === false && /limits unknown/.test(meterPendingBefore.pending), meterPendingBefore);
     o.subscriptionRateLimits = { [pm1.id]: { fiveHour: { pct: 0.42, resetsAt: new Date(Date.now() + 3600000).toISOString() } } };
     await ex(`await refresh(); await w(400);`);
     const meterQ = `{ hidden: $('#limitmeter').classList.contains('hidden'), pct: $('#limitmeter .lm-fill')?.style.width, text: $('#limitmeter').textContent }`;
@@ -634,6 +949,60 @@ async function guiE2E() {
     await ex(`switchTo(${JSON.stringify(cur.p ? cur : { p: gp })}); await w(300);`);
     console.log('[gui-e2e] mainlogswiki', JSON.stringify({ agents, overview, wlist, searched, noMatch: noMatch.count, wempty }));
   };
+  // Logs view design evidence (t_e503dd78): 7 agents with distinct runtime/model lines, 40+ seeded log
+  // lines carrying taskId+task, live orchestrator statuses. Asserts agent rows show a status line with a
+  // short task id, an ellipsizing muted model line, a labelled count badge, hover-only actions, a
+  // segmented level control and an Auto-scroll switch — then screenshots light+dark at 1440x900.
+  const logsDesignShots = async () => {
+    win.setSize(1440, 900);
+    await waitFor(`return !!document.querySelector('#tpl-select option')`); await ex(`await refresh();`);
+    const cp = pm.create('Logs design'); const ds = pm.store(cp.id);
+    const spec = [['Pia', 'PM', 'claude', 'opus'], ['Devon', 'Dev', 'claude', 'sonnet'], ['Dana', 'Dev', 'codex', 'gpt-5.3-codex'], ['Rex', 'Reviewer', 'claude', 'haiku'], ['Cy', 'Critic', 'helpycode', ''], ['Mia', 'Dev', 'opencode', 'gpt-5'], ['Leo', 'Researcher', 'claude', 'opusplan']];
+    for (const [n, r, rt, m] of spec) ds.addNode({ name: n, role: r, x: 40, y: 40, runtime: rt, model: m });
+    const teamId = pm.get(cp.id).teams[0].id; // store.getTeam() on an unbound store has no id — bind explicitly
+    const ns = ds.getTeam().nodes;
+    const titles = ['Logs view: agent list clips model chips', 'Filter chips: one segmented control style', 'Orchestration is wasteful when every retry re-reads the whole repository', 'Wake-on-message sweep floods idle agents'];
+    const tasks = titles.map((t, i) => ds.createTask({ title: t, assignee: ns[i + 1].id }));
+    const kinds = [['text', 'Planning the steps.'], ['tool', 'Read {"file_path":"app/renderer/style.css"}'], ['tool_result', '42 lines'], ['text', 'Editing the agent rows now.'], ['tool', 'Edit {"filePath":"app/renderer/app.js"}'], ['error', 'ENOENT: no such file or directory, open missing.txt']];
+    const logData = [];
+    ns.forEach((n, i) => { const tk = tasks[i % tasks.length];
+      logData.push({ nodeId: n.id, kind: 'system', taskId: tk.id, task: tk.title, text: `▶ ${n.name} starts "${tk.title}" in /repo` });
+      for (let line = 0; line < 5; line++) { const [kind, txt] = kinds[(line + i) % kinds.length]; logData.push({ nodeId: n.id, kind, taskId: tk.id, task: tk.title, text: txt }); } });
+    logData.forEach((d, i) => { d.at = Date.now() - (logData.length - i) * 45000; });
+    // Live working/idle states through the REAL orchestrator (not renderer injection): refresh() rebuilds
+    // S.orch from getAll on every pass, so injected agent state would be wiped before the shots.
+    const orch = orchFor(cp.id);
+    [[ns[0], tasks[0]], [ns[1], tasks[1]], [ns[2], tasks[2]]].forEach(([n, tk]) => { const a = orch.agent(n.id); a.status = 'working'; a.taskId = tk.id; a.task = tk.title; });
+    for (const n of [ns[3], ns[4], ns[5], ns[6]]) orch.agent(n.id).status = 'idle';
+    await ex(`await switchTo({ p: '${cp.id}', t: '${teamId}' }); await w(400); const D = ${JSON.stringify(logData)}; for (const d of D) logs.push({ projectId: ctx.p, ...d });
+      $('#tabs button[data-tab=obs]').click(); await refresh(); renderObs(); renderLog(); await w(400);`);
+    const got = await ex(`const mo = [...document.querySelectorAll('#logagents .lamodel')]; const st = [...document.querySelectorAll('#logagents .lastat')];
+      return { rows: document.querySelectorAll('#log .logrow').length, chips: document.querySelectorAll('#log .logtask').length, ids: [...document.querySelectorAll('#log .logtask')].slice(0, 3).map((d) => d.textContent),
+        ltid: !!document.querySelector('#logagents .ltid'), count: !!document.querySelector('#logagents .lacount'),
+        ellModel: mo.length && mo.every((d) => getComputedStyle(d).textOverflow === 'ellipsis'), ellStat: st.length && st.every((d) => getComputedStyle(d).textOverflow === 'ellipsis'),
+        actHidden: getComputedStyle(document.querySelector('#logagents .logagent-row[data-id]:not([data-id=""]) .lactions')).opacity === '0',
+        seg: !!document.querySelector('#loglevels .lvchip .dot'), ckGone: !document.querySelector('#loglevels .ck'), sw: !!document.querySelector('.asswitch .sw'), nativeCb: !!document.querySelector('.asswitch input[type=checkbox]') }`);
+    expect('logsdesign: 30+ log lines rendered', got.rows >= 30, got.rows);
+    expect('logsdesign: every seeded line carries a short task id chip', got.chips >= 30, got.chips);
+    expect('logsdesign: chips render as t_xxxx', got.ids.every((s) => /^t_[0-9a-f]{4}$/.test(s)), got.ids);
+    expect('logsdesign: status line with task id; model/status lines ellipsize cleanly', got.ltid && got.ellModel && got.ellStat, { ltid: got.ltid, ellModel: got.ellModel, ellStat: got.ellStat });
+    expect('logsdesign: count badge, hover-only actions, segmented level control (no check glyph), Auto-scroll switch', got.count && got.actHidden && got.seg && got.ckGone && got.sw && got.nativeCb, got);
+    for (const theme of ['light', 'dark']) {
+      require('electron').nativeTheme.themeSource = theme; await ex(`await w(400);`);
+      await shot(`logs-design-${theme}`);
+      const side = await ex(`const b = $('#logagents').getBoundingClientRect(); return { x: Math.round(b.x), y: Math.round(b.y), width: Math.round(b.width), height: Math.round(b.height) }`);
+      fs.writeFileSync(path.join(out, `logs-design-agents-${theme}.png`), (await win.capturePage(side)).toPNG());
+    }
+    // Hover a working agent: ⏹/✉ fade in.
+    require('electron').nativeTheme.themeSource = 'dark';
+    const hv = await ex(`const r = document.querySelector('#logagents .logagent-row[data-id="${ns[1].id}"]').getBoundingClientRect(); return [Math.round(r.x + r.width / 2), Math.round(r.y + r.height / 2)]`);
+    win.webContents.sendInputEvent({ type: 'mouseMove', x: hv[0], y: hv[1] });
+    await new Promise((r) => setTimeout(r, 300));
+    expect('logsdesign: actions visible on hover', await ex(`return getComputedStyle(document.querySelector('#logagents .logagent-row[data-id="${ns[1].id}"] .lactions')).opacity`) === '1');
+    await shot('logs-design-agents-hover-dark');
+    require('electron').nativeTheme.themeSource = 'system';
+    console.log('[gui-e2e] logsdesign', JSON.stringify(got));
+  };
   // Polish shots: graph at zoom 0.4 and 1.0 plus the sidebar, for both teams, light+dark. Node names must stay >= 11px on screen at 0.4.
   const polishShots = async () => {
     await waitFor(`return !!document.querySelector('#tpl-select option')`); await ex(`await refresh();`); const cur = await ex(`return { p: ctx.p, t: S.teamId }`);
@@ -664,6 +1033,30 @@ async function guiE2E() {
   // first; and the Logs "new lines" pill, if shipped, stays hidden while already scrolled to the tail.
   // Several of these depend on Uma's t_961b3b38 (still in progress) — checks are written now and pass/fail
   // is reported per item rather than assumed, per the plan (t_7f8764c8).
+  const auditShots = async () => {
+    win.setSize(1440, 900); const outDir = process.env.AUDIT_OUT || out;
+    const cp = pm.create('Audit'); const st = pm.store(cp.id);
+    for (const [n, r, x, y] of [['Pia', 'PM', 60, 60], ['Devon', 'Dev', 320, 40], ['Dana', 'Dev', 320, 200], ['Rex', 'Reviewer', 580, 120], ['Cy', 'Critic', 580, 260]]) st.addNode({ name: n, role: r, x, y });
+    const ns = st.getTeam().nodes; for (const d of [1, 2]) { st.addEdge(ns[0].id, ns[d].id, 'assign'); st.addEdge(ns[d].id, ns[3].id, 'message'); }
+    const titles = ['Add dark mode toggle', 'Fix login redirect loop', 'Refactor usage aggregation into a reusable module with tests', 'Write onboarding copy', 'Sidebar icons', 'Stale worker badge', 'Wiki backlinks', 'Graph zoom'];
+    titles.forEach((t, i) => { const k = st.createTask({ title: t, assignee: ns[1 + (i % 2)].id, description: 'Demo ' + t }); st.commentTask(k.id, ns[0].id, 'Please handle.'); if (i > 1) st._updateTask(k.id, { status: ['todo', 'in_progress', 'review', 'waiting_for_human', 'done', 'done'][i % 6] }); });
+    for (let i = 0; i < 22; i++) { const k = st.createTask({ title: 'Shipped item ' + (i + 1), assignee: ns[1].id }); st._updateTask(k.id, { status: 'done' }); }
+    const mc = st.createTask({ title: 'Merge conflict demo', assignee: ns[2].id }); st._updateTask(mc.id, { status: 'merge_conflict' });
+    st.writeWiki('Runbook', '# Runbook\n\nSee [[Glossary]].\n', 'human'); st.writeWiki('Glossary', '## Terms\n\n- **LOD**\n', 'human');
+    const L = (ago, n, kind, text) => `logs.push({ projectId: '${cp.id}', nodeId: '${n.id}', kind: '${kind}', text: ${JSON.stringify(text)}, at: Date.now() - ${ago} });`;
+    await ex(`await refresh(); await switchTo({ p: '${cp.id}', t: '${pm.get(cp.id).teams[0].id}' }); await w(400); ${ns.map((n, i) => L(60000 - i * 900, n, 'system', '▶ ' + n.name + ' starts a task') + L(30000, n, 'tool', 'Read {"file_path":"a.txt"}')).join('')} await refresh(); S.orch.agents = { '${ns[1].id}': { status: 'working', taskId: '${st.listTasks ? '' : ''}' } };`);
+    const sh = async (name) => { fs.writeFileSync(path.join(outDir, 'audit-' + name + '.png'), (await win.capturePage()).toPNG()); };
+    for (const theme of ['light', 'dark']) {
+      require('electron').nativeTheme.themeSource = theme; await ex(`await w(300);`);
+      for (const tab of ['chat', 'board', 'overview', 'team', 'wiki', 'obs', 'usage', 'settings', 'inbox']) {
+        await ex(`$('[data-tab=${tab}]').click(); await w(700);`); await sh(`${tab}-${theme}`);
+        if (tab === 'board') { await ex(`const c = document.querySelector('#board, .board'); if (c) c.scrollLeft = 99999; await w(300);`); await sh(`board-right-${theme}`); }
+        if (tab === 'usage') { await ex(`const m = document.querySelector('#usage, .view.active, main'); (document.scrollingElement || m).scrollTop = 99999; if (m) m.scrollTop = 99999; await w(300);`); await sh(`usage-scrolled-${theme}`); }
+        if (tab === 'team') { await ex(`try { VP.zoom = 0.3; applyView && applyView(); } catch (e) {} await w(300);`); await sh(`team-small-${theme}`); }
+      }
+    }
+    require('electron').nativeTheme.themeSource = 'system';
+  };
   const critiqueShots = async () => {
     const prevSize = win.getSize(); win.setSize(1440, 900);
     await waitFor(`return !!document.querySelector('#tpl-select option')`); await ex(`await refresh();`);
@@ -711,6 +1104,28 @@ async function guiE2E() {
     // 3) Minimap hides once the view already fits the whole graph (fitView() above matches the graph bbox).
     const mmHidden = await ex(`const m = $('#minimap'); return !m || m.classList.contains('hidden') || getComputedStyle(m).display === 'none';`);
     expect('critique: minimap hidden once fit-to-view already fits the graph', mmHidden, { mmHidden });
+    // 3b) t_0c3b6126: edges are orthogonal elbows that never cross a node card, fit-to-view centres the
+    // whole graph (ghosts included), and every edge marker is the 8px arrowhead.
+    const orth = await ex(`const shr = (r, m) => ({ x: r.x + m, y: r.y + m, w: r.width - 2 * m, h: r.height - 2 * m });
+      const hit = (r, p) => p.x > r.x && p.x < r.x + r.w && p.y > r.y && p.y < r.y + r.h;
+      const cards = [...document.querySelectorAll('#graph .node .card')].map((c) => shr(c.getBoundingClientRect(), 3));
+      let cross = 0, diag = 0;
+      for (const p of document.querySelectorAll('#graph .edge')) {
+        if (p.getAttribute('d').includes('C')) diag++;
+        const ctm = p.getScreenCTM(), L = p.getTotalLength();
+        for (let t = 0; t <= L; t += 3) { const pt = p.getPointAtLength(t).matrixTransform(ctm); if (cards.some((r) => hit(r, pt))) { cross++; break; } }
+      }
+      const gr = document.querySelector('#graph').getBoundingClientRect();
+      const pts = [...document.querySelectorAll('#graph .node, #graph .ghost')].map((g) => { const m = g.transform.baseVal.consolidate().matrix; return [m.e, m.f]; });
+      const vp = document.querySelector('#graph > g.viewport').transform.baseVal.consolidate().matrix;
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+      for (const [x, y] of pts) { x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x + 184); y1 = Math.max(y1, y + 80); }
+      const arrows = [...document.querySelectorAll('#graph defs marker')].map((m) => m.markerWidth.baseVal.value).join(',');
+      return { diag, cross, nodes: pts.length, arrows, zoom: Math.round(vp.a * 100) / 100, dx: Math.round((x0 + x1) / 2 * vp.a + vp.e - gr.width / 2), dy: Math.round((y0 + y1) / 2 * vp.d + vp.f - gr.height / 2) };`);
+    expect('critique: edges are orthogonal elbows (no bezier diagonals)', orth.diag === 0, orth);
+    expect('critique: no edge passes through a node card', orth.cross === 0, orth);
+    expect('critique: fit-to-view centres the graph', Math.abs(orth.dx) <= 24 && Math.abs(orth.dy) <= 24, orth);
+    expect('critique: 8px arrowheads on every edge marker', orth.arrows === '8,8,8,8', orth);
     // 4) A second edge popover replaces the first instead of stacking a duplicate on top of it.
     const [a, b, c, d] = main.nodes;
     await ex(`window.alert = () => {}; edgePopover(200, 200, '${a.id}', '${b.id}'); await w(80); edgePopover(260, 260, '${c.id}', '${d.id}');`);
@@ -770,21 +1185,484 @@ async function guiE2E() {
     for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`await w(300);`); await shot(`31-conflict-board-${t}`); }
     require('electron').nativeTheme.themeSource = 'system';
   };
+  // TEMP evidence scenario for t_04f36a69 (helpycode runtime/model selectable + persisted), not a permanent fixture.
+  const helpycodeShots = async () => {
+    await waitFor(`return !!document.querySelector('#tpl-select option')`); await ex(`await refresh();`); const cur = await ex(`return { p: ctx.p, t: S.teamId }`);
+    const ps = pm.store(cur.p || pid(), cur.t); let nodes = ps.getTeam().nodes;
+    if (!nodes.length) { ps.addNode({ name: 'Devon', role: 'Dev', x: 60, y: 60 }); nodes = ps.getTeam().nodes; }
+    const n = nodes[0];
+    await ex(`$('#tabs button[data-tab=settings]').click(); await refresh(); await w(300); $('#rt-path').value = 'helpycode'; $('#rt-detect').click(); await w(4000);`);
+    const draft = await ex(`return { label: $('#rd-label') && $('#rd-label').value, models: $('#rd-models') && $('#rd-models').value, stub: !!document.querySelector('#rt-draft .costnote') }`);
+    expect('helpycode: Detect populates a real (non-stub) draft', draft.label === 'helpycode' && !draft.stub, draft);
+    // The introspector now parses `models` output into names, but the reviewer still confirms/edits the
+    // list by hand from `helpycode models` output, same as any other free-text CLI model id.
+    await ex(`$('#rd-models').value = 'elice/z-ai/glm-5.3-flash, elice/z-ai/glm-5.3'; $('#rd-defmodel').value = 'elice/z-ai/glm-5.3-flash'; $('#rd-save').click(); await w(300);`);
+    const rtId = await ex(`return (JSON.parse(localStorage.getItem('customRuntimes')) || []).find((r) => r.bin === 'helpycode')?.id`);
+    await ex(`$('#tabs button[data-tab=team]').click(); await refresh(); selectNode('${n.id}'); await w(300); $('#nf-runtime').value = '${rtId}'; $('#nf-runtime').dispatchEvent(new Event('change')); await w(200);`);
+    const modelOpts = await ex(`return [...document.querySelectorAll('#modellist option')].map((o) => o.value)`);
+    const model = modelOpts.find((m) => /glm/i.test(m)) || modelOpts[0];
+    await ex(`$('#nf-model').value = ${JSON.stringify(model)}; $('#nf-save').click(); await w(400);`);
+    await shot('helpycode-node-config');
+    await ex(`await refresh(); selectNode('${n.id}'); await w(300);`);
+    const saved = await ex(`const nn = S.team.nodes.find((x) => x.id === '${n.id}'); return { runtime: nn.runtime, model: nn.model, formRuntime: $('#nf-runtime').value, formModel: $('#nf-model').value };`);
+    expect('helpycode: runtime+model persisted on the node and reflected in the form after reload', saved.runtime === rtId && saved.model === model && saved.formRuntime === rtId && saved.formModel === model, saved);
+    await shot('helpycode-node-config-reloaded');
+    console.log('[gui-e2e] helpycode', JSON.stringify({ draft, rtId, model, saved }));
+  };
+  // Wake-run UI (t_03a0e1a0): feed S.orch.agents[id].activity exactly as the backend shapes it
+  // (orchestrator wakeRun: {trigger:'message', messageId, fromNodeId, excerpt, taskId, count, startedAt};
+  // count = unread msgs delivered this run, renderer maps it to "+N queued") and
+  // check the Board banner + presence chip, the Team and Overview node badges, then cleared again.
+  const wakeShots = async () => {
+    await waitFor(`return !!document.querySelector('#tpl-select option')`); await ex(`await refresh();`);
+    const cur = await ex(`return { p: ctx.p, t: S.teamId }`);
+    const ps = pm.store(cur.p || pid(), cur.t); let nodes = ps.getTeam().nodes;
+    if (nodes.length < 2) { ps.addNode({ name: 'Pia', role: 'PM', x: 60, y: 60 }); ps.addNode({ name: 'Devon', role: 'Dev', x: 320, y: 160 }); nodes = ps.getTeam().nodes; }
+    const [pmN, dev] = nodes;
+    const task = ps.createTask({ title: 'Wake demo', assignee: dev.id });
+    await ex(`await refresh(); await w(200);`); // pick up the seeded nodes before injecting wake state
+    // Re-seed right before every read: a background refresh() replaces S (and S.orch) at any time.
+    const seed = `S.orch.agents = { '${dev.id}': { status: 'working', activity: { trigger: 'message', messageId: 'm1', fromNodeId: '${pmN.id}', excerpt: 'Please look at the failing test', taskId: '${task.id}', startedAt: Date.now() } } }; renderIdle(); renderGraph(); renderOverview();`;
+    await ex(`$('#tabs button[data-tab=board]').click(); await w(200);`);
+    const board = await ex(`${seed} await w(100); return { wakebar: !$('#wakebar').classList.contains('hidden'), text: ($('#wakebar .wakebar') || {}).textContent || '', chip: !!document.querySelector('#presence .pchip.wake') }`);
+    expect('wake: Board banner shows woken-by-message with presence chip and task link', board.wakebar && board.text.includes('woken by message from Pia') && board.chip && board.text.includes('Wake demo'), board);
+    await shot('wake-board-on');
+    await ex(`$('#tabs button[data-tab=team]').click(); await w(200);`);
+    const team = await ex(`${seed} await w(100); return { badge: !!document.querySelector('#graph .wakerunbadge'), linked: !!document.querySelector('#graph .wakerunbadge.linked'), txt: (document.querySelector('#graph .wakerunbadge text') || {}).textContent || '' }`);
+    expect('wake: Team node shows the linked wake badge, visible text keeps the sender after the clip (t_0cd29f4d)', team.badge && team.linked && team.txt.includes('Pia'), team);
+    await shot('wake-team-on');
+    await ex(`$('#tabs button[data-tab=overview]').click(); await w(200);`);
+    const ov = await ex(`${seed} await w(100); return { badge: !!document.querySelector('#ov-graph .wakerunbadge'), working: !!document.querySelector('#ov-graph .node.working'), txt: (document.querySelector('#ov-graph .wakerunbadge text') || {}).textContent || '' }`);
+    expect('wake: Overview node shows the wake badge while working, visible text keeps the sender', ov.badge && ov.working && ov.txt.includes('Pia'), ov);
+    await shot('wake-overview-on');
+    await ex(`$('#tabs button[data-tab=board]').click(); await w(200);`);
+    const off = await ex(`S.orch.agents = {}; renderIdle(); renderGraph(); renderOverview(); await w(100); return { wakebarHidden: $('#wakebar').classList.contains('hidden'), chip: !!document.querySelector('#presence .pchip.wake') }`);
+    expect('wake: cleared activity hides the banner and chip', off.wakebarHidden && !off.chip, off);
+    await shot('wake-board-cleared');
+    console.log('[gui-e2e] wake', JSON.stringify({ board, team, ov, off }));
+  };
+  // Monitor log lines (t_43243765, plan t_a4ceb629/C): the core's watchdog decisions render as
+  // accent "Monitor" rows — badge + action — reason with plain taskIds; a line persisted without
+  // the structured fields falls back to its raw text.
+  const monitorShots = async () => {
+    await waitFor(`return !!document.querySelector('#tpl-select option')`); await ex(`await refresh();`);
+    const cur = await ex(`return { p: ctx.p, t: S.teamId }`);
+    const ps = pm.store(cur.p || pid(), cur.t); let nodes = ps.getTeam().nodes;
+    if (!nodes.length) { ps.addNode({ name: 'Root', role: 'PM', x: 60, y: 60 }); nodes = ps.getTeam().nodes; }
+    const core = nodes[0];
+    await ex(`$('#tabs button[data-tab=obs]').click(); await refresh(); await w(300);`);
+    await ex(`logs.push({ projectId: ctx.p, nodeId: '${core.id}', kind: 'monitor', text: 'woke the core', reason: '2 open tasks with all agents idle', taskIds: ['t_1','t_2'], action: 'woke core', at: Date.now() - 1000 });
+      logs.push({ projectId: ctx.p, nodeId: '${core.id}', kind: 'monitor', text: 'legacy monitor line without fields', at: Date.now() - 500 });
+      renderLog(); await w(300);`);
+    const rows = await ex(`return [...document.querySelectorAll('#log .logrow.lv-monitor')].map((r) => ({ badge: r.querySelector('.loglevel').textContent, text: r.querySelector('.logtext').textContent }))`);
+    expect('monitor: badge + action — reason with plain taskIds', rows[0] && rows[0].badge === 'Monitor' && rows[0].text === 'woke core — 2 open tasks with all agents idle (t_1, t_2)', rows);
+    expect('monitor: line without structured fields falls back to raw text', rows[1] && rows[1].badge === 'Monitor' && rows[1].text === 'legacy monitor line without fields', rows);
+    await shot('monitor-log');
+    console.log('[gui-e2e] monitorlog', JSON.stringify(rows));
+  };
+  // Red-master banner (t_f72708fd): S.orch.redMaster is seeded exactly as Devon's pre-merge gate
+  // (t_897cca56) will publish it on the orchestrator snapshot (contract recorded on that task):
+  // { red, since, failingTests:[name|{name}], testOutput, fixTaskId, lastMergedTaskId,
+  //   gateBlocks:[{taskId, tests, at}] }. Checks the solid banner content, the fix-task link,
+  //   the gate-block line, persistence across tabs, and the green (red:false) clear.
+  const redbarShots = async () => {
+    await waitFor(`return !!document.querySelector('#tpl-select option')`); await ex(`await refresh();`);
+    const cur = await ex(`return { p: ctx.p, t: S.teamId }`);
+    const ps = pm.store(cur.p || pid(), cur.t); let nodes = ps.getTeam().nodes;
+    if (nodes.length < 2) { ps.addNode({ name: 'Pia', role: 'PM', x: 60, y: 60 }); ps.addNode({ name: 'Devon', role: 'Dev', x: 320, y: 160 }); nodes = ps.getTeam().nodes; }
+    const [pmN, dev] = nodes;
+    const fix = ps.createTask({ title: 'P0: fix red master — usage invariants', assignee: dev.id, priority: 'P0' });
+    const bounced = ps.createTask({ title: 'Logs team filter polish', assignee: dev.id });
+    await ex(`await refresh(); await w(200);`);
+    // Re-seed right before every read: a background refresh() replaces S (and S.orch) at any time.
+    const seed = `S.orch.redMaster = { red: true, since: Date.now() - 42 * 60000,
+      failingTests: ['usage-invariants.test.js › vendorTable resolves in renderer/app.js', { name: 'orchestrator.test.js › drain lets long tasks finish' }, 'store.test.js › auto-merge blocked by gate'],
+      testOutput: 'FAIL app/test/usage-invariants.test.js\\n  ● vendorTable resolves in renderer/app.js\\n    expect(received).toBeTruthy()\\n\\nFAIL app/test/orchestrator.test.js\\n  ● drain lets long tasks finish',
+      fixTaskId: '${fix.id}', lastMergedTaskId: '${bounced.id}',
+      gateBlocks: [{ taskId: '${bounced.id}', tests: ['usage-invariants.test.js › vendorTable resolves'], at: Date.now() - 5 * 60000 }] };
+      renderRedbar();`;
+    await ex(`$('#tabs button[data-tab=board]').click(); await w(200);`);
+    const on = await ex(`${seed} await w(100); return { vis: !$('#redbar').classList.contains('hidden'), title: ($('#redbar b') || {}).textContent || '', chips: document.querySelectorAll('#redbar .rb-test').length, fix: ($('#rb-fix') || {}).textContent || '', block: ($('.rb-block') || {}).textContent || '', out: !!$('#redbar .rb-out') }`);
+    expect('redbar: solid banner with red title, failing-test chips (string + {name}), fix task, gate block, output toggle',
+      on.vis && /MASTER IS RED/.test(on.title) && /since/.test(on.title) && on.chips === 3 && on.fix.includes(fix.id.slice(0, 6)) && on.fix.includes('P0: fix red master') && /Gate blocked the merge of/.test(on.block) && on.block.includes('Logs team filter polish') && on.block.includes('sent back to Devon') && on.out, on);
+    await shot('redbar-board');
+    await ex(`$('#rb-fix').click(); await w(400);`);
+    const opened = await ex(`return { boardTab: $('#tab-board').classList.contains('active'), detail: ($('#taskdetail h3') || {}).textContent || '', sel: sel.task === '${fix.id}' }`);
+    expect('redbar: fix-task link opens the board task detail for the fix task', opened.boardTab && opened.detail.includes('P0: fix red master') && opened.sel, opened);
+    await shot('redbar-fixtask');
+    await ex(`$('#tabs button[data-tab=chat]').click(); await w(200);`);
+    const cross = await ex(`${seed} await w(100); return { vis: !$('#redbar').classList.contains('hidden') }`);
+    expect('redbar: banner persists on other tabs (chat)', cross.vis, cross);
+    await shot('redbar-chat');
+    const off = await ex(`S.orch.redMaster = { red: false }; renderRedbar(); await w(100); return { hidden: $('#redbar').classList.contains('hidden') }`);
+    expect('redbar: red:false clears the banner (master green again)', off.hidden, off);
+    console.log('[gui-e2e] redbar', JSON.stringify({ on, opened, cross, off }));
+  };
+  // Wake run on an agent that ALSO has an in_progress task (t_8af586bc) — the case that used to
+  // render bare "working": the backend keeps a.taskId null for the whole wake, so the old
+  // wakeRun() veto on any in_progress task hid the wake info everywhere. Same seeded activity
+  // shape as wakeShots, plus count (queued) and the in_progress task.
+  const wakeBusyShots = async () => {
+    await waitFor(`return !!document.querySelector('#tpl-select option')`); await ex(`await refresh();`);
+    const cur = await ex(`return { p: ctx.p, t: S.teamId }`);
+    const ps = pm.store(cur.p || pid(), cur.t); let nodes = ps.getTeam().nodes;
+    if (nodes.length < 2) { ps.addNode({ name: 'Pia', role: 'PM', x: 60, y: 60 }); ps.addNode({ name: 'Devon', role: 'Dev', x: 320, y: 160 }); nodes = ps.getTeam().nodes; }
+    const [pmN, dev] = nodes;
+    const task = ps.createTask({ title: 'Busy wake demo', assignee: dev.id });
+    ps.updateTask(task.id, { status: 'in_progress' });
+    await ex(`await refresh(); await w(200);`); // pick up the seeded task before injecting wake state
+    const seed = (onTask) => `S.orch.agents = { '${dev.id}': { status: 'working', activity: { trigger: 'message', messageId: 'm1', fromNodeId: '${pmN.id}', excerpt: 'Please look at the failing test', taskId: null, count: 2, startedAt: Date.now() }${onTask ? `, taskId: '${task.id}'` : ''} } }; renderIdle(); renderGraph(); renderOverview(); renderChat();`;
+    await ex(`$('#tabs button[data-tab=team]').click(); await w(200);`);
+    const team = await ex(`${seed(false)} await w(100); return { badge: !!document.querySelector('#graph .wakerunbadge'), chip: !!document.querySelector('#presence .pchip.wake'), typing: '', txt: (document.querySelector('#graph .wakerunbadge text') || {}).textContent || '' }`);
+    expect('wakebusy: wake badge shows despite the in_progress task (was bare working), visible text keeps the sender', team.badge && team.chip && team.txt.includes('Pia'), team);
+    await shot('wakebusy-team');
+    const chat = await ex(`$('#tabs button[data-tab=chat]').click(); await w(200); ${seed(false)} await w(100); return { typing: $('#chat-typing').textContent || '' }`);
+    expect('wakebusy: chat header shows the wake reason, not bare "Name is working"', chat.typing.includes('woken by message from Pia') && !/^Devon is working/.test(chat.typing), chat);
+    await shot('wakebusy-chat');
+    await ex(`$('#tabs button[data-tab=overview]').click(); await w(200);`);
+    const ov = await ex(`${seed(false)} await w(100); return { badge: !!document.querySelector('#ov-graph .wakerunbadge'), txt: (document.querySelector('#ov-graph .wakerunbadge text') || {}).textContent || '' }`);
+    expect('wakebusy: Overview shows the wake badge despite the in_progress task, visible text keeps the sender', ov.badge && ov.txt.includes('Pia'), ov);
+    await shot('wakebusy-overview');
+    // The veto still applies when the live run IS the task run (a.taskId set): badge goes away.
+    await ex(`$('#tabs button[data-tab=team]').click(); await w(200);`);
+    const onTask = await ex(`${seed(true)} await w(100); return { badge: !!document.querySelector('#graph .wakerunbadge') }`);
+    expect('wakebusy: task badge wins when the live run is the task run (a.taskId set)', !onTask.badge, onTask);
+    await shot('wakebusy-taskwins');
+    console.log('[gui-e2e] wakebusy', JSON.stringify({ team, chat, ov, onTask }));
+  };
+  // Subagent (Task/Agent tool) visibility: replay REAL captured CLI streams (test/fixtures/subagents-*.jsonl —
+  // claude 2.1.283 with two parallel Agent spawns + parent_tool_use_id child events, helpycode 0.3.5 with two
+  // task-tool parts) through the backend's own event parsers — no mocks, no model runs — then assert the
+  // renderer nests child activity under the parent with own tokens ('n/a' when the CLI reports none) and a
+  // per-agent count. Selector contract with Uma (t_d716779d): .subblock/.subhead/.subdesc/.submeta/
+  // .subrows (collapsed by default, [data-subtoggle]) in Logs, .subbadge on Team+Overview graphs,
+  // details.cchip.subagent in Chat; tokens label "N / M tok", "n/a" when the CLI reports none.
+  const subagentShots = async () => {
+    const { SubagentTracker } = require('./subagents');
+    const fx = (f) => fs.readFileSync(path.join(__dirname, '..', 'test', 'fixtures', f), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+    const CLAUDE = fx('subagents-claude.jsonl'), HC = fx('subagents-helpycode.jsonl');
+    await waitFor(`return !!document.querySelector('#tpl-select option')`); await ex(`await refresh();`);
+    const cur = await ex(`return { p: ctx.p, t: S.teamId }`);
+    const p = cur.p || pid(); const ts = pm.store(p, cur.t); const o = orchFor(p);
+    let nodes = ts.getTeam().nodes;
+    if (nodes.length < 2) { ts.addNode({ name: 'Pia', role: 'PM', x: 60, y: 60 }); ts.addNode({ name: 'Devon', role: 'Dev', x: 320, y: 160 }); nodes = ts.getTeam().nodes; }
+    const [n1, n2] = nodes;
+    const tsk = ts.createTask({ title: 'Subagent demo', assignee: n1.id }); // overview thread + board render assume a task exists
+    // Replay through the backend's real parsers: claude stream-json on n1, helpycode profile events on n2.
+    const replay = (node, events, runtime) => {
+      const run = { sessionId: null, result: '', usage: U.newRun({ nodeId: node.id, agent: node.name }) };
+      run.subs = new SubagentTracker(node.id);
+      for (const ev of events) o.onEvent(node, JSON.stringify(ev), run, runtime);
+      return run;
+    };
+    replay(n1, CLAUDE, 'claude');
+    RT.RUNTIMES.stubsub = { id: 'stubsub', parseEvent: (ev) => RT.parseProfileEvent(ev, { label: 'Stub', eventMapping: {} }) };
+    try { replay(n2, HC, 'stubsub'); } finally { delete RT.RUNTIMES.stubsub; }
+    const [a1, a2] = [o.agent(n1.id), o.agent(n2.id)];
+    expect('subagents: backend replay -> 2 records per node (claude Agent, helpycode task)', a1.subagentCount === 2 && a2.subagentCount === 2, { n1: a1.subagentCount, n2: a2.subagentCount });
+    expect('subagents: claude tokens breakdown (2x 10in/4out), helpycode none (n/a)', JSON.stringify(a1.subagentTokens) === '{"inputTokens":20,"outputTokens":8}' && a2.subagents.every((r) => r.tokens === null), { a1: a1.subagentTokens });
+    await ex(`$('#tabs button[data-tab=obs]').click(); await refresh(); renderLog(); await w(600);`); // re-render: a refresh may land after the live 'log' renders (S.orch was still empty then)
+    await shot('31-subagents-logs');
+    // Only the claude fixture's children stream as tagged rows; the helpycode task tool surfaces the whole
+    // spawn as ONE completed part (no child events), so its 2 records show via the badge counts, not blocks.
+    const blocks = await ex(`return [...document.querySelectorAll('#log .subblock[data-sub]')].map((b) => ({ desc: (b.querySelector('.subdesc')||{}).textContent || '', status: (b.querySelector('.substatus')||{}).dataset ? b.querySelector('.substatus').dataset.substatus : '', meta: (b.querySelector('.submeta')||{}).textContent || '', open: b.classList.contains('open') }))`);
+    expect('subagents: Logs nest one collapsed block per claude subagent', blocks.length === 2 && blocks.every((b) => !b.open), blocks);
+    expect('subagents: block heads carry the descriptions + completed status', ['Run alpha echo command', 'Run beta echo command'].every((d) => blocks.some((b) => b.desc === d)) && blocks.every((b) => b.status === 'completed'), blocks.map((b) => [b.desc, b.status]));
+    expect('subagents: own tokens in the block meta (breakdown, not parent totals)', blocks.every((b) => /10 \/ 4 tok/.test(b.meta)), blocks.map((b) => [b.desc, b.meta]));
+    // Toggling re-renders the list, so re-query the block by its data-sub id after the click.
+    const expand = await ex(`const all = [...document.querySelectorAll('#log .subblock[data-sub]')]; const alpha = all.find((x) => (x.querySelector('.subdesc')||{}).textContent === 'Run alpha echo command'); if (!alpha) return { found: false, collapsed: false }; const sid = alpha.dataset.sub; const collapsed = all.every((x) => !x.classList.contains('open')); alpha.querySelector('[data-subtoggle]').click(); await w(400); const b = document.querySelector('#log .subblock[data-sub="' + sid + '"]'); return { found: true, collapsed, open: !!b && b.classList.contains('open') && !b.querySelector('.subrows').hidden, childText: !!b && b.textContent.includes('echo alpha-subagent-result') }`);
+    expect('subagents: blocks collapsed by default; expanding reveals the child rows', expand.found && expand.collapsed && expand.open && expand.childText, expand);
+    await shot('32-subagents-logs-expanded');
+    for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`$('#tabs button[data-tab=team]').click(); await w(400);`); await shot(`33-subagents-team-${t}`); }
+    const counts = await ex(`return [...document.querySelectorAll('#graph .subbadge')].map((b) => ({ txt: b.querySelector('text') ? b.querySelector('text').textContent : '', full: b.querySelector('title') ? b.querySelector('title').textContent : '' }))`);
+    expect('subagents: per-agent count badge (2) on both cards, claude totals as a breakdown of the parent', counts.length === 2 && counts.every((c) => /2/.test(c.txt)) && counts.some((c) => /2 subagents · 20 in \/ 8 out tok/.test(c.full)), counts);
+    const ovb = await ex(`$('#ov-task').value = '${tsk.id}'; $('#tabs button[data-tab=overview]').click(); await w(400); return [...document.querySelectorAll('#ov-graph .subbadge')].map((b) => b.querySelector('text') ? b.querySelector('text').textContent : '')`);
+    expect('subagents: Overview shows the count badges too', ovb.length >= 1, ovb);
+    for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`$('#tabs button[data-tab=overview]').click(); await w(400);`); await shot(`35-subagents-overview-${t}`); }
+    const chat = await ex(`$('#tabs button[data-tab=chat]').click(); await w(300); await refresh(); CH.key = ''; renderChat(); await w(400); return [...document.querySelectorAll('#chat-room details.cchip.subagent')].map((d) => d.querySelector('summary') ? d.querySelector('summary').textContent : '')`);
+    expect('subagents: Chat shows a nested subagent chip per spawn with its own tokens', chat.length >= 2 && chat.every((s) => /10 \/ 4 tok/.test(s)), chat);
+    require('electron').nativeTheme.themeSource = 'system';
+    await shot('34-subagents-chat');
+    console.log('[gui-e2e] subagents', JSON.stringify({ blocks, expand, counts, ovb, chat }));
+  };
+  // Dynamic team GUI (t_2054825d): core toggle in the node form, lock badge + recruited chip on the graph, maxAgents/teamChangeApproval settings.
+  const dynamicTeamShots = async () => {
+    // refresh BEFORE the first tab click: a click renders the settings form, and empty S.settings
+    // would trip the unguarded maxConcurrency/maxRuns number inputs ("cannot be parsed" warnings).
+    await ex(`await refresh(); $('#tabs button[data-tab=team]').click(); await w(300); await refresh();`);
+    const cur = await ex(`return { p: ctx.p, t: S.teamId }`);
+    const ps = pm.store(cur.p, cur.t); const psettings = pm.store(cur.p);
+    if (ps.getTeam().nodes.length < 3) { ps.addNode({ name: 'Corey', role: 'PM', x: 60, y: 60 }); ps.addNode({ name: 'Recruit A', role: 'Dev', x: 340, y: 60 }); ps.addNode({ name: 'Recruit B', role: 'Critic', x: 340, y: 200 }); }
+    const team = ps.getTeam(); const corey = team.nodes.find((n) => n.name === 'Corey'); const ra = team.nodes.find((n) => n.name === 'Recruit A'); const rb = team.nodes.find((n) => n.name === 'Recruit B');
+    await ex(`await refresh(); await w(400);`);
+    const cores = () => ps.getTeam().nodes.filter((n) => n.core);
+    const waitForStore = async (fn, ms = 8000) => { for (let t = 0; t < ms; t += 200) { if (fn(ps.getTeam(), psettings.getSettings())) return true; await new Promise((r) => setTimeout(r, 200)); } return false; };
+    // Core toggle through the node form: check, save, exactly one core in the team, lock badge on the graph.
+    await ex(`selectNode('${corey.id}'); await w(300);`);
+    const boxBefore = await ex(`return { present: !!$('#nf-core'), checked: $('#nf-core') ? $('#nf-core').checked : null }`);
+    expect('core toggle present and unchecked for a fresh node', boxBefore.present && boxBefore.checked === false, boxBefore);
+    await ex(`$('#nf-core').checked = true; $('#nf-save').click(); await w(600);`);
+    expect('setting core saves core:true on the node', await waitForStore((t) => cores().length === 1 && cores()[0].id === corey.id), cores().map((n) => n.id));
+    const lockOn = await ex(`return { core: !!document.querySelector('#graph .node[data-id="${corey.id}"] .corelock'), total: document.querySelectorAll('#graph .corelock').length }`);
+    expect('lock badge shows on the core node only', lockOn.core && lockOn.total === 1, lockOn);
+    // The form opens pre-checked for the core node; unchecking clears core (zero cores is safe, two are not).
+    await ex(`selectNode('${corey.id}'); await w(300);`);
+    const boxAfter = await ex(`return $('#nf-core') ? $('#nf-core').checked : null`);
+    expect('form opens with the core box checked for the core node', boxAfter === true, boxAfter);
+    await ex(`$('#nf-core').checked = false; $('#nf-save').click(); await w(600);`);
+    expect('unchecking core saves core:false', await waitForStore((t) => !cores().length), cores().length);
+    expect('lock badge gone when core is off', await ex(`return document.querySelectorAll('#graph .corelock').length`) === 0);
+    await ex(`selectNode('${corey.id}'); await w(200); $('#nf-core').checked = true; $('#nf-save').click(); await w(600);`);
+    expect('core re-enabled for the screenshots', await waitForStore((t) => cores().length === 1 && cores()[0].id === corey.id));
+    // Recruited chip: nodes with createdBy (set the way recruit_agent does), not on the core or plain nodes.
+    ps.updateNode(ra.id, { createdBy: corey.id });
+    await ex(`await refresh(); await w(400);`);
+    const chips = await ex(`return { a: !!document.querySelector('#graph .node[data-id="${ra.id}"] .chip-recruited'), b: !!document.querySelector('#graph .node[data-id="${rb.id}"] .chip-recruited'), core: !!document.querySelector('#graph .node[data-id="${corey.id}"] .chip-recruited') }`);
+    expect('recruited chip on the createdBy node only', chips.a && !chips.b && !chips.core, chips);
+    // wait for the badges instead of a fixed sleep so the shot cannot race the repaint (t_df6d61e4)
+    await waitFor(`return !!document.querySelector('#graph .node[data-id="${ra.id}"] .chip-recruited') && !!document.querySelector('#graph .node[data-id="${corey.id}"] .corelock')`);
+    await shot('36-dynamicteam-graph');
+    // Settings: defaults 6/ask, saved values persist and re-render.
+    await ex(`$('#tabs button[data-tab=settings]').click(); await w(300);`);
+    const defaults = await ex(`return { maxAgents: $('#st-maxagents') ? $('#st-maxagents').value : null, approval: $('#st-tcappr') ? $('#st-tcappr').value : null }`);
+    expect('settings default maxAgents=6 and teamChangeApproval=ask', defaults.maxAgents === '6' && defaults.approval === 'ask', defaults);
+    await ex(`$('#st-maxagents').value = '8'; $('#st-tcappr').value = 'auto'; $('#st-save').click(); await w(600);`);
+    expect('settings save maxAgents=8 and teamChangeApproval=auto', await waitForStore((t, s) => s.maxAgents === 8 && s.teamChangeApproval === 'auto'), psettings.getSettings());
+    await ex(`await refresh(); await w(300);`);
+    const saved = await ex(`return { maxAgents: $('#st-maxagents').value, approval: $('#st-tcappr').value }`);
+    expect('settings fields re-render the saved values', saved.maxAgents === '8' && saved.approval === 'auto', saved);
+    await shot('37-dynamicteam-settings');
+    console.log('[gui-e2e] dynamicteam', JSON.stringify({ cores: cores().map((n) => n.id), createdBy: ps.getTeam().nodes.find((n) => n.id === ra.id).createdBy, settings: { maxAgents: psettings.getSettings().maxAgents, teamChangeApproval: psettings.getSettings().teamChangeApproval } }));
+  };
+  // Recruit approval through the human Inbox (t_49f926ea): a core's recruit_agent files an approval
+  // request in the Inbox; approving it in the UI must add the node to the graph LIVE (no reload),
+  // declining must not — and the core is told either way. The REAL tool implementation runs
+  // in-process against the project-level store (exactly what mcp-server.js does), so the suite
+  // needs no claude run and stays red until the answer handler applies approved changes.
+  const recruitInboxShots = async () => {
+    const { makeTools } = require('./board-tools');
+    await waitFor(`return !!document.querySelector('#tpl-select option')`); await ex(`await refresh();`);
+    const cur = await ex(`return { p: ctx.p, t: S.teamId }`);
+    const ts = pm.store(cur.p, cur.t); const proj = pm.store(cur.p);
+    if (ts.getTeam().nodes.length < 2) { ts.addNode({ name: 'Corey', role: 'PM', x: 60, y: 60 }); ts.addNode({ name: 'Morgan', role: 'Dev', x: 340, y: 60 }); }
+    const corey = ts.getTeam().nodes.find((n) => n.name === 'Corey');
+    for (const n of ts.getTeam().nodes) if (n.core && n.id !== corey.id) ts.updateNode(n.id, { core: false });
+    if (!corey.core) ts.updateNode(corey.id, { core: true });
+    const task = ts.createTask({ title: 'Grow the team', assignee: corey.id, createdBy: corey.id });
+    ts.updateTask(task.id, { status: 'in_progress' });
+    const tools = makeTools(proj, corey.id);
+    const nodesBefore = ts.getTeam().nodes.length;
+    const until = async (fn, ms = 15000) => { for (let t = 0; t < ms; t += 200) { if (fn()) return true; await new Promise((r) => setTimeout(r, 200)); } return false; };
+    const named = (name) => ts.getTeam().nodes.filter((n) => n.name === name);
+    const openItem = (re) => proj.listInbox({ status: 'open' }).find((i) => i.change && re.test(i.question));
+    // (a) The core asks for a recruit: nothing changes until the human answers.
+    const req1 = tools.recruit_agent({ name: 'Rookie', role: 'Dev', reason: 'e2e: an extra pair of hands for the goal' });
+    const item1 = openItem(/Rookie/);
+    await ex(`await refresh(); await w(300); $('#sb-inbox').click(); await w(400);`);
+    const asked = { pending: !!req1.pending, item: !!item1, badge: await ex(`return $('#inbox-tab-badge').textContent`), parked: ts.getTask(task.id).status, nodes: ts.getTeam().nodes.length };
+    expect('recruit ask: pending result, open item, badge 1, task parked, no node yet', asked.pending && asked.item && asked.badge === '1' && asked.parked === 'waiting_for_human' && asked.nodes === nodesBefore, asked);
+    await shot('41-recruitinbox-request');
+    // (b) Approve in the Inbox: the node joins the graph live — marker proves no reload happened.
+    await ex(`window.__noreload = 'alive'; const d = [...document.querySelectorAll('.inboxitem')].find((x) => x.textContent.includes('Rookie')); d.querySelector('.ib-choice[data-v=approve]').click(); await w(600);`);
+    const applied = await until(() => named('Rookie').length === 1);
+    const rookie = named('Rookie')[0] || {};
+    await ex(`await refresh(); await w(300); $('#tabs button[data-tab=team]').click(); await w(500);`);
+    const approved = {
+      applied, marker: await ex(`return window.__noreload === 'alive'`),
+      dom: await ex(`return { nodes: document.querySelectorAll('#graph .node').length, rookie: [...document.querySelectorAll('#graph .node')].some((n) => n.textContent.includes('Rookie')) }`),
+      createdBy: rookie.createdBy || null, edges: ts.getTeam().edges.filter((e) => (e.from === corey.id && e.to === rookie.id) || (e.from === rookie.id && e.to === corey.id)).map((e) => e.type).sort(),
+      itemClosed: !!item1 && proj.getInboxItem(item1.id).status !== 'open',
+      badgeAfter: await ex(`await refresh(); $('#sb-inbox').click(); await w(300); return $('#inbox-tab-badge').textContent`),
+      task: ts.getTask(task.id).status,
+      toldCore: proj.listMessages({ to: corey.id }).some((m) => /Rookie/.test(m.text)),
+    };
+    expect('recruit approved: node appears live (no reload), createdBy=core, both edges, item closed, badge 0, task back, core told',
+      approved.applied && approved.marker && approved.dom.nodes === nodesBefore + 1 && approved.dom.rookie && approved.createdBy === corey.id && approved.edges.join() === 'assign,message' && approved.itemClosed && approved.badgeAfter === '' && approved.task === 'in_progress' && approved.toldCore, approved);
+    await ex(`$('#tabs button[data-tab=team]').click(); await w(300);`); await shot('42-recruitinbox-approved');
+    // (c) Decline: any non-'approve' answer changes nothing; the core still gets told.
+    const req2 = tools.recruit_agent({ name: 'Nova', role: 'Critic', reason: 'e2e: decline-path coverage' });
+    const item2 = openItem(/Nova/);
+    await ex(`await refresh(); await w(300); $('#sb-inbox').click(); await w(400);`);
+    await shot('43-recruitinbox-decline-request');
+    await ex(`const d = [...document.querySelectorAll('.inboxitem')].find((x) => x.textContent.includes('Nova')); d.querySelector('.ib-text').value = 'decline: not needed for this goal'; d.querySelector('.ib-send').click(); await w(800);`);
+    await new Promise((r) => setTimeout(r, 2000)); // settle: nothing is supposed to change
+    await ex(`await refresh(); await w(300);`);
+    const it2 = item2 && proj.getInboxItem(item2.id);
+    const declined = {
+      pending: !!req2.pending, answered: it2 ? it2.status === 'answered' && it2.answer : null,
+      nodes: ts.getTeam().nodes.length, task: ts.getTask(task.id).status,
+      badge: await ex(`return $('#inbox-tab-badge').textContent`),
+      toldCore: proj.listMessages({ to: corey.id }).some((m) => /Nova/.test(m.text)),
+    };
+    expect('recruit declined: no node, item answered, badge 0, task back, core told',
+      declined.pending && declined.answered && declined.nodes === nodesBefore + 1 && declined.task === 'in_progress' && declined.badge === '' && declined.toldCore, declined);
+    await ex(`$('#tabs button[data-tab=team]').click(); await w(300);`); await shot('44-recruitinbox-declined');
+    console.log('[gui-e2e] recruitinbox', JSON.stringify({ asked, approved, declined }));
+  };
+  // Top bar must fit any window width with the meter filled (bug t_19ec5471): header never overflows
+  // (scrollWidth <= clientWidth), New goal/Help stay visible (the goal composer is a popover since
+  // t_db67859d; Stop only shows while a run is live), and the bar stays a FIXED-SIZE
+  // summary — one limit chip whatever the provider count (t_bc19b2f5; the tokens pill is gone, the
+  // cost pill stays at every width). Widths swept via setContentSize so the CSS viewport is exact.
+  // The chat pane must reach the window's right edge (t_a99ed2c2): the 360px task-thread aside must
+  // actually hide (its ID display:flex used to beat .hidden) and come back when a thread is opened.
+  const topbarShots = async () => {
+    await waitFor(`return !!document.querySelector('#tpl-select option')`); await ex(`await refresh();`); const cur = await ex(`return { p: ctx.p, t: S.teamId }`);
+    const p = cur.p || pid(); const ts = pm.store(p, cur.t); const o = orchFor(p);
+    let nodes = ts.getTeam().nodes;
+    if (nodes.length < 2) { ts.addNode({ name: 'Pia', role: 'PM', runtime: 'claude', model: 'opus', x: 60, y: 60 }); ts.addNode({ name: 'Devon', role: 'Dev', runtime: 'codex', model: 'gpt-5.6-terra', x: 320, y: 60 }); nodes = ts.getTeam().nodes; }
+    const rl = (pct, hrs) => ({ pct, resetsAt: new Date(Date.now() + hrs * 3600000).toISOString() });
+    o.subscriptionRateLimits = { [nodes[0].id]: { fiveHour: rl(0.42, 1), weekly: rl(0.13, 72) }, [nodes[1].id]: { fiveHour: rl(0.66, 2) } };
+    // Real usage rows too: an empty #totalcost hides itself, and the human's overflow happens with
+    // the pill populated.
+    for (let i = 0; i < 3; i++) {
+      ts.addRun({ id: 'tb-c' + i, projectId: p, nodeId: nodes[0].id, agent: nodes[0].name, kind: 'agent', runtime: 'claude', billingSource: 'subscription', startedAt: new Date(Date.now() - i * 1000).toISOString(), inputTokens: 5000, outputTokens: 1200, reportedCostUsd: 0.02 + i * 0.01 });
+      ts.addRun({ id: 'tb-x' + i, projectId: p, nodeId: nodes[1].id, agent: nodes[1].name, kind: 'agent', runtime: 'codex', billingSource: 'subscription', startedAt: new Date(Date.now() - i * 1000).toISOString(), inputTokens: 4000, outputTokens: 900, reportedCostUsd: 0.02 + i * 0.01 });
+    }
+    // A task with createdBy renders a handoff bubble carrying data-thread — used below to open the
+    // thread pane and prove #chat-thread.hidden still toggles (t_a99ed2c2).
+    ts.createTask({ title: 'Thread pane geometry', assignee: nodes[0].id, createdBy: nodes[1].id });
+    await ex(`await refresh(); await w(500);`);
+    expect('topbar: exactly ONE limit chip, naming the worst provider (claude 42%)', await ex(`return document.querySelectorAll('#limitmeter [data-provider]').length === 1 && document.querySelector('#limitmeter [data-provider]').dataset.provider === 'claude' && /42%/.test($('#limitmeter').textContent) && !$('#limitmeter').classList.contains('hidden')`));
+    expect('topbar: cost pill populated (tokens pill removed; cost visible)', await ex(`return !$('#totalcost').classList.contains('hidden') && !/no cost yet/.test($('#totalcost').textContent) && !document.querySelector('#totaltokens')`));
+    // Regime (t_bc19b2f5, t_57421101 round 3; goal popover in t_db67859d): the meter and the cost
+    // pill are FIXED — they may never shrink or clip, at any width. #updst/#runstate ellipsize as
+    // the last valves, and below 1200px the brand text hides and the tab labels collapse to icons.
+    // The header holds only fixed-size chrome now: the goal composer lives in a popover off the
+    // "New goal" button, asserted to open focused and fully on-screen at 1400px below.
+    const measure = `(async () => { const h = document.querySelector('header'); const d = document.documentElement; const vis = (s) => { const e = document.querySelector(s); if (!e || e.getClientRects().length === 0) return false; const r = e.getBoundingClientRect(); return r.width > 0 && r.left >= 0 && r.right <= window.innerWidth && r.top >= 0 && r.bottom <= window.innerHeight; };
+      const cm = document.querySelector('#tab-chat.active .chat-main'); const th = document.querySelector('#chat-thread');
+      return { sw: Math.max(d.scrollWidth, document.body.scrollWidth), cw: Math.min(d.clientWidth, document.body.clientWidth), edge: Math.round(Math.max(...[...h.children].map((c) => c.getBoundingClientRect().right))), iw: window.innerWidth, hdrSw: h.scrollWidth, hdrCw: h.clientWidth, newgoal: vis('#newgoal'), help: vis('#help'), cost: vis('#totalcost'), clipped: [...h.children].filter((c) => c.id !== 'goalpop' && c.scrollWidth > c.clientWidth + 1).map((c) => c.id || c.className), kids: [...h.children].map((c) => ({ id: c.id || c.className, w: Math.round(c.getBoundingClientRect().width), sw: c.scrollWidth, cw: c.clientWidth })), meterKids: [...document.querySelector('#limitmeter').children].map((c) => ({ cls: c.className, w: Math.round(c.getBoundingClientRect().width), t: c.textContent.trim().slice(0, 24) })), cm: cm ? Math.round(cm.getBoundingClientRect().right) : null, thDisp: !!(th && th.getClientRects().length), thW: th ? Math.round(th.getBoundingClientRect().width) : 0 }; })()`;
+    const prevSize = win.getContentSize();
+    const sweep = [];
+    for (const cw of [1900, 1600, 1400, 900]) {
+      win.setContentSize(cw, Math.max(600, Math.min(prevSize[1], 800))); await new Promise((r) => setTimeout(r, 350));
+      const m = await ex(`return ${measure}`); sweep.push({ cw, ...m });
+      expect(`topbar: no horizontal scroll at ${cw}px (page scrollWidth ${m.sw} <= ${m.cw})`, m.sw <= m.cw + 1, m);
+      expect(`topbar: no header item cut off at ${cw}px (rightmost edge ${m.edge} <= window ${m.iw})`, m.edge <= m.iw + 1, m);
+      expect(`topbar: New goal/Help visible at ${cw}px`, m.newgoal && m.help, m);
+      expect(`topbar: cost pill visible at ${cw}px (no breakpoint: the pill stays at every width)`, m.cost, m);
+      if (cw >= 1400) expect(`topbar: nothing clipped at ${cw}px — goal absorbs, the summary chip shows full text`, m.clipped.length === 0, m);
+      else expect(`topbar: below 1400px only #updst/#runstate may clip — the chip and the cost pill never do`, m.clipped.every((x) => String(x).includes('updst') || String(x).includes('runstate')), m);
+      if (cw === 1600 || cw === 1400 || cw === 900) expect(`topbar: chat pane reaches the window's right edge at ${cw}px (chat right ${m.cm} vs window ${m.iw}, thread hidden)`, m.cm !== null && m.cm >= m.iw - 1 && !m.thDisp, m);
+      await shot(`topbar-${cw}`);
+      if (cw === 1400) { // the composer popover must open focused and sit fully on-screen (t_db67859d)
+        await ex(`$('#newgoal').click(); await w(200);`);
+        const gp = await ex(`return { open: !$('#goalpop').classList.contains('hidden'), w: Math.round($('#goalpop').getBoundingClientRect().width), r: Math.round($('#goalpop').getBoundingClientRect().right), b: Math.round($('#goalpop').getBoundingClientRect().bottom), ih: window.innerHeight, focused: document.activeElement === $('#goal') }`);
+        expect(`topbar: goal popover opens focused and fits at 1400px (w ${gp.w}, right ${gp.r})`, gp.open && gp.focused && gp.w >= 440 && gp.r <= m.iw + 1 && gp.b <= gp.ih + 1, gp);
+        await shot('topbar-1400-goalpop');
+        await ex(`$('#goalpop').classList.add('hidden'); await w(100);`);
+      }
+      if (cw === 1400) { // the fix must not hide the thread pane for good: opening a task thread shows it again
+        await ex(`document.querySelector('#chat-room [data-thread]').click(); await w(300);`);
+        const th = await ex(`return { disp: $('#chat-thread').getClientRects().length > 0, w: Math.round($('#chat-thread').getBoundingClientRect().width), cm: Math.round($('#tab-chat.active .chat-main').getBoundingClientRect().right) }`);
+        expect(`topbar: opened thread pane is displayed with width > 0 at 1400px (chat right ${th.cm} = window ${m.iw} - thread ${th.w})`, th.disp && th.w > 0 && th.cm <= m.iw - th.w + 1, th);
+        await shot('topbar-1400-thread');
+        await ex(`CH.thread = null; chatSig = null; renderChat(); await w(200);`);
+        const m2 = await ex(`return ${measure}`);
+        expect(`topbar: chat pane reaches the right edge again after closing the thread at 1400px (chat right ${m2.cm} vs window ${m2.iw})`, m2.cm >= m2.iw - 1 && !m2.thDisp, m2);
+      }
+    }
+    // Critic round 3: the chip and the cost pill must be READABLE at 900px, not squashed — assert
+    // unclipped (scrollWidth <= clientWidth) and width-stable (the SAME width as at 1400px).
+    const kidAt = (cw2, id) => { const s2 = sweep.find((s3) => s3.cw === cw2); return (s2 && s2.kids.find((k2) => k2.id === id)) || null; };
+    for (const id of ['limitmeter', 'totalcost']) {
+      const k9 = kidAt(900, id), k14 = kidAt(1400, id);
+      expect(`topbar: ${id} unclipped and the SAME width at 900px as at 1400px (${k9 && k9.w}px vs ${k14 && k14.w}px)`, k9 && k14 && k9.sw <= k9.cw && Math.abs(k9.w - k14.w) <= 1, { at900: k9, at1400: k14 });
+    }
+    // Fixed-size bar whatever the provider count (t_bc19b2f5): 6 providers must still render the SAME
+    // one-chip summary — the same width as the 2-provider header swept above — with no overflow at
+    // 1600/1400/900, and clicking the chip must open the Usage tab listing every provider. The team
+    // mixes real and unknown runtime ids (agent-config keeps those), so usageStatus really keys 6
+    // providers; claude gets the same windows as the main team so the chip text — and thus the chip
+    // width — is directly comparable.
+    const prevCtx6 = await ex(`return { ...ctx }`);
+    const pj6 = pm.create('Topbar: 6 providers'); await ex(`P = await call('listProjects'); renderSidebar(); await switchTo({ p: '${pj6.id}' }); await w(700);`);
+    const s6 = pm.store(pj6.id); const o6 = orchFor(pj6.id);
+    const rts = ['claude', 'codex', 'opencode', 'helpycode', 'gemini', 'droid'];
+    const nodes6 = rts.map((rt, i) => s6.addNode({ name: 'Six' + i, role: i ? 'Dev' : 'PM', runtime: rt, model: i ? '' : 'opus', x: 60 + i * 40, y: 60 }));
+    for (let i = 0; i < 3; i++) s6.addRun({ id: 'tb6-c' + i, projectId: pj6.id, nodeId: nodes6[0].id, agent: nodes6[0].name, kind: 'agent', runtime: 'claude', billingSource: 'subscription', startedAt: new Date(Date.now() - i * 1000).toISOString(), inputTokens: 5000, outputTokens: 1200, reportedCostUsd: 0.02 });
+    o6.subscriptionRateLimits = Object.fromEntries(nodes6.map((n, i) => [n.id, i === 0
+      ? { fiveHour: rl(0.42, 1), weekly: rl(0.13, 72), runtime: 'claude' }
+      : { fiveHour: rl(0.35 - i * 0.06, 1), weekly: rl(0.07, 72), runtime: rts[i] }]));
+    await ex(`await refresh(); await w(500);`);
+    expect('topbar-6: exactly one chip despite 6 providers — the worst one (claude 42%), never the others', await ex(`return document.querySelectorAll('#limitmeter [data-provider]').length === 1 && document.querySelector('#limitmeter [data-provider]').dataset.provider === 'claude' && /42%/.test($('#limitmeter').textContent) && !/codex|opencode|helpycode|gemini|droid/i.test($('#limitmeter').textContent) && !$('#limitmeter').classList.contains('hidden')`));
+    const chipW2 = (cw2) => { const x = sweep.find((s2) => s2.cw === cw2); return x && x.meterKids[0] ? x.meterKids[0].w : null; };
+    const six = {};
+    for (const cw of [1600, 1400, 900]) {
+      win.setContentSize(cw, Math.max(600, Math.min(prevSize[1], 800))); await new Promise((r) => setTimeout(r, 350));
+      const m = await ex(`return ${measure}`); six[cw] = m;
+      expect(`topbar-6: no overflow at ${cw}px (page ${m.sw} <= ${m.cw}, rightmost ${m.edge} <= ${m.iw})`, m.sw <= m.cw + 1 && m.edge <= m.iw + 1, m);
+      expect(`topbar-6: New goal/Help visible at ${cw}px`, m.newgoal && m.help, m);
+      if (cw >= 1400) expect(`topbar-6: nothing clipped at ${cw}px`, m.clipped.length === 0, m);
+      else expect(`topbar-6: below 1400px only #updst/#runstate may clip — the chip and the cost pill never do`, m.clipped.every((x) => String(x).includes('updst') || String(x).includes('runstate')), m);
+      expect(`topbar-6: bar same width as the 2-provider header at ${cw}px (${m.meterKids[0] ? m.meterKids[0].w : null}px vs ${chipW2(cw)}px)`, m.meterKids[0] && chipW2(cw) != null && Math.abs(m.meterKids[0].w - chipW2(cw)) <= 1, { six: m.meterKids[0], two: chipW2(cw) });
+      await shot(`topbar-6-${cw}`);
+    }
+    for (const id of ['limitmeter', 'totalcost']) {
+      const k9 = six[900].kids.find((k2) => k2.id === id), k14 = six[1400].kids.find((k2) => k2.id === id);
+      expect(`topbar-6: ${id} unclipped and the SAME width at 900px as at 1400px (${k9 && k9.w}px vs ${k14 && k14.w}px)`, k9 && k14 && k9.sw <= k9.cw && Math.abs(k9.w - k14.w) <= 1, { at900: k9, at1400: k14 });
+    }
+    // Clicking the summary chip opens the Usage tab, which lists EVERY provider (the top bar names only the worst).
+    await ex(`$('#limitmeter').click(); await w(300);`);
+    await waitFor(`return $('#tab-usage').classList.contains('active') && document.querySelectorAll('#us-limits [data-provider]').length === 6`);
+    const det = await ex(`return { provs: [...document.querySelectorAll('#us-limits [data-provider]')].map((c) => c.dataset.provider) }`);
+    expect('topbar-6: clicking the chip opens the Usage tab listing every provider', det.provs.length === 6 && rts.every((r) => det.provs.includes(r)), det);
+    await ex(`document.querySelector('#us-limits').scrollIntoView({ block: 'center' }); await w(250);`);
+    const uv = await ex(`return (() => { const r = document.querySelector('#us-limits').getBoundingClientRect(); return { top: Math.round(r.top), bottom: Math.round(r.bottom), ih: window.innerHeight }; })()`);
+    expect('topbar-6: #us-limits is scrolled into view for the shot (evidence that all 6 providers are listed)', uv.top >= 0 && uv.bottom <= uv.ih, uv);
+    await shot('topbar-6-usage');
+    // Pause/near-limit renders INSIDE the one chip — the word replaces the % text — so the meter
+    // never gains an element when the state changes and the equal-width comparison above stays
+    // chip-vs-chip. Prove it with the flag actually shown on BOTH teams at 1400px.
+    const flagGrab = `(async () => { const m2 = document.querySelector('#limitmeter'); const c = m2.querySelector('.lm-chip'); return { kids: m2.children.length, cls: c ? c.className : '', txt: c ? c.textContent.trim() : '', flagEl: !!m2.querySelector('.lm-flag'), w: c ? Math.round(c.getBoundingClientRect().width) : null }; })()`;
+    win.setContentSize(1400, Math.max(600, Math.min(prevSize[1], 800))); await new Promise((r) => setTimeout(r, 350));
+    o6.subscriptionRateLimits[nodes6[0].id] = { fiveHour: rl(1, 1), weekly: rl(0.13, 72), runtime: 'claude' };
+    await ex(`await refresh(); await w(500);`);
+    const pf6 = await ex(`return ${flagGrab}`);
+    expect('topbar-6[paused]: flag lives inside the one chip — meter stays one element, no .lm-flag element, chip says "paused"', pf6.kids === 1 && pf6.cls.includes('lm-danger') && /paused/.test(pf6.txt) && !pf6.flagEl, pf6);
+    await shot('topbar-6-paused');
+    await ex(`await switchTo(${JSON.stringify(prevCtx6)}); await w(300);`);
+    o.subscriptionRateLimits[nodes[0].id] = { fiveHour: rl(1, 1), weekly: rl(0.13, 72) };
+    await ex(`await refresh(); await w(500);`);
+    const pf2 = await ex(`return ${flagGrab}`);
+    expect('topbar[paused]: same in-chip flag on the 2-provider team', pf2.kids === 1 && pf2.cls.includes('lm-danger') && /paused/.test(pf2.txt) && !pf2.flagEl, pf2);
+    expect(`topbar[paused]: equal-width holds with the flag shown (${pf6.w}px vs ${pf2.w}px)`, pf6.w != null && pf2.w != null && Math.abs(pf6.w - pf2.w) <= 1, { six: pf6, two: pf2 });
+    await shot('topbar-paused-1400');
+    o6.subscriptionRateLimits = {};
+    o.subscriptionRateLimits = {};
+    console.log('[gui-e2e] topbar sweep', JSON.stringify(sweep.map(({ cw, hdrSw, hdrCw, goalW, clipped, kids, meterKids }) => ({ cw, hdrSw, hdrCw, goalW, clipped, kids, meterKids }))));
+    win.setContentSize(prevSize[0], prevSize[1]); await ex(`await refresh(); await w(300);`);
+  };
   try {
+    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'helpycode') { await helpycodeShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'wikilogs') { await wikiLogsShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'conflict') { await conflictShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'graph') { await graphShots(); for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`$('#tabs button[data-tab=team]').click(); await w(500);`); await shot(`graph-${t}`); } require('electron').nativeTheme.themeSource = 'system'; throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'chat') { await chatShots(); throw null; }
+    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'windowing') { await windowingShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'firstrun') { await firstrunInbox(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'overview') { await overviewShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'parallel') { await parallelShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'mixed') { await mixedShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'limits') { await limitsShots(); throw null; }
+    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'limits-providers') { await limitsProvidersShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'discovery') { await discoveryPanelShots(); throw null; }
+    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'usage') { await usagePerModelShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'existingdata') { await existingDataShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'polish') { await polishShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'mainlogswiki') { await mainLogsWikiShots(); throw null; }
+    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'logsdesign') { await logsDesignShots(); throw null; }
+    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'audit') { await auditShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'critique') { await critiqueShots(); throw null; }
+    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'wake') { await wakeShots(); throw null; }
+    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'wakebusy') { await wakeBusyShots(); throw null; }
+    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'monitorlog') { await monitorShots(); throw null; }
+    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'redbar') { await redbarShots(); throw null; }
+    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'subagents') { await subagentShots(); throw null; }
+    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'dynamicteam') { await dynamicTeamShots(); throw null; }
+    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'recruitinbox') { await recruitInboxShots(); throw null; }
+    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'topbar') { await topbarShots(); throw null; }
     // project/team management through the UI: create a project from the Startup template, then a Solo team, then switch back.
     // Wait until the template select is filled (the first refresh loads the templates) before choosing one.
     await ex(`$('#tabs button[data-tab=team]').click(); await w(300);`); // Chat is the default tab; the flow below clicks the graph
@@ -838,12 +1716,12 @@ async function guiE2E() {
     expect('preflight badges shown', pfNodes.every((n) => typeof n.ok === 'boolean'), pfNodes);
     console.log('[gui-e2e] preflight', JSON.stringify({ nodes: pfNodes, badges: await ex(`return [...document.querySelectorAll('#graph .pfbadge text')].map((t) => t.textContent)`), summary: await ex(`return $('#pf-summary').textContent`), checks: await ex(`return document.querySelectorAll('#nf-pf .pf-checks li').length`) }));
     await ex(`window.__confirms = []; window.confirm = (m) => { window.__confirms.push(m); return true; };`);
-    await ex(`$('#goal').value = 'Create a file hello.txt containing exactly: hello world. PM should delegate the implementation to the Dev.';`);
+    await ex(`$('#goal').value = 'Create a file hello.txt containing exactly: hello world. PM should delegate the implementation to the Dev.'; $('#newgoal').click(); await w(150);`);
     await click('#run');
     for (let i = 0; i < 180; i++) { await new Promise((r) => setTimeout(r, 2000)); if (!orch.running && orch.runs > 0) break; }
     await new Promise((r) => setTimeout(r, 1500)); await shot('2-observability');
     // Header stays on one row once tokens and costs are filled in.
-    const hdr = await ex(`const h = $('header'); const s = $('header strong'); return { h: h.getBoundingClientRect().height, title: s.getBoundingClientRect().height, cost: $('#totalcost').textContent, tok: $('#totaltokens').textContent }`);
+    const hdr = await ex(`const h = $('header'); const s = $('header strong'); return { h: h.getBoundingClientRect().height, title: s.getBoundingClientRect().height, cost: $('#totalcost').textContent }`);
     console.log('[gui-e2e] header', JSON.stringify(hdr));
     expect('header on one row', hdr.h < 56 && hdr.title < 24, hdr);
     expect('header money pill does not show $ for subscription-only runs', store.listRuns().some((r) => r.billingSource !== 'subscription') || !/\$/.test(hdr.cost), hdr);
@@ -920,7 +1798,7 @@ async function guiE2E() {
       gstore.createTask({ title: 'Two steps', description: 'Iterative task. If step1.txt does NOT exist in the working directory: create step1.txt containing 1 and stop right away; do NOT create step2.txt in this pass. If step1.txt already exists: create step2.txt containing 2.', assignee: byName('Goaler').id });
       gstore.createTask({ title: 'Loop append', description: 'Append exactly one line containing only the letter L to the file loop.txt in the working directory (create it if missing). Do this once per pass.', assignee: byName('Looper').id });
       gstore.createTask({ title: 'ARGTEXT', assignee: byName('Flow').id });
-      await ex(`window.confirm = () => true; window.__alerts = []; window.alert = (m) => window.__alerts.push(m); $('#goal').value = ''; await refresh(); await w(300);`);
+      await ex(`window.confirm = () => true; window.__alerts = []; window.alert = (m) => window.__alerts.push(m); $('#goal').value = ''; $('#newgoal').click(); await refresh(); await w(300);`);
       await click('#run');
       for (let i = 0; i < 240; i++) { await new Promise((r) => setTimeout(r, 2000)); if (!gorch.running && gorch.runs > 0) break; }
       await new Promise((r) => setTimeout(r, 1500)); await shot('10-second-project');
@@ -941,6 +1819,7 @@ async function guiE2E() {
     await firstrunInbox();
     await overviewShots();
     await chatShots();
+    await windowingShots();
     if (!process.env.SKIP_GRAPH) await graphShots();
     // Main screens in light + dark (the renderer themes via prefers-color-scheme, driven by nativeTheme).
     const { nativeTheme } = require('electron');
@@ -975,10 +1854,12 @@ async function guiE2E() {
     if (!process.env.SKIP_WIKILOGS) await mainLogsWikiShots();
     if (!process.env.SKIP_CRITIQUE) await critiqueShots();
     if (!process.env.SKIP_LIMITS) await limitsShots();
+    if (!process.env.SKIP_LIMITS_PROVIDERS) await limitsProvidersShots();
     if (!process.env.SKIP_DISCOVERY) await discoveryPanelShots();
+    if (!process.env.SKIP_USAGEPM) await usagePerModelShots();
     nativeTheme.themeSource = 'system';
     const tasks = store.listTasks();
-    console.log('[gui-e2e]', JSON.stringify({ edges: store.getTeam().edges.length, tasks: tasks.map((t) => [t.title, t.status, t.iterations || 0, !!t.sessionId]), cost: orch.snapshot().totalCost }));
+    console.log('[gui-e2e]', JSON.stringify({ edges: store.getTeam().edges.length, tasks: tasks.map((t) => [t.title, t.status, t.iterations || 0, !!t.sessions]), cost: orch.snapshot().totalCost }));
   } catch (e) { if (e !== null) { console.error('[gui-e2e] failed', e); failures.push('exception: ' + e.message); } }
   console.log(failures.length ? `[gui-e2e] FAIL (${failures.length}): ${failures.join('; ')}` : '[gui-e2e] PASS');
   app.exit(failures.length ? 1 : 0);
@@ -986,8 +1867,11 @@ async function guiE2E() {
 function send(ch, data) { if (win && !win.isDestroyed()) win.webContents.send(ch, data); }
 
 // Every API call receives ctx = { p: projectId, t: teamId } from the renderer first.
-const ST = (c) => pm.store(c.p); // project-wide (board, wiki, settings, merged team)
-const TS = (c) => { const ts = pm.get(c.p).teams; return pm.store(c.p, (ts.find((t) => t.id === c.t) || ts[0]).id); }; // the selected team graph
+  const ST = (c) => pm.store(c.p); // project-wide (board, wiki, settings, merged team)
+  const TS = (c) => { const ts = pm.get(c.p).teams; return pm.store(c.p, (ts.find((t) => t.id === c.t) || ts[0]).id); }; // the selected team graph
+  // Cheap change fingerprint for the renderer's polling (t_9d92c3d3): file signatures + the
+  // orchestrator's in-memory sig. `team` folds in settings because getAll decorates team nodes withPF.
+  const stateVersion = (c) => { const s = ST(c); const t = TS(c); const v = s.versions(); v.team = t.sigFile(t.teamFile()) + '|' + v.settings; v.teams = v.teams + '|' + v.settings; v.orch = orchFor(c.p).versionSig(); return v; };
 const withPF = (nodes, settings) => nodes.map((n) => ({ ...n, preflightStatus: PF.preflightStatus(n, settings) }));
 // Test one agent with its exact config and save the result on the node (in whichever team owns it).
 async function testAgent(c, nodeId) {
@@ -997,7 +1881,7 @@ async function testAgent(c, nodeId) {
   const ts = pm.store(c.p, team.id); const node = ts.getTeam().nodes.find((n) => n.id === nodeId);
   const r = await orchFor(c.p).preflight(node, settings);
   ts.updateNode(nodeId, { preflight: r });
-  send('state', { ...orchFor(c.p).snapshot(), projectId: c.p });
+  send('state', { ...orchFor(c.p).snapshotSlim(), projectId: c.p });
   return r;
 }
 async function testTeam(c) {
@@ -1007,15 +1891,51 @@ async function testTeam(c) {
   return out;
 }
 const wtTask = (c, id) => { const t = ST(c).listTasks().find((x) => x.id === id); if (!t || !t.worktreePath) throw new Error('task has no worktree'); return t; };
+// Backend RuntimeProfile (low-level: argsTemplate/effortValues/effortFlag/resumeFlag/mcp/eventMapping
+// with dotted paths) -> renderer's draft-profile schema (label/bin/version/models/defaultModel/effort/
+// variants/resume/eventMapping{kind:label}), agreed with Uma per t_833956fa. Conversion lives here so
+// neither side has to know the other's shape.
+function toDraftProfile(bin, profile, derived = {}) {
+  const hasModels = Array.isArray(profile.modelsCommand) && profile.modelsCommand.length > 0;
+  const em = profile.eventMapping || {};
+  const models = (derived.models || []).length ? derived.models : (hasModels ? [] : ['default']);
+  return {
+    label: profile.label || bin, bin: profile.binary || bin, version: null,
+    models, defaultModel: models[0] || '',
+    effort: profile.effortValues || [], variants: [],
+    resume: !!profile.resumeFlag,
+    eventMapping: {
+      text: em.textPath || 'text', session: em.sessionIdPath || 'session_id', cost: em.costPath || 'cost',
+      input: em.inputPath || 'input_tokens', output: em.outputPath || 'output_tokens',
+      reasoning: em.reasoningPath || 'reasoning_tokens', cache: em.cachePath || 'cache_read_tokens',
+    },
+    // per-field provenance ({source, confidence}) from the introspector: the UI shows where every
+    // value came from (help/models/probe/agent); 'agent' sources are low-confidence and opt-in.
+    sources: derived.sources || {},
+  };
+}
 const api = {
+  introspectRuntime: (_c, bin) => { const r = runIntrospectRuntime(bin); return toDraftProfile(bin, r.profile, r); },
   listProjects: () => ({ projects: pm.list().map((p) => ({ ...p, running: !!(orchs.get(p.id) || {}).running })), templates: Object.fromEntries(Object.entries(TEMPLATES).map(([k, v]) => [k, v.label])) }),
   createProject: (_c, name, tpl) => pm.create(name, tpl), renameProject: (_c, pid, name) => pm.rename(pid, name),
   deleteProject: (_c, pid) => { if ((orchs.get(pid) || {}).running) throw new Error('stop the project first'); orchs.delete(pid); return pm.remove(pid); },
   createTeam: (c, name, tpl) => pm.createTeam(c.p, name, tpl), renameTeam: (c, tid, name) => pm.renameTeam(c.p, tid, name),
   deleteTeam: (c, tid) => pm.removeTeam(c.p, tid), duplicateTeam: (c, tid) => pm.duplicateTeam(c.p, tid),
   exportTeam: (c, tid) => pm.exportTeam(c.p, tid), importTeam: (c, json) => pm.importTeam(c.p, json),
-  getAll: (c) => { const s = ST(c); const t = TS(c); probeUnprobedAgents(c.p); return { project: s.meta(), teamId: t.teamId, dir: s.dir, team: { ...t.getTeam(), nodes: withPF(t.getTeam().nodes, s.getSettings()) }, allNodes: withPF(s.getTeam().nodes, s.getSettings()), tasks: s.listTasks(), wiki: s.listWiki(), settings: s.getSettings(), messages: s.listMessages().slice(-200), orch: orchFor(c.p).snapshot(),
-    config: { runtimes: runtimes(s.getSettings()), billingModes: U.BILLING_MODES, permissionModes: AC.PERMISSION_MODES, edgeTypes: AC.EDGE_TYPES, boardTools: AC.BOARD_TOOLS, roles: AC.roleSuggestions(s.getSettings().rolePresets, s.getTeam().nodes) } }; },
+  // Delta getAll (t_9d92c3d3): with `since` (the client's last version map) only sections whose
+  // signature changed are returned, so the 2s poll moves kilobytes instead of ~1.8MB of JSON.
+  // Without `since` (first load, project switch, old callers) every section is returned as before.
+  getAll: (c, since) => {
+    const s = ST(c); const t = TS(c); probeUnprobedAgents(c.p);
+    const v = stateVersion(c);
+    const all = { project: s.meta(), team: { ...t.getTeam(), nodes: withPF(t.getTeam().nodes, s.getSettings()) }, allNodes: withPF(s.getTeam().nodes, s.getSettings()), tasks: s.listTasks(), wiki: s.listWiki(), settings: s.getSettings(), messages: s.listMessages().slice(-200), orch: orchFor(c.p).snapshotSlim(),
+      config: { runtimes: runtimes(s.getSettings()), billingModes: U.BILLING_MODES, permissionModes: AC.PERMISSION_MODES, edgeTypes: AC.EDGE_TYPES, boardTools: AC.BOARD_TOOLS, roles: AC.roleSuggestions(s.getSettings().rolePresets, s.getTeam().nodes) } };
+    const sectionOf = { project: 'project', team: 'team', teams: 'allNodes', board: 'tasks', wiki: 'wiki', settings: 'settings', messages: 'messages', orch: 'orch' };
+    const out = { v, teamId: t.teamId, dir: s.dir };
+    for (const k of pickChanged(v, since)) { if (sectionOf[k]) out[sectionOf[k]] = all[sectionOf[k]]; if (k === 'settings') out.config = all.config; }
+    return out;
+  },
+  getStateVersion: (c) => stateVersion(c),
   // New agents are auto-probed for capabilities right away (same probe as the manual Refresh button) so the
   // node form and graph badges never sit on "not probed yet" for an agent the user just added.
   addNode: (c, n) => {
@@ -1027,37 +1947,51 @@ const api = {
     } catch (e) { return node; }
   },
   updateNode: (c, id, p) => TS(c).updateNode(id, p), removeNode: (c, id) => TS(c).removeNode(id),
+  // Human-only: the single writer of node.protected (the UI's agent-editor toggle). IPC is reachable
+  // only from the renderer; no MCP tool wraps it, and updateNode/store refuse the key everywhere else.
+  setNodeProtected: (c, id, v) => TS(c).setNodeProtected(id, v),
   addEdge: (c, a, b, type) => TS(c).addEdge(a, b, type), updateEdge: (c, id, p) => TS(c).updateEdge(id, p),
   savePreset: (c, p) => ST(c).savePreset(p), deletePreset: (c, name) => ST(c).deletePreset(name), removeEdge: (c, id) => TS(c).removeEdge(id),
   createTask: (c, t) => ST(c).createTask(t), updateTask: (c, id, p) => ST(c).updateTask(id, p), deleteTask: (c, id) => ST(c).deleteTask(id),
+  // Paste/upload: bytes land on disk under <store>/attachments and only {path,name,mime,size} comes
+  // back ({error} on rejection) — messages.json never holds base64.
+  saveAttachment: (c, input) => ST(c).saveAttachment(input || {}),
   commentTask: (c, id, text) => ST(c).commentTask(id, 'human', text),
   writeWiki: (c, t, x) => ST(c).writeWiki(t, x, 'human'), deleteWiki: (c, t) => ST(c).deleteWiki(t),
   listWikiSummaries: (c) => ST(c).listWikiSummaries(), searchWiki: (c, q) => ST(c).searchWiki(q),
   listSessions: (c, nodeId) => ST(c).listSessions({ nodeId }), getSessionLog: (c, sessionId, opts) => ST(c).getSessionLog(sessionId, opts || {}),
   saveSettings: (c, s) => ST(c).saveSettings(s),
   listRuns: (c, f) => ST(c).listRuns(f || {}), clearRuns: (c) => ST(c).clearRuns(), usageCSV: (c, all) => U.toCSV(all ? pm.list().flatMap((p) => pm.store(p.id).listRuns()) : ST(c).listRuns()),
-  usageByProject: () => pm.list().map((p) => ({ id: p.id, name: p.name, ...U.total(pm.store(p.id).listRuns()) })),
+  // Per project: the usage ledger's $ totals and key count. Token amounts are only offered per
+  // {runtime, provider, model} key (usageLedger) — never as a cross-model sum.
+  usageByProject: () => pm.list().map((p) => { const l = U.usageLedger(pm.store(p.id).listRuns()); return { id: p.id, name: p.name, runs: l.rows.reduce((a, r) => a + r.runs, 0), keys: l.rows.length, costUsd: l.costUsd, costPartial: l.costPartial }; }),
   // Run-derived counts alone miss it when the CLI itself reports a higher subscription rate-limit %
   // (e.g. usage from other clients sharing the same subscription window), so fold in the CLI's own
   // reported utilization (usage.js parseRateLimits, fed by orchestrator's init-event handling) whenever
   // it's more constraining than the local run count.
   usageStatus: (c) => {
     const s = ST(c); const settings = s.getSettings();
-    const status = U.usageStatus(s.listRuns(), settings.usageLimits);
+    const runs = s.listRuns();
+    const status = U.usageStatus(runs, settings.usageLimits);
     const warnPct = (settings.usageLimits && settings.usageLimits.warnPct) || 80;
     const inMemory = orchFor(c.p).subscriptionRateLimits || {};
     // The in-memory map is only populated after a run/probe this session, so it's empty right after a restart —
     // fall back to each node's persisted rateLimits snapshot (discoverCapabilities/orchestrator writes
     // node.rateLimits alongside the in-memory map) so a restart doesn't lose the last known real CLI %.
     const nodes = TS(c).getTeam().nodes;
-    const rlAll = nodes.map((n) => inMemory[n.id] || n.rateLimits).filter(Boolean);
-    return U.applyCliRateLimits(status, rlAll, warnPct);
+    // nodeLiveRateLimits, not liveRateLimits alone: a reading captured by a runtime the node has since
+    // left (e.g. claude -> helpycode) must not meter or pause under the new provider.
+    const rlAll = nodes.map((n) => U.nodeLiveRateLimits(n, inMemory)).filter(Boolean);
+    // Provider-keyed view (t_8f8ab37d): one entry per provider the team's agents actually run, each carrying
+    // its own windows — Claude's CLI-reported 5h/weekly among them, others 'unknown' until their CLI reports.
+    const providers = U.usageProviders({ runs, limits: settings.usageLimits, nodes, rateLimitsByNode: inMemory, warnPct });
+    return { ...U.applyCliRateLimits(status, rlAll, warnPct), providers };
   },
   // Real per-provider subscription usage (5h/weekly used % + reset time) for one agent, as self-reported by its
   // own CLI's init event — with an explicit reason when there is nothing to report yet.
   providerUsage: (c, nodeId) => {
     const s = ST(c); const node = TS(c).getTeam().nodes.find((n) => n.id === nodeId); if (!node) throw new Error('no agent ' + nodeId);
-    const rl = (orchFor(c.p).subscriptionRateLimits || {})[nodeId] || node.rateLimits || null;
+    const rl = U.nodeLiveRateLimits(node, orchFor(c.p).subscriptionRateLimits || {}) || null;
     const installed = runtimes(s.getSettings())[node.runtime] ? runtimes(s.getSettings())[node.runtime].installed : undefined;
     return U.providerUsageStatus(rl, { installed, billingMode: node.billingMode });
   },
@@ -1090,8 +2024,8 @@ const api = {
           capabilities = CAP.discoverCapabilities(rt, settings, { initEvent: init });
           patch.capabilities = capabilities; patch.capabilitiesProbedAt = capabilities.probedAt;
         }
-        const rl = rateLimit ? U.parseRateLimits(rateLimit) : null;
-        if (rl) { patch.rateLimits = rl; patch.rateLimitsAt = new Date().toISOString(); (orchFor(c.p).subscriptionRateLimits ||= {})[nodeId] = rl; }
+        const rl0 = rateLimit ? U.parseRateLimits(rateLimit) : null;
+        if (rl0) { const rl = { ...rl0, runtime: rt.id }; patch.rateLimits = rl; patch.rateLimitsAt = new Date().toISOString(); (orchFor(c.p).subscriptionRateLimits ||= {})[nodeId] = rl; }
       } catch {}
     }
     const kept = capabilities !== node.capabilities && CAP.mergeCapabilities(node.capabilities, capabilities) === node.capabilities;
@@ -1100,12 +2034,16 @@ const api = {
     return capabilities;
   },
   testAgent, testTeam,
-  stopAgent: (c, nodeId) => orchFor(c.p).stopAgent(nodeId), sendToAgent: (c, nodeId, text, taskId) => orchFor(c.p).sendToAgent(nodeId, text, taskId),
-  listInbox: (c) => ST(c).listInbox({ status: 'open' }), answerInbox: (c, id, answer) => ST(c).answerInbox(id, answer),
+  stopAgent: (c, nodeId) => orchFor(c.p).stopAgent(nodeId), sendToAgent: (c, nodeId, text, taskId, extra) => orchFor(c.p).sendToAgent(nodeId, text, taskId, extra),
+  listInbox: (c) => ST(c).listInbox({ status: 'open' }),
+  // Recording the answer is not enough for askGate approvals (recruit/retire/update): the core is
+  // idle by then, so team-answers.js applies/consumes the answered item right here and messages the
+  // core. It never throws — the answer is already recorded either way.
+  answerInbox: (c, id, answer) => { const s = ST(c); const r = s.answerInbox(id, answer); applyAnsweredChange(s, orchFor(c.p), s.getInboxItem(id), answer); return r; },
   inboxCounts: () => Object.fromEntries(pm.list().map((p) => [p.id, pm.store(p.id).listInbox({ status: 'open' }).length])),
   approveTask: (c, id, ok, note) => ST(c).approveTask(id, ok, note), getLogs: (c, n) => ST(c).readLogs(n || 2000), clearLogs: (c) => ST(c).clearLogs(),
   taskDiff: (c, id) => WT.worktreeDiff(wtTask(c, id)),
-  taskMerge: (c, id) => { const r = WT.worktreeMerge(wtTask(c, id)); ST(c).commentTask(id, 'human', `merged ${r.branch} into ${r.base}`); return r; },
+  taskMerge: (c, id) => { const r = WT.worktreeMerge(wtTask(c, id)); ST(c).commentTask(id, 'human', r.refused ? WT.dirtyMergeMessage(r.dirty) : r.merged ? `merged ${r.branch} into ${r.base}` : `nothing merged: no commits on ${r.branch} ahead of ${r.base}`); return r; },
   taskDiscard: (c, id) => { const r = WT.worktreeDiscard(wtTask(c, id)); ST(c).updateTask(id, { worktreePath: null, worktreeBranch: null }); return r; },
   unmergedBranches: (c) => ST(c).listUnmergedBranches(),
   pickDir: async () => { const { dialog } = require('electron'); const r = await dialog.showOpenDialog(win, { properties: ['openDirectory', 'createDirectory'] }); return r.canceled ? null : r.filePaths[0]; },
@@ -1116,6 +2054,14 @@ const api = {
       status: inbox.some((i) => i.nodeId === n.id) ? 'needs-human' : (ag[n.id] || {}).status === 'working' || st[n.id] === 'busy' ? 'working' : 'idle' }])); },
   crossEdges: (c) => TS(c).incomingCrossEdges(), setViewport: (c, v) => TS(c).setViewport(v), getViewport: (c) => TS(c).getViewport(), setPositions: (c, pos) => TS(c).setPositions(pos),
   run: (c) => orchFor(c.p).start(), stop: (c) => orchFor(c.p).stop(),
+  // Core-agent watch (plan t_42f310cf item 2): pull the watch indicator state; live updates arrive on the 'watch-status' push channel.
+  getWatchStatus: (c) => orchFor(c.p).watchStatus(),
+  // Runtime breaker resume (t_419062e2): clears the unavailable state and re-dispatches the queued
+  // tasks. Throws the reason on failure — the renderer shows it inline in the banner.
+  resumeRuntime: (c, runtime) => orchFor(c.p).resumeRuntime(runtime),
+  getSelfUpdateStatus: (c) => ({ ...watcherFor(c.p).status(), devMode: DEV_MODE }),
+  setAutoRestart: (c, on) => { if (DEV_MODE) ST(c).saveSettings({ autoRestart: !!on }); return { ...watcherFor(c.p).status(), devMode: DEV_MODE }; },
+  restartSelfUpdate: (c) => { watcherFor(c.p).restartNow(); return { ...watcherFor(c.p).status(), devMode: DEV_MODE }; },
   getPrefs: () => getPrefs(), setPrefs: (_c, patch) => setPrefs(patch || {}),
 };
 nativeTheme.on('updated', () => { if (win && !win.isDestroyed()) win.setBackgroundColor(BG[nativeTheme.shouldUseDarkColors ? 'dark' : 'light']); send('theme', { dark: nativeTheme.shouldUseDarkColors }); });
@@ -1141,6 +2087,17 @@ app.whenReady().then(() => {
   createWindow();
   probeUnprobedAgents();
   pollInbox(true); setInterval(() => pollInbox(false), 1500);
+  // Self-update: resume a Run interrupted by a safe restart (or roll back a bad update that fails to
+  // boot). markBootOk ~15s in proves the new code booted, so a later crash is not a boot failure.
+  for (const p of pm.list()) {
+    if (!DEV_MODE) continue; // real users: no self-update polling, no boot resume/rollback
+    try {
+      const r = SU.bootResume(pm.store(p.id), { repoDir: APP_ROOT });
+      watcherFor(p.id); // start polling for new commits right away
+      if (r.resume) setImmediate(() => orchFor(p.id).start());
+    } catch (e) { console.error('[self-update] boot resume failed:', e.message); }
+  }
+  setTimeout(() => { for (const p of pm.list()) { try { SU.markBootOk(pm.store(p.id)); } catch {} } }, 15000).unref();
   console.log('[agents-squad] ready, data root:', pm.root);
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });

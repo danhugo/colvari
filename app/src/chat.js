@@ -6,6 +6,15 @@
   // Colour from a hash of the node id (not the name), so renames keep the colour.
   function avatarColor(id) { let h = 0; for (const c of String(id)) h = (h * 31 + c.charCodeAt(0)) >>> 0; return `hsl(${h % 360}, 55%, 48%)`; }
   const initials = (name) => String(name || '?').split(/[\s_-]+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join('') || '?';
+  // Attachments (t_993822cf): size label + file:// URL for lazy <img> thumbnails (renderer + tests share).
+  const fmtSize = (n) => n == null || isNaN(n) ? '' : n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`;
+  const fileUrl = (p) => encodeURI('file://' + p);
+  // One bubble's attachment row: images render as 64px lazy file:// thumbnails, other files as name chips.
+  const attThumbs = (atts) => {
+    if (!atts || !atts.length) return '';
+    const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    return `<span class="att-row">${atts.map((a) => String(a.mime || '').startsWith('image/') ? `<img class="att-thumb" src="${esc(fileUrl(a.path))}" loading="lazy" alt="${esc(a.name)}" title="${esc(a.name)} · ${fmtSize(a.size)}">` : `<span class="att-file" title="${esc(a.name)} · ${fmtSize(a.size)}">📄 ${esc(a.name)}</span>`).join('')}</span>`;
+  };
   const toolName = (text) => String(text).split(' ')[0].replace(/^mcp__\w+__/, '');
   const toolArgs = (text) => { const s = String(text); const i = s.indexOf(' '); return i < 0 ? '' : s.slice(i + 1); };
   function toolLabel(text) {
@@ -15,20 +24,37 @@
   }
 
   // Room events, oldest first, capped to the last MAX. who = node id | 'human' | 'orchestrator'.
-  function roomEvents(logs, tasks, messages, inbox, max = MAX) {
+  // Child events carrying subagentId (t_c33656ba) are folded into ONE 'subagent' bubble at the
+  // position of the first child event — the room must not flood with subagent tool noise. When the
+  // caller passes a record lookup (recOf), nested subagents become children of their parent bubble.
+  function roomEvents(logs, tasks, messages, inbox, max = MAX, recOf = null) {
     const ev = []; const taskOf = {}; // nodeId -> task title of the current run, to link log bubbles to a thread
+    const sub = new Map(); // subagentId -> its single bubble event
     const byTitle = Object.fromEntries((tasks || []).map((t) => [t.title, t.id]));
     for (const l of (logs || []).slice().sort((a, b) => a.at - b.at)) {
       if (!l.nodeId) continue;
       const start = l.kind === 'system' && /^▶ .* starts "(.*?)"/.exec(l.text);
       if (start) { taskOf[l.nodeId] = byTitle[start[1]] || null; ev.push({ at: l.at, who: l.nodeId, type: 'action', text: `started working on “${start[1]}”`, taskId: taskOf[l.nodeId] }); continue; }
       const taskId = taskOf[l.nodeId] || null;
+      if (l.subagentId) {
+        let e = sub.get(l.subagentId);
+        if (!e) { e = { at: l.at, who: l.nodeId, type: 'subagent', subagentId: l.subagentId, taskId, events: [], total: 0 }; sub.set(l.subagentId, e); ev.push(e); }
+        e.total++;
+        if (e.events.length < 20) e.events.push({ kind: l.kind, text: String(l.text || '').slice(0, 300), at: l.at });
+        continue;
+      }
       if (l.kind === 'text' && String(l.text).trim()) ev.push({ at: l.at, who: l.nodeId, type: 'thought', text: l.text, taskId });
       else if (l.kind === 'tool') ev.push({ at: l.at, who: l.nodeId, type: 'tool', label: toolLabel(l.text), text: l.text, taskId });
       else if (l.kind === 'tool_result' || l.kind === 'tool_error') { const p = ev[ev.length - 1]; if (p && p.type === 'tool' && p.who === l.nodeId && p.result == null) p.result = l.text; }
       else if (l.kind === 'error') ev.push({ at: l.at, who: l.nodeId, type: 'error', text: l.text, taskId });
     }
-    for (const m of messages || []) ev.push({ at: ms(m.at), who: m.from, to: m.to, type: 'message', text: m.text, taskId: m.taskId || null });
+    // Nest sub-subagents under their parent bubble (matched by records, never arrival order).
+    if (recOf) {
+      const nested = new Set();
+      for (const [sid, e] of sub) { const p = recOf(sid) && recOf(sid).parentAgentId; if (p && sub.has(p)) { (sub.get(p).children ||= []).push(e); nested.add(sid); } }
+      for (let i = ev.length - 1; i >= 0; i--) if (ev[i].type === 'subagent' && nested.has(ev[i].subagentId)) ev.splice(i, 1);
+    }
+    for (const m of messages || []) ev.push({ at: ms(m.at), who: m.from, to: m.to, type: 'message', text: m.text, atts: m.attachments || null, taskId: m.taskId || null });
     for (const t of tasks || []) {
       if (t.createdBy) ev.push({ at: ms(t.createdAt), who: t.createdBy, to: t.assignee, type: 'handoff', text: t.title, taskId: t.id });
       for (const c of t.comments || []) ev.push({ at: ms(c.at), who: c.author, type: 'comment', text: c.text, taskId: t.id });
@@ -60,5 +86,41 @@
   // @mention autocomplete: the partial "@xx" at the end of the text -> matching nodes.
   function mentionMatches(text, nodes) { const m = /(?:^|\s)@(\w*)$/.exec(String(text)); if (!m) return null; return (nodes || []).filter((n) => n.name.toLowerCase().startsWith(m[1].toLowerCase())); }
 
-  return { avatarColor, initials, toolLabel, roomEvents, group, parseComposer, preview, mentionMatches, GROUP_MS, MAX };
+  // Signature of every input the room feed reads (pure, used by the renderer's 1s tick to skip the
+  // expensive roomEvents walk + DOM rebuild when nothing changed). Task comments bump task.updatedAt,
+  // logs are append/prepend/clear-only, and subagent bubbles render records from agents/runs
+  // (subRecOf), so all three sources are fingerprinted here.
+  function feedKey(inp) {
+    const logs = inp.logs || [], tasks = inp.tasks || [], messages = inp.messages || [], inbox = inp.inbox || [];
+    const subRecs = (holder) => (holder.subagents || []).map((x) => [x.id, x.status || '', x.endedAt || 0, x.tokens ? (x.tokens.inputTokens || 0) + (x.tokens.outputTokens || 0) : 0]);
+    return JSON.stringify([
+      inp.projectId, inp.thread || null,
+      logs.length, logs.length ? logs[0].at : null, logs.length ? logs[logs.length - 1].at : null,
+      tasks.map((t) => [t.id, t.updatedAt, (t.comments || []).length]),
+      messages.length, messages.length ? messages[messages.length - 1].at : null,
+      inbox.map((i) => i.id),
+      (inp.nodes || []).map((n) => [n.id, n.name, n.role]),
+      [...(inp.working || [])].sort(),
+      ...Object.values(inp.agents || {}).flatMap(subRecs),
+      ...(inp.runs || []).flatMap(subRecs),
+    ]);
+  }
+
+  // Windowing (t_fb193107): the room renders only the last `win` events; scrolling near the top
+  // prepends the next older page (grow `win` by PAGE) while the scroll anchor keeps the viewport
+  // on the same content. Pure so renderer and tests share one implementation.
+  const PAGE = 100;
+  function pageOf(events, win) {
+    const start = Math.max(0, events.length - Math.max(1, win | 0));
+    return { items: events.slice(start), hidden: start };
+  }
+  // After a re-render that added `newHeight - prevHeight` px above the viewport, the scrollTop that
+  // keeps the previously-visible content in place. Clamped at 0 (content shrank / scrolled past top).
+  const anchorScroll = (prevTop, prevHeight, newHeight) => Math.max(0, newHeight - prevHeight + prevTop);
+
+  // Collapse consecutive identical messages (same type/target/text) from one author into one bubble + a ×N
+  // badge at the end. Messages carrying attachments never collapse (each file needs its own thumbs).
+  const collapseRepeats = (items) => items.reduce((out, it) => { const p = out[out.length - 1]; if (p && p.type === it.type && p.text === it.text && p.to === it.to && !p.atts && !it.atts && it.type !== 'tool' && it.type !== 'question' && it.type !== 'subagent') p.count = (p.count || 1) + 1; else out.push({ ...it }); return out; }, []);
+  return { avatarColor, initials, toolLabel, roomEvents, group, parseComposer, preview, mentionMatches, fmtSize, fileUrl, attThumbs, collapseRepeats, GROUP_MS, MAX, PAGE, pageOf, anchorScroll, feedKey };
 });
+

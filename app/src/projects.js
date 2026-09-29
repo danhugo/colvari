@@ -1,5 +1,6 @@
 // Multi-project / multi-team management.
-// Layout: <root>/projects/<projectId>/{project.json, team-<teamId>.json, board.json, wiki.json, settings.json}
+// Layout: <root>/projects/<projectId>/{project.json, team-<teamId>.json, messages.json, settings.json,
+//          .squad/board/tasks/<taskId>.json, .squad/wiki/<slug>.md}
 // project.json: { id, name, createdAt, teams: [{ id, name }] }
 const fs = require('fs');
 const path = require('path');
@@ -12,6 +13,19 @@ const rid = (p) => `${p}_${crypto.randomBytes(4).toString('hex')}`;
 const DATA_FILES = ['team', 'board', 'wiki', 'settings', 'messages'];
 
 function defaultRoot() { return process.env.AGENTS_SQUAD_HOME || process.env.AGENTS_SQUAD_PROJECT || path.join(os.homedir(), '.agents-squad'); }
+
+// Data root for test instances (gui-e2e / smoke, called from main.js before any store opens).
+// AGENTS_SQUAD_HOME is the live app's root and leaks in from ambient shells, so in test mode an
+// explicit AGENTS_SQUAD_PROJECT wins over it; with neither set a throwaway temp root is created
+// instead of falling through to the real ~/.agents-squad. The dir is pre-created because some
+// drivers assume an existing AGENTS_SQUAD_PROJECT.
+function isolateTestRoot(env = process.env, tmp = os.tmpdir()) {
+  if (env.AGENTS_SQUAD_PROJECT) return env.AGENTS_SQUAD_PROJECT;
+  delete env.AGENTS_SQUAD_HOME;
+  const root = fs.mkdtempSync(path.join(tmp, 'agents-squad-e2e-'));
+  env.AGENTS_SQUAD_PROJECT = root;
+  return root;
+}
 
 // Team templates: nodes are given by key, edges reference keys.
 const TEMPLATES = {
@@ -83,6 +97,9 @@ class ProjectManager {
       const src = path.join(legacy, f + '.json'); if (!fs.existsSync(src)) continue;
       fs.copyFileSync(src, path.join(d, (f === 'team' ? 'team-' + teamId : f) + '.json'));
     }
+    // Legacy dirs written by the per-file store keep board/wiki under .squad/ — copy that tree too.
+    const sq = path.join(legacy, '.squad');
+    if (fs.existsSync(sq)) fs.cpSync(sq, path.join(d, '.squad'), { recursive: true });
     fs.writeFileSync(path.join(d, 'project.json'), JSON.stringify({ id: pid, name: 'Default', createdAt: new Date(0).toISOString(), migratedFrom: legacy, teams: [{ id: teamId, name: 'Main' }] }, null, 2));
     fs.writeFileSync(marker, pid);
     return pid;
@@ -138,4 +155,4 @@ class ProjectManager {
   }
 }
 
-module.exports = { ProjectManager, TEMPLATES, instantiate, defaultRoot };
+module.exports = { ProjectManager, TEMPLATES, instantiate, defaultRoot, isolateTestRoot };

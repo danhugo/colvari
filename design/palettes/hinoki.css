@@ -1,0 +1,41 @@
+/* Palette B — Sumi & Hinoki (ink lines on cypress wood). Assign = ink, message = blue, review = amber.
+   Override for tokens.css: paste after the base tokens (light, dark, and OS-dark blocks). */
+:root {
+  --bg-app: #f4efe6; --bg-sidebar: #ebe4d7; --bg-surface: #fffcf6; --bg-raised: #fffcf6; --bg-hover: #e6ddcc; --bg-active: #efe1c6;
+  --bg-bubble: #fffcf6; --bg-bubble-self: #2a2622; --bg-code: #efe8db;
+  --fg-primary: #221e19; --fg-secondary: #4d463d; --fg-muted: #675e52; --fg-on-accent: #fffcf6;
+  --border: #e2d9c9; --border-strong: #cfc3ae;
+  --accent: #2a2622; --accent-soft: #efe1c6; --accent-text: #8a4a1b;
+  --edge: #8c8272;
+  --success: #2c7a47; --success-soft: #e1efdc; --success-text: #256a3c;
+  --warning: #c98a00; --warning-soft: #f8ebcc; --warning-text: #7a5200; --warning-strong: #a15c00;
+  --danger: #c33a2f; --danger-soft: #f8e0da; --info: #2f5ea8;
+  --human: #221e19;
+  --selection: #0f7f86; /* selected edge + node in the graph (ink accent = assign edge, so selection needs its own colour) */
+}
+[data-theme="dark"] {
+  --bg-app: #15120f; --bg-sidebar: #100e0b; --bg-surface: #1d1915; --bg-raised: #25201b; --bg-hover: #2e2822; --bg-active: #2e2a25;
+  --bg-bubble: #25201b; --bg-bubble-self: #3a2f22; --bg-code: #110f0c;
+  --fg-primary: #f1ebe1; --fg-secondary: #c4baaa; --fg-muted: #9a8f7f; --fg-on-accent: #1a1612;
+  --border: #2d2721; --border-strong: #3d352c;
+  --accent: #efe6d6; --accent-soft: #3a2f22; --accent-text: #efe6d6;
+  --edge: #7a6f62;
+  --success: #5cc98a; --success-soft: #16301f; --success-text: #5cc98a;
+  --warning: #f0a93c; --warning-soft: #3a2a10; --warning-text: #f0a93c; --warning-strong: #f0a93c;
+  --danger: #ff7a6b; --danger-soft: #3d1c18; --info: #7fa8ff;
+  --human: #f1ebe1;
+  --selection: #4fd1d9;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg-app: #15120f; --bg-sidebar: #100e0b; --bg-surface: #1d1915; --bg-raised: #25201b; --bg-hover: #2e2822; --bg-active: #2e2a25;
+  --bg-bubble: #25201b; --bg-bubble-self: #3a2f22; --bg-code: #110f0c;
+  --fg-primary: #f1ebe1; --fg-secondary: #c4baaa; --fg-muted: #9a8f7f; --fg-on-accent: #1a1612;
+  --border: #2d2721; --border-strong: #3d352c;
+  --accent: #efe6d6; --accent-soft: #3a2f22; --accent-text: #efe6d6;
+  --edge: #7a6f62;
+  --success: #5cc98a; --success-soft: #16301f; --success-text: #5cc98a;
+  --warning: #f0a93c; --warning-soft: #3a2a10; --warning-text: #f0a93c; --warning-strong: #f0a93c;
+  --danger: #ff7a6b; --danger-soft: #3d1c18; --info: #7fa8ff;
+  --human: #f1ebe1;
+  --selection: #4fd1d9;
+} }

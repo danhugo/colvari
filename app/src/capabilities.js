@@ -21,6 +21,10 @@ function detectAppModes(helpText = '', slashCommands = []) {
   const found = new Set();
   if (cmds.includes('/goal')) found.add('goal');
   if (cmds.includes('/loop')) found.add('loop');
+  // Workflow mode runs any user-chosen slash command / skill as the first prompt, so it's exposed whenever the
+  // runtime has a workflow-flavored slash command of its own (e.g. this repo's /workflow, or plugins like
+  // "beads:workflow") — not gated on one exact literal the way goal/loop's own dedicated commands are.
+  if (cmds.some((c) => c.includes('workflow'))) found.add('workflow');
   return [...found];
 }
 

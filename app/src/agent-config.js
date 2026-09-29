@@ -6,7 +6,7 @@ const { normalizeBilling } = require('./usage');
 const SUGGESTED_ROLES = ['PM', 'Planner', 'Dev', 'Reviewer', 'QA'];
 const PERMISSION_MODES = ['default', 'acceptEdits', 'bypassPermissions', 'plan'];
 const EDGE_TYPES = ['assign', 'message', 'review'];
-const BOARD_TOOLS = ['list_team', 'list_tasks', 'create_task', 'update_task_status', 'comment_task', 'send_message', 'read_messages', 'ask_human', 'read_wiki', 'write_wiki'];
+const BOARD_TOOLS = ['list_team', 'list_tasks', 'create_task', 'update_task_status', 'comment_task', 'send_message', 'read_messages', 'ask_human', 'read_wiki', 'write_wiki', 'recruit_agent', 'retire_agent', 'update_agent', 'request_self_update'];
 const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
 
 // Fields every node carries. '' / 0 / [] / {} mean "not set" (use the project default or the CLI default).
@@ -17,7 +17,9 @@ const NODE_DEFAULTS = {
   billingMode: 'auto', billingBaseUrl: '',
   requireApproval: false, budgetUsd: 0, budgetTokens: 0,
   effort: 'low', autoCompact: '', // autoCompact: '' = CLI default; 'auto', or a token window 100000-1000000
+  autoCompactPct: '', // auto-compact threshold (% of the window); '' = use the project default (settings.autoCompactPct)
   enabledCapabilities: [], // names from node.capabilities.categorized (mode/skill/command/mcp) this agent should use
+  core: false, createdBy: '', recruitedAt: '', protected: false, // team management: core on the one core; recruits carry who/when created them. protected blocks retirement only (canRetire); when the field is absent normalizeNode derives it from createdBy (human-made true, recruits false)
   ...MODE_DEFAULTS,
 };
 const NODE_FIELDS = Object.keys(NODE_DEFAULTS);
@@ -69,6 +71,10 @@ function normalizeNode(n = {}, base = NODE_DEFAULTS) {
   for (const k of NODE_FIELDS) r[k] = n[k] !== undefined ? n[k] : (Array.isArray(base[k]) ? [...base[k]] : typeof base[k] === 'object' ? { ...base[k] } : base[k]);
   r.runtime = r.runtime ? String(r.runtime) : 'claude'; // unknown ids are kept so the run errors instead of silently using claude
   r.name = String(r.name || 'Agent'); r.role = String(r.role || '').trim() || 'Dev';
+  r.core = !!r.core; r.createdBy = String(r.createdBy || ''); r.recruitedAt = String(r.recruitedAt || '');
+  // Absent flag derives from recruitment: nodes the human made (editor, presets, templates) are
+  // protected from retirement, recruits are not. Explicit values always win (the human's toggle).
+  r.protected = n.protected !== undefined ? !!n.protected : !r.createdBy;
   if (r.permissionMode && !PERMISSION_MODES.includes(r.permissionMode)) throw new Error('bad permission mode ' + r.permissionMode);
   r.allowedTools = toList(r.allowedTools); r.disallowedTools = toList(r.disallowedTools); r.addDirs = toList(r.addDirs);
   r.enabledCapabilities = toList(r.enabledCapabilities);
@@ -84,8 +90,12 @@ function normalizeNode(n = {}, base = NODE_DEFAULTS) {
   if (String(r.autoCompact).trim().toLowerCase() === 'auto') r.autoCompact = 'auto';
   else {
     const tokens = parseInt(r.autoCompact, 10);
-    r.autoCompact = tokens ? String(Math.min(1000000, Math.max(100000, tokens))) : '';
+    // Legacy autoCompact values <=100 were percentages; migrate them to the CLI default instead of clamping.
+    r.autoCompact = (tokens && tokens > 100) ? String(Math.min(1000000, Math.max(100000, tokens))) : '';
   }
+  // '' / 0 / invalid -> '' (project default). 0 as "off" is handled at project level (settings.autoCompactPct = 0).
+  const pct = parseInt(r.autoCompactPct, 10);
+  r.autoCompactPct = pct >= 1 ? Math.min(100, pct) : '';
   Object.assign(r, normalizeMode(r), normalizeBilling(r));
   return r;
 }
@@ -136,7 +146,9 @@ function buildClaudeArgs(node, prompt, settings, mcpConfig, opts = {}) {
   const capNote = n.enabledCapabilities.length ? `Enabled capabilities for this agent: ${n.enabledCapabilities.join(', ')}. Use them when relevant.` : '';
   const sysPrompt = [n.appendSystemPrompt, capNote].filter(Boolean).join('\n\n');
   if (sysPrompt) args.push('--append-system-prompt', sysPrompt);
-  for (const d of n.addDirs) args.push('--add-dir', d);
+  // opts.attachDir (the project's attachments dir, set only for runs that carry attachments) rides
+  // the same --add-dir loop as the node's own addDirs.
+  for (const d of (opts.attachDir ? [...n.addDirs, opts.attachDir] : n.addDirs)) args.push('--add-dir', d);
   args.push(...splitArgs(n.extraArgs));
   return args;
 }

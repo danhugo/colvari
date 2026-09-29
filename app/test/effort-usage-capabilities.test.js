@@ -20,6 +20,25 @@ test('autoCompact is "auto" or a token window clamped to 100k-1M', () => {
   assert.equal(normalizeNode({ autoCompact: 0 }).autoCompact, '');
 });
 
+test('legacy percentage autoCompact values (<=100) are migrated to CLI default, not clamped', () => {
+  assert.equal(normalizeNode({ autoCompact: 80 }).autoCompact, '');
+  assert.equal(normalizeNode({ autoCompact: '80' }).autoCompact, '');
+  assert.equal(normalizeNode({ autoCompact: 100 }).autoCompact, '');
+  assert.equal(normalizeNode({ autoCompact: 1 }).autoCompact, '');
+});
+
+test('autoCompactPct is a per-agent 1-100 threshold override; empty = project default', () => {
+  assert.equal(normalizeNode({}).autoCompactPct, '');
+  assert.equal(normalizeNode({ autoCompactPct: '' }).autoCompactPct, '');
+  assert.equal(normalizeNode({ autoCompactPct: 0 }).autoCompactPct, '');
+  assert.equal(normalizeNode({ autoCompactPct: 'bogus' }).autoCompactPct, '');
+  assert.equal(normalizeNode({ autoCompactPct: 70 }).autoCompactPct, 70);
+  assert.equal(normalizeNode({ autoCompactPct: '70' }).autoCompactPct, 70);
+  assert.equal(normalizeNode({ autoCompactPct: 1 }).autoCompactPct, 1);
+  assert.equal(normalizeNode({ autoCompactPct: 100 }).autoCompactPct, 100);
+  assert.equal(normalizeNode({ autoCompactPct: 250 }).autoCompactPct, 100);
+});
+
 test('migration: "--effort low" in extraArgs becomes effort=low and is stripped', () => {
   const n = normalizeNode({ extraArgs: '--effort low --verbose' });
   assert.equal(n.effort, 'low');
@@ -70,7 +89,7 @@ test('usageStatus warns then pauses on configured limits', () => {
   const old = [{ kind: 'agent', billingSource: 'subscription', startedAt: new Date(now - 6 * 60 * 60 * 1000).toISOString() }];
   assert.equal(U.usageStatus(old, { fiveHourLimit: 1 }, now).fiveHour.used, 0);
   // disabled limit (0) never warns/pauses
-  assert.deepEqual(U.usageStatus(runs, {}, now).fiveHour, { used: 5, limit: 0, pct: 0, warn: false, pause: false });
+  assert.deepEqual(U.usageStatus(runs, {}, now).fiveHour, { used: 5, limit: 0, pct: 0, warn: false, pause: false, resetsAt: null });
 });
 
 test('usageStatus: API auth tracks tokens/cost, not request windows', () => {
@@ -133,12 +152,15 @@ test('usage: subscription rate limits parsed as % of window + reset time, not $'
   // 0-100 scale is normalized to 0-1
   const rl2 = U.parseRateLimits({ rateLimits: { fiveHour: { pct: 92 } } });
   assert.equal(rl2.fiveHour.pct, 0.92);
-  // Already-past reset times aren't a useful countdown — omitted rather than shown as "↻0m"/negative.
+  // Already-past reset times mean the window reset: the whole reading is stale and must not count.
   const rlPast = U.parseRateLimits({ rate_limits: { five_hour: { utilization: 0.5, resets_at: '2020-01-01T00:00:00Z' } } });
-  assert.equal(rlPast.fiveHour.resetsAt, null);
+  assert.equal(rlPast, null);
 });
 
-test('usage: parseRateLimits reads the CLI\'s real "rate_limit_event" stream event (rate_limit_info.unifiedWindows), not just system/init', () => {
+test('usage: parseRateLimits reads the CLI\'s real "rate_limit_event" stream event (rate_limit_info.unifiedWindows), not just system/init', (t) => {
+  // Freeze just before the recorded reset so the parser keeps resetsAt (it drops already-past times, and this
+  // hardcoded event ages past its reset as wall-clock time moves — tests must not depend on today's date).
+  t.mock.timers.enable({ apis: ['Date'], now: 1790520600 * 1000 - 60_000 });
   const ev = { type: 'rate_limit_event', rate_limit_info: { unifiedWindows: { five_hour: { utilization: 0.36, resetsAt: 1790520600 }, seven_day: { utilization: 0.22, resetsAt: 1790989200 } } } };
   const rl = U.parseRateLimits(ev);
   assert.equal(rl.fiveHour.pct, 0.36); assert.equal(rl.fiveHour.resetsAt, new Date(1790520600 * 1000).toISOString());
@@ -151,6 +173,44 @@ test('usage: subscriptionGuard pauses at the configured threshold (default 90%)'
   assert.equal(U.subscriptionGuard({ fiveHour: { pct: 0.9 } }).pause, true);
   assert.equal(U.subscriptionGuard(rl, 80).pause, true);
   assert.equal(U.subscriptionGuard(null).pause, false);
+});
+
+test('usage: a reading whose resetsAt already passed must not count (stale window after reset)', () => {
+  const past = new Date(Date.now() - 60e3).toISOString();
+  const future = new Date(Date.now() + 3600e3).toISOString();
+  // The parser drops the whole stale reading (its pct described a window that no longer exists)...
+  assert.equal(U.parseRateLimitWindow({ utilization: 0.97, resetsAt: past }), null);
+  assert.equal(U.parseRateLimitWindow({ utilization: 0.97, resetsAt: future }).pct, 0.97);
+  // ...and stored snapshots are filtered the same way at use time (resetsAt can pass after parsing).
+  assert.deepEqual(U.liveRateLimits({ fiveHour: { pct: 0.97, resetsAt: past }, weekly: { pct: 0.5, resetsAt: future } }),
+    { fiveHour: null, weekly: { pct: 0.5, resetsAt: future } });
+  assert.equal(U.liveRateLimits({ fiveHour: { pct: 0.97, resetsAt: past }, weekly: { pct: 0.5, resetsAt: past } }), null);
+  assert.equal(U.liveRateLimits(null), null);
+  // A stale >=90% reading must never pause the guard; only a still-live one may.
+  assert.equal(U.subscriptionGuard({ fiveHour: { pct: 0.97, resetsAt: past } }).pause, false);
+  assert.equal(U.subscriptionGuard({ fiveHour: { pct: 0.97, resetsAt: future } }).pause, true);
+});
+
+test('usage: orchestrator ignores a stale persisted rateLimits snapshot (resetsAt past) — no pause after restart', () => {
+  const fs = require('fs'); const os = require('os'); const path = require('path');
+  const { Store } = require('../src/store');
+  const { Orchestrator } = require('../src/orchestrator');
+  const r = fs.mkdtempSync(path.join(os.tmpdir(), 'squad-stale-rl-'));
+  const s = new Store(path.join(r, 'data'));
+  // The incident: a >=90% snapshot whose resetsAt passed while the app was down; real usage was ~3%.
+  const stale = new Date(Date.now() - 60e3).toISOString();
+  const n = s.addNode({ name: 'D', role: 'Dev', runtime: 'claude' });
+  s.updateNode(n.id, { rateLimits: { fiveHour: { pct: 0.97, resetsAt: stale }, weekly: null } });
+  const o = new Orchestrator(s);
+  assert.deepEqual(o.subscriptionRateLimits[n.id], undefined, 'stale snapshot must not be restored at startup');
+  const st = o.checkUsageLimits(n.id);
+  assert.equal(o.usagePaused, false, 'stale reading must not pause dispatch');
+  assert.equal(st.subscriptionGuard.fiveHour.pct, 0);
+  // A still-live high reading does pause, as before.
+  const future = new Date(Date.now() + 3600e3).toISOString();
+  o.subscriptionRateLimits[n.id] = { fiveHour: { pct: 0.97, resetsAt: future }, weekly: null };
+  assert.equal(o.checkUsageLimits(n.id).subscriptionGuard.pause, true);
+  assert.equal(o.usagePaused, true);
 });
 
 test('usage: providerUsageStatus reports real usage or an explicit reason', () => {

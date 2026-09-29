@@ -1,34 +1,40 @@
 <!doctype html>
-<html><head><meta charset="utf-8"><title>Agents Squad</title>
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'">
+<html><head><meta charset="utf-8"><title>Colvari</title>
+<link rel="icon" href="icon.svg">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' file: data: blob:">
 <link rel="stylesheet" href="tokens.css"><link rel="stylesheet" href="style.css"></head>
 <body>
 <header>
-  <strong>Agents Squad</strong>
+  <strong class="brand"><svg class="brandmark" viewBox="0 0 32 32" aria-hidden="true"><path d="M23 9A10 10 0 1 0 23 23" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/><g fill="currentColor"><circle cx="23" cy="9" r="3.6"/><circle cx="6" cy="16" r="3.6"/><circle cx="23" cy="23" r="3.6"/></g></svg>colvari</strong>
   <nav id="tabs">
-    <button data-tab="chat" class="active">Chat</button><button data-tab="team">Team</button><button data-tab="board">Board</button><button data-tab="overview">Overview</button><span class="navsep"></span><button data-tab="wiki" class="sec" title="Wiki">Wiki</button><button data-tab="obs" class="sec" title="Observability (logs)">Logs</button><button data-tab="usage" class="sec" title="Usage">Usage</button><button data-tab="settings" class="sec" title="Settings">⚙</button><button data-tab="inbox">Inbox <span class="badge" id="inbox-tab-badge"></span></button>
+    <button data-tab="chat" class="active"><svg class="navicon" viewBox="0 0 24 24"><path d="M4 5h16v11H8l-4 4V5Z"/></svg><span class="lbl">Chat</span></button><button data-tab="team"><svg class="navicon" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><circle cx="17" cy="9" r="2.4"/><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6M14 14.2c2.9.3 5 2.6 5 5.8"/></svg><span class="lbl">Team</span></button><button data-tab="board"><svg class="navicon" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="1.5"/><path d="M9 4v16M15 4v16"/></svg><span class="lbl">Board</span></button><button data-tab="overview"><svg class="navicon" viewBox="0 0 24 24"><rect x="3" y="3" width="8" height="8" rx="1"/><rect x="13" y="3" width="8" height="5" rx="1"/><rect x="13" y="10" width="8" height="11" rx="1"/><rect x="3" y="13" width="8" height="8" rx="1"/></svg><span class="lbl">Overview</span></button><span class="navsep"></span><button data-tab="wiki" class="sec" title="Wiki"><svg class="navicon" viewBox="0 0 24 24"><path d="M4 4.5C4 4 5 3.5 7 3.5s3.5.5 3.5.5v15S9.5 18.5 7 18.5 4 19 4 19.5v-15ZM10.5 4s1.5-.5 3.5-.5 3 .5 3 1v15S15.5 19 13.5 19s-3 .5-3 .5v-15Z"/></svg><span class="lbl">Wiki</span></button><button data-tab="obs" class="sec" title="Observability (logs)"><svg class="navicon" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="1.5"/><path d="m6.5 9 3 3-3 3M12 15h5.5"/></svg><span class="lbl">Logs</span></button><button data-tab="usage" class="sec" title="Usage"><svg class="navicon" viewBox="0 0 24 24"><path d="M4 20V10M11 20V4M18 20v-7"/></svg><span class="lbl">Usage</span></button>
   </nav>
   <span class="spacer"></span>
   <div id="limitmeter" class="limitmeter hidden" title="Usage limits"></div>
+  <span id="watchst" class="pill hidden" title=""></span>
+  <span id="restartst" class="pill hidden"></span>
+  <span id="updst" class="pill hidden"></span>
   <span id="runstate" class="pill">idle</span>
-  <span id="totaltokens" class="pill" title="Measured tokens this session (in / out / cache read / cache write)">0 tok</span>
   <span id="totalcost" class="pill" title="API-equivalent (reported by Claude CLI). Not what you pay on a Pro/Max subscription.">API-eq $0.0000</span>
-  <input id="goal" placeholder="Goal for the team (e.g. Create hello.txt with hello world)"><button id="run" class="primary">Run</button><button id="stop">Stop</button><button id="help" title="Keyboard shortcuts (?)">?</button>
+  <button id="stop" class="hidden" title="Stop all agents (⌘.)">Stop</button><button id="newgoal" class="primary" title="New goal for the team (/)">＋ New goal</button>
+  <button id="settingsbtn" data-tab="settings" class="iconbtn" title="Settings (⌘,)" aria-label="Settings"><svg class="navicon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 3v2.4M12 18.6V21M21 12h-2.4M5.4 12H3M18.4 5.6l-1.7 1.7M7.3 16.7l-1.7 1.7M18.4 18.4l-1.7-1.7M7.3 7.3 5.6 5.6"/></svg></button><button id="help" title="Keyboard shortcuts (?)">?</button>
+  <div id="goalpop" class="goalpop hidden" role="dialog" aria-label="New goal for the team">
+    <label for="goal">Goal for the team</label>
+    <textarea id="goal" rows="3" placeholder="e.g. Create hello.txt with hello world"></textarea>
+    <div class="goalpop-foot"><span class="muted">⌘⏎ run · / opens this</span><span class="spacer"></span><button id="run" class="primary">Run</button></div>
+  </div>
 </header>
+<div id="updveil" class="updveil hidden" role="status" aria-live="polite"></div>
+<div id="redbar" class="redbar hidden" role="alert"></div>
+<div id="rtbar" class="rtbar hidden" role="alert"></div>
 <div id="body">
 <aside id="sidebar">
-  <div id="inbox-side" class="inbox-side" title="Open questions and approvals for you">Inbox <span class="badge" id="inbox-badge"></span></div>
-  <section class="sb-sec"><h4>Projects</h4>
-  <div id="projectlist"></div>
-  <div class="sb-actions"><button id="newproject" title="New project">＋ New</button><button id="renproject" title="Rename project">✎ Rename</button><button id="delproject" class="danger" title="Delete project">✕</button></div></section>
-  <section class="sb-sec"><h4>Team</h4>
-  <div id="teamlist"></div>
-  <div class="sb-actions"><button id="newteam" title="New team">＋ New</button><button id="renteam" title="Rename team">✎ Rename</button><button id="dupteam" title="Duplicate team">⧉ Copy</button><button id="delteam" class="danger" title="Delete team">✕</button></div></section>
-  <section class="sb-sec"><h4>Import / Export</h4>
-  <div class="sb-actions"><button id="exportteam" title="Export team as JSON">⤓ Export</button><button id="importteam" title="Import team from JSON">⤒ Import</button><input id="importfile" type="file" accept=".json,application/json" class="hidden"></div></section>
-  <section class="sb-sec"><h4>Settings</h4>
-  <label class="muted" for="tpl-select">Template for new project/team</label>
-  <select id="tpl-select"></select></section>
+  <section class="sb-sec sb-sec-nav"><button id="sb-inbox" class="sb-inbox" data-tab="inbox" title="Inbox — questions and approvals waiting for you"><svg class="navicon" viewBox="0 0 24 24"><path d="M4 12 6.5 5h11L20 12v6a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 18v-6ZM4 12h5.5l1 2h3l1-2H20"/></svg><span class="lbl">Inbox</span><span class="spacer"></span><span class="badge" id="inbox-tab-badge"></span></button></section>
+  <section class="sb-sec"><div class="sb-head"><h4>Projects</h4><div class="sb-actions"><button id="newproject" title="New project" aria-label="New project">＋</button><button id="renproject" title="Rename project" aria-label="Rename project">✎</button><button id="delproject" class="danger" title="Delete project" aria-label="Delete project">✕</button></div></div>
+  <div id="projectlist"></div></section>
+  <section class="sb-sec"><div class="sb-head"><h4>Team</h4><div class="sb-actions"><button id="newteam" title="New team" aria-label="New team">＋</button><button id="renteam" title="Rename team" aria-label="Rename team">✎</button><button id="dupteam" title="Duplicate team" aria-label="Duplicate team">⧉</button><button id="exportteam" title="Export team as JSON" aria-label="Export team">⤓</button><button id="importteam" title="Import team from JSON" aria-label="Import team">⤒</button><button id="delteam" class="danger" title="Delete team" aria-label="Delete team">✕</button></div></div>
+  <input id="importfile" type="file" accept=".json,application/json" class="hidden">
+  <div id="teamlist"></div></section>
 </aside>
 <main>
   <section id="tab-chat" class="tab active">
@@ -38,22 +44,23 @@
       <button id="chat-newpill" class="hidden">↓ <span></span> new</button>
       <div id="chat-mentions" class="hidden"></div>
       <div id="chat-yourturn" class="hidden"></div>
-      <div class="composer"><div id="chat-preview" class="muted"></div><div class="row"><textarea id="chat-input" rows="2" placeholder="Message #company — @Name task · @Name? question · plain text starts a goal"></textarea><button id="chat-send" class="primary">Send</button></div></div>
+      <div class="composer"><div id="chat-preview" class="muted"></div><div id="chat-att" class="att-chips hidden"></div><div class="row"><textarea id="chat-input" rows="2" placeholder="Message #company…" title="@Name task · @Name? question · plain text starts a goal"></textarea><button id="chat-attach" class="icon" title="Attach files (or paste / drop images)"><svg class="navicon" viewBox="0 0 24 24"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button><button id="chat-send" class="primary">Send</button></div></div>
+      <input id="chat-file" type="file" multiple class="hidden">
     </div><aside id="chat-thread" class="hidden"></aside></div>
   </section>
   <section id="tab-team" class="tab">
     <div class="toolbar gtoolbar"><div class="tgroup"><button id="addnode" class="primary" title="Add agent (or right-click the canvas)">＋ Agent</button><button id="testteam" title="Run a cheap preflight check on every agent">Test team</button></div><div class="tgroup"><button id="connect" class="icon" title="Connect mode: click source then target (or drag from a node's right handle)">⤳</button><select id="edgetype" title="Type for click-connect edges"><option>assign</option><option>message</option><option>review</option></select><button id="delsel" class="icon" title="Delete selected (⌫)">✕</button></div><span id="pf-summary" class="pill"></span><span id="hint" class="muted">Drag a node's handle to connect · right-click for actions · scroll to pan, ⌘/pinch to zoom</span></div>
     <div class="idlebanner hidden" data-where="team"></div>
     <div class="split"><div class="canvas"><svg id="graph"></svg>
-      <div class="gcontrols"><button id="zoomout" title="Zoom out">−</button><span id="zoomlvl">100%</span><button id="zoomin" title="Zoom in">＋</button><span class="gsep"></span><button id="fit" title="Fit view">⤢</button><button id="autolayout" title="Auto-layout (layered)">⇶</button></div>
+      <div class="gcontrols"><button id="zoomout" title="Zoom out">−</button><span id="zoomlvl">100%</span><button id="zoomin" title="Zoom in">＋</button><span class="gsep"></span><button id="fit" title="Fit view: centre the whole graph at ≤100% zoom">Fit</button><button id="autolayout" title="Auto-layout: arrange agents in layers">Layout</button></div>
       <svg id="minimap" preserveAspectRatio="xMidYMid meet"></svg>
       <div class="glegend"><span><i class="sw sw-assign"></i>assign</span><span><i class="sw sw-message"></i>message</span><span><i class="sw sw-review"></i>review</span><span><i class="sw sw-cross"></i>cross-team</span></div></div><aside id="nodeform" class="panel"></aside></div>
   </section>
   <section id="tab-board" class="tab">
     <div class="toolbar"><input id="nt-title" placeholder="New task / goal title"><select id="nt-assignee"></select><button id="nt-add" class="primary">Create task</button></div>
-    <textarea id="nt-desc" placeholder="Description (optional)" rows="2"></textarea>
-    <div class="idlebanner hidden" data-where="board"></div><div id="presence" class="presence"></div>
-    <div class="split"><div id="columns"></div><aside id="taskdetail" class="panel"></aside></div>
+    <textarea id="nt-desc" placeholder="Description (optional)" rows="2" style="display:none"></textarea>
+    <div id="wakebar" class="hidden"></div><div id="presence" class="presence"></div>
+    <div class="split"><div id="columns"></div><aside id="taskdetail" class="panel closed"></aside></div>
   </section>
   <section id="tab-wiki" class="tab">
     <div class="split"><aside id="wikilist" class="panel narrow">
@@ -61,28 +68,31 @@
       <input id="wk-search" type="search" placeholder="Search pages…">
       <div id="wikipages" class="wk-pages"></div>
     </aside>
-    <div class="panel grow"><div class="toolbar"><input id="wk-title" placeholder="Page title"><button id="wk-save" class="primary">Save</button><button id="wk-edit">Edit / Preview</button><button id="wk-del">Delete</button></div>
-    <textarea id="wk-content" rows="24" class="hidden"></textarea><div id="wk-view" class="md"></div></div></div>
+    <div class="panel grow"><div id="wk-empty" class="wk-emptystate hidden"><svg viewBox="0 0 24 24" width="40" height="40" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M6 3h9l4 4v14H6zM14 3v5h5M9 13h7M9 17h5"/></svg><h3>No page selected</h3><p class="muted">Pick a page on the left, or write a runbook, glossary or notes for the team.</p><button id="wk-empty-new" class="primary">＋ New page</button></div>
+    <div id="wk-editor" class="wk-editor"><div class="toolbar"><input id="wk-title" placeholder="Page title"><button id="wk-save" class="primary">Save</button><button id="wk-edit">Edit / Preview</button><details id="wk-more" class="wk-more"><summary title="More actions" aria-label="More actions">…</summary><div class="wk-menu"><button id="wk-del">Delete page…</button></div></details></div>
+    <textarea id="wk-content" rows="24" class="hidden"></textarea><div id="wk-view" class="md"></div></div></div></div>
   </section>
   <section id="tab-obs" class="tab">
     <div class="split"><aside id="logagents" class="panel narrow"></aside>
     <div class="panel grow">
-      <div class="toolbar"><select id="logteam"><option value="">All teams</option></select><select id="logfilter" class="hidden"><option value="">All agents</option></select><input id="logsearch" type="search" placeholder="Search logs…"><div id="loglevels" class="lvchips"></div><label class="inline"><input id="logauto" type="checkbox" checked> Auto-scroll</label><button id="clearlog">Clear</button></div>
+      <div class="toolbar"><select id="logteam"><option value="">All teams</option></select><select id="logfilter" class="hidden"><option value="">All agents</option></select><input id="logsearch" type="search" placeholder="Search logs…"><div id="loglevels" class="lvchips"></div><label class="inline asswitch" title="Keep the newest line in view"><input id="logauto" type="checkbox" checked><span class="sw" aria-hidden="true"></span>Auto-scroll</label><button id="clearlog">Clear</button></div>
       <div id="budgetbar" class="muted"></div>
       <div id="log" class="loglist"></div>
     </div></div>
   </section>
   <section id="tab-usage" class="tab">
     <div class="toolbar"><label>Agent <select id="us-agent"><option value="">All</option></select></label><label>Billing <select id="us-billing"><option value="">All</option><option>subscription</option><option>api</option><option>proxy</option><option>bedrock</option><option>vertex</option><option>unknown</option></select></label>
-      <button id="us-export" class="primary">Export CSV</button><button id="us-exportall">Export CSV (all projects)</button><button id="us-clear">Clear history</button><span class="muted">Tokens are measured from the claude stream-json output. Costs are only what the Claude CLI reports.</span></div>
+      <button id="us-export" class="primary">Export CSV</button><button id="us-exportall">Export CSV (all projects)</button><button id="us-clear">Clear history</button><button id="us-help" class="us-help" type="button" aria-label="About usage tracking" title="Usage is tracked per runtime · provider · model in the ledger — token columns are per key and never summed across models; cost is the only grand total. Costs are the CLI-reported figure or a list-price estimate (marked est).">?</button></div>
+    <nav class="us-anchors" id="us-anchors"><a href="#us-summary">Cost</a><a href="#us-discovery">Discovery</a><a href="#us-limits">Limits</a><a href="#us-runs">Runs</a></nav>
     <div id="us-summary"></div>
     <div id="us-discovery"></div>
     <div id="us-limits"></div>
     <div class="scroll"><table id="us-runs"></table></div>
   </section>
   <section id="tab-overview" class="tab">
+    <p class="ov-purpose muted">Live monitor: who is working right now, who is stuck, and where work is flowing. Arrows are the team’s reporting lines; one glows when a task or message just travelled along it. Edit the team in <b>Team</b>.</p>
     <div id="ov-stuck"></div>
-    <div class="split"><div id="ov-graph-wrap"><svg id="ov-graph"></svg></div><aside class="panel" id="ov-threadpanel"><div id="ov-threadhead"></div><label>Task thread</label><select id="ov-task"></select><div id="ov-thread"></div></aside></div>
+    <div class="split"><div id="ov-graph-wrap"><svg id="ov-graph"></svg><div class="glegend ov-legend"><span><i class="sw sw-assign"></i>assigns tasks</span><span><i class="sw sw-message"></i>messages</span><span><i class="sw sw-review"></i>reviews</span><span><i class="sw sw-assign ov-sw-flash"></i>glowing = active just now</span><span><i class="dot-leg run"></i>green card = working</span></div></div><aside class="panel" id="ov-threadpanel"><div id="ov-threadhead"></div><label>Task thread</label><select id="ov-task"></select><div id="ov-thread"></div></aside></div>
     <div id="ov-timelinewrap"><div class="ovtl-head"><label>Timeline <span class="muted">(last 15m)</span></label><div class="ovtl-legend"><span><i class="dot-leg run"></i>running</span><span><i class="dot-leg mark"></i>status change</span><span><i class="dot-leg tick"></i>tool call</span></div></div>
     <div id="ov-timeline"></div></div>
   </section>
@@ -92,15 +102,17 @@
 </div>
 <dialog id="askdlg"><form method="dialog"><p id="ask-title"></p><input id="ask-input" style="width:280px"><p><button value="cancel">Cancel</button> <button id="ask-ok" value="ok" class="primary">OK</button></p></form></dialog>
 <dialog id="helpdlg"><form method="dialog"><h3>Keyboard shortcuts</h3><table>
-  <tr><td>Ctrl/Cmd + 1…9</td><td>Chat, Team, Board, Wiki, Observability, Usage, Settings, Overview, Inbox</td></tr>
+  <tr><td>Ctrl/Cmd + 1…7</td><td>Chat, Team, Board, Overview, Wiki, Logs, Usage</td></tr>
+  <tr><td>Ctrl/Cmd + ,</td><td>Settings</td></tr><tr><td>Ctrl/Cmd + I</td><td>Inbox (also in the sidebar)</td></tr>
   <tr><td>Ctrl/Cmd + Enter</td><td>Run</td></tr><tr><td>Ctrl/Cmd + .</td><td>Stop all agents</td></tr>
-  <tr><td>/</td><td>Focus the goal box</td></tr><tr><td>n</td><td>New task (Board tab)</td></tr>
+  <tr><td>/</td><td>Open the goal composer</td></tr><tr><td>n</td><td>New task (Board tab)</td></tr>
   <tr><td>Esc</td><td>Clear selection / leave a field</td></tr><tr><td>?</td><td>This help</td></tr></table>
   <p><button id="reopenguide" value="close">Open first-run guide</button> <button value="close" class="primary">Close</button></p></form></dialog>
 <div id="guide" class="hidden"></div>
 <div id="toasts"></div>
 <script src="../src/overview.js"></script>
 <script src="../src/chat.js"></script>
+<script src="../src/subagent-view.js"></script>
 <script src="app.js"></script>
 <div id="ctxmenu" class="ctxmenu hidden"></div>
 </body></html>

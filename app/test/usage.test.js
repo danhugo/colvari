@@ -89,8 +89,15 @@ echo "{\\"type\\":\\"result\\",\\"subtype\\":\\"success\\",\\"session_id\\":\\"s
   assert.equal(ra.inputTokens, 3); assert.equal(ra.cacheReadTokens, 50); assert.equal(ra.cacheCreationTokens, 6); assert.equal(ra.numTurns, 2);
   assert.equal(rb.billingSource, 'proxy'); assert.match(rb.billingDetail, /127\.0\.0\.1:4000/);
   assert.ok(ra.durationMs >= 0 && ra.endedAt);
-  assert.equal(snap.agents[a.id].cacheReadTokens, 50); assert.equal(snap.agents[a.id].billingSource, 'subscription');
-  assert.equal(snap.tokens.inputTokens, 6); assert.ok(Math.abs(snap.totalCost - 0.04) < 1e-9);
+  assert.equal(snap.agents[a.id].billingSource, 'subscription');
+  // t_3318ff63: no cross-model token totals in the API — per-key ledger rows instead
+  assert.equal(snap.agents[a.id].cacheReadTokens, undefined);
+  assert.equal(snap.tokens, undefined); assert.equal(snap.runTokens, undefined);
+  const rowSub = snap.ledger.rows.find((x) => x.provider === 'subscription');
+  assert.equal(rowSub.inputTokens, 3); assert.equal(rowSub.cacheReadTokens, 50); assert.equal(rowSub.cacheCreationTokens, 6);
+  assert.equal(rowSub.costUsd, 0.02); assert.equal(rowSub.costSource, 'reported');
+  assert.ok(snap.ledger.rows.some((x) => x.provider === '127.0.0.1:4000')); // proxy host is the key's provider
+  assert.ok(Math.abs(snap.totalCost - 0.04) < 1e-9);
   assert.equal(s.listRuns({ nodeId: b.id }).length, 1);
 });
 

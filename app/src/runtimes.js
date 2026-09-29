@@ -1,7 +1,80 @@
-// Runtime adapters: which agent CLI runs a node. Each adapter builds args, parses one stdout JSON line into
-// normalized log entries, and declares honest capabilities (true only for what was tested live on this machine).
+// Runtime adapters: which agent CLI runs a node. Claude keeps its tuned buildArgs; every other CLI
+// runs through the generic profile path: the introspector derives a RuntimeProfile from the binary
+// itself (no hand-built per-CLI profiles, no CLI-specific parsing), and this module spawns/parses
+// purely from that profile data.
 const { execFileSync } = require('child_process');
 const { buildClaudeArgs, normalizeNode, splitArgs } = require('./agent-config');
+const { buildProfileArgs, writePerRunMcpConfig, binConfigEnvKey, getPath } = require('./profile-runner');
+const { introspectRuntime, defaultExec, makeExec } = require('./introspector');
+const { isSubagentTool } = require('./subagents');
+
+// Derived-profile cache, stamped with the CLI's --version: a binary is introspected once per
+// version and reused until it changes (re-derived automatically after an upgrade). Two entries per
+// binary: the full one (probe included — needs one real run) for actual runs, and a cheap help-only
+// one (key "|help") for capability detection, which must not cost a model call.
+const derivedProfiles = new Map(); // cacheKey -> { version, profile }
+function deriveRuntimeProfile(bin, { exec, label, probe = true, askAgent = false, env } = {}) {
+  const key = probe ? bin : `${bin}|help`;
+  const run = exec || (env ? makeExec(env) : defaultExec);
+  let version = '';
+  try { version = String(run(bin, ['--version']) || '').trim(); } catch { /* binary missing; still try to derive */ }
+  const hit = derivedProfiles.get(key);
+  if (hit && hit.version === version) return hit.profile;
+  const id = String(bin).split(/[\\/]/).pop().replace(/\.(exe|sh)$/i, '').toLowerCase().replace(/[^a-z0-9_.-]/g, '_');
+  const { profile } = introspectRuntime(bin, run, { id, label: label || id, probe, askAgent });
+  derivedProfiles.set(key, { version, profile });
+  return profile;
+}
+
+// Capabilities claimed straight from the derived profile — honest by construction: true only for
+// what the profile actually carries (usage paths, cost path, mcp method, resume flag).
+function capabilitiesFromProfile(profile) {
+  const em = profile.eventMapping || {};
+  return {
+    tokens: !!(em.inputPath && em.outputPath),
+    cost: !!em.costPath,
+    mcp: profile.mcp.method !== 'none',
+    resume: !!profile.resumeFlag,
+  };
+}
+
+// Generic adapter for an introspected CLI: args and event parsing come purely from the derived
+// RuntimeProfile. The old hand-built helpycode profile was deleted — helpycode is just the first
+// user of this factory. exec/askAgent injectable via opts for tests (askAgent opts into the
+// expensive ask-the-agent introspection layer; never on by default).
+function profileRuntime(id, label, binFromSettings) {
+  const profileFor = (settings, opts = {}) => deriveRuntimeProfile(binFromSettings(settings || {}), { label, exec: opts.exec, probe: opts.probe !== false, askAgent: !!opts.askAgent, env: opts.env });
+  return {
+    id, label, bin: binFromSettings,
+    // help-only derivation: cheap, no probe/model call (used by detectRuntimes)
+    capabilities(settings, exec) {
+      try { return capabilitiesFromProfile(deriveRuntimeProfile(binFromSettings(settings || {}), { label, exec, probe: false })); }
+      catch { return { tokens: false, cost: false, mcp: false, resume: false }; }
+    },
+    buildArgs(node, prompt, settings, mcp, opts = {}) {
+      const n = normalizeNode(node);
+      const profile = profileFor(settings, opts);
+      if (mcp && mcp.mcpServers && Object.keys(mcp.mcpServers).length && profile.mcp.method === 'file') {
+        // One config per run in a fresh temp dir, delivered via <BIN>_CONFIG (opencode-style). Writing
+        // it into a shared cwd made concurrent agents overwrite each other's board identity ("task not
+        // visible"); without an env to carry the per-run path there is no safe way to inject it at all.
+        const bin = binFromSettings(settings || {});
+        if (!opts.env) throw new Error(`${label}: file-method MCP needs opts.env (per-run config via ${binConfigEnvKey(bin)})`);
+        writePerRunMcpConfig(bin, profile.mcp.flag, mcp, opts.env);
+      }
+      // Same effective-mode rule as buildClaudeArgs: unset falls through to bypassPermissions.
+      // Without the derived bypass flag, non-interactive profile-runtime runs auto-reject permission
+      // asks (e.g. helpycode's external_directory) and the agent cannot reach the paths it needs.
+      const bypass = (n.permissionMode || (settings || {}).permissionMode || 'bypassPermissions') === 'bypassPermissions';
+      const args = buildProfileArgs(profile, { model: n.model, prompt, variant: n.effort, session: opts.resume, bypass });
+      args.push(...splitArgs(n.extraArgs));
+      return args;
+    },
+    // Generic JSON-event parsing driven by the profile's eventMapping; wired into the orchestrator
+    // via rt.parseEvent (no per-CLI branch there).
+    parseEvent(ev, settings, opts = {}) { return parseProfileEvent(ev, profileFor(settings, opts)); },
+  };
+}
 
 const RUNTIMES = {
   claude: {
@@ -22,12 +95,14 @@ const RUNTIMES = {
       args.push(prompt);
       return args;
     },
+    parseEvent: (ev) => parseCodexEvent(ev),
   },
   opencode: {
     id: 'opencode', label: 'OpenCode', bin: (s) => (s && s.opencodePath) || 'opencode',
     capabilities: { tokens: false, cost: false, mcp: false, resume: false }, // stub: not installed here, nothing tested
     buildArgs(node, prompt) { const n = normalizeNode(node); return ['run', ...(n.model ? ['-m', n.model] : []), prompt]; },
   },
+  helpycode: profileRuntime('helpycode', 'HelpyCode', (s) => (s && s.helpycodePath) || 'helpycode'),
 };
 // board MCP server -> codex `-c mcp_servers.<name>.*` overrides (TOML values; JSON strings/arrays are valid TOML)
 function codexMcpArgs(mcp) {
@@ -58,10 +133,92 @@ function parseCodexEvent(ev) {
     else out.logs.push(['tool', `${it.type} ${JSON.stringify(it).slice(0, 300)}`]);
   } else if (ev.type === 'turn.completed') {
     const u = ev.usage || {};
-    out.tokens = { inputTokens: u.input_tokens || 0, outputTokens: (u.output_tokens || 0) + (u.reasoning_output_tokens || 0), cachedInputTokens: u.cached_input_tokens || 0 };
+    // cached_input_tokens -> cacheReadTokens (absent -> null downstream: unknown, not 0; no CLI reports cache writes here)
+    out.tokens = { inputTokens: u.input_tokens || 0, outputTokens: (u.output_tokens || 0) + (u.reasoning_output_tokens || 0), ...(u.cached_input_tokens != null ? { cacheReadTokens: u.cached_input_tokens } : {}) };
     out.done = true; out.logs.push(['result', `codex turn completed: ${out.tokens.inputTokens} in / ${out.tokens.outputTokens} out`]);
   } else if (ev.type === 'turn.failed') { out.failed = true; out.logs.push(['error', (ev.error && ev.error.message) || 'turn failed']); }
   else if (ev.type === 'error') out.logs.push(['error', ev.message || '']);
+  return out;
+}
+
+// Generic JSON-event line -> same shape as parseCodexEvent, driven only by the profile's
+// eventMapping. Run totals are claimed when a usage-bearing event is seen: either an explicit
+// `result`-typed event (claude/helpycode convention) or any event whose mapped input/output/cost
+// paths carry numbers (e.g. helpycode's current `step_finish` events). `done` only on such events.
+// opencode-derived CLIs (helpycode 0.3.5, captured live) also stream tool activity as
+// {type:'tool_use', part:{type:'tool', tool, state:{status:'pending'|'running'|'completed'|'error',
+// input, output, metadata:{exit}}}} — the part is re-emitted per state change, but a fast tool may
+// only ever surface as 'completed'. Their step_finish carries that step's usage; only
+// part.reason === 'stop' ends the turn, so intermediate steps log a `system` step line and stay
+// not-done. This stdout stream is the only live feed used — helpycode's own log files rotate
+// quickly, so they are not a readable fallback for activity.
+function parseProfileEvent(ev, profile) {
+  const out = { logs: [] };
+  const em = profile.eventMapping || {};
+  const part = ev.part || {};
+  if (ev.type === 'tool_use' && part.type === 'tool') {
+    const st = part.state || {};
+    const name = part.tool || 'tool';
+    if (st.status === 'pending' || st.status === 'running') out.logs.push(['tool', `${name} ${JSON.stringify(st.input || {}).slice(0, 300)}`]);
+    else {
+      const exit = st.metadata ? st.metadata.exit : undefined;
+      const kind = st.status === 'error' || (Number.isFinite(exit) && exit !== 0) ? 'tool_error' : 'tool_result';
+      out.logs.push([kind, `${name}: ${String(st.output ?? st.error ?? '').slice(0, 400)}`]);
+    }
+    // Task/Agent tool: a subagent spawn. helpycode 0.3.5 (captured live) surfaces the whole spawn as ONE
+    // completed 'task' part — pending/running -> start, completed/error -> end; input carries
+    // {description, prompt, subagent_type}, and the answer "<task id=\"ses_…\" state=…>" holds the child
+    // session id (the child's own events never stream on this stdout, hence tokens stay null here).
+    if (isSubagentTool(name)) {
+      const done = st.status === 'completed' || st.status === 'error';
+      out.subagent = {
+        toolUseId: part.callID || part.id || name,
+        phase: done ? 'end' : 'start',
+        status: st.status === 'error' ? 'failed' : done ? 'completed' : 'running',
+        toolName: name,
+        type: String(name).toLowerCase(),
+        description: (st.input && (st.input.description || st.input.subagent_type)) || '',
+        prompt: (st.input && st.input.prompt) || '',
+        startedAt: (st.time && st.time.start) || ev.timestamp,
+        ...(done ? { endedAt: (st.time && st.time.end) || ev.timestamp } : {}),
+        childSessionId: (String(st.output || '').match(/<task id="([^"]+)"/) || [])[1] || undefined,
+      };
+    }
+    return out;
+  }
+  // opencode-style subtask part (unverified shape — start only; ends derive from a later part/event).
+  if (part.type === 'subtask') {
+    out.logs.push(['tool', `subtask ${String(part.description || part.prompt || '').slice(0, 280)}`]);
+    out.subagent = {
+      toolUseId: part.callID || part.id,
+      phase: 'start',
+      status: 'running',
+      toolName: 'subtask',
+      type: 'subtask',
+      description: part.description || '',
+      prompt: part.prompt || '',
+      startedAt: ev.timestamp,
+    };
+    return out;
+  }
+  const text = getPath(ev, em.textPath);
+  if (typeof text === 'string' && text) { out.logs.push(['text', text]); out.result = text; }
+  const sessionId = getPath(ev, em.sessionIdPath);
+  // opencode-derived CLIs put the session id on every event: capture it silently, log only a
+  // dedicated session-type event (a line per event would flood the live log).
+  if (sessionId != null) { out.sessionId = String(sessionId); if (ev.type === 'session') out.logs.push(['system', `${profile.label} session ${sessionId}`]); }
+  if (ev.type === 'error') { out.failed = true; out.logs.push(['error', String(ev.message || 'error')]); }
+  const input = Number(getPath(ev, em.inputPath)) || 0;
+  const output = Number(getPath(ev, em.outputPath)) || 0;
+  const cost = getPath(ev, em.costPath);
+  if (ev.type === 'result' || input || output || typeof cost === 'number') {
+    const reasoning = Number(getPath(ev, em.reasoningPath)) || 0;
+    const cacheRaw = getPath(ev, em.cachePath); const cache = Number(cacheRaw);
+    out.tokens = { inputTokens: input, outputTokens: output + reasoning, ...(cacheRaw != null && Number.isFinite(cache) ? { cacheReadTokens: cache } : {}) };
+    out.cost = Number(cost) || 0;
+    out.done = ev.type !== 'step_finish' || part.reason === 'stop';
+    out.logs.push([out.done ? 'result' : 'system', `${profile.label} ${out.done ? 'result' : 'step'}: ${input} in / ${output + reasoning} out`]);
+  }
   return out;
 }
 
@@ -71,10 +228,18 @@ function detectRuntimes(settings = {}, env = process.env, exec = (b, a) => execF
   const r = {};
   for (const id of RUNTIME_IDS) {
     const rt = RUNTIMES[id];
-    try { const v = exec(rt.bin(settings), ['--version']); r[id] = { installed: true, version: parseVersion(v) || String(v).trim(), label: rt.label, capabilities: rt.capabilities }; }
-    catch (e) { r[id] = { installed: false, version: null, label: rt.label, capabilities: rt.capabilities, error: e.code === 'ENOENT' ? 'not installed' : e.message }; }
+    try {
+      const v = exec(rt.bin(settings), ['--version']);
+      let caps;
+      try { caps = typeof rt.capabilities === 'function' ? rt.capabilities(settings, exec) : rt.capabilities; }
+      catch { caps = { tokens: false, cost: false, mcp: false, resume: false }; }
+      r[id] = { installed: true, version: parseVersion(v) || String(v).trim(), label: rt.label, capabilities: caps };
+    } catch (e) {
+      const caps = { tokens: false, cost: false, mcp: false, resume: false };
+      r[id] = { installed: false, version: null, label: rt.label, capabilities: caps, error: e.code === 'ENOENT' ? 'not installed' : e.message };
+    }
   }
   return r;
 }
 
-module.exports = { RUNTIMES, codexMcpArgs, RUNTIME_IDS, getRuntime, parseCodexEvent, parseVersion, detectRuntimes };
+module.exports = { RUNTIMES, codexMcpArgs, RUNTIME_IDS, getRuntime, parseCodexEvent, parseProfileEvent, parseVersion, detectRuntimes, deriveRuntimeProfile, capabilitiesFromProfile, profileRuntime };

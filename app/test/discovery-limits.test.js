@@ -105,7 +105,7 @@ test('limits: subscriptionGuard treats missing/unavailable rate limits as 0% (no
 test('limits: usageStatus with no limits configured at all reports every window as disabled (unavailable), no warn/pause', () => {
   const runs = [{ kind: 'agent', billingSource: 'subscription', startedAt: new Date().toISOString() }];
   const s = U.usageStatus(runs, undefined);
-  for (const w of [s.fiveHour, s.weekly, s.tokens, s.cost]) assert.deepEqual(w, { used: w.used, limit: 0, pct: 0, warn: false, pause: false });
+  for (const w of [s.fiveHour, s.weekly, s.tokens, s.cost]) assert.deepEqual(w, { used: w.used, limit: 0, pct: 0, warn: false, pause: false, resetsAt: null });
   assert.equal(s.warn, false); assert.equal(s.pause, false);
 });
 
@@ -179,7 +179,9 @@ test('refresh regression: a smaller --help-only probe never reduces an already-r
   assert.equal(CAP.mergeCapabilities(null, narrower), narrower);
 });
 
-test('real event: usageStatus prefers the CLI-reported rate-limit snapshot even with an empty in-memory map (persisted node.rateLimits fallback)', () => {
+test('real event: usageStatus prefers the CLI-reported rate-limit snapshot even with an empty in-memory map (persisted node.rateLimits fallback)', (t) => {
+  // Freeze just before the recorded reset: a reading whose resetsAt has passed is stale and doesn't count.
+  t.mock.timers.enable({ apis: ['Date'], now: 1790520600 * 1000 - 60_000 });
   const rateLimitEvent = JSON.parse(fixture('real-rate-limit-event.json'));
   const rl = U.parseRateLimits(rateLimitEvent);
   const runs = []; // no local runs at all — an empty in-memory subscriptionRateLimits map, only a persisted snapshot
@@ -189,7 +191,23 @@ test('real event: usageStatus prefers the CLI-reported rate-limit snapshot even 
   assert.equal(Math.round(merged.weekly.pct * 100), 22);
 });
 
-test('real event: recorded rate_limit_event parses to numeric 5h/weekly percentages', () => {
+test('real event: applyCliRateLimits ignores a stale reading (resetsAt past) and uses the freshest live one', () => {
+  const future = new Date(Date.now() + 3600e3).toISOString();
+  const past = new Date(Date.now() - 60e3).toISOString();
+  const status = U.usageStatus([], { fiveHourLimit: 0, weeklyLimit: 0, warnPct: 80 });
+  // One node's snapshot outlived its own reset at 97%; another node's live rate_limit_event reported 3%.
+  const merged = U.applyCliRateLimits(status, [
+    { fiveHour: { pct: 0.97, resetsAt: past }, weekly: null },
+    { fiveHour: { pct: 0.03, resetsAt: future }, weekly: null },
+  ], 90);
+  assert.equal(Math.round(merged.fiveHour.pct * 100), 3);
+  assert.equal(merged.pause, false, 'the stale reading must not pause dispatch');
+});
+
+test('real event: recorded rate_limit_event parses to numeric 5h/weekly percentages', (t) => {
+  // Freeze just before the fixture's recorded reset: the parser drops already-past resetsAt (runtime behavior),
+  // and this recorded event ages into the past as wall-clock moves — tests must not depend on today's date.
+  t.mock.timers.enable({ apis: ['Date'], now: 1790520600 * 1000 - 60_000 });
   const rateLimitEvent = JSON.parse(fixture('real-rate-limit-event.json'));
   assert.equal(rateLimitEvent.type, 'rate_limit_event');
 
@@ -203,4 +221,61 @@ test('real event: recorded rate_limit_event parses to numeric 5h/weekly percenta
   assert.equal(rl.weekly.pct, 0.22);
   assert.ok(rl.fiveHour.resetsAt);
   assert.ok(rl.weekly.resetsAt);
+});
+
+// --- End-to-end values from the recorded real `claude -p --output-format stream-json --verbose` run
+// (test/fixtures/real-init-event.json + real-rate-limit-event.json, captured on this machine) ---
+
+test('real event: recorded system/init has 123 slash commands (incl goal/loop), 58 skills, modes>=2', () => {
+  const initEvent = JSON.parse(fixture('real-init-event.json'));
+  assert.equal(initEvent.slash_commands.length, 123);
+  assert.ok(initEvent.slash_commands.includes('goal'));
+  assert.ok(initEvent.slash_commands.includes('loop'));
+  assert.equal(initEvent.skills.length, 58);
+
+  const rt = { id: 'claude', bin: () => 'claude' };
+  const c = CAP.discoverCapabilities(rt, {}, { exec: () => '', initEvent, ...FS_OPTS });
+  assert.equal(c.skills.length, 58);
+  assert.equal(c.slashCommands.length, initEvent.slash_commands.length);
+  const modeNames = c.categorized.filter((x) => x.category === 'mode').map((x) => x.name);
+  assert.ok(modeNames.length >= 2);
+  assert.ok(modeNames.includes('goal') && modeNames.includes('loop'));
+});
+
+test('real event: rate_limit_event exposes both five_hour and seven_day utilization + resetsAt', (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: 1790520600 * 1000 - 60_000 });
+  const rateLimitEvent = JSON.parse(fixture('real-rate-limit-event.json'));
+  const w = rateLimitEvent.rate_limit_info.unifiedWindows;
+  assert.equal(typeof w.five_hour.utilization, 'number');
+  assert.ok(w.five_hour.resetsAt);
+  assert.equal(typeof w.seven_day.utilization, 'number');
+  assert.ok(w.seven_day.resetsAt);
+
+  const rl = U.parseRateLimits(rateLimitEvent);
+  assert.equal(rl.fiveHour.pct, w.five_hour.utilization);
+  assert.equal(rl.weekly.pct, w.seven_day.utilization);
+  assert.equal(rl.fiveHour.resetsAt, new Date(w.five_hour.resetsAt * 1000).toISOString());
+  assert.equal(rl.weekly.resetsAt, new Date(w.seven_day.resetsAt * 1000).toISOString());
+});
+
+test('real event: two consecutive probes of the same init event replace, not accumulate, counts', () => {
+  const initEvent = JSON.parse(fixture('real-init-event.json'));
+  const rt = { id: 'claude', bin: () => 'claude' };
+
+  // Manual-refresh style (main.js): each discoverCapabilities() call wholesale-overwrites node.capabilities.
+  const first = CAP.discoverCapabilities(rt, {}, { exec: () => '', initEvent, ...FS_OPTS });
+  const second = CAP.discoverCapabilities(rt, {}, { exec: () => '', initEvent, ...FS_OPTS });
+  assert.equal(first.skills.length, 58); assert.equal(second.skills.length, 58);
+  assert.equal(first.slashCommands.length, second.slashCommands.length);
+
+  // Automatic per-run style (orchestrator.js): slashCommands are unioned+deduped against the previous
+  // stored capabilities on every init event, so replaying the identical event must not grow the count.
+  const fromInit = CAP.fromInitEvent(initEvent);
+  let node = { capabilities: null };
+  for (let i = 0; i < 2; i++) {
+    const prev = node.capabilities || {};
+    node.capabilities = { ...prev, ...fromInit, slashCommands: [...new Set([...(prev.slashCommands || []), ...fromInit.slashCommands])] };
+  }
+  assert.equal(node.capabilities.slashCommands.length, initEvent.slash_commands.length);
+  assert.equal(node.capabilities.skills.length, 58);
 });
