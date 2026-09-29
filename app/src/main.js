@@ -50,6 +50,9 @@ function orchFor(pid) {
     o.on('run.recovery_failed', (e) => send('run-recovery-failed', { ...e, projectId: pid }));
     o.on('watch-status', (w) => send('watch-status', { ...w, projectId: pid }));
     o.on('restart-state', (r) => send('restart-state', { ...r, projectId: pid }));
+    // Runtime breaker (t_419062e2): banner push + clear, consumed by Uma's syncRtu (t_d33685f3).
+    o.on('runtime.unavailable', (e) => send('runtime-unavailable', { ...e, projectId: pid }));
+    o.on('runtime.available', (e) => send('runtime-available', { ...e, projectId: pid }));
     // Scheduled restarts fire through the watcher's drain/test/relaunch flow (watcherFor lazily
     // creates it; in non-dev builds it answers the no-op stub and the schedule just stays armed).
     o.updater = watcherFor(pid);
@@ -890,6 +893,84 @@ async function guiE2E() {
     require('electron').nativeTheme.themeSource = 'system';
     console.log('[gui-e2e] wikilogs', JSON.stringify({ wempty, lempty, wlist, wview, rows, filtered, searched }));
   };
+  // Team filter for Logs (t_cb945259, plan t_db23070d): 2 teams (Alpha, Beta) plus a cross-team message
+  // logged under the recipient (Beta's dev, sent by Alpha's PM). With per-team log scope (t_8d3d6989)
+  // the log defaults to the current team's lines and "All teams" is the explicit lift. Checks: the
+  // default scope shows only the current team; All teams shows every line; selecting a team hides other
+  // teams' lines and narrows #logfilter to that team's agents; a cross-team message renders only on the
+  // recipient's team side (the sender's team does not mirror it); changing team resets an out-of-scope
+  // agent filter; a team with no activity shows a dedicated empty state. The #logteam select is
+  // feature-detected (Uma's t_86da3a0b) — logged as pending until then.
+  const teamFilterShots = async () => {
+    await waitFor(`return !!document.querySelector('#tpl-select option')`); await ex(`await refresh();`); const cur = await ex(`return { p: ctx.p, t: S.teamId }`);
+    const gp = cur.p || pid(); const alpha = pm.store(gp, cur.t);
+    pm.renameTeam(gp, cur.t, 'Alpha');
+    const pmA = alpha.getTeam().nodes[0] || alpha.addNode({ name: 'AlphaPM', role: 'PM', x: 60, y: 60 });
+    const devA = alpha.addNode({ name: 'AlphaDev', role: 'Dev', x: 260, y: 60 });
+    const beta = pm.createTeam(gp, 'Beta'); const betaId = beta.id || beta; const bs = pm.store(gp, betaId);
+    const devB = bs.addNode({ name: 'BetaDev', role: 'Dev', x: 60, y: 60 });
+    const revB = bs.addNode({ name: 'BetaRev', role: 'Reviewer', x: 260, y: 60 });
+    alpha.addEdge(pmA.id, devB.id, 'message'); // cross-team edge: Alpha's PM can message Beta's dev
+    await ex(`switchTo({ p: '${gp}', t: '${cur.t}' }); await refresh(); $('#tabs button[data-tab=obs]').click(); await w(300);`);
+    const now = Date.now();
+    const L = (nodeId, text, ago = 0) => ({ projectId: gp, nodeId, kind: 'text', text, at: now - ago });
+    const fixture = [
+      L(pmA.id, 'AlphaPM: planning the sprint', 5000), L(devA.id, 'AlphaDev: writing the feature', 4000),
+      L(devB.id, 'BetaDev: reviewing the spec', 3000), L(revB.id, 'BetaRev: left comments', 2000),
+      L(devB.id, "✉ message from AlphaPM (cross-team): please prioritise the spec review", 1000),
+    ];
+    await ex(`const F = ${JSON.stringify(fixture)}; for (const l of F) logs.push(l); await refresh(); renderLog(); renderObs(); await w(300);`);
+    const has = (sels) => ex(`return ${JSON.stringify(sels)}.find((s) => document.querySelector(s)) || null`);
+    const teamSel = await has(['#logteam', '#log-team', '[data-log=team]']);
+    if (!teamSel) { console.log('[gui-e2e] teamfilter: #logteam UI pending (Uma t_86da3a0b)'); return; }
+    const rowsText = () => ex(`return [...document.querySelectorAll('#log .logrow .logtext')].map((r) => r.textContent)`);
+    const selectTeam = (name) => ex(`const s = $('${teamSel}'); const o = [...s.options].find((x) => new RegExp('${name}', 'i').test(x.textContent)); s.value = o.value; s.dispatchEvent(new Event('change')); await w(250);`);
+    // Per-team log scope (t_8d3d6989): switchTo scopes the log to the current team, so the default view
+    // is Alpha-only, and "All teams" is the explicit way to see every line.
+    const scoped = await rowsText();
+    expect('teamfilter: log scope defaults to the current team (Alpha only)', scoped.some((r) => r.includes('AlphaPM: planning')) && scoped.some((r) => r.includes('AlphaDev: writing')) && !scoped.some((r) => r.includes('BetaDev: reviewing')) && !scoped.some((r) => r.includes('BetaRev: left')), scoped);
+    await shot('teamfilter-default');
+    await selectTeam('all');
+    const all = await rowsText();
+    expect('teamfilter: All teams shows every team\'s line', fixture.every((l) => all.some((r) => r.includes(l.text.slice(0, 15)))), { all });
+    await shot('teamfilter-all');
+    const teamOptions = await ex(`return [...document.querySelectorAll('${teamSel} option')].map((o) => o.textContent.trim())`);
+    expect('teamfilter: select lists All teams + Alpha + Beta', /all/i.test(teamOptions[0] || '') && teamOptions.some((t) => /alpha/i.test(t)) && teamOptions.some((t) => /beta/i.test(t)), teamOptions);
+    // Select Beta: hides Alpha-only lines, keeps Beta's own, narrows the agent filter to Beta's agents,
+    // and shows the cross-team message (it is logged under Beta's dev — the recipient side).
+    await selectTeam('beta');
+    const betaRows = await rowsText();
+    const betaAgentOpts = await ex(`return [...document.querySelectorAll('#logfilter option')].map((o) => o.textContent.trim())`);
+    expect('teamfilter: Beta hides Alpha-only lines', !betaRows.some((r) => r.includes('AlphaDev: writing')) && !betaRows.some((r) => r.includes('AlphaPM: planning')), betaRows);
+    expect('teamfilter: Beta keeps Beta\'s own lines', betaRows.some((r) => r.includes('BetaDev: reviewing')) && betaRows.some((r) => r.includes('BetaRev: left')), betaRows);
+    expect('teamfilter: Beta narrows agent filter to Beta agents', betaAgentOpts.some((o) => /BetaDev/.test(o)) && betaAgentOpts.some((o) => /BetaRev/.test(o)) && !betaAgentOpts.some((o) => /AlphaDev/.test(o)), betaAgentOpts);
+    expect('teamfilter: cross-team message visible from the recipient (Beta) side', betaRows.some((r) => r.includes('cross-team')), betaRows);
+    await shot('teamfilter-beta');
+    // Select Alpha: Beta-only lines are hidden, and the cross-team message is NOT mirrored here — it is
+    // logged under the recipient, so per-team scope keeps it on the Beta side only.
+    await selectTeam('alpha');
+    const alphaRows = await rowsText();
+    expect('teamfilter: Alpha hides Beta-only lines', !alphaRows.some((r) => r.includes('BetaRev: left')) && !alphaRows.some((r) => r.includes('BetaDev: reviewing')), alphaRows);
+    expect('teamfilter: cross-team message stays on the recipient (Beta) side, not mirrored to Alpha', alphaRows.some((r) => r.includes('AlphaPM: planning')) && !alphaRows.some((r) => r.includes('cross-team')), alphaRows);
+    await shot('teamfilter-alpha');
+    // Agent filter resets to All when the previously selected agent isn't in the newly selected team.
+    await ex(`$('#logfilter').value = '${devB.id}'; $('#logfilter').dispatchEvent(new Event('change')); await w(150);`);
+    await selectTeam('alpha');
+    const resetVal = await ex(`return $('#logfilter').value`);
+    expect('teamfilter: agent filter resets to All on an invalid team/agent combo', resetVal === '', resetVal);
+    // Empty state: a freshly created team with no activity shows a dedicated message, not a generic one.
+    const gamma = pm.createTeam(gp, 'Gamma'); await ex(`await refresh();`); await selectTeam('gamma');
+    const emptyMsg = await ex(`return $('#log').textContent`);
+    expect('teamfilter: empty team shows a team-specific empty state', /no messages for this team/i.test(emptyMsg), emptyMsg);
+    await shot('teamfilter-empty');
+    // All restores everything.
+    await selectTeam('all');
+    const restored = await rowsText();
+    expect('teamfilter: All restores every line', fixture.every((l) => restored.some((r) => r.includes(l.text.slice(0, 15)))), { restored });
+    for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await selectTeam('beta'); await ex(`await w(300);`); await shot(`teamfilter-${t}`); }
+    require('electron').nativeTheme.themeSource = 'system'; await selectTeam('all');
+    console.log('[gui-e2e] teamfilter', JSON.stringify({ teamOptions, betaAgentOpts, resetVal }));
+  };
   // Realistic Logs/Wiki fixture (t_2f1aa27f): 20 agents, 30+ wiki pages, 500+ log lines spread across 3
   // sessions per agent. Proves the log pane scrolls and reads as multi-turn conversations per agent
   // ("session" = clicking an agent in #logagents filters #log to just its lines), the wiki page list and
@@ -1653,6 +1734,7 @@ async function guiE2E() {
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'existingdata') { await existingDataShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'polish') { await polishShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'mainlogswiki') { await mainLogsWikiShots(); throw null; }
+    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'teamfilter') { await teamFilterShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'logsdesign') { await logsDesignShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'audit') { await auditShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'critique') { await critiqueShots(); throw null; }
@@ -1853,6 +1935,7 @@ async function guiE2E() {
       const bg = await ex(`return getComputedStyle(document.documentElement).getPropertyValue('--bg').trim()`); expect(`theme ${theme} applied`, bg === BG[theme], { bg, dt: await ex(`return document.documentElement.dataset.theme + '|' + matchMedia('(prefers-color-scheme: dark)').matches + '|' + getComputedStyle(document.documentElement).getPropertyValue('--bg-app')`) });
     }
     if (!process.env.SKIP_WIKILOGS) await mainLogsWikiShots();
+    if (!process.env.SKIP_TEAMFILTER) await teamFilterShots();
     if (!process.env.SKIP_CRITIQUE) await critiqueShots();
     if (!process.env.SKIP_LIMITS) await limitsShots();
     if (!process.env.SKIP_LIMITS_PROVIDERS) await limitsProvidersShots();
@@ -2044,7 +2127,7 @@ const api = {
   inboxCounts: () => Object.fromEntries(pm.list().map((p) => [p.id, pm.store(p.id).listInbox({ status: 'open' }).length])),
   approveTask: (c, id, ok, note) => ST(c).approveTask(id, ok, note), getLogs: (c, n) => ST(c).readLogs(n || 2000), clearLogs: (c) => ST(c).clearLogs(),
   taskDiff: (c, id) => WT.worktreeDiff(wtTask(c, id)),
-  taskMerge: (c, id) => { const r = WT.worktreeMerge(wtTask(c, id)); ST(c).commentTask(id, 'human', r.refused ? WT.dirtyMergeMessage(r.dirty) : r.merged ? `merged ${r.branch} into ${r.base}` : `nothing merged: no commits on ${r.branch} ahead of ${r.base}`); return r; },
+  taskMerge: (c, id, opts) => ST(c).mergeTask(id, opts),
   taskDiscard: (c, id) => { const r = WT.worktreeDiscard(wtTask(c, id)); ST(c).updateTask(id, { worktreePath: null, worktreeBranch: null }); return r; },
   unmergedBranches: (c) => ST(c).listUnmergedBranches(),
   pickDir: async () => { const { dialog } = require('electron'); const r = await dialog.showOpenDialog(win, { properties: ['openDirectory', 'createDirectory'] }); return r.canceled ? null : r.filePaths[0]; },
@@ -2062,6 +2145,9 @@ const api = {
   getRestartState: (c) => orchFor(c.p).restartState(),
   restartNow: (c) => { orchFor(c.p).restartNow(); return orchFor(c.p).restartState(); },
   cancelRestart: (c) => { orchFor(c.p).cancelRestart(); return orchFor(c.p).restartState(); },
+  // Runtime breaker resume (t_419062e2): clears the unavailable state and re-dispatches the queued
+  // tasks. Throws the reason on failure — the renderer shows it inline in the banner.
+  resumeRuntime: (c, runtime) => orchFor(c.p).resumeRuntime(runtime),
   getSelfUpdateStatus: (c) => ({ ...watcherFor(c.p).status(), devMode: DEV_MODE }),
   setAutoRestart: (c, on) => { if (DEV_MODE) ST(c).saveSettings({ autoRestart: !!on }); return { ...watcherFor(c.p).status(), devMode: DEV_MODE }; },
   restartSelfUpdate: (c) => { watcherFor(c.p).restartNow(); return { ...watcherFor(c.p).status(), devMode: DEV_MODE }; },

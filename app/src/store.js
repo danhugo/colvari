@@ -15,6 +15,10 @@ const PRESET_FIELDS = ['systemPrompt', 'allowedTools', 'disallowedTools', 'permi
 const pick = (o, ks) => Object.fromEntries(ks.map((k) => [k, o[k]]));
 const { normalizeNode, normalizePatch, normalizePreset, applyPreset, EDGE_TYPES, SUGGESTED_ROLES } = require('./agent-config');
 const WT = require('./worktree');
+const MG = require('./merge-gate');
+
+// Bounce payload for a gate-blocked merge: failing test names + a capped output tail (#8).
+const blockPayload = (r) => `${(r.names || []).length ? (r.names || []).map((n) => '- ' + n).join('\n') : '- (test names unavailable)'}\n\ntail of the test output:\n\`\`\`\n${r.output || '(none)'}\n\`\`\``;
 
 const ROLES = SUGGESTED_ROLES; // suggestions only: roles are free text
 const STATUSES = ['todo', 'in_progress', 'review', 'done', 'waiting_for_human', 'merge_conflict'];
@@ -510,35 +514,70 @@ class Store {
     this._withTasks((tasks) => { task.blockedBy = C.validateDeps(task.id, blockedBy, tasks); tasks.push(task); });
     return task;
   }
-  updateTask(tid, patch) {
+  updateTask(tid, patch, opts) {
     let t = this._updateTask(tid, patch);
     // Every approval request also shows up in the human inbox.
     if (patch.awaitingApproval && !this.listInbox({ status: 'open' }).some((i) => i.kind === 'approval' && i.taskId === tid)) this.addInbox({ kind: 'approval', taskId: tid, nodeId: t.assignee, question: `Approve "${t.title}"?`, choices: ['approve'] });
     // Never strand finished work in its worktree branch: auto-merge on done, or park as merge_conflict.
-    if (patch.status === 'done' && t.worktreePath && t.worktreeBranch) t = this._mergeOnDone(t);
+    if (patch.status === 'done' && t.worktreePath && t.worktreeBranch) t = this._mergeOnDone(t, opts);
     return t;
   }
-  // Merge a done task's squad/<id> branch into base. On conflict, abort, mark the task 'merge_conflict'
-  // (not done) and hand the SAME branch to a follow-up conflict-resolution task (never a new branch),
-  // so resolving it re-merges the original work instead of stranding it behind a chain of tasks.
-  _mergeOnDone(t) {
-    try {
-      const r = WT.worktreeMerge(t);
-      if (r.refused) {
-        // Dirty main checkout: park in review (not merge_conflict) so cleaning main and
-        // re-marking done retries the same merge instead of spawning a resolve task.
-        this._updateTask(t.id, { status: 'review' });
-        this.commentTask(t.id, 'system', WT.dirtyMergeMessage(r.dirty));
-        return this.getTask(t.id);
-      }
+  // Merge a done task's squad/<id> branch into base — through the pre-merge test gate
+  // (src/merge-gate.js, SYNC per the t_12a92368 contract): base is merged into the branch in its
+  // worktree, the unit suite runs on exactly that tree, and only a green run lands the base.
+  // opts flows into the gate ({runTests} / {testCmd} for tests and the human merge button;
+  // production omits it and runs the real suite). On red/infra the task is reopened to its
+  // assignee with the capped failing output. On conflict, abort, mark the task 'merge_conflict'
+  // (not done) and hand the SAME branch to a follow-up conflict-resolution task (never a new
+  // branch), so resolving it re-merges the original work instead of stranding it.
+  // Human "merge now" (main.js taskMerge IPC): the same gated merge as a done flip, callable
+  // in any task state; returns the task in its post-gate state.
+  mergeTask(tid, opts) { return this._mergeOnDone(this.getTask(tid), opts || {}); }
+  _mergeOnDone(t, opts = {}) {
+    const tid = t.id;
+    this.commentTask(tid, 'system', `merge gate: running the unit suite on ${t.worktreeBranch} before merging into base${process.env.AGENTS_SQUAD_GATE_DISABLED ? ' (gate disabled — merging untested)' : ''}`);
+    let r;
+    try { r = MG.gateMerge(t, opts); }
+    catch (e) { return this._onMergeConflict(t, e); }
+    if (r.refused) {
+      // Dirty main checkout: park in review (not merge_conflict) so cleaning main and
+      // re-marking done retries the same merge instead of spawning a resolve task.
+      this._updateTask(tid, { status: 'review' });
+      this.commentTask(tid, 'system', WT.dirtyMergeMessage(r.dirty));
+      return this.getTask(tid);
+    }
+    if (r.merged) {
+      const flaky = r.gate && r.gate.flaky && r.gate.flaky.length ? `green after one flaky rerun (${r.gate.flaky.join(', ')})` : (r.gate && r.gate.state) || 'green';
+      this.commentTask(tid, 'system', `auto-merged ${t.worktreeBranch} into ${r.base} (merge gate: npm test ${flaky}${r.gate && r.gate.tests ? `, ${r.gate.tests} tests` : ''})`);
       // A landed merge no longer restarts the app; it only counts toward the next scheduled one
       // (conflicts/refusals are not landed work — the count covers merges that actually merged).
-      if (r.merged) this.bumpRestartPending();
-      this.commentTask(t.id, 'system', r.merged ? `auto-merged ${t.worktreeBranch} into base` : `nothing merged: no commits on ${t.worktreeBranch} ahead of ${r.base}`);
-      return this.getTask(t.id);
-    } catch (e) {
-      return this._onMergeConflict(t, e);
+      this.bumpRestartPending();
+      if (r.reason === 'tree-mismatch') {
+        // Landed, but the base tree is not the tree we tested — someone bypassed the lock.
+        MG.ensureRedMasterTask(this, { root: r.root, tests: ['(post-merge tree mismatch — base changed outside the gate)'], base: r.base, source: 'post-merge verification', lastMergedTask: t.id, lastMergedBranch: t.worktreeBranch });
+      } else {
+        MG.markMasterGreen(this, { root: r.root, tree: r.gate && r.gate.tree, base: r.base, source: 'merge gate', lastMergedTask: t.id, lastMergedBranch: t.worktreeBranch });
+      }
+      return this.getTask(tid);
     }
+    if (!r.gate || r.gate.state === 'skipped') {
+      this.commentTask(tid, 'system', `nothing merged: no commits on ${t.worktreeBranch} ahead of ${r.base}`);
+      return this.getTask(tid);
+    }
+    // Blocked by the gate: reopen to the assignee with the capped failing output.
+    MG.recordGateBlock(this, { root: r.root, taskId: tid, tests: r.names || [] });
+    if (r.reason === 'master-red') {
+      MG.ensureRedMasterTask(this, { root: r.root, tests: r.names, output: r.output, base: r.base, source: 'merge gate', detail: `detected while merging ${t.worktreeBranch}`, lastMergedTask: undefined });
+      this.commentTask(tid, 'system', `merge gate: NOT merged — the base branch (${r.base}@${String(r.baseSha || '').slice(0, 8)}) itself fails the unit suite, so this may not be your branch's fault. A P0 fix task has been created.\nFailing on base:\n${blockPayload(r)}`);
+    } else if (r.reason === 'infra') {
+      this.commentTask(tid, 'system', `merge gate: NOT merged — the unit suite could not run (infrastructure error, retried once; not counted as a test failure). Fix the environment or retry.\n${blockPayload(r)}`);
+    } else {
+      this._updateTask(tid, { status: 'todo', reopenCount: (t.reopenCount || 0) + 1 });
+      this.commentTask(tid, 'system', `merge gate: tests failed, task reopened: fix and mark done to retry.\nFailing tests:\n${blockPayload(r)}`);
+      return this.getTask(tid);
+    }
+    this._updateTask(tid, { status: 'todo', reopenCount: (t.reopenCount || 0) + 1 });
+    return this.getTask(tid);
   }
   static MAX_CONFLICT_RETRIES = 3;
   _onMergeConflict(t, e) {
@@ -583,7 +622,7 @@ class Store {
       if (patch.blockedBy !== undefined) t.blockedBy = C.validateDeps(tid, patch.blockedBy, tasks);
       if (patch.status && patch.status !== 'review') t.awaitingApproval = false;
       if (patch.priority !== undefined) t.priority = C.normalizePriority(patch.priority);
-      for (const k of ['title', 'description', 'assignee', 'status', 'sessionId', 'sessions', 'iterations', 'awaitingApproval', 'reopenCount', 'worktreePath', 'worktreeBranch', 'isConflictResolution', 'conflictBranch', 'conflictRetries', 'parkedForHuman', 'stallRecoveries', 'drainCuts']) if (patch[k] !== undefined) t[k] = patch[k];
+      for (const k of ['title', 'description', 'assignee', 'status', 'sessionId', 'sessions', 'iterations', 'awaitingApproval', 'reopenCount', 'worktreePath', 'worktreeBranch', 'isConflictResolution', 'conflictBranch', 'conflictRetries', 'parkedForHuman', 'stallRecoveries', 'drainCuts', 'redMaster']) if (patch[k] !== undefined) t[k] = patch[k];
       t.updatedAt = new Date().toISOString();
       // Parent auto-complete: when the last open subtask is done, the parent moves to done.
       for (let c = t; c.status === 'done' && c.parentId;) {

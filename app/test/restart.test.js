@@ -10,7 +10,7 @@ const { Store } = require('../src/store');
 const { Orchestrator, RESTART } = require('../src/orchestrator');
 const { UpdateWatcher } = require('../src/self-update');
 const { makeTools } = require('../src/board-tools');
-const WT = require('../src/worktree');
+const MG = require('../src/merge-gate');
 
 const tmp = (p) => fs.mkdtempSync(path.join(os.tmpdir(), p));
 const waitFor = async (fn, ms = 8000) => { const t0 = Date.now(); while (!fn()) { if (Date.now() - t0 > ms) throw new Error('timeout'); await new Promise((r) => setTimeout(r, 10)); } };
@@ -39,18 +39,19 @@ test('store: landed merges bump the pending counter; refusals and empty merges d
   assert.equal(rp.count, 2);
   assert.ok(rp.since, 'since is anchored on the first bump');
   const since = rp.since;
-  const orig = WT.worktreeMerge;
+  const orig = MG.gateMerge;
+  const root = tmp('squad-restart-root-');
   try {
-    WT.worktreeMerge = () => ({ merged: true, base: 'master' });
+    MG.gateMerge = () => ({ merged: true, base: 'master', root, gate: { state: 'green', tests: 1, flaky: [] } });
     s.updateTask(s.createTask({ title: 'x', assignee: pm.id, createdBy: 'human' }).id, { worktreePath: '/w', worktreeBranch: 'squad/x', status: 'done' });
     assert.equal(s.restartPending().count, 3, 'a landed merge counts');
-    WT.worktreeMerge = () => ({ refused: true, dirty: ['f'] });
+    MG.gateMerge = () => ({ merged: false, refused: true, dirty: ['f'], root });
     s.updateTask(s.createTask({ title: 'y', assignee: pm.id, createdBy: 'human' }).id, { worktreePath: '/w2', worktreeBranch: 'squad/y', status: 'done' });
-    WT.worktreeMerge = () => ({ merged: false, base: 'master' });
+    MG.gateMerge = () => ({ merged: false, base: 'master', root, gate: { state: 'skipped' } });
     s.updateTask(s.createTask({ title: 'z', assignee: pm.id, createdBy: 'human' }).id, { worktreePath: '/w3', worktreeBranch: 'squad/z', status: 'done' });
     assert.equal(s.restartPending().count, 3, 'refused and empty merges do not count (Cato #6)');
     assert.equal(s.restartPending().since, since);
-  } finally { WT.worktreeMerge = orig; }
+  } finally { MG.gateMerge = orig; }
 });
 
 test('store: scheduleRestart validates the anchor at schedule time (Cato #2)', () => {
