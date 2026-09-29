@@ -2040,7 +2040,7 @@ async function renderDiscovery() {
   const cnt = (n) => n > 0 ? String(n) : '—';
   const reason = (!st || (!st.fiveHour.limit && !st.weekly.limit)) ? await noLimitDataReason() : null;
   const limPart = (label, u) => {
-    if (!u || !u.limit) return `<span class="lm-part lm-pending" title="${esc(label)}: ${reason ? `no limit data — ${esc(reason)}` : 'no limit set or reported yet'}"><b>${esc(label)}</b> <small>—  ${reason ? 'no data' : 'not set'}</small></span>`;
+    if (!u || !u.limit) return `<span class="lm-part lm-pending" title="${esc(label)}: ${reason ? `no limit data — ${esc(reason)}` : 'no limit set or reported yet'}"><b>${esc(label)}</b> <small>— ${reason ? 'no data' : 'not set'}</small></span>`;
     const pct = Math.min(100, Math.round(u.pct * 100)); const cls = u.pause ? 'danger' : u.warn ? 'warn' : 'ok';
     const ms = u.resetsAt ? new Date(u.resetsAt).getTime() - Date.now() : 0;
     const resetTitle = ms > 0 ? ` · resets in ${fmtCountdown(ms)}` : '';
