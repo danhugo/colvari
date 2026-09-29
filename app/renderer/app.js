@@ -373,7 +373,7 @@ function renderSidebar() {
   if (sig === sidebarSig) return;
   sidebarSig = sig;
   $('#projectlist').innerHTML = P.projects.map((p) => `<div data-pid="${p.id}" class="${p.id === ctx.p ? 'sel' : ''}">${esc(p.name)}${p.running ? '<span class="dot" title="running"></span>' : ''}</div>`).join('');
-  $('#teamlist').innerHTML = teams.map((t) => `<div data-tid="${t.id}" class="${t.id === ctx.t ? 'sel' : ''}">${esc(t.name)}</div>`).join('');
+  $('#teamlist').innerHTML = teams.map((t) => `<div data-tid="${t.id}" class="${t.id === ctx.t ? 'sel' : ''}"><i class="teamdot" style="background:var(--agent-${teamHue(t.id)})"></i>${esc(t.name)}</div>`).join('');
 }
 function switchTo(c) {
   if (c.p !== ctx.p) { sel = { node: null, edge: null, task: null, page: null, logTeam: '' }; wikiEdit = false; $('#wk-title').value = ''; $('#wk-content').value = ''; }
@@ -744,10 +744,24 @@ let VP = { x: 20, y: 20, zoom: 1 }, vpTeam = null, vpSave = null, lastEdgeType =
 // Team-tied colour system (t_300e8fd2): the hue belongs to the TEAM (hash of teamId), so a
 // screenshot reads team clustering, not noise; members within a team step toward --agent-mix
 // (80% / 62%) so teammates are distinguishable while staying in the team's hue family.
+// Team-tied hue: a team's index among the project's teams (sorted by id — stable across
+// machines) so up to 8 teams get DISTINCT hues; hash fallback covers unknown/teamless ids.
+const _teamHue = new Map(); let _teamHueSrc = null;
+const teamHue = (teamId) => {
+  if (!teamId) return 0;
+  const teams = (S.project && S.project.teams) || [];
+  if (teams !== _teamHueSrc) { _teamHue.clear(); _teamHueSrc = teams; } // self-invalidating: any project/team change swaps the array
+  if (_teamHue.has(teamId)) return _teamHue.get(teamId);
+  const i = teams.slice().sort((a, b) => String(a.id).localeCompare(String(b.id))).findIndex((t) => t.id === teamId);
+  const hue = i < 0 ? 0 : (i % 8) + 1;
+  _teamHue.set(teamId, hue);
+  return hue;
+};
 const agentColor = (id) => {
   const n = S.allNodes.find((x) => x.id === id);
-  const key = n && n.teamId ? n.teamId : String(id);
-  let h = 0; for (const c of String(key)) h = (h * 31 + c.charCodeAt(0)) >>> 0; return (h % 8) + 1;
+  const hue = n ? teamHue(n.teamId) : 0;
+  if (hue) return hue;
+  let h = 0; for (const c of String(id)) h = (h * 31 + c.charCodeAt(0)) >>> 0; return (h % 8) + 1;
 };
 const agentStep = (id) => {
   const n = S.allNodes.find((x) => x.id === id);
@@ -905,6 +919,7 @@ function renderGraph() {
     el('rect', { class: 'card', width: W, height: H, rx: 12 }, g);
     el('rect', { class: 'stripe', width: 4, height: H - 20, x: 0, y: 10, rx: 2, style: `fill:${agentVar(n.id)}` }, g);
     el('circle', { class: 'avatar', cx: 30, cy: 26, r: 14, style: `fill:${agentVar(n.id)}` }, g);
+    if (isLeadRole(n.role)) el('text', { x: 40, y: 37, class: 'leadstar', 'text-anchor': 'middle' }, g).textContent = '★';
     el('text', { x: 30, y: 30.5, class: 'avtext', 'text-anchor': 'middle' }, g).textContent = initials(n.name);
     el('text', { x: 52, y: 23, class: 'nname' }, g).textContent = clipText(n.name, Math.max(6, Math.round(16 / Math.max(1, 11 / (13 * VP.zoom)))));
     el('text', { x: 52, y: 38, class: 'nrole' }, g).textContent = clipText(n.role, 20);
@@ -2290,6 +2305,7 @@ function renderOverview() {
     el('rect', { class: 'card', width: W, height: H, rx: 12 }, g);
     el('rect', { class: 'stripe', width: 4, height: H - 20, x: 0, y: 10, rx: 2, style: `fill:${agentVar(n.id)}` }, g);
     el('circle', { class: 'avatar', cx: 26, cy: 24, r: 13, style: `fill:${agentVar(n.id)}` }, g);
+    if (isLeadRole(n.role)) el('text', { x: 35.5, y: 34, class: 'leadstar', 'text-anchor': 'middle' }, g).textContent = '★';
     el('text', { x: 26, y: 28.5, class: 'avtext', 'text-anchor': 'middle' }, g).textContent = initials(n.name);
     el('text', { x: 47, y: 21, class: 'nname' }, g).textContent = clipText(n.name, 16);
     el('text', { x: 47, y: 36, class: 'nrole' }, g).textContent = isStuck ? '⚠ stuck' : `${clipText(n.role, 14)} · ${live === 'working' ? 'Working' : humanStatus(live)}`;
@@ -2305,9 +2321,12 @@ function renderOverview() {
   }
   // Fit the graph to the available canvas without ever shrinking node text below its authored (readable) size:
   // fit the whole graph in the wrap (never clipped); shrink down to 0.6 before letting the wrap scroll, grow up to 1.3.
-  const gbox = graphBox(ovNodes), gpad = 40, bw = gbox.w + gpad * 2, bh = gbox.h + gpad * 2;
+  const gbox = graphBox(ovNodes), gpad = 28, bw = gbox.w + gpad * 2, bh = gbox.h + gpad * 2;
   const wrap = svg.parentElement, r = wrap.getBoundingClientRect();
-  const scale = clamp(r.width && r.height ? Math.min(r.width / bw, r.height / bh) : 1, 0.6, 1.3);
+  // Auto-fit zooms small graphs to fill the canvas but NEVER shrinks below 1.0 — the old
+  // 0.6 floor scaled the 12px labels down to ~7px (the original Overview legibility complaint).
+  // Larger graphs stay at 1.0 and pan/drag in the wrap instead.
+  const scale = clamp(r.width && r.height ? Math.min(r.width / bw, r.height / bh) : 1, 1, 1.6);
   const vbw = Math.max(bw, r.width ? r.width / scale : bw), vbh = Math.max(bh, r.height ? r.height / scale : bh);
   svg.setAttribute('viewBox', `${gbox.x - gpad - (vbw - bw) / 2} ${gbox.y - gpad - (vbh - bh) / 2} ${vbw} ${vbh}`);
   svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');

@@ -865,3 +865,16 @@ button, .pchip, .tag, .badge, .pill, .avatar, .cchip summary, .lvchip, .asswitch
 /* Wiki: one filled "+ New page" CTA (the empty state's); the list-toolbar one goes quiet. */
 .wk-toolbar #wk-new { background: transparent; border-color: transparent; color: var(--fg-muted); font-weight: var(--fw-medium); box-shadow: none; }
 .wk-toolbar #wk-new:hover { background: var(--bg-hover); color: var(--fg-primary); }
+
+/* Node status states (Overview + Team graphs): idle mutes the disc, working gets a pulsing
+   success ring, stuck gets a warning ring; lead agents wear a star on the disc edge. */
+#ov-graph .node .avatar, #graph .node .avatar { transition: opacity var(--dur-base) var(--ease-out); }
+#ov-graph .node:not(.working):not(.stuck) .avatar, #graph .node:not(.working):not(.stuck):not(.sel) .avatar { opacity: .42; }
+#ov-graph .node.stuck .avatar, #graph .node.stuck .avatar { opacity: 1; stroke: var(--warning); stroke-width: 2.5; }
+#ov-graph .node.working .avatar, #graph .node.working .avatar { stroke: var(--success); stroke-width: 2.5; animation: avpulse 2.2s var(--ease-out) infinite; }
+@keyframes avpulse { 0%, 100% { stroke-opacity: 1; } 50% { stroke-opacity: .4; } }
+#ov-graph .leadstar, #graph .leadstar { font-size: 11px; fill: var(--accent); stroke: var(--bg-surface); stroke-width: 3px; paint-order: stroke; font-weight: var(--fw-bold); }
+.glegend .leadkey { font-style: normal; color: var(--accent); font-weight: var(--fw-bold); }
+/* Sidebar team rows wear their team hue so the avatar palette is legible at a glance. */
+#teamlist > div { display: flex; align-items: center; gap: 7px; }
+.teamdot { width: 8px; height: 8px; border-radius: 50%; flex: none; }

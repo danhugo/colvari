@@ -7,7 +7,12 @@
   // Token palette (t_300e8fd2): callers that know the node override with the team-tied
   // agentVar(); this keeps standalone callers (tests, mentions fallback) on the brand ramp
   // instead of raw hsl values that matched no token.
-  function avatarColor(id) { let h = 0; for (const c of String(id)) h = (h * 31 + c.charCodeAt(0)) >>> 0; return `var(--agent-${(h % 8) + 1})`; }
+  function avatarColor(id) {
+    // Inside the app page, defer to app.js's team-tied agentColor (chat.js loads first and
+    // also runs standalone in node tests, where the hash fallback keeps colours stable).
+    try { if (typeof agentColor === 'function') return `var(--agent-${agentColor(id)})`; } catch (e) { /* standalone */ }
+    let h = 0; for (const c of String(id)) h = (h * 31 + c.charCodeAt(0)) >>> 0; return `var(--agent-${(h % 8) + 1})`;
+  }
   const initials = (name) => String(name || '?').split(/[\s_-]+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join('') || '?';
   // Attachments (t_993822cf): size label + file:// URL for lazy <img> thumbnails (renderer + tests share).
   const fmtSize = (n) => n == null || isNaN(n) ? '' : n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`;
