@@ -901,3 +901,10 @@ button, .pchip, .tag, .badge, .pill, .avatar, .cchip summary, .lvchip, .asswitch
 #graph .node.cluster.st-working .card:not(.stack1):not(.stack2) { fill:var(--success-soft); }
 #graph .mdot { fill:var(--fg-muted); opacity:.5; } #graph .mdot.s-working { fill:var(--success); opacity:1; } #graph .mdot.s-needs-human { fill:var(--warning-strong); opacity:1; }
 #graph .clsum { fill:var(--fg-secondary); font-size:11px; }
+
+/* Header theme toggle: moon in light mode (click for dark), sun in dark mode. */
+#themebtn .icon-sun, #themebtn .icon-moon { display: none; }
+#themebtn .icon-moon { display: block; }
+[data-theme="dark"] #themebtn .icon-moon, :root:not([data-theme="light"]) #themebtn .icon-moon { display: none; }
+[data-theme="dark"] #themebtn .icon-sun, :root:not([data-theme="light"]) #themebtn .icon-sun { display: block; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) #themebtn .icon-moon { display: none; } :root:not([data-theme="light"]) #themebtn .icon-sun { display: block; } }

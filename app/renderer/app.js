@@ -2375,10 +2375,10 @@ function renderOverview() {
   // fit the whole graph in the wrap (never clipped); shrink down to 0.6 before letting the wrap scroll, grow up to 1.3.
   const gbox = graphBox(ovNodes), gpad = 28, bw = gbox.w + gpad * 2, bh = gbox.h + gpad * 2;
   const wrap = svg.parentElement, r = wrap.getBoundingClientRect();
-  // Auto-fit zooms small graphs to fill the canvas but NEVER shrinks below 1.0 — the old
-  // 0.6 floor scaled the 12px labels down to ~7px (the original Overview legibility complaint).
-  // Larger graphs stay at 1.0 and pan/drag in the wrap instead.
-  const scale = clamp(r.width && r.height ? Math.min(r.width / bw, r.height / bh) : 1, 1, 1.6);
+  // Auto-fit zooms small graphs to fill the canvas; the 0.85 floor keeps 12px labels >=10px
+  // effective (the original complaint was ~8px) while 24-agent graphs avoid a scrollbar.
+  // Genuinely huge graphs still pan/drag in the wrap.
+  const scale = clamp(r.width && r.height ? Math.min(r.width / bw, r.height / bh) : 1, 0.85, 1.6);
   const vbw = Math.max(bw, r.width ? r.width / scale : bw), vbh = Math.max(bh, r.height ? r.height / scale : bh);
   svg.setAttribute('viewBox', `${gbox.x - gpad - (vbw - bw) / 2} ${gbox.y - gpad - (vbh - bh) / 2} ${vbw} ${vbh}`);
   svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
@@ -2722,7 +2722,11 @@ function renderGuide() {
 $('#reopenguide').onclick = () => { G.hidden = false; G.forced = true; localStorage.removeItem('guideHidden'); renderGuide(); };
 
 // Theme: mirror the OS/nativeTheme scheme onto <html data-theme> so tokens flip reliably (media query alone didn't re-apply in Electron).
-{ const mq = matchMedia('(prefers-color-scheme: dark)'); const apply = () => document.documentElement.dataset.theme = mq.matches ? 'dark' : 'light'; apply(); mq.addEventListener('change', apply); squad.on('theme', (t) => { document.documentElement.dataset.theme = t.dark ? 'dark' : 'light'; }); }
+{ const mq = matchMedia('(prefers-color-scheme: dark)'); const override = () => { try { const o = localStorage.getItem('themeOverride'); if (o === 'light' || o === 'dark') return o; } catch {} return null; };
+  const apply = () => document.documentElement.dataset.theme = override() || (mq.matches ? 'dark' : 'light');
+  apply(); mq.addEventListener('change', apply);
+  squad.on('theme', (t) => { if (!override()) document.documentElement.dataset.theme = t.dark ? 'dark' : 'light'; });
+  $('#themebtn').onclick = () => { const cur = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'; try { localStorage.setItem('themeOverride', cur); } catch {} document.documentElement.dataset.theme = cur; }; }
 // macOS draws the hiddenInset traffic lights over the page's top-left; flag the platform so the
 // header can inset its content (brand first) clear of the window controls.
 if (/Mac/i.test(navigator.userAgent)) document.documentElement.dataset.platform = 'mac';
