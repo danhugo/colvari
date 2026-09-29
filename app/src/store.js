@@ -395,6 +395,13 @@ class Store {
   _mergeOnDone(t) {
     try {
       const r = WT.worktreeMerge(t);
+      if (r.refused) {
+        // Dirty main checkout: park in review (not merge_conflict) so cleaning main and
+        // re-marking done retries the same merge instead of spawning a resolve task.
+        this._updateTask(t.id, { status: 'review' });
+        this.commentTask(t.id, 'system', WT.dirtyMergeMessage(r.dirty));
+        return this.getTask(t.id);
+      }
       this.commentTask(t.id, 'system', r.merged ? `auto-merged ${t.worktreeBranch} into base` : `nothing merged: no commits on ${t.worktreeBranch} ahead of ${r.base}`);
       return this.getTask(t.id);
     } catch (e) {

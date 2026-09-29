@@ -154,6 +154,29 @@ test('work committed on another branch: done stays done but the comment reports 
   assert.ok(!fs.existsSync(path.join(repo, 'b.txt')), 'side branch work must not be merged');
 });
 
+// t_8ace5439: uncommitted edits in the main checkout must refuse the merge with a clear
+// message (files + how to retry), park the task in review (NOT merge_conflict — no resolve
+// task), and let a later done after cleanup merge normally.
+test('dirty main checkout: done refuses merge, parks task in review, names files; retry after cleanup merges', () => {
+  const { repo, g, s, task, worktreePath } = setup('t_am10');
+  fs.writeFileSync(path.join(worktreePath, 'b.txt'), 'new\n');
+  g(worktreePath, 'add', '.'); g(worktreePath, 'commit', '-q', '-m', 'work');
+  fs.writeFileSync(path.join(repo, 'dirty.txt'), 'someone edits main\n');
+
+  const updated = s.updateTask(task.id, { status: 'done' });
+  assert.strictEqual(updated.status, 'review');
+  const sys = updated.comments.filter((c) => c.author === 'system').map((c) => c.text);
+  assert.ok(sys.some((t) => t.includes('dirty.txt') && /commit or clean main/i.test(t)), `refusal comment names the file and the retry: ${JSON.stringify(sys)}`);
+  assert.strictEqual(s.listTasks().filter((t) => t.parentId === task.id).length, 0, 'no resolve task spawned for a refusal');
+  assert.ok(!fs.existsSync(path.join(repo, 'b.txt')), 'nothing was merged into the dirty main');
+
+  // Cleanup + retry: re-marking done now merges normally.
+  fs.rmSync(path.join(repo, 'dirty.txt'));
+  const retried = s.updateTask(task.id, { status: 'done' });
+  assert.strictEqual(retried.status, 'done');
+  assert.strictEqual(fs.readFileSync(path.join(repo, 'b.txt'), 'utf8'), 'new\n');
+});
+
 // Makes `a.txt` diverge between a task's worktree branch and its base repo, so the
 // next auto-merge attempt on that task is guaranteed to conflict.
 function conflictAgain(g, repo, worktreePath, tag) {

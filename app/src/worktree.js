@@ -31,14 +31,36 @@ function worktreeDiff(t) {
   return { base, branch: t.worktreeBranch, files, diff: git(root, ['diff', range]) };
 }
 
+// Uncommitted changes in the main checkout (the root repo), ignoring .squad/ — the
+// worktree/board files this app manages live there; that is not user work. The raw
+// (untrimmed) status is sliced per line: porcelain paths start at column 3, and the
+// shared git() helper's blob trim() would eat a first line's leading status space.
+function dirtyMainFiles(root) {
+  const out = execFileSync('git', ['status', '--porcelain'], { cwd: root, stdio: ['ignore', 'pipe', 'pipe'] }).toString();
+  return out.split('\n').filter(Boolean)
+    .map((l) => l.slice(3))
+    .filter((p) => p !== '.squad' && !p.startsWith('.squad/'));
+}
+
+const DIRTY_LIST_CAP = 10;
+function dirtyMergeMessage(dirty) {
+  const shown = dirty.slice(0, DIRTY_LIST_CAP).join(', ');
+  const more = dirty.length > DIRTY_LIST_CAP ? ` (+${dirty.length - DIRTY_LIST_CAP} more)` : '';
+  return `merge refused: main checkout has uncommitted changes: ${shown}${more}. Commit or clean main, then retry.`;
+}
+
 // Merge branch into base; on conflict abort so nothing is left half-merged. A branch with no
 // commits ahead of base (work landed on a differently-named branch, or a verify-only task) is
-// reported as merged:false instead of running a merge that would be a no-op.
+// reported as merged:false instead of running a merge that would be a no-op. A dirty main
+// checkout refuses the merge (merged:false, refused:true, dirty file list) instead of letting
+// git fail around uncommitted work.
 function worktreeMerge(t) {
   const root = rootOf(t); const base = baseOf(root);
   let ahead;
   try { ahead = Number(git(root, ['rev-list', '--count', `${base}..${t.worktreeBranch}`])); } catch { ahead = 1; }
   if (ahead === 0) return { base, branch: t.worktreeBranch, merged: false };
+  const dirty = dirtyMainFiles(root);
+  if (dirty.length) return { base, branch: t.worktreeBranch, merged: false, refused: true, dirty };
   try { git(root, ['merge', '--no-ff', '--no-edit', t.worktreeBranch]); }
   catch (e) { try { git(root, ['merge', '--abort']); } catch {} throw new Error(`merge of ${t.worktreeBranch} into ${base} failed, aborted: ${errOf(e)}`); }
   return { base, branch: t.worktreeBranch, merged: true };
@@ -61,4 +83,4 @@ function unmergedSquadBranches(root) {
     .map((branch) => ({ root, base, branch }));
 }
 
-module.exports = { ensureWorktree, worktreeDiff, worktreeMerge, worktreeDiscard, unmergedSquadBranches };
+module.exports = { ensureWorktree, worktreeDiff, worktreeMerge, worktreeDiscard, unmergedSquadBranches, dirtyMergeMessage };
