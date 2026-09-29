@@ -1,7 +1,7 @@
 // Pure tool implementations with scope enforcement. Used by the MCP server and by tests.
 const fs = require('fs');
 const path = require('path');
-const { outgoing, incoming, canAssign, canMessage, reviewees, visibleTask, canSetStatus, AGENT_PATCH_FIELDS, capPermissionMode, canManageAgent } = require('./scope');
+const { outgoing, incoming, canAssign, canMessage, reviewees, visibleTask, canSetStatus, AGENT_PATCH_FIELDS, capPermissionMode, canManageAgent, canRetire } = require('./scope');
 const { BOARD_TOOLS } = require('./agent-config');
 const { getRuntime } = require('./runtimes');
 const C = require('./controls');
@@ -69,7 +69,9 @@ function makeTools(store, nodeId) {
     return { pending: true, result: { pending: true, note: 'pending approval: the request is in the human Inbox; nothing changes until it is approved and you call this tool again' } };
   };
   const refuseManage = (tool, core, target) => {
-    const why = target.id === core.id ? 'a core agent cannot manage itself' : 'a core node can never be retired or updated';
+    const why = target.id === core.id ? 'a core agent cannot manage itself'
+      : target.core === true ? 'a core node can never be retired or updated'
+      : `"${target.name}" is protected from retirement — only the human can unprotect it (UI, agent editor)`;
     return new Error(`scope violation: ${tool}: ${why}`);
   };
   // Recruit is refused at >=80% of either project budget (the orchestrator hard-stops runs at 100%):
@@ -236,7 +238,7 @@ function makeTools(store, nodeId) {
       if (!String(reason || '').trim()) throw new Error('reason required: state the expected gain vs cost of this change');
       const { core, s } = coreStore();
       const target = resolve(s.getTeam(), ref, 'agent');
-      if (!canManageAgent(core, target)) throw refuseManage('retire_agent', core, target);
+      if (!canRetire(core, target)) throw refuseManage('retire_agent', core, target);
       const inProg = store.listTasks({ assignee: target.id, status: 'in_progress' });
       if (inProg.length) throw new Error(`refused: "${target.name}" still owns ${inProg.length} in_progress task(s) (${inProg.map((t) => t.id).join(', ')})`);
       const g = askGate({ tool: 'retire_agent', nodeId: target.id }, `Core agent "${core.name}" requests retiring agent "${target.name}"${reason ? ` — ${reason}` : ''}. Approve?`, reason);

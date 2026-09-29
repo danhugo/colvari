@@ -56,6 +56,7 @@ class Store {
     this.teamId = teamId;
     fs.mkdirSync(dir, { recursive: true });
     this.migrateUsageLedger();
+    this.migrateNodeProtection();
   }
   // Per-key usage ledger (t_3318ff63): runs recorded before the ledger existed carry flat totals
   // that mix models — they cannot be split retroactively, so they are dropped (migrate by reset)
@@ -76,6 +77,29 @@ class Store {
         }
       });
       fs.writeFileSync(marker, '');
+    } catch {}
+  }
+  // Decision: protected-from-retirement. Nodes stored before `protected` existed carry no flag:
+  // every node WITHOUT createdBy (human-made, never recruited) gets protected=true, recruits
+  // (createdBy set) get protected=false — matched on field absence, never on names, in every team
+  // file of the project (the legacy single 'team' file included). Marker-guarded like the ledger
+  // migration: pm.store() constructs a Store per call. Never throws on old/corrupt files.
+  migrateNodeProtection() {
+    const marker = path.join(this.dir, '.nodes-protected');
+    try {
+      if (fs.existsSync(marker)) return;
+      this.withLock(() => {
+        const files = new Set(this.teamIds().map((tid) => 'team-' + tid));
+        files.add('team'); // pre-multi-team stores (teamFile() fallback)
+        for (const name of files) {
+          const t = this.read(name, null);
+          if (!t || !Array.isArray(t.nodes)) continue;
+          let changed = false;
+          for (const n of t.nodes) if (n && n.protected === undefined) { n.protected = !n.createdBy; changed = true; }
+          if (changed) this.write(name, t);
+        }
+      });
+      fs.writeFileSync(marker, new Date().toISOString());
     } catch {}
   }
   forTeam(teamId) { return new Store(this.dir, teamId); }
@@ -325,6 +349,9 @@ class Store {
   }
   // Changing the role to a preset's name fills the node's empty prompt / tools / permission mode from that preset.
   updateNode(nid, patch) {
+    // `protected` has exactly one writer (the human's setNodeProtected below): no generic patch —
+    // renderer save, update_agent whitelist or any future caller — may smuggle it through here.
+    if (patch && 'protected' in patch) throw new Error('protected is human-only: use setNodeProtected');
     const p = normalizePatch(patch); const presets = this.getSettings().rolePresets;
     return this.update(this.teamFile(), { nodes: [], edges: [] }, (t) => {
       const n = t.nodes.find((x) => x.id === nid); if (!n) throw new Error('no node');
@@ -336,6 +363,13 @@ class Store {
       if (runtimeChanged) { delete n.rateLimits; delete n.rateLimitsAt; }
       if (roleChanged) Object.assign(n, normalizePatch(pick(applyPreset(n, presets), PRESET_FIELDS)));
       return n;
+    });
+  }
+  // The single writer of the protected flag: called only from the human-only IPC (main.js api).
+  setNodeProtected(nid, v) {
+    return this.update(this.teamFile(), { nodes: [], edges: [] }, (t) => {
+      const n = t.nodes.find((x) => x.id === nid); if (!n) throw new Error('no node');
+      n.protected = !!v; return n;
     });
   }
   removeNode(nid) {

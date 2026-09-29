@@ -155,7 +155,7 @@ function setupRepo(script = RESULT()) {
   // .squad/ is the app's own data; fake-claude.sh is test tooling; the store's runtime files sit
   // at the store root because this test colocates Store(repo) — none of it is main-checkout dirt
   // for the merge guard (t_8ace5439); a real project keeps the store outside the repo.
-  fs.writeFileSync(path.join(repo, '.gitignore'), '.squad/\nfake-claude.sh\n.usage-ledger\nlogs.jsonl\nruns.json\nsettings.json\nteam.json\n');
+  fs.writeFileSync(path.join(repo, '.gitignore'), '.squad/\nfake-claude.sh\n.usage-ledger\n.nodes-protected\nlogs.jsonl\nruns.json\nsettings.json\nteam.json\n');
   g(repo, 'add', '.'); g(repo, 'commit', '-q', '-m', 'init');
   const s = new Store(repo);
   s.saveSettings({ claudePath: fakeClaude(repo, script), maxConcurrency: 1, useWorktrees: true });
