@@ -582,3 +582,5 @@ header > strong.brand { display:flex; align-items:center; gap:6px; font-weight:7
 /* t_e31f5663: less boxed, less "AI-generated" chrome */
 button:not(.primary) { border-color:transparent; background:var(--bg-sidebar); } button:not(.primary):hover { background:var(--card); border-color:var(--line); }
 button.ghost { background:none; color:var(--fg-muted); width:100%; } #taskdetail[hidden] { display:none; }
+/* t_831325b9: Overview sweep - hide empty thread panel, drop always-on explainer (kept as tooltip) */
+#ov-threadpanel[hidden] { display:none; } .ov-purpose { display:none; }

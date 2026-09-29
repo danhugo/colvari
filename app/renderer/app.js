@@ -2004,7 +2004,7 @@ function renderOverview() {
   const cur = ts.value || sel.task || (activeTask || S.tasks[S.tasks.length - 1] || {}).id || '';
   ts.innerHTML = S.tasks.map((t) => `<option value="${t.id}">${esc(t.title)} (${t.status})</option>`).join(''); ts.value = cur;
   const t = S.tasks.find((x) => x.id === ts.value); const open = new Set([...document.querySelectorAll('#ov-thread details[open]')].map((d) => d.dataset.k));
-  const head = $('#ov-threadhead');
+  const head = $('#ov-threadhead'); $('#ov-threadpanel').hidden = !t;
   if (!t) { head.innerHTML = ''; ts.classList.add('hidden'); }
   else {
     ts.classList.remove('hidden');
