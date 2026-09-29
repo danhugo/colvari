@@ -35,6 +35,28 @@ if (TEST_MODE) {
   setTimeout(() => { console.error(`[agents-squad] test instance exceeded ${timeoutMs} ms — force exit (pid ${process.pid}, data root ${testRoot})`); app.exit(1); }, timeoutMs);
 }
 
+// Single instance (live profile): a second launch must focus the running window, not fork a second
+// orchestrator stack over the same store. Test/gate instances skip the lock: they run with an
+// isolated data root and must start alongside the live app and each other.
+let appLockHeld = TEST_MODE || app.requestSingleInstanceLock();
+if (!appLockHeld) {
+  console.log('[agents-squad] another instance is already running — focusing it and exiting');
+  app.quit();
+} else if (!TEST_MODE) {
+  app.on('second-instance', () => {
+    if (win && !win.isDestroyed()) { if (win.isMinimized()) win.restore(); win.show(); win.focus(); }
+    else if (BrowserWindow.getAllWindows().length === 0) createWindow(); // window was closed, app kept running
+  });
+}
+// A safe restart (scheduled restart / self-update) must REPLACE the window: the relaunched instance
+// is spawned as this process tears down and could otherwise see the dying lock, take the
+// "another instance" exit, and leave no window at all — release the lock up front.
+function relaunchApp() {
+  try { if (!TEST_MODE && appLockHeld) app.releaseSingleInstanceLock(); } catch {}
+  app.relaunch();
+  app.exit(0);
+}
+
 const pm = new ProjectManager();
 const orchs = new Map(); // projectId -> Orchestrator (projects run independently / concurrently)
 function orchFor(pid) {
@@ -72,7 +94,7 @@ function watcherFor(pid) {
     w = new SU.UpdateWatcher({
       // git runs at the repo root; npm (build/test) in the package dir (app/).
       store, repoDir: APP_ROOT, npmDir: path.join(__dirname, '..'),
-      relaunch: () => { app.relaunch(); app.exit(0); },
+      relaunch: relaunchApp,
       procCount: () => (orchs.get(pid) || { procs: new Map() }).procs.size,
       runActive: () => (orchs.get(pid) || {}).running || false,
       // Drain deadline hit: stop the still-running agents so the restart can proceed; their tasks
@@ -2173,6 +2195,7 @@ function pollInbox(first) {
 }
 
 app.whenReady().then(() => {
+  if (!appLockHeld) return; // second launch: the running instance stays, this one exits
   createWindow();
   probeUnprobedAgents();
   pollInbox(true); setInterval(() => pollInbox(false), 1500);
