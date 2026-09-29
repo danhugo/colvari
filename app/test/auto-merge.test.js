@@ -137,6 +137,23 @@ test('listUnmergedBranches reports branches not yet merged into base', () => {
   assert.ok(!unmerged.some((b) => b.branch === task.worktreeBranch));
 });
 
+// t_6aea5305: the registered branch is empty because the work landed on a differently-named
+// branch (the t_bf1b168a review finding) — done must say so instead of claiming "auto-merged".
+test('work committed on another branch: done stays done but the comment reports nothing merged', () => {
+  const { repo, g, s, task } = setup('t_am9');
+  g(repo, 'checkout', '-qb', 'squad/side-work');
+  fs.writeFileSync(path.join(repo, 'b.txt'), 'real work\n');
+  g(repo, 'add', '.'); g(repo, 'commit', '-qm', 'real work');
+  g(repo, 'checkout', '-q', 'main');
+
+  const updated = s.updateTask(task.id, { status: 'done' });
+  assert.strictEqual(updated.status, 'done');
+  const sys = updated.comments.filter((c) => c.author === 'system').map((c) => c.text);
+  assert.ok(!sys.some((t) => /auto-merged/.test(t)), `must not claim a merge that did not happen: ${JSON.stringify(sys)}`);
+  assert.ok(sys.some((t) => t.includes(task.worktreeBranch) && /no commits/.test(t)), `must say the registered branch had no commits: ${JSON.stringify(sys)}`);
+  assert.ok(!fs.existsSync(path.join(repo, 'b.txt')), 'side branch work must not be merged');
+});
+
 // Makes `a.txt` diverge between a task's worktree branch and its base repo, so the
 // next auto-merge attempt on that task is guaranteed to conflict.
 function conflictAgain(g, repo, worktreePath, tag) {

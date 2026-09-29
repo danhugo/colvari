@@ -31,12 +31,17 @@ function worktreeDiff(t) {
   return { base, branch: t.worktreeBranch, files, diff: git(root, ['diff', range]) };
 }
 
-// Merge branch into base; on conflict abort so nothing is left half-merged.
+// Merge branch into base; on conflict abort so nothing is left half-merged. A branch with no
+// commits ahead of base (work landed on a differently-named branch, or a verify-only task) is
+// reported as merged:false instead of running a merge that would be a no-op.
 function worktreeMerge(t) {
   const root = rootOf(t); const base = baseOf(root);
+  let ahead;
+  try { ahead = Number(git(root, ['rev-list', '--count', `${base}..${t.worktreeBranch}`])); } catch { ahead = 1; }
+  if (ahead === 0) return { base, branch: t.worktreeBranch, merged: false };
   try { git(root, ['merge', '--no-ff', '--no-edit', t.worktreeBranch]); }
   catch (e) { try { git(root, ['merge', '--abort']); } catch {} throw new Error(`merge of ${t.worktreeBranch} into ${base} failed, aborted: ${errOf(e)}`); }
-  return { base, branch: t.worktreeBranch };
+  return { base, branch: t.worktreeBranch, merged: true };
 }
 
 function worktreeDiscard(t) {

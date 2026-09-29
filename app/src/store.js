@@ -394,8 +394,8 @@ class Store {
   // so resolving it re-merges the original work instead of stranding it behind a chain of tasks.
   _mergeOnDone(t) {
     try {
-      WT.worktreeMerge(t);
-      this.commentTask(t.id, 'system', `auto-merged ${t.worktreeBranch} into base`);
+      const r = WT.worktreeMerge(t);
+      this.commentTask(t.id, 'system', r.merged ? `auto-merged ${t.worktreeBranch} into base` : `nothing merged: no commits on ${t.worktreeBranch} ahead of ${r.base}`);
       return this.getTask(t.id);
     } catch (e) {
       return this._onMergeConflict(t, e);
