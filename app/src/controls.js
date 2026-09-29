@@ -58,7 +58,12 @@ function gateStatus(status, node, settings, byHuman = false) {
 
 // ---- persisted logs ----
 const LOG_CAP = 5000;
-const logLine = (l) => JSON.stringify({ at: l.at || Date.now(), nodeId: l.nodeId || null, kind: l.kind, text: String(l.text ?? '').slice(0, 4000), taskId: l.taskId || null, task: l.task || null, subagentId: l.subagentId || null });
+// Monitor events (plan t_a4ceb629/C) carry structured {reason, taskIds, action} the log UI reads;
+// other kinds keep the whitelist so unknown extras never reach the persisted file.
+const monitorFields = (l) => l.kind === 'monitor'
+  ? { reason: l.reason ?? null, taskIds: Array.isArray(l.taskIds) ? l.taskIds : null, action: l.action ?? null }
+  : {};
+const logLine = (l) => JSON.stringify({ at: l.at || Date.now(), nodeId: l.nodeId || null, kind: l.kind, text: String(l.text ?? '').slice(0, 4000), taskId: l.taskId || null, task: l.task || null, subagentId: l.subagentId || null, ...monitorFields(l) });
 function parseLogs(text, limit = 2000) {
   const out = [];
   for (const line of String(text || '').split('\n')) { if (!line.trim()) continue; try { out.push(JSON.parse(line)); } catch {} }

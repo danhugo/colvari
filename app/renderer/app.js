@@ -1340,11 +1340,19 @@ function renderObs() {
   $('#budgetbar').innerHTML = (st.budgetUsd || st.budgetTokens ? `Run budget: ${st.budgetUsd ? `$${(S.orch.runCost || 0).toFixed(4)} / $${st.budgetUsd}` : ''}${st.budgetUsd && st.budgetTokens ? ' · ' : ''}${st.budgetTokens ? `token budget ${fmtTok(st.budgetTokens)} tok per run (enforced — per-key split in Usage; token totals are no longer summed)` : ''}` : '') + (stopMsg ? ` <span class="warn">Stopped: ${stopMsg}</span>` : '');
   const f = $('#logfilter'); f.innerHTML = '<option value="">All agents</option>' + nodes.map((n) => `<option value="${n.id}">${esc(n.name)}</option>`).join(''); f.value = cur;
 }
-const LOG_LEVEL = { error: 'error', stderr: 'error', tool_error: 'error', system: 'info', tool: 'tool', tool_result: 'tool', result: 'ok', raw: 'muted', compacted: 'compact', event: 'info' };
+const LOG_LEVEL = { error: 'error', stderr: 'error', tool_error: 'error', system: 'info', tool: 'tool', tool_result: 'tool', result: 'ok', raw: 'muted', compacted: 'compact', event: 'info', monitor: 'monitor' };
+// Monitor line (plan t_a4ceb629/C, watchdog decision): prefer the structured {reason, taskIds, action}
+// fields Dev A sends with the event; fall back to the raw text for lines persisted without them.
+function monitorText(l) {
+  const ids = Array.isArray(l.taskIds) && l.taskIds.length ? ` (${l.taskIds.join(', ')})` : '';
+  return esc(([l.action, l.reason].filter(Boolean).join(' — ') || l.text) + ids);
+}
 function logRow(l) {
   const w = who(l.nodeId); const lvl = LOG_LEVEL[l.kind] || 'text';
   const task = l.task ? `<span class="logtask" ${l.taskId ? `data-tasklink="${esc(l.taskId)}" title="Open in task thread"` : ''}>${esc(l.task)}</span>` : '';
-  return `<div class="logrow lv-${lvl}"><span class="logtime">${new Date(l.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span><span class="avatar sm" style="background:${w.color}" title="${esc(w.name)}">${esc(w.ini)}</span><span class="logagent" title="${esc(w.name)}">${esc(w.name)}</span>${task}<span class="loglevel lv-${lvl}">${esc(l.kind)}</span><span class="logtext">${esc(l.text)}</span></div>`;
+  const badge = l.kind === 'monitor' ? 'Monitor' : esc(l.kind);
+  const text = l.kind === 'monitor' ? monitorText(l) : esc(l.text);
+  return `<div class="logrow lv-${lvl}"><span class="logtime">${new Date(l.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span><span class="avatar sm" style="background:${w.color}" title="${esc(w.name)}">${esc(w.ini)}</span><span class="logagent" title="${esc(w.name)}">${esc(w.name)}</span>${task}<span class="loglevel lv-${lvl}">${badge}</span><span class="logtext">${text}</span></div>`;
 }
 // ---------- subagents (contract: t_c33656ba) ----------
 // Records live on the owning agent (S.orch.agents[id].subagents) for the current run and persist per

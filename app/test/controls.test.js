@@ -163,3 +163,16 @@ exec sleep 5
   assert.equal(o.stopAgent(x.id), false); // idle now
   assert.match(humanPrompt('hi', 'BASE'), /^BASE\n\nMessage from the human/);
 });
+
+test('persisted logs: monitor events keep their structured fields, other kinds stay whitelisted', () => {
+  const mon = { at: 123, nodeId: 'core', kind: 'monitor', text: 'woke the core', reason: '2 open tasks, all agents idle', taskIds: ['t_1', 't_2'], action: 'woke core' };
+  const back = C.parseLogs(C.logLine(mon))[0];
+  assert.equal(back.reason, '2 open tasks, all agents idle');
+  assert.deepEqual(back.taskIds, ['t_1', 't_2']);
+  assert.equal(back.action, 'woke core');
+  assert.equal(back.kind, 'monitor'); assert.equal(back.text, 'woke the core');
+  const plain = C.parseLogs(C.logLine({ at: 1, nodeId: 'a', kind: 'text', text: 'hi', reason: 'x' }))[0];
+  assert.equal(plain.reason, undefined); // whitelist still strips unknown extras on other kinds
+  const malformed = C.parseLogs(C.logLine({ at: 1, kind: 'monitor', text: 'x', taskIds: 't_1' }))[0];
+  assert.equal(malformed.taskIds, null); // non-array taskIds persist as null, not a string
+});
