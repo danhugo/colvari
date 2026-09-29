@@ -6,4 +6,6 @@ contextBridge.exposeInMainWorld('squad', {
   // t_993822cf: save a chat attachment in the main process; resolves {path,name,mime,size} or {error}.
   saveAttachment: (ctx, file) => ipcRenderer.invoke('api', 'saveAttachment', ctx, file),
   on: (ch, fn) => ipcRenderer.on(ch, (_e, d) => fn(d)),
+  // Core-agent watch (plan t_42f310cf item 2): direct helper for the 'watch-status' push channel.
+  onWatchStatus: (fn) => ipcRenderer.on('watch-status', (_e, d) => fn(d)),
 });
