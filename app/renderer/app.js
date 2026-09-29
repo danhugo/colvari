@@ -470,16 +470,26 @@ function renderHeader() {
 // 'restart-state' / 'watch-status' (watch digests also arrive as kind:'watch' log lines). Until the
 // backend lands this runs on the last known state, stub-marked like the self-update chip above —
 // with nothing known, no pill shows at all rather than a wrong one.
-let rst = { pendingCount: 0, since: null, scheduledAfter: null, scheduledNow: false, gating: [], stub: true };
+let rst = { pendingCount: 0, since: null, scheduledAfter: null, scheduledNow: false, gating: [], waitingReasons: undefined, blockedReason: undefined, busyAgents: undefined, stub: true };
 let watch = { lastWatchAt: null, active: false, digest: '', intervalMin: 10, stub: true };
-// Defensive about the exact payload shape (Devon's tasks are still in flight): pending/count vs
-// pendingCount, afterTaskId vs scheduledAfter, gatedTaskIds vs gating.
+// Blocker lines for the popover. Devon's landed core shape (t_acae4863) is authoritative:
+// blockedReason (one human line: anchor / drain with names / updater phase) + busyAgents. Absent
+// fields mean an older core without any reason → the popover stubs; blockedReason === null means
+// landed and nothing blocks — the next tick fires. waitingReasons stays as a defensive alias for
+// the prose-array contract proposed on t_acae4863.
+const normWaiting = (v) => !Array.isArray(v) ? undefined
+  : v.map((r) => (typeof r === 'string' ? r : (r && (r.text || r.reason)) || '')).filter(Boolean);
+// Defensive about the exact payload shape (pending/count vs pendingCount, afterTaskId vs
+// scheduledAfter, gatedTaskIds vs gating, waitingReasons vs waiting.reasons).
 const normRestart = (d) => { d = d || {}; return {
   pendingCount: Math.max(0, Number(d.pendingCount ?? d.pending ?? d.count) || 0),
   since: d.since || null,
   scheduledAfter: d.scheduledAfter || d.afterTaskId || null,
   scheduledNow: !!d.scheduledNow || d.now === true,
   gating: Array.isArray(d.gating) ? d.gating : Array.isArray(d.gatedTaskIds) ? d.gatedTaskIds : [],
+  waitingReasons: normWaiting(d.waitingReasons ?? (d.waiting && d.waiting.reasons)),
+  blockedReason: d.blockedReason === undefined ? undefined : (typeof d.blockedReason === 'string' && d.blockedReason ? d.blockedReason : null),
+  busyAgents: Array.isArray(d.busyAgents) ? d.busyAgents.map(String).filter(Boolean) : undefined,
 }; };
 const normWatch = (d) => { d = d || {}; return {
   lastWatchAt: d.lastWatchAt || d.at || null,
@@ -510,6 +520,7 @@ function renderRestartPill() {
   if (rst.scheduledAfter) bits.push(`after ${shortTaskId(rst.scheduledAfter)}`);
   else if (rst.scheduledNow) bits.push('once agents drain');
   const label = document.createElement('span');
+  label.className = 'rstlbl';
   label.textContent = bits.join(' · ');
   c.replaceChildren(label);
   // Human escape hatch (Cato t_42f310cf #7). Hidden while stubbed: without the core-restart
@@ -519,11 +530,9 @@ function renderRestartPill() {
     if (armed) c.appendChild(rstBtn('Cancel schedule', 'Cancel the scheduled restart — the landed changes stay pending until the core schedules one again.', () => rstAction('cancel'), rstBusy === 'cancel'));
     if (rstErr) { const e = document.createElement('span'); e.className = 'rsterr'; e.textContent = rstErr; c.appendChild(e); }
   }
-  c.title = ['Merged changes wait for a core-scheduled restart — dispatch keeps running meanwhile.',
-    n ? `${n} change${n === 1 ? '' : 's'} landed since the last restart${rst.since ? ` (first ${agoTxt(rst.since)})` : ''}.` : '',
-    rst.scheduledAfter ? `Restarts once ${rst.scheduledAfter} is done and in-flight tasks drain.` : (rst.scheduledNow ? 'Restarts as soon as running agents finish.' : 'No restart armed yet — only the core agent (PM) can schedule one.'),
-    rst.gating.length ? `${rst.gating.length} not-yet-started task${rst.gating.length === 1 ? '' : 's'} held until then.` : '',
-    rst.stub ? 'backend pending' : ''].filter(Boolean).join(' ');
+  // The blocker popover (rstWaiting/renderRstPop) is the chip's tooltip now — a native title would
+  // only overlap it. Re-render the open card here so live pushes update it in place.
+  if (!$('#rstpop').classList.contains('hidden')) showRstPop();
 }
 const rstBtn = (txt, tip, fn, busy) => { const b = document.createElement('button'); b.className = 'rstact'; b.textContent = busy ? '…' : txt; b.title = tip; b.disabled = !!rstBusy; b.onclick = fn; return b; };
 // restartNow / cancelRestart (Devon, t_20d5a23c contract): the state push re-renders this pill;
@@ -546,6 +555,55 @@ async function rstAction(kind) {
     setTimeout(() => { if (rstErr === ((err && err.message) || 'not available')) { rstErr = null; renderRestartPill(); } }, 4000);
   }
 }
+// ---- blocker popover (t_ec59eefa): the chip's hover card with the full "waiting on" breakdown ----
+// Priority: Devon's landed core shape (blockedReason + busyAgents, t_acae4863), then the prose-array
+// alias, then — only for a core without any reason field — the honest subset derivable from the
+// state we already have, marked as provisional.
+function rstWaiting() {
+  if (rst.blockedReason !== undefined || rst.busyAgents !== undefined) {
+    const lines = [];
+    if (rst.blockedReason) lines.push(rst.blockedReason);
+    const extra = (rst.busyAgents || []).filter((n) => !rst.blockedReason || !rst.blockedReason.includes(n));
+    if (extra.length) lines.push(`${extra.length} agent${extra.length === 1 ? '' : 's'} still running: ${extra.join(', ')}`);
+    if (!lines.length) lines.push('Nothing — it fires on the next tick.');
+    return { lines, stub: false };
+  }
+  if (rst.waitingReasons) return { lines: rst.waitingReasons.length ? rst.waitingReasons : ['Nothing — it fires on the next tick.'], stub: false };
+  const armed = !!(rst.scheduledAfter || rst.scheduledNow);
+  if (!armed) return { lines: ['No restart armed yet — the core agent (PM) schedules one, or it auto-arms when pending changes hit the cap.'], stub: false };
+  const lines = [];
+  if (rst.scheduledAfter) lines.push(`Anchor task ${rst.scheduledAfter} must reach done.`);
+  lines.push('In-flight agents must finish (drain) and the updater must be idle.');
+  return { lines, stub: true }; // only here is part of the real blockers invisible to the renderer
+}
+function renderRstPop() {
+  const pop = $('#rstpop'); if (!pop) return;
+  const n = rst.pendingCount;
+  const w = rstWaiting();
+  const div = (cls, txt) => { const d = document.createElement('div'); if (cls) d.className = cls; if (txt != null) d.textContent = txt; return d; };
+  const kids = [div('rp-title', 'Restart pending')];
+  if (n) kids.push(div('rp-row', `${n} merged change${n === 1 ? '' : 's'} waiting${rst.since ? ` — first landed ${agoTxt(rst.since)}` : ''}.`));
+  kids.push(rst.scheduledAfter ? div('rp-row', `Scheduled: restarts once ${rst.scheduledAfter} is done.`)
+    : rst.scheduledNow ? div('rp-row', 'Scheduled: restarts once agents drain.')
+    : div('rp-row', 'Not scheduled — dispatch keeps running meanwhile.'));
+  kids.push(div('rp-sec', 'Waiting on'));
+  const ul = document.createElement('ul');
+  for (const l of w.lines) { const li = document.createElement('li'); li.textContent = l; ul.appendChild(li); }
+  kids.push(ul);
+  if (rst.gating.length) kids.push(div('rp-row rp-note', `${rst.gating.length} queued task${rst.gating.length === 1 ? '' : 's'} held by the gate: ${rst.gating.slice(0, 3).map(shortTaskId).join(', ')}${rst.gating.length > 3 ? '…' : ''}`));
+  if (w.stub) kids.push(div('rp-note', 'Exact blockers (running agents, update phase) appear here once the core update lands.'));
+  pop.replaceChildren(...kids);
+}
+function showRstPop() {
+  const c = $('#restartst'), pop = $('#rstpop');
+  if (!c || !pop || c.classList.contains('hidden')) return hideRstPop();
+  renderRstPop();
+  const r = c.getBoundingClientRect();
+  pop.style.top = `${Math.round(r.bottom + 6)}px`;
+  pop.style.right = `${Math.max(8, Math.round(window.innerWidth - r.right))}px`;
+  pop.classList.remove('hidden');
+}
+function hideRstPop() { const pop = $('#rstpop'); if (pop) pop.classList.add('hidden'); }
 function renderWatchPill() {
   const c = $('#watchst'); if (!c) return;
   const t = watch.lastWatchAt ? new Date(watch.lastWatchAt).getTime() : 0;
@@ -2714,6 +2772,19 @@ if (squad.onRestartState) squad.onRestartState(onRestartPush);
 else { squad.on('restart-state', onRestartPush); squad.on('restartStatus', onRestartPush); }
 if (squad.onWatchStatus) squad.onWatchStatus(onWatchPush);
 else { squad.on('watch-status', onWatchPush); squad.on('watchStatus', onWatchPush); }
+// Restart chip popover wiring (t_ec59eefa): hover shows it, leaving either element hides it after a
+// short grace gap (so moving from the chip into the card keeps it); clicking the chip toggles.
+{
+  let rstPopT = null;
+  const popEnter = () => { clearTimeout(rstPopT); showRstPop(); };
+  const popLeave = () => { clearTimeout(rstPopT); rstPopT = setTimeout(hideRstPop, 250); };
+  const chip = $('#restartst'), pop = $('#rstpop');
+  chip.addEventListener('mouseenter', popEnter);
+  chip.addEventListener('mouseleave', popLeave);
+  chip.addEventListener('click', (e) => { if (e.target.closest('.rstact')) return; clearTimeout(rstPopT); pop.classList.contains('hidden') ? showRstPop() : hideRstPop(); });
+  pop.addEventListener('mouseenter', popEnter);
+  pop.addEventListener('mouseleave', popLeave);
+}
 // Runtime unavailable/resumed pushes (contract on t_d33685f3); dash channels are primary.
 const onRtuPush = (d) => { if (d && d.projectId && d.projectId !== ctx.p) return; setRtu(d); };
 const onRtaPush = (d) => { if (d && d.projectId && d.projectId !== ctx.p) return; clearRtu(d && d.runtime); };
