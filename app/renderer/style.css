@@ -35,12 +35,12 @@ main { flex:1; overflow:hidden; } .tab { display:none; height:100%; padding:10px
 .logrow:hover { background:color-mix(in srgb, var(--fg-on-accent, #fff) 6%, transparent); }
 .logtime { flex:0 0 auto; color:var(--term-dim); font-variant-numeric:tabular-nums; }
 .logagent { flex:0 0 auto; max-width:120px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:600; }
-.logtask { flex:0 0 auto; max-width:160px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--fg-muted); }
+.logtask { flex:0 0 auto; max-width:160px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--term-dim); }
 .logtask[data-tasklink] { cursor:pointer; text-decoration:underline dotted; }
-.logtask[data-tasklink]:hover { color:var(--acc); }
+.logtask[data-tasklink]:hover { color:var(--term-fg); }
 .loglevel { flex:0 0 auto; text-transform:uppercase; font-size:10px; letter-spacing:.03em; padding:0 5px; border-radius:4px; background:color-mix(in srgb, currentColor 18%, transparent); }
 .logtext { flex:1; min-width:0; white-space:pre-wrap; word-break:break-word; }
-.logrow.lv-error, .loglevel.lv-error { color:var(--term-red); } .logrow.lv-tool, .loglevel.lv-tool { color:var(--term-yellow); }
+.logrow.lv-error, .loglevel.lv-error { color:var(--term-red); } .logrow.lv-tool, .loglevel.lv-tool, .logrow.lv-warn, .loglevel.lv-warn { color:var(--term-yellow); }
 .logrow.lv-info, .loglevel.lv-info { color:var(--term-blue); } .logrow.lv-ok, .loglevel.lv-ok { color:var(--term-green); }
 .logrow.lv-muted, .loglevel.lv-muted { color:var(--term-dim); } .logrow.lv-text, .loglevel.lv-text { color:var(--term-fg); }
 .logempty { padding:24px 4px; text-align:center; }
@@ -81,8 +81,8 @@ table { border-collapse:collapse; background:var(--card); } td, th { border:1px 
 #graph .compactbadge rect { fill:var(--acc); } #graph .compactbadge text { fill:var(--fg-on-accent); font-weight:600; }
 #graph .corelock rect { fill:var(--acc); } #graph .corelock text { fill:var(--fg-on-accent); font-weight:600; } #graph .corelock { pointer-events:all; }
 #graph .chip-recruited rect { fill:var(--accent-soft); stroke:var(--accent); } #graph .chip-recruited text { fill:var(--accent); font-weight:var(--fw-semibold); }
-.logrow.lv-compact, .loglevel.lv-compact { color:var(--acc); } .logrow.lv-compact .logtext { font-weight:600; }
-.logrow.lv-monitor, .loglevel.lv-monitor { color:var(--acc); } .logrow.lv-monitor .logtext { font-weight:600; }
+.logrow.lv-compact, .loglevel.lv-compact { color:var(--term-blue); } .logrow.lv-compact .logtext { font-weight:600; }
+.logrow.lv-monitor, .loglevel.lv-monitor { color:var(--term-blue); } .logrow.lv-monitor .logtext { font-weight:600; }
 .pill.pf-pass { background:var(--ok); color:var(--fg-on-accent); border-color:var(--ok); } .pill.pf-fail { background:var(--danger); color:var(--fg-on-accent); border-color:var(--danger); }
 .pill.pf-stale, .pill.pf-testing { color:var(--warn); border-color:var(--warn); } .pill.pf-untested { color:var(--muted); } #pf-summary:empty { display:none; }
 h3 .pill { font-size:10px; font-weight:600; vertical-align:middle; }
@@ -410,8 +410,8 @@ header .pill { border:none; background:none; color:var(--fg-muted); font-size:va
 .lvchip .ck { display:none; }
 .lvchip.on { color:var(--fg-on-accent); border-color:transparent; }
 .lvchip.on .ck { display:inline; }
-.lvchip.lv-error { color:var(--term-red); } .lvchip.lv-tool { color:var(--term-yellow); } .lvchip.lv-info { color:var(--term-blue); } .lvchip.lv-ok { color:var(--term-green); } .lvchip.lv-muted, .lvchip.lv-text { color:var(--fg-muted); }
-.lvchip.on.lv-error { background:var(--term-red); color:var(--fg-on-accent); } .lvchip.on.lv-tool { background:var(--term-yellow); color:var(--fg-on-accent); } .lvchip.on.lv-info { background:var(--term-blue); color:var(--fg-on-accent); } .lvchip.on.lv-ok { background:var(--term-green); color:var(--fg-on-accent); } .lvchip.on.lv-muted, .lvchip.on.lv-text { background:var(--fg-muted); color:var(--fg-on-accent); }
+.lvchip.lv-error { color:var(--term-red); } .lvchip.lv-tool, .lvchip.lv-warn { color:var(--term-yellow); } .lvchip.lv-info { color:var(--term-blue); } .lvchip.lv-ok { color:var(--term-green); } .lvchip.lv-muted, .lvchip.lv-text { color:var(--fg-muted); }
+.lvchip.on.lv-error { background:var(--term-red); color:var(--term-bg); } .lvchip.on.lv-tool, .lvchip.on.lv-warn { background:var(--term-yellow); color:var(--term-bg); } .lvchip.on.lv-info { background:var(--term-blue); color:var(--term-bg); } .lvchip.on.lv-ok { background:var(--term-green); color:var(--term-bg); } .lvchip.on.lv-muted, .lvchip.on.lv-text { background:var(--fg-muted); color:var(--fg-on-accent); }
 /* Logs task column: truncated title, id in the tooltip; deep-links into the Board task */
 .logtask { flex:0 0 auto; max-width:160px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:11px; color:var(--accent-text); cursor:pointer; padding:0 4px; border-radius:4px; }
 .logtask:hover { background:var(--bg-hover); text-decoration:underline; }
