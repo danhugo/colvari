@@ -18,6 +18,14 @@ function scope(block) {
 const lightBlock = css.slice(0, css.indexOf('[data-theme="dark"] {'));
 const darkBlock = css.slice(css.indexOf('[data-theme="dark"] {'));
 const scopes = { light: scope(lightBlock), dark: scope(darkBlock) };
+// --palette design/palettes/<name>.css: layer a palette override on top (t_116b48a8)
+const palArg = process.argv.indexOf('--palette');
+if (palArg > 0) {
+  const pal = readFileSync(process.argv[palArg + 1], 'utf8');
+  const i = pal.indexOf('[data-theme="dark"] {');
+  Object.assign(scopes.light, scope(pal.slice(0, i)));
+  Object.assign(scopes.dark, scope(pal.slice(i)));
+}
 
 function parseColour(str) {
   str = str.trim();
@@ -106,6 +114,11 @@ function matrix() {
   rows.push(['non-text', 'success', 'bg-sidebar', 'working dot on sidebar']);
   rows.push(['non-text', 'warning-strong', 'bg-sidebar', '"!" dot on sidebar']);
   for (const n of AGENTS) rows.push(['non-text', `agent-${n}-text`, 'bg-hover', `agent ${n} progress fill`]);
+  rows.push(['text', 'fg-on-accent', 'success', 'ink on ok fill (pass pill, live tag)']);
+  rows.push(['text', 'fg-on-accent', 'danger', 'ink on error fill (badge, fail pill)']);
+  for (const [v, l] of [['accent', 'assign'], ['info', 'message'], ['warning-strong', 'review']])
+    rows.push(['non-text', v, 'bg-app', `${l} edge on graph canvas`]);
+  rows.push(['non-text', 'danger', 'bg-surface', 'error colour on surface']);
   return rows;
 }
 
@@ -139,6 +152,31 @@ for (const theme of ['light', 'dark']) {
     } else {
       lines.push(`${name.padEnd(44)} ${before ? before.toFixed(2) : ' --'} -> ${after.r.toFixed(2)} (need ${need}) ${ok ? 'PASS' : 'FAIL  <-- ' + after.fg + ' on ' + after.bg}`);
     }
+  }
+}
+// Distinctness: CIE76 ΔE between colours that must not be confused, normal and deuteranopia
+// (Machado 2009, severity 1). ponytail: ΔE76 is coarse; use ΔE2000 if borderline cases matter.
+const lin = (c) => { c /= 255; return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; };
+const DEU = [[0.367322, 0.860646, -0.227968], [0.280085, 0.672501, 0.047413], [-0.011820, 0.042940, 0.968881]];
+function lab(hex, cvd) {
+  let [r, g, b] = parseColour(hex).map(lin);
+  if (cvd) [r, g, b] = DEU.map(([x, y, z]) => Math.min(1, Math.max(0, x * r + y * g + z * b)));
+  const X = (0.4124 * r + 0.3576 * g + 0.1805 * b) / 0.95047, Y = 0.2126 * r + 0.7152 * g + 0.0722 * b, Z = (0.0193 * r + 0.1192 * g + 0.9505 * b) / 1.08883;
+  const f = (t) => (t > 0.008856 ? Math.cbrt(t) : 7.787 * t + 16 / 116);
+  return [116 * f(Y) - 16, 500 * (f(X) - f(Y)), 200 * (f(Y) - f(Z))];
+}
+const dE = (a, b, cvd) => Math.hypot(...lab(a, cvd).map((v, i) => v - lab(b, cvd)[i]));
+const GROUPS = { 'edges (assign/message/review)': ['accent', 'info', 'warning-strong'], 'status (ok/warn/error)': ['success', 'warning-strong', 'danger'] };
+for (const theme of ['light', 'dark']) {
+  for (const [g, vars] of Object.entries(GROUPS)) {
+    const out = [];
+    for (let i = 0; i < vars.length; i++) for (let j = i + 1; j < vars.length; j++) {
+      const a = resolve(vars[i], theme), b = resolve(vars[j], theme);
+      const n = dE(a, b), d = dE(a, b, true), ok = n >= 20 && d >= 10;
+      if (!ok) fails++;
+      out.push(`${vars[i]}~${vars[j]} ΔE ${n.toFixed(0)} / deut ${d.toFixed(0)}${ok ? '' : ' FAIL'}`);
+    }
+    lines.push(`${theme} ${g}: ${out.join(' · ')}`);
   }
 }
 console.log(lines.join('\n'));

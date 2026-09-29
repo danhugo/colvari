@@ -1,0 +1,38 @@
+/* Palette A — Aizome (indigo dye on washi paper). Assign = indigo, message = teal, review = amber.
+   Override for tokens.css: paste after the base tokens (light, dark, and OS-dark blocks). */
+:root {
+  --bg-app: #f5f4f0; --bg-sidebar: #ecebe5; --bg-surface: #ffffff; --bg-raised: #ffffff; --bg-hover: #e6e4dc; --bg-active: #dfe6f3;
+  --bg-bubble: #ffffff; --bg-bubble-self: #27457a; --bg-code: #f0efe9;
+  --fg-primary: #1b1f2a; --fg-secondary: #454b5a; --fg-muted: #5c6170; --fg-on-accent: #ffffff;
+  --border: #e2e0d8; --border-strong: #cdcac0;
+  --accent: #27457a; --accent-soft: #e3e9f5; --accent-text: #27457a;
+  --edge: #85887f;
+  --success: #1d7f45; --success-soft: #def2e4; --success-text: #17703d;
+  --warning: #c98a00; --warning-soft: #fbefd4; --warning-text: #7f5600; --warning-strong: #a15c00;
+  --danger: #c93a34; --danger-soft: #fbe3e0; --info: #0b7480;
+  --human: #1b1f2a;
+}
+[data-theme="dark"] {
+  --bg-app: #10131c; --bg-sidebar: #0c0f16; --bg-surface: #161a25; --bg-raised: #1c2130; --bg-hover: #242a3a; --bg-active: #1e2b47;
+  --bg-bubble: #1c2130; --bg-bubble-self: #2f5596; --bg-code: #0e111a;
+  --fg-primary: #eceef4; --fg-secondary: #b4b9c8; --fg-muted: #8c92a6; --fg-on-accent: #0e1320;
+  --border: #262c3b; --border-strong: #343b4d;
+  --accent: #8fb0ff; --accent-soft: #1c2a48; --accent-text: #a9c2ff;
+  --edge: #6d7489;
+  --success: #4cc98a; --success-soft: #13301f; --success-text: #4cc98a;
+  --warning: #f0b44c; --warning-soft: #3a2c10; --warning-text: #f0b44c; --warning-strong: #f0b44c;
+  --danger: #ff7a72; --danger-soft: #3d1a1c; --info: #3cc6c9;
+  --human: #eceef4;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg-app: #10131c; --bg-sidebar: #0c0f16; --bg-surface: #161a25; --bg-raised: #1c2130; --bg-hover: #242a3a; --bg-active: #1e2b47;
+  --bg-bubble: #1c2130; --bg-bubble-self: #2f5596; --bg-code: #0e111a;
+  --fg-primary: #eceef4; --fg-secondary: #b4b9c8; --fg-muted: #8c92a6; --fg-on-accent: #0e1320;
+  --border: #262c3b; --border-strong: #343b4d;
+  --accent: #8fb0ff; --accent-soft: #1c2a48; --accent-text: #a9c2ff;
+  --edge: #6d7489;
+  --success: #4cc98a; --success-soft: #13301f; --success-text: #4cc98a;
+  --warning: #f0b44c; --warning-soft: #3a2c10; --warning-text: #f0b44c; --warning-strong: #f0b44c;
+  --danger: #ff7a72; --danger-soft: #3d1a1c; --info: #3cc6c9;
+  --human: #eceef4;
+} }
