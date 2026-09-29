@@ -47,9 +47,8 @@ main { flex:1; overflow:hidden; } .tab { display:none; height:100%; padding:10px
 .logrow:hover { background:color-mix(in srgb, var(--fg-on-accent, #fff) 6%, transparent); }
 .logtime { flex:0 0 auto; color:var(--term-dim); font-variant-numeric:tabular-nums; }
 .logagent { flex:0 0 auto; max-width:120px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:600; }
-.logtask { flex:0 0 auto; max-width:160px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--term-dim); }
-.logtask[data-tasklink] { cursor:pointer; text-decoration:underline dotted; }
-.logtask[data-tasklink]:hover { color:var(--term-fg); }
+.logtask { flex:0 0 auto; font-family:var(--font-mono); font-size:10px; line-height:16px; padding:0 5px; border-radius:var(--radius-xs); background:color-mix(in srgb, var(--term-blue) 16%, transparent); color:var(--term-blue); cursor:pointer; }
+.logtask:hover { background:color-mix(in srgb, var(--term-blue) 32%, transparent); text-decoration:underline; }
 .loglevel { flex:0 0 auto; text-transform:uppercase; font-size:10px; letter-spacing:.03em; padding:0 5px; border-radius:4px; background:color-mix(in srgb, currentColor 18%, transparent); }
 .logtext { flex:1; min-width:0; white-space:pre-wrap; word-break:break-word; }
 .logrow.lv-error, .loglevel.lv-error { color:var(--term-red); } .logrow.lv-tool, .loglevel.lv-tool, .logrow.lv-warn, .loglevel.lv-warn { color:var(--term-yellow); }
@@ -67,12 +66,20 @@ table { border-collapse:collapse; background:var(--card); } td, th { border:1px 
 .dot { display:inline-block; width:7px; height:7px; border-radius:50%; background:var(--ok); margin-left:6px; }
 .panel .checks label { display:inline-flex; gap:4px; align-items:center; margin:2px 10px 2px 0; color:var(--fg); } .panel .checks input { width:auto; }
 .panel details summary { cursor:pointer; margin-top:10px; font-weight:600; } #presettable { width:100%; margin:6px 0; } #presettable td, #presettable th { text-align:left; padding:2px 6px; }
-.logagent-row { display:flex; align-items:center; gap:8px; padding:6px 7px; border-radius:6px; cursor:pointer; }
-.logagent-row:hover { background:var(--bg); } .logagent-row.sel { background:var(--bg); color:var(--acc); }
-.logagent-row .lameta { flex:1; min-width:0; overflow:hidden; } .logagent-row .lameta b { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.logagent-row .lameta small { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; display:block; }
-.logagent-row .lacount { flex:0 0 auto; color:var(--muted); font-variant-numeric:tabular-nums; font-size:11px; }
-.logagent-row .lactions { flex:0 0 auto; display:flex; gap:2px; }
+/* Agent rows (t_e503dd78): avatar · name over a status line ("working · t_xxxx title"), model as
+   secondary muted text — every line ellipsizes cleanly instead of clipping mid-word. Count is a
+   labelled muted badge; ⏹/✉ appear on hover so they stop cramming the row. */
+.logagent-row { display:flex; align-items:center; gap:8px; padding:5px 7px; border-radius:var(--radius-sm); cursor:pointer; }
+.logagent-row:hover { background:var(--bg-hover); } .logagent-row.sel { background:var(--bg-active); color:var(--acc); }
+.logagent-row .lameta { flex:1; min-width:0; }
+.logagent-row .lameta b, .logagent-row .lastat, .logagent-row .lamodel { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.logagent-row .lastat { font-size:11px; color:var(--fg-secondary); }
+.logagent-row .lamodel { font-size:10px; color:var(--fg-muted); opacity:.85; font-family:var(--font-mono); }
+.logagent-row .lst-working { color:var(--success-text); font-weight:var(--fw-medium); } .logagent-row .lst-idle { color:var(--fg-muted); }
+.logagent-row .ltid { font-family:var(--font-mono); font-size:10px; padding:0 4px; border-radius:var(--radius-xs); background:var(--bg-code); border:1px solid var(--border); }
+.logagent-row .lacount { flex:0 0 auto; min-width:20px; text-align:center; padding:0 6px; border-radius:var(--radius-full); background:var(--bg-code); border:1px solid var(--border); color:var(--fg-muted); font-size:10px; font-variant-numeric:tabular-nums; }
+.logagent-row .lactions { flex:0 0 auto; display:flex; gap:2px; opacity:0; transition:opacity var(--dur-fast) var(--ease-out); }
+.logagent-row:hover .lactions, .logagent-row:focus-within .lactions { opacity:1; }
 .logagent-row .lactions button { padding:1px 5px; font-size:11px; }
 
 .panel fieldset { border:1px solid var(--border-strong); border-radius:6px; padding:6px 8px; margin:8px 0; } .panel fieldset legend { color:var(--muted); padding:0 4px; }
@@ -432,18 +439,24 @@ header .pill { border:none; background:none; color:var(--fg-muted); font-size:va
 .vbadge { display:inline-flex; align-items:center; gap:4px; margin-left:6px; padding:0 6px; border-radius:8px; font:500 10.5px/16px var(--font-mono); background:var(--bg-code); border:1px solid var(--border); color:var(--fg-secondary); vertical-align:middle; white-space:nowrap; }
 .vbadge i { font-style:normal; opacity:.75; } .vbadge.vb-codex { border-color:var(--success-text); } .vbadge.vb-opencode { border-color:var(--danger); }
 #minimap.hidden { display:none; }
-/* level filter: filled chip with a check when active, outline when off */
+/* Level filter (t_e503dd78): one segmented control — a raised on-segment inside a shared track with a
+   per-level colour dot — instead of three loose outlined toggles with check glyphs. */
 .linklike { background:none; border:none; padding:0; color:var(--accent, #4a9eff); text-decoration:underline; cursor:pointer; font:inherit; }
-.lvchips { display:flex; gap:4px; align-items:center; }
-.lvchip { display:inline-flex; align-items:center; gap:3px; padding:2px 8px; border-radius:var(--radius-full); border:1px solid var(--border-strong); background:var(--bg-code); color:var(--fg-muted); font-size:10.5px; font-weight:var(--fw-medium); cursor:pointer; text-transform:uppercase; letter-spacing:.02em; }
-.lvchip .ck { display:none; }
-.lvchip.on { color:var(--fg-on-accent); border-color:transparent; }
-.lvchip.on .ck { display:inline; }
-.lvchip.lv-error { color:var(--term-red); } .lvchip.lv-tool, .lvchip.lv-warn { color:var(--term-yellow); } .lvchip.lv-info { color:var(--term-blue); } .lvchip.lv-ok { color:var(--term-green); } .lvchip.lv-muted, .lvchip.lv-text { color:var(--fg-muted); }
-.lvchip.on.lv-error { background:var(--term-red); color:var(--term-bg); } .lvchip.on.lv-tool, .lvchip.on.lv-warn { background:var(--term-yellow); color:var(--term-bg); } .lvchip.on.lv-info { background:var(--term-blue); color:var(--term-bg); } .lvchip.on.lv-ok { background:var(--term-green); color:var(--term-bg); } .lvchip.on.lv-muted, .lvchip.on.lv-text { background:var(--fg-muted); color:var(--fg-on-accent); }
-/* Logs task column: truncated title, id in the tooltip; deep-links into the Board task */
-.logtask { flex:0 0 auto; max-width:160px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:11px; color:var(--accent-text); cursor:pointer; padding:0 4px; border-radius:4px; }
-.logtask:hover { background:var(--bg-hover); text-decoration:underline; }
+.lvchips { display:inline-flex; gap:2px; padding:2px; background:var(--bg-code); border:1px solid var(--border-strong); border-radius:var(--radius-sm); }
+.lvchip { display:inline-flex; align-items:center; gap:5px; padding:2px 9px; border:none; background:none; border-radius:var(--radius-xs); color:var(--fg-muted); font-size:10.5px; font-weight:var(--fw-medium); cursor:pointer; text-transform:uppercase; letter-spacing:.02em; }
+.lvchip .dot { width:7px; height:7px; border-radius:50%; background:currentColor; opacity:.45; }
+.lvchip.on { background:var(--bg-surface); color:var(--fg); box-shadow:var(--shadow-sm); }
+.lvchip.on .dot { opacity:1; }
+.lvchip.lv-error .dot { background:var(--danger); } .lvchip.lv-warn .dot { background:var(--warning); } .lvchip.lv-info .dot { background:var(--info); }
+/* Auto-scroll as a real toggle: the hidden input keeps it keyboard-operable (focus ring on the track). */
+.asswitch { position:relative; display:inline-flex; align-items:center; gap:6px; cursor:pointer; color:var(--fg-secondary); font-size:12px; }
+.asswitch input { position:absolute; opacity:0; width:0; height:0; }
+.asswitch .sw { flex:0 0 auto; width:26px; height:16px; border-radius:var(--radius-full); background:var(--bg-code); border:1px solid var(--border-strong); position:relative; transition:background var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out); }
+.asswitch .sw::after { content:''; position:absolute; top:1px; left:1px; width:12px; height:12px; border-radius:50%; background:var(--fg-muted); transition:transform var(--dur-fast) var(--ease-out), background var(--dur-fast) var(--ease-out); }
+.asswitch input:checked + .sw { background:var(--acc); border-color:var(--acc); }
+.asswitch input:checked + .sw::after { transform:translateX(10px); background:var(--fg-on-accent); }
+.asswitch input:focus-visible + .sw { box-shadow:var(--ring); }
+/* Logs task column: short id chip (t_8308), full title in the tooltip; deep-links into the Board task */
 /* chat: repeat-count badge at the end of a collapsed run of identical messages */
 .repeat { display:inline-block; margin-left:6px; padding:0 5px; border-radius:8px; font-size:10px; font-weight:var(--fw-semibold); background:var(--bg-code); color:var(--fg-muted); border:1px solid var(--border); vertical-align:middle; }
 /* chat: "N new" pill, shown only while scrolled up */

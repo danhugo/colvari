@@ -97,6 +97,8 @@ const COST_NOTE = { subscription: 'Covered by subscription — not billed per to
 const VENDOR = { claude: 'Claude', codex: 'Codex', opencode: 'OpenCode' };
 const canCost = (rt) => { const r = ((S.config || {}).runtimes || {})[rt || 'claude']; return !r || !r.capabilities || r.capabilities.cost !== false; };
 const vbadge = (n) => n ? `<span class="vbadge vb-${esc(n.runtime || 'claude')}" title="runtime · model">${esc(VENDOR[n.runtime || 'claude'] || n.runtime)}<i>${esc(n.model || 'default')}</i></span>` : '';
+// t_e503dd78: log lines and status lines show a short id chip (t_8308) — the full title lives in the tooltip.
+const shortTaskId = (id) => /^t_/.test(id || '') ? id.slice(0, 6) : (id || '');
 const RT_PRESETS = [{ name: 'Planner', runtime: 'claude', model: 'opus' }, { name: 'Dev', runtime: 'codex', model: '' }, { name: 'Checker', runtime: 'claude', model: 'haiku' }];
 const billTag = (src, detail) => `<span class="bill bill-${esc(src || 'unknown')}" title="${esc(detail || '')}">${esc(src || 'unknown')}</span>`;
 
@@ -1388,9 +1390,14 @@ function renderObs() {
   const ids = new Set(nodes.map((n) => n.id));
   for (const l of logs) if (l.projectId === ctx.p && ids.has(l.nodeId)) { counts[l.nodeId] = (counts[l.nodeId] || 0) + 1; total++; }
   const rows = nodes.map((n) => { const a = S.orch.agents[n.id] || {}; const w = who(n.id);
-    const task = a.taskId ? esc((S.tasks.find((t) => t.id === a.taskId) || {}).title || a.taskId) : '';
-    return `<div class="logagent-row ${cur === n.id ? 'sel' : ''}" data-id="${n.id}"><span class="avatar sm ${a.status === 'working' ? 'working' : ''}" style="background:${w.color}" title="${esc(w.name)}">${esc(w.ini)}</span><span class="lameta"><b>${esc(n.name)}</b> ${vbadge(n)}<br><small class="muted st-${a.status || 'idle'}">${a.status || 'idle'}${task ? ` · ${task}` : ''}</small></span><span class="lacount" title="log lines">${counts[n.id] || 0}</span><span class="lactions">${a.status === 'working' ? `<button data-stopagent="${n.id}" title="Stop">⏹</button>` : ''}<button data-msgagent="${n.id}" title="Message">✉</button></span></div>`; }).join('');
-  $('#logagents').innerHTML = `<div class="logagent-row ${!cur ? 'sel' : ''}" data-id=""><span class="avatar sm" style="background:#3a3f4b">∀</span><span class="lameta"><b>All agents</b><br><small class="muted">every session</small></span><span class="lacount" title="log lines">${total}</span></div>` +
+    const ttl = a.task || (S.tasks.find((t) => t.id === a.taskId) || {}).title || '';
+    // Status line reads "working · t_xxxx title"; the model is secondary muted text below (t_e503dd78).
+    const stat = [`<span class="lst-${esc(a.status || 'idle')}">${esc(a.status || 'idle')}</span>`,
+      a.taskId ? `<span class="ltid" title="${esc(ttl || a.taskId)}">${esc(shortTaskId(a.taskId))}</span>` : '',
+      ttl ? `<span class="lttl">${esc(ttl)}</span>` : ''].filter(Boolean).join(' · ');
+    const model = `${runtimeLabel(n.runtime || 'claude')} · ${n.model || 'default'}`;
+    return `<div class="logagent-row ${cur === n.id ? 'sel' : ''}" data-id="${n.id}"><span class="avatar sm ${a.status === 'working' ? 'working' : ''}" style="background:${w.color}" title="${esc(w.name)}">${esc(w.ini)}</span><span class="lameta"><b>${esc(n.name)}</b><small class="lastat">${stat}</small><small class="lamodel" title="${esc(model)}">${esc(model)}</small></span><span class="lacount" title="${counts[n.id] || 0} log lines">${counts[n.id] || 0}</span><span class="lactions">${a.status === 'working' ? `<button data-stopagent="${n.id}" title="Stop">⏹</button>` : ''}<button data-msgagent="${n.id}" title="Message">✉</button></span></div>`; }).join('');
+  $('#logagents').innerHTML = `<div class="logagent-row ${!cur ? 'sel' : ''}" data-id=""><span class="avatar sm" style="background:#3a3f4b">∀</span><span class="lameta"><b>All agents</b><small class="lastat">every session</small></span><span class="lacount" title="${total} log lines">${total}</span></div>` +
     (rows || '<p class="muted logempty">No agents in this team.</p>');
   document.querySelectorAll('#logagents .logagent-row[data-id]').forEach((d) => d.onclick = (e) => { if (e.target.closest('.lactions')) return; $('#logfilter').value = d.dataset.id; renderLog(); renderObs(); });
   document.querySelectorAll('[data-stopagent]').forEach((b) => b.onclick = act(async (e) => { e.stopPropagation(); await call('stopAgent', b.dataset.stopagent); refresh(); }));
@@ -1410,7 +1417,7 @@ function monitorText(l) {
 }
 function logRow(l) {
   const w = who(l.nodeId); const lvl = LOG_LEVEL[l.kind] || 'text';
-  const task = l.task ? `<span class="logtask" ${l.taskId ? `data-tasklink="${esc(l.taskId)}" title="Open in task thread"` : ''}>${esc(l.task)}</span>` : '';
+  const task = l.taskId ? `<span class="logtask" data-tasklink="${esc(l.taskId)}" title="${esc(l.task || l.taskId)} — open in task thread">${esc(shortTaskId(l.taskId))}</span>` : '';
   const badge = l.kind === 'monitor' ? 'Monitor' : esc(l.kind);
   const text = l.kind === 'monitor' ? monitorText(l) : esc(l.text);
   return `<div class="logrow lv-${lvl}"><span class="logtime">${new Date(l.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span><span class="avatar sm" style="background:${w.color}" title="${esc(w.name)}">${esc(w.ini)}</span><span class="logagent" title="${esc(w.name)}">${esc(w.name)}</span>${task}<span class="loglevel lv-${lvl}">${badge}</span><span class="logtext">${text}</span></div>`;
@@ -1446,7 +1453,7 @@ const logLevels = new Set(['info', 'warn', 'error']);
 const LOG_SEVERITY = { error: 'error', tool_error: 'error', stderr: 'warn' };
 const severityOf = (l) => l.level || LOG_SEVERITY[l.kind] || 'info';
 function renderLogLevelChips() {
-  $('#loglevels').innerHTML = ['info', 'warn', 'error'].map((lv) => `<button class="lvchip lv-${lv}${logLevels.has(lv) ? ' on' : ''}" data-lv="${lv}" aria-pressed="${logLevels.has(lv)}"><span class="ck">✓</span>${lv}</button>`).join('');
+  $('#loglevels').innerHTML = ['info', 'warn', 'error'].map((lv) => `<button class="lvchip lv-${lv}${logLevels.has(lv) ? ' on' : ''}" data-lv="${lv}" aria-pressed="${logLevels.has(lv)}" title="${logLevels.has(lv) ? 'Hide' : 'Show'} ${lv} lines"><span class="dot" aria-hidden="true"></span>${lv}</button>`).join('');
   document.querySelectorAll('#loglevels [data-lv]').forEach((b) => b.onclick = () => { const lv = b.dataset.lv; logLevels.has(lv) ? logLevels.delete(lv) : logLevels.add(lv); renderLogLevelChips(); renderLog(); });
 }
 renderLogLevelChips();

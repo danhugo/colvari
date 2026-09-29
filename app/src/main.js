@@ -945,6 +945,60 @@ async function guiE2E() {
     await ex(`switchTo(${JSON.stringify(cur.p ? cur : { p: gp })}); await w(300);`);
     console.log('[gui-e2e] mainlogswiki', JSON.stringify({ agents, overview, wlist, searched, noMatch: noMatch.count, wempty }));
   };
+  // Logs view design evidence (t_e503dd78): 7 agents with distinct runtime/model lines, 40+ seeded log
+  // lines carrying taskId+task, live orchestrator statuses. Asserts agent rows show a status line with a
+  // short task id, an ellipsizing muted model line, a labelled count badge, hover-only actions, a
+  // segmented level control and an Auto-scroll switch — then screenshots light+dark at 1440x900.
+  const logsDesignShots = async () => {
+    win.setSize(1440, 900);
+    await waitFor(`return !!document.querySelector('#tpl-select option')`); await ex(`await refresh();`);
+    const cp = pm.create('Logs design'); const ds = pm.store(cp.id);
+    const spec = [['Pia', 'PM', 'claude', 'opus'], ['Devon', 'Dev', 'claude', 'sonnet'], ['Dana', 'Dev', 'codex', 'gpt-5.3-codex'], ['Rex', 'Reviewer', 'claude', 'haiku'], ['Cy', 'Critic', 'helpycode', ''], ['Mia', 'Dev', 'opencode', 'gpt-5'], ['Leo', 'Researcher', 'claude', 'opusplan']];
+    for (const [n, r, rt, m] of spec) ds.addNode({ name: n, role: r, x: 40, y: 40, runtime: rt, model: m });
+    const teamId = pm.get(cp.id).teams[0].id; // store.getTeam() on an unbound store has no id — bind explicitly
+    const ns = ds.getTeam().nodes;
+    const titles = ['Logs view: agent list clips model chips', 'Filter chips: one segmented control style', 'Orchestration is wasteful when every retry re-reads the whole repository', 'Wake-on-message sweep floods idle agents'];
+    const tasks = titles.map((t, i) => ds.createTask({ title: t, assignee: ns[i + 1].id }));
+    const kinds = [['text', 'Planning the steps.'], ['tool', 'Read {"file_path":"app/renderer/style.css"}'], ['tool_result', '42 lines'], ['text', 'Editing the agent rows now.'], ['tool', 'Edit {"filePath":"app/renderer/app.js"}'], ['error', 'ENOENT: no such file or directory, open missing.txt']];
+    const logData = [];
+    ns.forEach((n, i) => { const tk = tasks[i % tasks.length];
+      logData.push({ nodeId: n.id, kind: 'system', taskId: tk.id, task: tk.title, text: `▶ ${n.name} starts "${tk.title}" in /repo` });
+      for (let line = 0; line < 5; line++) { const [kind, txt] = kinds[(line + i) % kinds.length]; logData.push({ nodeId: n.id, kind, taskId: tk.id, task: tk.title, text: txt }); } });
+    logData.forEach((d, i) => { d.at = Date.now() - (logData.length - i) * 45000; });
+    // Live working/idle states through the REAL orchestrator (not renderer injection): refresh() rebuilds
+    // S.orch from getAll on every pass, so injected agent state would be wiped before the shots.
+    const orch = orchFor(cp.id);
+    [[ns[0], tasks[0]], [ns[1], tasks[1]], [ns[2], tasks[2]]].forEach(([n, tk]) => { const a = orch.agent(n.id); a.status = 'working'; a.taskId = tk.id; a.task = tk.title; });
+    for (const n of [ns[3], ns[4], ns[5], ns[6]]) orch.agent(n.id).status = 'idle';
+    await ex(`await switchTo({ p: '${cp.id}', t: '${teamId}' }); await w(400); const D = ${JSON.stringify(logData)}; for (const d of D) logs.push({ projectId: ctx.p, ...d });
+      $('#tabs button[data-tab=obs]').click(); await refresh(); renderObs(); renderLog(); await w(400);`);
+    const got = await ex(`const mo = [...document.querySelectorAll('#logagents .lamodel')]; const st = [...document.querySelectorAll('#logagents .lastat')];
+      return { rows: document.querySelectorAll('#log .logrow').length, chips: document.querySelectorAll('#log .logtask').length, ids: [...document.querySelectorAll('#log .logtask')].slice(0, 3).map((d) => d.textContent),
+        ltid: !!document.querySelector('#logagents .ltid'), count: !!document.querySelector('#logagents .lacount'),
+        ellModel: mo.length && mo.every((d) => getComputedStyle(d).textOverflow === 'ellipsis'), ellStat: st.length && st.every((d) => getComputedStyle(d).textOverflow === 'ellipsis'),
+        actHidden: getComputedStyle(document.querySelector('#logagents .logagent-row[data-id]:not([data-id=""]) .lactions')).opacity === '0',
+        seg: !!document.querySelector('#loglevels .lvchip .dot'), ckGone: !document.querySelector('#loglevels .ck'), sw: !!document.querySelector('.asswitch .sw'), nativeCb: !!document.querySelector('.asswitch input[type=checkbox]') }`);
+    expect('logsdesign: 30+ log lines rendered', got.rows >= 30, got.rows);
+    expect('logsdesign: every seeded line carries a short task id chip', got.chips >= 30, got.chips);
+    expect('logsdesign: chips render as t_xxxx', got.ids.every((s) => /^t_[0-9a-f]{4}$/.test(s)), got.ids);
+    expect('logsdesign: status line with task id; model/status lines ellipsize cleanly', got.ltid && got.ellModel && got.ellStat, { ltid: got.ltid, ellModel: got.ellModel, ellStat: got.ellStat });
+    expect('logsdesign: count badge, hover-only actions, segmented level control (no check glyph), Auto-scroll switch', got.count && got.actHidden && got.seg && got.ckGone && got.sw && got.nativeCb, got);
+    for (const theme of ['light', 'dark']) {
+      require('electron').nativeTheme.themeSource = theme; await ex(`await w(400);`);
+      await shot(`logs-design-${theme}`);
+      const side = await ex(`const b = $('#logagents').getBoundingClientRect(); return { x: Math.round(b.x), y: Math.round(b.y), width: Math.round(b.width), height: Math.round(b.height) }`);
+      fs.writeFileSync(path.join(out, `logs-design-agents-${theme}.png`), (await win.capturePage(side)).toPNG());
+    }
+    // Hover a working agent: ⏹/✉ fade in.
+    require('electron').nativeTheme.themeSource = 'dark';
+    const hv = await ex(`const r = document.querySelector('#logagents .logagent-row[data-id="${ns[1].id}"]').getBoundingClientRect(); return [Math.round(r.x + r.width / 2), Math.round(r.y + r.height / 2)]`);
+    win.webContents.sendInputEvent({ type: 'mouseMove', x: hv[0], y: hv[1] });
+    await new Promise((r) => setTimeout(r, 300));
+    expect('logsdesign: actions visible on hover', await ex(`return getComputedStyle(document.querySelector('#logagents .logagent-row[data-id="${ns[1].id}"] .lactions')).opacity`) === '1');
+    await shot('logs-design-agents-hover-dark');
+    require('electron').nativeTheme.themeSource = 'system';
+    console.log('[gui-e2e] logsdesign', JSON.stringify(got));
+  };
   // Polish shots: graph at zoom 0.4 and 1.0 plus the sidebar, for both teams, light+dark. Node names must stay >= 11px on screen at 0.4.
   const polishShots = async () => {
     await waitFor(`return !!document.querySelector('#tpl-select option')`); await ex(`await refresh();`); const cur = await ex(`return { p: ctx.p, t: S.teamId }`);
@@ -1556,6 +1610,7 @@ async function guiE2E() {
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'existingdata') { await existingDataShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'polish') { await polishShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'mainlogswiki') { await mainLogsWikiShots(); throw null; }
+    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'logsdesign') { await logsDesignShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'audit') { await auditShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'critique') { await critiqueShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'wake') { await wakeShots(); throw null; }
