@@ -994,3 +994,4 @@ button, .pchip, .tag, .badge, .pill, .avatar, .cchip summary, .lvchip, .asswitch
 #chat-thread .chat-head > b { min-width:0; flex:0 1 auto; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .cgroup .cname { overflow-wrap:anywhere; }
 .yt-item { flex-wrap:wrap; } .yt-item > span:not(.spacer) { min-width:0; overflow-wrap:anywhere; }
+.idlebanner.hidden { display:none; }
