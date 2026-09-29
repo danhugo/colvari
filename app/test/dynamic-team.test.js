@@ -5,6 +5,7 @@ const os = require('os');
 const path = require('path');
 const { Store } = require('../src/store');
 const { makeTools } = require('../src/board-tools');
+const { applyAnsweredChange } = require('../src/team-answers');
 const { capPermissionMode, canManageAgent } = require('../src/scope');
 
 // Core + one human-made node + one node already recruited by the core, in team-a of a 1- or 2-team
@@ -277,6 +278,105 @@ test('ask mode: the budget gate is re-checked after the human approves', () => {
   s.answerInbox(s.listInbox({ status: 'open' })[0].id, 'approve');
   assert.throws(() => tools.recruit_agent(req), /80%/);
   assert.equal(s.listInbox().some((i) => i.kind === 'question' && !i.consumed && i.status === 'open'), false, 'the approval was consumed by the refused re-call');
+});
+
+// ---- main-process answer handler (team-answers.js): the human's answer applies the stored ----
+// ---- change itself, so an approved request no longer waits for a core re-call nobody triggers ----
+
+// Mirror of the main.js api.answerInbox sequence: store.answerInbox records the answer, then the
+// handler applies/consumes. orch is the real orchestrator in the app; here a recorder stub — the
+// real sendToAgent interrupts a live agent and otherwise stores the message, never starting a run.
+function answerViaHandler(s, orch, id, text) {
+  s.answerInbox(id, text);
+  return applyAnsweredChange(s, orch, s.getInboxItem(id), text);
+}
+const stubOrch = () => ({ sent: [], sendToAgent(nodeId, text, taskId) { this.sent.push({ nodeId, text, taskId }); } });
+
+test('answer handler: approve applies the stored change directly — node exists with no tool re-call', () => {
+  const { s, core, tools } = setup({ approval: 'ask' });
+  const task = s.createTask({ title: 'core work', assignee: core.id });
+  s.updateTask(task.id, { status: 'in_progress' });
+  const before = s.forTeam('a').getTeam().nodes.length;
+  assert.equal(tools.recruit_agent({ name: 'Rookie', role: 'QA', reason: 'need a tester' }).pending, true);
+  const item = s.listInbox({ status: 'open' }).find((i) => i.kind === 'question');
+  assert.equal(item.reason, 'need a tester', 'reason stored on the item (kept out of the fp)');
+  const orch = stubOrch();
+  assert.equal(answerViaHandler(s, orch, item.id, 'approve'), true);
+  const node = s.forTeam('a').getTeam().nodes.find((n) => n.name === 'Rookie');
+  assert.ok(node, 'node exists after the answer alone (the core never re-called)');
+  assert.equal(node.role, 'QA');
+  assert.equal(node.createdBy, core.id);
+  assert.equal(s.forTeam('a').getTeam().nodes.length, before + 1);
+  assert.ok(s.getTask(task.id).comments.some((c) => /recruited agent "Rookie"/.test(c.text)), 'same tool path ran: task comment posted');
+  assert.ok(s.listInbox().find((i) => i.id === item.id).consumed, 'answer consumed (one-shot)');
+  assert.equal(orch.sent.length, 1, 'core messaged once');
+  assert.equal(orch.sent[0].nodeId, core.id);
+  assert.match(orch.sent[0].text, /approved/);
+  assert.equal(orch.sent[0].taskId, task.id);
+});
+
+test('answer handler: decline consumes the item, applies nothing, messages the core', () => {
+  const { s, tools } = setup({ approval: 'ask' });
+  const before = s.forTeam('a').getTeam().nodes.length;
+  assert.equal(tools.recruit_agent({ name: 'Nope', role: 'Dev', reason: 'r' }).pending, true);
+  const item = s.listInbox({ status: 'open' })[0];
+  const orch = stubOrch();
+  assert.equal(answerViaHandler(s, orch, item.id, 'no'), true);
+  assert.equal(s.forTeam('a').getTeam().nodes.length, before, 'nothing applied');
+  assert.ok(s.listInbox().find((i) => i.id === item.id).consumed, 'declined item consumed without a re-call');
+  assert.equal(orch.sent.length, 1);
+  assert.match(orch.sent[0].text, /declined/);
+});
+
+test('answer handler: double answer is idempotent — second answer throws, stale re-apply is a no-op', () => {
+  const { s, tools } = setup({ approval: 'ask' });
+  const before = s.forTeam('a').getTeam().nodes.length;
+  assert.equal(tools.recruit_agent({ name: 'Once', role: 'Dev', reason: 'r' }).pending, true);
+  const item = s.listInbox({ status: 'open' })[0];
+  assert.equal(answerViaHandler(s, stubOrch(), item.id, 'approve'), true);
+  assert.equal(s.forTeam('a').getTeam().nodes.length, before + 1);
+  assert.throws(() => s.answerInbox(item.id, 'approve'), /already answered/);
+  const orch = stubOrch();
+  assert.equal(applyAnsweredChange(s, orch, s.getInboxItem(item.id), 'approve'), false, 'consumed item: re-apply refused');
+  assert.equal(orch.sent.length, 0, 'no second notice');
+  assert.equal(s.forTeam('a').getTeam().nodes.length, before + 1, 'still exactly one node');
+  assert.equal(s.listInbox({ status: 'open' }).filter((i) => i.kind === 'question').length, 0, 'no duplicate ask filed');
+});
+
+test('answer handler: approve that fails the re-checks is caught — "approved but not applied", no throw', () => {
+  const { s, tools } = setup({ approval: 'ask', maxAgents: 4 });
+  const req = { name: 'Late', role: 'Dev', reason: 'r' };
+  assert.equal(tools.recruit_agent(req).pending, true); // 3 < 4 at ask time
+  s.addNode({ name: 'Filler', role: 'Dev' }); // team grows to 4 while pending
+  const item = s.listInbox({ status: 'open' })[0];
+  s.answerInbox(item.id, 'approve');
+  const orch = stubOrch();
+  assert.doesNotThrow(() => applyAnsweredChange(s, orch, s.getInboxItem(item.id), 'approve'), 'never throws into the UI answer handler');
+  assert.equal(s.forTeam('a').getTeam().nodes.length, 4, 'nothing applied');
+  assert.ok(s.listInbox().find((i) => i.id === item.id).consumed, 'askGate consumed the answer before refusing');
+  assert.equal(orch.sent.length, 1);
+  assert.match(orch.sent[0].text, /approved but not applied/);
+  assert.match(orch.sent[0].text, /maxAgents/);
+});
+
+test('answer handler: update_agent applies via the stored payload (nested patch survives the JSON round-trip)', () => {
+  const { s, recruited, tools } = setup({ approval: 'ask' });
+  assert.equal(tools.update_agent({ nodeId: recruited.id, patch: { role: 'QA' }, reason: 'r' }).pending, true);
+  const item = s.listInbox({ status: 'open' })[0];
+  const orch = stubOrch();
+  assert.equal(answerViaHandler(s, orch, item.id, 'approve'), true);
+  assert.equal(s.forTeam('a').getTeam().nodes.find((x) => x.id === recruited.id).role, 'QA');
+  assert.ok(s.listInbox().find((i) => i.id === item.id).consumed);
+  assert.match(orch.sent[0].text, /approved/);
+});
+
+test('answer handler: plain ask_human questions are not handled', () => {
+  const { s, core } = setup();
+  const item = s.askHuman({ nodeId: core.id, question: 'Which color?', choices: ['red', 'blue'] });
+  s.answerInbox(item.id, 'blue');
+  const orch = stubOrch();
+  assert.equal(applyAnsweredChange(s, orch, s.getInboxItem(item.id), 'blue'), false);
+  assert.equal(orch.sent.length, 0);
 });
 
 test('real stdio MCP server lists the team tools only for a core node', async () => {

@@ -11,6 +11,7 @@ const RT = require('./runtimes');
 const CAP = require('./capabilities');
 const SU = require('./self-update');
 const { allowReload } = require('./renderer-reload');
+const { applyAnsweredChange } = require('./team-answers');
 const { introspectRuntime: runIntrospectRuntime } = require('./introspector');
 // The app repo (main checkout): what the UpdateWatcher polls and fast-forwards.
 const APP_ROOT = path.join(__dirname, '..', '..');
@@ -1846,7 +1847,11 @@ const api = {
   },
   testAgent, testTeam,
   stopAgent: (c, nodeId) => orchFor(c.p).stopAgent(nodeId), sendToAgent: (c, nodeId, text, taskId) => orchFor(c.p).sendToAgent(nodeId, text, taskId),
-  listInbox: (c) => ST(c).listInbox({ status: 'open' }), answerInbox: (c, id, answer) => ST(c).answerInbox(id, answer),
+  listInbox: (c) => ST(c).listInbox({ status: 'open' }),
+  // Recording the answer is not enough for askGate approvals (recruit/retire/update): the core is
+  // idle by then, so team-answers.js applies/consumes the answered item right here and messages the
+  // core. It never throws — the answer is already recorded either way.
+  answerInbox: (c, id, answer) => { const s = ST(c); const r = s.answerInbox(id, answer); applyAnsweredChange(s, orchFor(c.p), s.getInboxItem(id), answer); return r; },
   inboxCounts: () => Object.fromEntries(pm.list().map((p) => [p.id, pm.store(p.id).listInbox({ status: 'open' }).length])),
   approveTask: (c, id, ok, note) => ST(c).approveTask(id, ok, note), getLogs: (c, n) => ST(c).readLogs(n || 2000), clearLogs: (c) => ST(c).clearLogs(),
   taskDiff: (c, id) => WT.worktreeDiff(wtTask(c, id)),

@@ -477,10 +477,12 @@ class Store {
   listInbox(filter = {}) { let xs = this.read('inbox', { items: [] }).items; if (filter.status) xs = xs.filter((i) => i.status === filter.status); return xs; }
   getInboxItem(iid) { return this.listInbox().find((i) => i.id === iid); }
   // `change` (optional) fingerprints a core-agent team-change request, so recruit/retire/update can
-  // find their own inbox item again when the core re-calls the tool after the human answered.
-  addInbox({ kind = 'question', taskId = null, nodeId = null, question, choices = [], change = null }) {
+  // find their own inbox item again when the core re-calls the tool after the human answered — and
+  // doubles as the stored payload the main process applies on the answer (team-answers.js). `reason`
+  // rides alongside it (the tool requires one, but it must stay out of the fingerprint).
+  addInbox({ kind = 'question', taskId = null, nodeId = null, question, choices = [], change = null, reason = null }) {
     if (!question) throw new Error('question required');
-    const item = { id: id('q'), kind, taskId, nodeId, question, choices: (choices || []).map(String), status: 'open', answer: null, at: new Date().toISOString(), ...(change ? { change } : {}) };
+    const item = { id: id('q'), kind, taskId, nodeId, question, choices: (choices || []).map(String), status: 'open', answer: null, at: new Date().toISOString(), ...(change ? { change } : {}), ...(reason ? { reason } : {}) };
     this.update('inbox', { items: [] }, (d) => { d.items.push(item); });
     return item;
   }
@@ -489,8 +491,8 @@ class Store {
   // is marked consumed so the same request can never replay a stale answer.
   consumeInbox(iid) { this.update('inbox', { items: [] }, (d) => { for (const i of d.items) if (i.id === iid) i.consumed = true; }); }
   // ask_human: store the question and park the task in waiting_for_human.
-  askHuman({ taskId, nodeId, question, choices, change }) {
-    const item = this.addInbox({ kind: 'question', taskId, nodeId, question, choices, change });
+  askHuman({ taskId, nodeId, question, choices, change, reason }) {
+    const item = this.addInbox({ kind: 'question', taskId, nodeId, question, choices, change, reason });
     if (taskId && this.getTask(taskId)) this.updateTask(taskId, { status: 'waiting_for_human' });
     return item;
   }

@@ -49,8 +49,11 @@ function makeTools(store, nodeId) {
   // returns {pending:true}; nothing changes. When the human answered and the core calls again with
   // the same request, the answered item decides: 'approve' applies it, anything else refuses. The
   // answer is one-shot: askGate consumes the item once it is used, so the same request re-asks
-  // instead of replaying an old approval or staying blocked by an old decline.
-  const askGate = (change, question) => {
+  // instead of replaying an old approval or staying blocked by an old decline. The core does not
+  // have to re-call at all: the main process applies an answered item itself (team-answers.js), so
+  // the stored payload must be complete here — `change` (stable JSON, the fingerprint) plus `reason`,
+  // which the tools require but which stays out of the fingerprint.
+  const askGate = (change, question, reason) => {
     if ((store.getSettings().teamChangeApproval || 'ask') !== 'ask') return { proceed: true };
     const fp = JSON.stringify(stable(change));
     const mine = store.listInbox().filter((i) => i.kind === 'question' && i.nodeId === nodeId && i.change === fp && !i.consumed);
@@ -62,7 +65,7 @@ function makeTools(store, nodeId) {
       return answered.answer === 'approve' ? { proceed: true } : { declined: true, result: { applied: false, note: `declined by the human (${answered.answer}); nothing was changed` } };
     }
     const tk = store.listTasks({ assignee: nodeId, status: 'in_progress' })[0];
-    store.askHuman({ taskId: tk ? tk.id : null, nodeId, question, choices: ['approve'], change: fp });
+    store.askHuman({ taskId: tk ? tk.id : null, nodeId, question, choices: ['approve'], change: fp, reason });
     return { pending: true, result: { pending: true, note: 'pending approval: the request is in the human Inbox; nothing changes until it is approved and you call this tool again' } };
   };
   const refuseManage = (tool, core, target) => {
@@ -201,7 +204,7 @@ function makeTools(store, nodeId) {
       getRuntime(runtime); // runtimes.js is the registry: unknown id -> error (model stays free text)
       const blocked = recruitBudgetBlock(s);
       if (blocked) throw new Error(blocked);
-      const g = askGate({ tool: 'recruit_agent', name, role, prompt, runtime, model, effort }, `Core agent "${core.name}" requests a new agent "${name}" (role ${role})${reason ? ` — ${reason}` : ''}. Approve?`);
+      const g = askGate({ tool: 'recruit_agent', name, role, prompt, runtime, model, effort }, `Core agent "${core.name}" requests a new agent "${name}" (role ${role})${reason ? ` — ${reason}` : ''}. Approve?`, reason);
       if (!g.proceed) { if (g.declined) announce(`recruit of "${name}" declined by the human`); return g.result; }
       // Counted again after approval too: the team may have grown while the request was pending.
       const max = Math.max(1, parseInt(store.getSettings().maxAgents, 10) || 6);
@@ -236,7 +239,7 @@ function makeTools(store, nodeId) {
       if (!canManageAgent(core, target)) throw refuseManage('retire_agent', core, target);
       const inProg = store.listTasks({ assignee: target.id, status: 'in_progress' });
       if (inProg.length) throw new Error(`refused: "${target.name}" still owns ${inProg.length} in_progress task(s) (${inProg.map((t) => t.id).join(', ')})`);
-      const g = askGate({ tool: 'retire_agent', nodeId: target.id }, `Core agent "${core.name}" requests retiring agent "${target.name}"${reason ? ` — ${reason}` : ''}. Approve?`);
+      const g = askGate({ tool: 'retire_agent', nodeId: target.id }, `Core agent "${core.name}" requests retiring agent "${target.name}"${reason ? ` — ${reason}` : ''}. Approve?`, reason);
       if (!g.proceed) { if (g.declined) announce(`retire of "${target.name}" declined by the human`); return g.result; }
       // Reassign BEFORE removeNode, while the core -> target edges still exist.
       for (const tk of store.listTasks({ assignee: target.id, status: 'todo' })) store.updateTask(tk.id, { assignee: nodeId });
@@ -253,7 +256,7 @@ function makeTools(store, nodeId) {
       const bad = Object.keys(patch).filter((k) => !AGENT_PATCH_FIELDS.includes(k));
       if (bad.length) throw new Error(`patch field(s) not allowed: ${bad.join(', ')} (allowed: ${AGENT_PATCH_FIELDS.join(', ')})`);
       if (patch.runtime) getRuntime(patch.runtime);
-      const g = askGate({ tool: 'update_agent', nodeId: target.id, patch }, `Core agent "${core.name}" requests updating agent "${target.name}": ${JSON.stringify(patch)}${reason ? ` — ${reason}` : ''}. Approve?`);
+      const g = askGate({ tool: 'update_agent', nodeId: target.id, patch }, `Core agent "${core.name}" requests updating agent "${target.name}": ${JSON.stringify(patch)}${reason ? ` — ${reason}` : ''}. Approve?`, reason);
       if (!g.proceed) { if (g.declined) announce(`update of "${target.name}" declined by the human`); return g.result; }
       const storePatch = {};
       for (const k of Object.keys(patch)) storePatch[k === 'prompt' ? 'systemPrompt' : k] = patch[k];
