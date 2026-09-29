@@ -8,8 +8,8 @@ const { makeTools } = require('../src/board-tools');
 const { Orchestrator, WAKE, wakePrompt } = require('../src/orchestrator');
 
 // Short timings so sweeps fire quickly; the semantics under test are unchanged.
-WAKE.SWEEP_MS = 40; WAKE.DEBOUNCE_MS = 60;
-test.after(() => { WAKE.SWEEP_MS = 1000; WAKE.DEBOUNCE_MS = 1500; });
+WAKE.SWEEP_MS = 40; WAKE.DEBOUNCE_MS = 60; WAKE.MIN_GAP_MS = 80;
+test.after(() => { WAKE.SWEEP_MS = 1000; WAKE.DEBOUNCE_MS = 1500; WAKE.MIN_GAP_MS = 5 * 60 * 1000; });
 
 const tmp = (p) => fs.mkdtempSync(path.join(os.tmpdir(), p));
 const fakeClaude = (dir, body) => { const f = path.join(dir, 'fake-claude.sh'); fs.writeFileSync(f, '#!/bin/sh\n' + body); fs.chmodSync(f, 0o755); return f; };

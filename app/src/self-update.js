@@ -1,13 +1,15 @@
 // Self-update: watch the app repo for new commits and restart the app safely.
 // State machine: idle -> pending (new commits on the base branch, or a request_self_update call,
 // with auto-restart on) -> draining (no new dispatches; wait for running agents to finish, at most
-// drainTimeoutMin minutes — a run that outlasts the grace is stopped and its task resumes after the
-// restart, so one long run cannot freeze the whole team's dispatch indefinitely) -> testing (npm
-// test in a throwaway worktree at the new sha so a bad checkout never touches the live tree) ->
-// restarting (persist restart-state, relaunch). Any failure aborts back to idle and logs the reason.
-// On boot, bootResume() resumes a Run interrupted by a restart, or rolls back to the previous sha
-// and disables auto-restart after repeated boot failures. All git/npm/relaunch steps are injectable
-// for tests.
+// drainTimeoutMin minutes (default 30) — past that grace the runs that were never cut before are
+// stopped (a task already cut once for a restart is spared and waited for indefinitely; its persisted
+// drainCuts marker survives the relaunch), and a stopped task resumes from its persisted session
+// after the restart, so one long run cannot freeze the whole team's dispatch indefinitely) ->
+// testing (npm test in a throwaway worktree at the new sha so a bad checkout never touches the live
+// tree) -> restarting (persist restart-state, relaunch). Any failure aborts back to idle and logs the
+// reason. On boot, bootResume() resumes a Run interrupted by a restart, or rolls back to the previous
+// sha and disables auto-restart after repeated boot failures. All git/npm/relaunch steps are
+// injectable for tests.
 const { spawnSync } = require('child_process');
 const { EventEmitter } = require('events');
 const fs = require('fs');
@@ -99,12 +101,14 @@ class UpdateWatcher extends EventEmitter {
 
   autoRestart() { try { return !!this.store.getSettings().autoRestart; } catch { return false; } }
   // How long draining may wait for running agents before they are stopped and the update proceeds.
-  // Setting drainTimeoutMin (default 5; 0 = wait forever, the old no-timeout behavior).
+  // Setting drainTimeoutMin (default 30; 0 = wait forever, the old no-timeout behavior). The grace is
+  // a cap on how long the team is frozen, not a license to kill work: past it, haltProcs stops only
+  // tasks never cut before — a task already cut once keeps running and the drain waits for it.
   drainMs() {
     if (this._drainTimeoutMs != null) return this._drainTimeoutMs;
     const min = Number(this.store.getSettings().drainTimeoutMin);
     if (min === 0) return Infinity;
-    return min > 0 ? min * 60000 : 5 * 60000;
+    return min > 0 ? min * 60000 : 30 * 60000;
   }
   baseBranch() {
     if (this.branch) return this.branch;
@@ -177,7 +181,9 @@ class UpdateWatcher extends EventEmitter {
     }
     const defer = (why) => {
       if (!keepDefer) this._log('system', `self-update: ${reason} seen but ${why}; skipping — will retry when the guard clears.`);
-      this._deferred = { sha: s.to, reason, from: keepDefer ? this._deferred.from : prevSeen };
+      // Coalesce to the NEWEST sha, but keep the from-sha captured when the commits were FIRST seen:
+      // that is the sha actually running now, and the one a rollback would return to.
+      this._deferred = { sha: s.to, reason, from: (this._deferred && this._deferred.from) || prevSeen };
       this.emitStatus();
     };
     if (!force && this.now() - this.lastRestartAt < this.minIntervalMs) {
@@ -199,7 +205,7 @@ class UpdateWatcher extends EventEmitter {
   }
 
   async _flow() {
-    const from = this.fromSha; const to = this.toSha; const reason = this.reason;
+    const from = this.fromSha; let to = this.toSha; const reason = this.reason;
     const abort = (why) => {
       this._log('error', `self-update aborted: ${why}`);
       appendHistory(this.store.dir, { ts: new Date().toISOString(), reason, fromSha: from, toSha: to, result: 'aborted: ' + why });
@@ -226,16 +232,35 @@ class UpdateWatcher extends EventEmitter {
       const drainMs = this.drainMs();
       const deadline = isFinite(drainMs) ? this.now() + drainMs : null;
       this.drainEndsAt = deadline != null ? new Date(deadline).toISOString() : null;
+      // One halt per drain: past the grace, tasks never cut before are stopped (their tasks resume
+      // after the restart). haltProcs spares already-cut tasks on purpose ({cut, spared}) — only an
+      // EXPLICIT spared count keeps the loop waiting (and without a second deadline: a task cut once
+      // must never be cut again; the stall watchdog recovers a hung one). A haltProcs that does not
+      // report the shape (tests, custom wiring) proceeds, as before.
+      let halted = false;
       while (this.procCount() > 0) {
-        if (deadline != null && this.now() >= deadline) {
-          this._log('system', `self-update: drain grace (${Math.round(drainMs / 60000)}min) over with ${this.procCount()} run(s) still active; stopping them — their tasks resume after the restart.`);
-          await this.haltProcs();
+        if (!halted && deadline != null && this.now() >= deadline) {
+          halted = true;
+          this._log('system', `self-update: drain grace (${Math.round(drainMs / 60000)}min) over with ${this.procCount()} run(s) still active; stopping the runs not already cut once — their tasks resume after the restart. Tasks already cut once keep running and the drain waits for them.`);
+          const res = await this.haltProcs();
+          const spared = res && typeof res.spared === 'number' ? res.spared : 0;
+          if (spared > 0 && this.procCount() > 0) {
+            this._log('system', `self-update: ${spared} run(s) already cut once keep running; the drain waits for them.`);
+            continue;
+          }
           break;
         }
         this.waitingOn = this.procCount(); this.emitStatus(); await this.sleep(500);
       }
       this.drainEndsAt = null;
       this.waitingOn = 0; this.emitStatus();
+      // Commits that landed while the drain waited coalesce into THIS restart: the freeze was
+      // already paid once, so re-resolve the target instead of restarting onto a stale sha.
+      const latest = this.shas();
+      if (latest && latest.to !== to) {
+        this._log('system', `self-update: newer commits landed during the drain; coalescing this restart ${String(to).slice(0, 7)} -> ${String(latest.to).slice(0, 7)}.`);
+        to = latest.to; this.toSha = to; this._seenSha = to;
+      }
       const dirty = this.git(['status', '--porcelain']);
       if (dirty.code !== 0 || dirty.out.trim()) return abort('main checkout has uncommitted changes; refusing to fast-forward');
       if (to !== from) {
