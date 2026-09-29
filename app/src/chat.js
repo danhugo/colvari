@@ -6,6 +6,15 @@
   // Colour from a hash of the node id (not the name), so renames keep the colour.
   function avatarColor(id) { let h = 0; for (const c of String(id)) h = (h * 31 + c.charCodeAt(0)) >>> 0; return `hsl(${h % 360}, 55%, 48%)`; }
   const initials = (name) => String(name || '?').split(/[\s_-]+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join('') || '?';
+  // Attachments (t_993822cf): size label + file:// URL for lazy <img> thumbnails (renderer + tests share).
+  const fmtSize = (n) => n == null || isNaN(n) ? '' : n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`;
+  const fileUrl = (p) => encodeURI('file://' + p);
+  // One bubble's attachment row: images render as 64px lazy file:// thumbnails, other files as name chips.
+  const attThumbs = (atts) => {
+    if (!atts || !atts.length) return '';
+    const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    return `<span class="att-row">${atts.map((a) => String(a.mime || '').startsWith('image/') ? `<img class="att-thumb" src="${esc(fileUrl(a.path))}" loading="lazy" alt="${esc(a.name)}" title="${esc(a.name)} · ${fmtSize(a.size)}">` : `<span class="att-file" title="${esc(a.name)} · ${fmtSize(a.size)}">📄 ${esc(a.name)}</span>`).join('')}</span>`;
+  };
   const toolName = (text) => String(text).split(' ')[0].replace(/^mcp__\w+__/, '');
   const toolArgs = (text) => { const s = String(text); const i = s.indexOf(' '); return i < 0 ? '' : s.slice(i + 1); };
   function toolLabel(text) {
@@ -45,7 +54,7 @@
       for (const [sid, e] of sub) { const p = recOf(sid) && recOf(sid).parentAgentId; if (p && sub.has(p)) { (sub.get(p).children ||= []).push(e); nested.add(sid); } }
       for (let i = ev.length - 1; i >= 0; i--) if (ev[i].type === 'subagent' && nested.has(ev[i].subagentId)) ev.splice(i, 1);
     }
-    for (const m of messages || []) ev.push({ at: ms(m.at), who: m.from, to: m.to, type: 'message', text: m.text, taskId: m.taskId || null });
+    for (const m of messages || []) ev.push({ at: ms(m.at), who: m.from, to: m.to, type: 'message', text: m.text, atts: m.attachments || null, taskId: m.taskId || null });
     for (const t of tasks || []) {
       if (t.createdBy) ev.push({ at: ms(t.createdAt), who: t.createdBy, to: t.assignee, type: 'handoff', text: t.title, taskId: t.id });
       for (const c of t.comments || []) ev.push({ at: ms(c.at), who: c.author, type: 'comment', text: c.text, taskId: t.id });
@@ -109,6 +118,9 @@
   // keeps the previously-visible content in place. Clamped at 0 (content shrank / scrolled past top).
   const anchorScroll = (prevTop, prevHeight, newHeight) => Math.max(0, newHeight - prevHeight + prevTop);
 
-  return { avatarColor, initials, toolLabel, roomEvents, group, parseComposer, preview, mentionMatches, GROUP_MS, MAX, PAGE, pageOf, anchorScroll, feedKey };
+  // Collapse consecutive identical messages (same type/target/text) from one author into one bubble + a ×N
+  // badge at the end. Messages carrying attachments never collapse (each file needs its own thumbs).
+  const collapseRepeats = (items) => items.reduce((out, it) => { const p = out[out.length - 1]; if (p && p.type === it.type && p.text === it.text && p.to === it.to && !p.atts && !it.atts && it.type !== 'tool' && it.type !== 'question' && it.type !== 'subagent') p.count = (p.count || 1) + 1; else out.push({ ...it }); return out; }, []);
+  return { avatarColor, initials, toolLabel, roomEvents, group, parseComposer, preview, mentionMatches, fmtSize, fileUrl, attThumbs, collapseRepeats, GROUP_MS, MAX, PAGE, pageOf, anchorScroll, feedKey };
 });
 

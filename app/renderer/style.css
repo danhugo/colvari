@@ -561,3 +561,21 @@ rect.usb-rep, i.usb-rep { fill:var(--accent); background:var(--accent); } rect.u
 header > strong.brand { display:flex; align-items:center; gap:6px; font-weight:700; letter-spacing:-.02em; color:var(--fg-primary); }
 @media (max-width:1200px) { header > strong.brand { display:none; } }
 .brandmark { width:20px; height:20px; color:var(--accent-text); } .brandmark.big { width:40px; height:40px; display:block; margin:0 auto 8px; }
+
+/* Composer attachments (t_993822cf): chips with 64px lazy thumbnails, drop highlight, bubble thumbs. */
+.att-chips { display:flex; flex-wrap:wrap; gap:6px; margin:0 0 6px; }
+.att-chip { display:flex; align-items:center; gap:6px; padding:3px 8px 3px 3px; background:var(--bg-raised); border:1px solid var(--border); border-radius:var(--radius-sm); max-width:360px; }
+.att-chip.err { border-color:var(--danger); }
+.att-chip .att-thumb { width:64px; height:64px; object-fit:cover; border-radius:var(--radius-xs); display:block; flex:none; }
+.att-chip .att-spin { width:64px; height:64px; border-radius:var(--radius-xs); background:var(--bg-hover); display:block; flex:none; }
+.att-chip .att-nopic { width:64px; height:64px; border-radius:var(--radius-xs); background:var(--bg-hover); color:var(--fg-muted); font-size:24px; display:flex; align-items:center; justify-content:center; flex:none; }
+.att-chip .att-name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:var(--text-xs); color:var(--fg-primary); }
+.att-chip .att-err { color:var(--danger); font-size:var(--text-xs); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.att-chip .att-x { border:none; background:none; cursor:pointer; color:var(--fg-muted); font-size:14px; padding:2px 3px; flex:none; }
+.att-chip .att-x:hover { color:var(--danger); }
+.composer.dragover { outline:2px dashed var(--accent); outline-offset:-4px; }
+.composer button:disabled { opacity:.45; cursor:not-allowed; }
+#chat-attach { align-self:stretch; margin:0 !important; }
+.att-row { display:inline-flex; flex-wrap:wrap; gap:6px; vertical-align:middle; margin-left:8px; }
+.bubble .att-thumb { width:64px; height:64px; object-fit:cover; border-radius:var(--radius-xs); display:block; }
+.bubble .att-file, .att-chip .att-file { font-size:var(--text-xs); border:1px solid var(--border); border-radius:var(--radius-xs); padding:2px 6px; align-self:center; }
