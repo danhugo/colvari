@@ -478,6 +478,9 @@ class Store {
     return item;
   }
   closeInbox(match, answer) { this.update('inbox', { items: [] }, (d) => { for (const i of d.items) if (match(i)) Object.assign(i, { status: 'answered', answer, answeredAt: new Date().toISOString() }); }); }
+  // One-shot team-change approvals: once the core has used an answer (applied or declined) the item
+  // is marked consumed so the same request can never replay a stale answer.
+  consumeInbox(iid) { this.update('inbox', { items: [] }, (d) => { for (const i of d.items) if (i.id === iid) i.consumed = true; }); }
   // ask_human: store the question and park the task in waiting_for_human.
   askHuman({ taskId, nodeId, question, choices, change }) {
     const item = this.addInbox({ kind: 'question', taskId, nodeId, question, choices, change });

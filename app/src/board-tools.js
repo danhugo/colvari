@@ -47,15 +47,20 @@ function makeTools(store, nodeId) {
   // teamChangeApproval 'ask' must NOT block the tool call (an MCP call can time out): the first call
   // files the request in the human Inbox — the core's current task goes waiting_for_human — and
   // returns {pending:true}; nothing changes. When the human answered and the core calls again with
-  // the same request, the answered item decides: 'approve' applies it, anything else refuses.
+  // the same request, the answered item decides: 'approve' applies it, anything else refuses. The
+  // answer is one-shot: askGate consumes the item once it is used, so the same request re-asks
+  // instead of replaying an old approval or staying blocked by an old decline.
   const askGate = (change, question) => {
     if ((store.getSettings().teamChangeApproval || 'ask') !== 'ask') return { proceed: true };
     const fp = JSON.stringify(stable(change));
-    const mine = store.listInbox().filter((i) => i.kind === 'question' && i.nodeId === nodeId && i.change === fp);
+    const mine = store.listInbox().filter((i) => i.kind === 'question' && i.nodeId === nodeId && i.change === fp && !i.consumed);
     const open = mine.find((i) => i.status === 'open');
     if (open) return { pending: true, result: { pending: true, inboxId: open.id, note: 'pending approval: waiting for the human to answer in the Inbox; call this tool again once it is answered' } };
     const answered = [...mine].reverse().find((i) => i.status === 'answered');
-    if (answered) return answered.answer === 'approve' ? { proceed: true } : { declined: true, result: { applied: false, note: `declined by the human (${answered.answer}); nothing was changed` } };
+    if (answered) {
+      store.consumeInbox(answered.id);
+      return answered.answer === 'approve' ? { proceed: true } : { declined: true, result: { applied: false, note: `declined by the human (${answered.answer}); nothing was changed` } };
+    }
     const tk = store.listTasks({ assignee: nodeId, status: 'in_progress' })[0];
     store.askHuman({ taskId: tk ? tk.id : null, nodeId, question, choices: ['approve'], change: fp });
     return { pending: true, result: { pending: true, note: 'pending approval: the request is in the human Inbox; nothing changes until it is approved and you call this tool again' } };

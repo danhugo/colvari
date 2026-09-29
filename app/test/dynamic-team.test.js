@@ -179,6 +179,24 @@ test('ask mode: a declined request changes nothing and is announced', () => {
   assert.ok(s.readLogs(50).some((l) => l.kind === 'team.change' && l.text.includes('declined')));
 });
 
+test('ask mode: an answer is one-shot — used up on apply and on decline, so the same request re-asks', () => {
+  const { s, tools } = setup({ approval: 'ask' });
+  const req = { name: 'Once', role: 'Dev', reason: 'r' };
+  tools.recruit_agent(req);
+  const first = s.listInbox()[0];
+  s.answerInbox(first.id, 'approve');
+  assert.ok(tools.recruit_agent(req).id, 'applied on the re-call');
+  const r2 = tools.recruit_agent(req); // same arguments again
+  assert.equal(r2.pending, true, 'pending again, not applied off the stale approval');
+  const again = s.listInbox({ status: 'open' })[0];
+  assert.ok(again && again.id !== first.id, 'a new inbox item was filed');
+  s.answerInbox(again.id, 'no');
+  const r3 = tools.recruit_agent(req);
+  assert.equal(r3.applied, false, 'declined once');
+  assert.ok(/declined/.test(r3.note));
+  assert.equal(tools.recruit_agent(req).pending, true, 'the decline is used up too: re-asks instead of blocking forever');
+});
+
 test('ask mode: maxAgents is re-checked after the human approves', () => {
   const { s, core, tools } = setup({ approval: 'ask', maxAgents: 4 });
   s.createTask({ title: 'core work', assignee: core.id });
