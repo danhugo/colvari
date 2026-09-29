@@ -6,11 +6,13 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs'); const os = require('os'); const path = require('path');
+const { execSync } = require('child_process');
 const { Store } = require('../src/store');
 const { Orchestrator, RESTART } = require('../src/orchestrator');
 const { UpdateWatcher } = require('../src/self-update');
 const { makeTools } = require('../src/board-tools');
 const MG = require('../src/merge-gate');
+const WT = require('../src/worktree');
 
 const tmp = (p) => fs.mkdtempSync(path.join(os.tmpdir(), p));
 const waitFor = async (fn, ms = 8000) => { const t0 = Date.now(); while (!fn()) { if (Date.now() - t0 > ms) throw new Error('timeout'); await new Promise((r) => setTimeout(r, 10)); } };
@@ -52,6 +54,44 @@ test('store: landed merges bump the pending counter; refusals and empty merges d
     assert.equal(s.restartPending().count, 3, 'refused and empty merges do not count (Cato #6)');
     assert.equal(s.restartPending().since, since);
   } finally { MG.gateMerge = orig; }
+});
+
+test('store: merges collapse to ONE pending restart at the latest sha, counted as commits behind (t_7e590e54)', () => {
+  const d = tmp('squad-restart-');
+  const s = new Store(path.join(d, 'p'));
+  s.bumpRestartPending({ sha: 'sha-1', behind: 2 });
+  const rp = s.bumpRestartPending({ sha: 'sha-2', behind: 5 });
+  assert.equal(rp.count, 5, 'the count is commits behind, not merges seen');
+  assert.equal(rp.sha, 'sha-2', 'one pending restart, moved to the latest master sha');
+  assert.equal(rp.since, s.restartPending().since, 'since still anchors the first change');
+  s.bumpRestartPending({ sha: 'sha-3' }); // no behind known (no buildSha recorded yet)
+  assert.equal(s.restartPending().sha, 'sha-3', 'the sha still moves');
+  assert.equal(s.restartPending().count, 6, 'without a behind count the plain tally holds');
+  s.bumpRestartPending(); // legacy callers keep working
+  assert.equal(s.restartPending().count, 7);
+});
+
+test('store: a landed merge points the pending restart at the new tip, N commits behind (t_7e590e54)', () => {
+  const d = tmp('squad-restart-');
+  const s = new Store(path.join(d, 'p'));
+  const pm = s.addNode({ name: 'PM', role: 'PM' });
+  s.update('project', {}, (m) => { m.buildSha = 'build-1'; return m; });
+  const orig = MG.gateMerge;
+  const origCB = WT.commitsBehind;
+  const root = tmp('squad-restart-root-');
+  try {
+    MG.gateMerge = () => ({ merged: true, base: 'master', root, sha: 'tip-9', gate: { state: 'green', tests: 1, flaky: [] } });
+    WT.commitsBehind = () => 4;
+    s.updateTask(s.createTask({ title: 'x', assignee: pm.id, createdBy: 'human' }).id, { worktreePath: '/w', worktreeBranch: 'squad/x', status: 'done' });
+  } finally { MG.gateMerge = orig; WT.commitsBehind = origCB; }
+  const rp = s.restartPending();
+  assert.equal(rp.sha, 'tip-9', 'one restart to the merged tip');
+  assert.equal(rp.count, 4, 'commits build-1..tip-9, not "1 merge"');
+  MG.gateMerge = () => ({ merged: true, base: 'master', root, gate: { state: 'green', tests: 1, flaky: [] } });
+  s.updateTask(s.createTask({ title: 'y', assignee: pm.id, createdBy: 'human' }).id, { worktreePath: '/w2', worktreeBranch: 'squad/y', status: 'done' });
+  MG.gateMerge = orig;
+  assert.equal(s.restartPending().count, 5, 'a gate result without a sha falls back to the tally');
+  assert.equal(s.restartPending().sha, 'tip-9', 'and keeps the last known tip');
 });
 
 test('store: scheduleRestart validates the anchor at schedule time (Cato #2)', () => {
@@ -108,7 +148,7 @@ test('orchestrator: armed schedule gates new dispatch (anchor exempt) and fires 
   assert.equal(rp.firedCount, 0);
   assert.equal(o._restartGate, true, 'the gate stays armed until the relaunch (no dispatch window)');
   const st = o.restartState();
-  assert.deepEqual(st, { pendingCount: 0, since: rp.since, scheduledAfter: anchor.id, scheduledNow: false, gating: [other.id], busyAgents: [], blockedReason: null, waitingReasons: [] });
+  assert.deepEqual(st, { pendingCount: 0, since: rp.since, targetSha: null, scheduledAfter: anchor.id, scheduledNow: false, gating: [other.id], busyAgents: [], blockedReason: null, waitingReasons: [] });
   assert.ok(pushed.length >= 1, 'restart-state is pushed when it changes');
 });
 
@@ -215,12 +255,41 @@ test('orchestrator: restartState says when changes are pending but nothing is ar
   s.bumpRestartPending(); s.bumpRestartPending();
   const st = o.restartState();
   assert.equal(st.pendingCount, 2);
-  assert.match(st.blockedReason, /not armed — 2 changes pending \(cap 20\)/);
+  assert.match(st.blockedReason, /not armed — 2 commits behind \(cap 20\)/);
   assert.deepEqual(st.waitingReasons, [st.blockedReason]);
+  assert.equal(st.targetSha, null, 'bare bumps carry no target sha');
   s.scheduleRestart({ now: true });
   const st2 = o.restartState();
   assert.equal(st2.blockedReason, null, 'armed and drained: nothing blocks (next sweep fires)');
   assert.deepEqual(st2.waitingReasons, []);
+});
+
+test('orchestrator: the not-armed reason names the target sha and the commits behind (t_7e590e54)', () => {
+  const d = tmp('squad-restart-');
+  const { s, o } = setup(d);
+  s.bumpRestartPending({ sha: 'abcdef1234567890', behind: 3 });
+  const st = o.restartState();
+  assert.equal(st.pendingCount, 3);
+  assert.equal(st.targetSha, 'abcdef1234567890', 'the restart targets the latest master sha');
+  assert.match(st.blockedReason, /not armed — 3 commits behind at abcdef1 \(cap 20\)/);
+  assert.deepEqual(st.waitingReasons, [st.blockedReason]);
+});
+
+test('orchestrator: boot records the running build sha so merges can count commits behind (t_7e590e54)', () => {
+  const d = tmp('squad-restart-');
+  const repo = tmp('squad-restart-repo-');
+  execSync(`git -C "${repo}" init -q`);
+  execSync(`git -C "${repo}" -c user.email=t@t -c user.name=t commit --allow-empty -qm boot`);
+  const sha = execSync(`git -C "${repo}" rev-parse HEAD`).toString().trim();
+  const s = new Store(path.join(d, 'p'));
+  const clear = (o) => { clearInterval(o._wakeTimer); clearInterval(o._stallTimer); clearInterval(o._tickTimer); clearInterval(o._restartTimer); };
+  const o = new Orchestrator(s, { repoDir: repo });
+  clear(o);
+  assert.equal((s.meta() || {}).buildSha, sha, 'meta.buildSha = HEAD at boot');
+  execSync(`git -C "${repo}" -c user.email=t@t -c user.name=t commit --allow-empty -qm two`);
+  const o2 = new Orchestrator(s, { repoDir: repo });
+  clear(o2);
+  assert.equal((s.meta() || {}).buildSha, execSync(`git -C "${repo}" rev-parse HEAD`).toString().trim(), 'a moved HEAD is re-recorded');
 });
 
 test('orchestrator: human pill — restartNow fires when idle; cancel disarms and aborts the flow', () => {

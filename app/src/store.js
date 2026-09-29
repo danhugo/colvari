@@ -183,13 +183,20 @@ class Store {
       return m.restartPending;
     });
   }
-  // One more landed merge waits for the next restart. `since` anchors the first change that the
-  // running process has not picked up yet.
-  bumpRestartPending() {
+  // One more landed merge waits for the next restart. Collapses (t_7e590e54): every merge moves
+  // the SAME pending restart to the new base tip ({sha}) and the count reads as the commits the
+  // running build is behind — so "21 merges" can never pile up again. `behind` comes from the
+  // merge site (meta.buildSha..sha); callers without it keep the plain one-merge-per-bump tally.
+  bumpRestartPending({ sha = null, behind = null } = {}) {
     return this.withLock(() => {
       const m = this.read('project', null) || {};
       const rp = m.restartPending || {};
-      m.restartPending = { ...rp, count: (Number(rp.count) || 0) + 1, since: rp.since || new Date().toISOString() };
+      const next = { ...rp, count: (Number(rp.count) || 0) + 1, since: rp.since || new Date().toISOString() };
+      if (sha) {
+        next.sha = sha;
+        if (Number.isFinite(behind) && behind > 0) next.count = behind;
+      }
+      m.restartPending = next;
       this.write('project', m);
       return m.restartPending;
     });
@@ -551,7 +558,19 @@ class Store {
       this.commentTask(tid, 'system', `auto-merged ${t.worktreeBranch} into ${r.base} (merge gate: npm test ${flaky}${r.gate && r.gate.tests ? `, ${r.gate.tests} tests` : ''})`);
       // A landed merge no longer restarts the app; it only counts toward the next scheduled one
       // (conflicts/refusals are not landed work — the count covers merges that actually merged).
-      this.bumpRestartPending();
+      // Collapse (t_7e590e54): point the one pending restart at the new base tip; the count is the
+      // commits the running build (meta.buildSha, written by the app at boot) is behind. Without a
+      // buildSha — fresh store, or the merge ran where the boot sha was never recorded — the plain
+      // merge tally holds, and a failed rev-list falls back the same way.
+      let bump = { sha: r.sha || null };
+      try {
+        const build = (this.meta() || {}).buildSha;
+        if (bump.sha && build && build !== bump.sha) {
+          const n = WT.commitsBehind(r.root, build, bump.sha);
+          if (n > 0) bump.behind = n;
+        }
+      } catch {}
+      this.bumpRestartPending(bump);
       if (r.reason === 'tree-mismatch') {
         // Landed, but the base tree is not the tree we tested — someone bypassed the lock.
         MG.ensureRedMasterTask(this, { root: r.root, tests: ['(post-merge tree mismatch — base changed outside the gate)'], base: r.base, source: 'post-merge verification', lastMergedTask: t.id, lastMergedBranch: t.worktreeBranch });
