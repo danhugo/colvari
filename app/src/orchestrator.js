@@ -47,7 +47,8 @@ function autoCompactEnv(pct) {
 // per window). MIN_GAP_MS is the per-recipient wake debounce: after an agent-to-agent wake, that
 // agent is not auto-woken again for at least this long — further messages accumulate unread in its
 // inbox until the interval passes (or the agent is dispatched for a task, whose prompt carries them).
-// Human/system wakes (ask_human answers, nudges, chat) and task dispatch bypass the interval.
+// Human wakes (ask_human answers, chat) and task dispatch bypass the interval; nudge wakes (idle/
+// stale watchdog) defer to it in nudgeIdle — a changed idle set must not re-wake a just-woken core.
 // Exported so tests can shorten the timings.
 const WAKE = { SWEEP_MS: 1000, DEBOUNCE_MS: 1500, MIN_GAP_MS: 5 * 60 * 1000, MAX_PER_PAIR: 3, PAIR_WINDOW_MS: 10 * 60 * 1000 };
 
@@ -450,7 +451,9 @@ class Orchestrator extends EventEmitter {
   // Deliver already-stored messages to an IDLE agent as a wake run — the two paths the message sweep
   // deliberately ignores (human and system senders have their own delivery): the human's answer to an
   // ask_human (team-answers) and the core nudge (nudgeIdle). This path BYPASSES the per-agent wake
-  // debounce by design: anything from a human or the system must reach the agent immediately. Guards
+  // debounce for human messages (an answer must reach the asker immediately); the nudge path defers
+  // to the debounce itself in nudgeIdle, so a watchdog wake never lands inside another wake's gap.
+  // Guards
   // mirror dispatchWake plus the run gate: nothing auto-starts on a stopped project, a live agent is
   // reached by its own channels, and maxRuns/maxConcurrency still bound auto-dispatch. `why` carries
   // the monitor event Dev B's UI keys on — orch.log(nodeId, 'monitor', <sentence>, {reason, taskIds,
@@ -734,7 +737,8 @@ class Orchestrator extends EventEmitter {
     this.nudged ||= new Map();
     // staleMin reuses the stall timeout (no new setting); <=0 disables the watchdog condition.
     const staleMin = Number(this.store.getSettings().stallTimeoutMin ?? 10);
-    const opts = staleMin > 0 ? { staleMin, now: Date.now() } : {};
+    const now = Date.now();
+    const opts = staleMin > 0 ? { staleMin, now } : {};
     for (const n of IDLE.idleNudges(this.store.getTeam(), this.store.listTasks(), this.agents, opts)) {
       // Debounce per kind, keyed by pmId+kind so the two conditions never clobber each other: idle
       // nudges by their (already distinct) text, stale nudges by the sorted taskIds — a core that
@@ -744,6 +748,22 @@ class Orchestrator extends EventEmitter {
       const key = kind === 'stale' ? [...n.taskIds].sort().join(',') : n.text;
       const mk = `${n.pmId}|${kind}`;
       if (this.nudged.get(mk) === key) continue;
+      // Nudge wakes respect the per-agent wake gap too (t_cb6663f7): the text-key debounce re-arms
+      // whenever the idle set changes — any report flipping busy<->idle — and each "new" nudge would
+      // otherwise wake the core through wakeForHuman's human bypass seconds after the last wake,
+      // even right after the sweep logged "wake suppressed" for the same agent. Deferred, not
+      // dropped: the key is recorded only when the wake actually fires, so the condition re-fires
+      // on a later tick once the interval passes (a newer condition supersedes it meanwhile).
+      const cooldown = (this.wakeLastAt.get(n.pmId) || 0) + WAKE.MIN_GAP_MS - now;
+      if (cooldown > 0) {
+        const last = (this.nudgeDeferredLogged ||= new Map()).get(n.pmId) || 0;
+        if (now - last >= WAKE.MIN_GAP_MS) { // one line per gap window, like the sweep's suppression line
+          this.nudgeDeferredLogged.set(n.pmId, now);
+          this.log(n.pmId, 'system', `nudge deferred for another ${Math.ceil(cooldown / 60000)}min (last wake < ${Math.round(WAKE.MIN_GAP_MS / 60000)}min ago); it re-fires once the interval passes: ${n.text}`);
+        }
+        continue;
+      }
+      this.nudgeDeferredLogged?.delete(n.pmId);
       this.nudged.set(mk, key);
       const m = this.store.sendMessage({ from: 'system', to: n.pmId, text: n.text });
       this.log(n.pmId, 'system', 'nudge: ' + n.text);
