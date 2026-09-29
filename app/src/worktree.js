@@ -73,6 +73,15 @@ function worktreeDiscard(t) {
   return { ok: true };
 }
 
+// Merge state of `branch` against the repo's base: { base, merged } — merged=true when the branch
+// is an ancestor of the base (fully merged), false when it carries unmerged commits. null when the
+// repo or its base branch cannot be determined (the caller decides whether that is fatal).
+function branchMergeState(root, branch) {
+  let base;
+  try { base = baseOf(root); } catch { return null; }
+  try { git(root, ['merge-base', '--is-ancestor', branch, base]); return { base, merged: true }; } catch { return { base, merged: false }; }
+}
+
 // squad/<taskId> branches in `root` not yet merged (as an ancestor) into the repo's base branch.
 function unmergedSquadBranches(root) {
   const base = baseOf(root);
@@ -83,4 +92,4 @@ function unmergedSquadBranches(root) {
     .map((branch) => ({ root, base, branch }));
 }
 
-module.exports = { ensureWorktree, worktreeDiff, worktreeMerge, worktreeDiscard, unmergedSquadBranches, dirtyMergeMessage, dirtyMainFiles };
+module.exports = { ensureWorktree, worktreeDiff, worktreeMerge, worktreeDiscard, unmergedSquadBranches, branchMergeState, dirtyMergeMessage, dirtyMainFiles };
