@@ -803,9 +803,24 @@ function fitView() {
 // ---------- graph view model: automatic layered tree + team clusters above CLUSTER_MIN agents ----------
 // The stored x/y stay the user's manual layout; while graphAuto is on, the view lays the assign hierarchy
 // out as a tidy top-down tree (lead on top, reports underneath). Past CLUSTER_MIN agents each lead's
-// subtree (>=3 agents) collapses into one cluster card (count + working/idle summary); click expands it.
-const CLUSTER_MIN = 12; let graphAuto = true, GV = null; const expandedClusters = new Set();
+// WHOLE group (assign-subtree + edge-attached reviewers, >=3 agents — grouping lives in src/graph-view.js)
+// collapses into one cluster card (count + working/idle summary); click expands it.
+let graphAuto = true, GV = null; const expandedClusters = new Set();
 const liveOf = (n) => (n.cluster ? (n.members.some((m) => nodeLive(m) === 'working') ? 'working' : n.members.some((m) => nodeLive(m) === 'needs-human') ? 'needs-human' : 'idle') : nodeLive(n));
+// Shared collapsed-group card for the Team and Overview graphs: stacked cards, member-count avatar,
+// live member dots and a working/idle summary; onExpand unfolds the group back into member cards.
+function drawClusterCard(g, n, onExpand) {
+  const cnt = { working: 0, 'needs-human': 0, idle: 0 }; n.members.forEach((m) => { cnt[nodeLive(m) === 'working' ? 'working' : nodeLive(m) === 'needs-human' ? 'needs-human' : 'idle']++; });
+  // Back cards peek straight DOWN only: side anchors exit at the main card's left/right edges, so a
+  // diagonal stack would put its overhang under every edge start (and the card-crossing check).
+  el('rect', { class: 'card stack2', width: W, height: H, rx: 12, x: 0, y: 10 }, g); el('rect', { class: 'card stack1', width: W, height: H, rx: 12, x: 0, y: 5 }, g); el('rect', { class: 'card', width: W, height: H, rx: 12 }, g);
+  const c = agentColor(n.head); el('circle', { class: 'avatar', cx: 30, cy: 26, r: 14, style: `fill:var(--agent-${c})` }, g); el('text', { x: 30, y: 30.5, class: 'avtext', 'text-anchor': 'middle' }, g).textContent = n.members.length;
+  el('text', { x: 52, y: 23, class: 'nname' }, g).textContent = clipText(n.name, 18); el('text', { x: 52, y: 38, class: 'nrole' }, g).textContent = n.role + ' · expand';
+  n.members.slice(0, 16).forEach((m, i) => el('circle', { class: 'mdot s-' + nodeLive(m), cx: 16 + i * 10, cy: 54, r: 3.5 }, g));
+  el('text', { x: 12, y: 72, class: 'clsum' }, g).textContent = [cnt.working && cnt.working + ' working', cnt['needs-human'] && cnt['needs-human'] + ' needs you', cnt.idle && cnt.idle + ' idle'].filter(Boolean).join(' · ');
+  el('title', {}, g).textContent = n.members.map((m) => `${m.name} — ${nodeLive(m)}`).join('\n');
+  g.style.cursor = 'pointer'; g.onclick = (ev) => { ev.stopPropagation(); onExpand(); };
+}
 function treeLayout(nodes, edges) {
   const ids = new Set(nodes.map((n) => n.id)), kids = {}, hasParent = new Set(); const GX = W + 36, GY = H + 64, pos = {};
   for (const e of edges) if ((e.type || 'assign') === 'assign' && ids.has(e.from) && ids.has(e.to) && e.from !== e.to && !hasParent.has(e.to)) { (kids[e.from] ||= []).push(e.to); hasParent.add(e.to); }
@@ -826,17 +841,10 @@ function treeLayout(nodes, edges) {
   return pos;
 }
 function buildView() {
-  const real = S.team.nodes, ids = new Set(real.map((n) => n.id)); let nodes = real; const remap = {};
-  if (real.length > CLUSTER_MIN) {
-    const kids = {}, hasParent = new Set();
-    for (const e of S.team.edges) if ((e.type || 'assign') === 'assign' && ids.has(e.from) && ids.has(e.to) && e.from !== e.to && !hasParent.has(e.to)) { (kids[e.from] ||= []).push(e.to); hasParent.add(e.to); }
-    const byId = Object.fromEntries(real.map((n) => [n.id, n])); const sub = (id, acc = []) => { if (acc.includes(id)) return acc; acc.push(id); (kids[id] || []).forEach((k) => sub(k, acc)); return acc; };
-    const roots = real.filter((n) => !hasParent.has(n.id)); const cl = [];
-    for (const r of roots) for (const c of kids[r.id] || []) { const m = sub(c); if (m.length >= 3 && !expandedClusters.has(c)) { cl.push({ id: 'cl:' + c, cluster: true, head: c, members: m.map((i) => byId[i]), name: (byId[c].name || c) + ' team', role: m.length + ' agents', x: 0, y: 0 }); m.forEach((i) => { remap[i] = 'cl:' + c; }); } }
-    nodes = [...real.filter((n) => !remap[n.id]), ...cl];
-  }
-  const seenE = new Set(); const mapE = (e) => ({ ...e, from: remap[e.from] || e.from, to: remap[e.to] || e.to });
-  const edges = [...S.team.edges, ...(S.cross || []).filter((e) => !S.team.edges.some((x) => x.id === e.id))].map(mapE).filter((e) => e.from !== e.to && !seenE.has(e.from + '|' + e.to + '|' + (e.type || 'assign')) && seenE.add(e.from + '|' + e.to + '|' + (e.type || 'assign')));
+  const real = S.team.nodes;
+  const cv = GraphView.clusterView(real, S.team.edges, expandedClusters);
+  const nodes = cv.nodes;
+  const edges = GraphView.mapEdges([...S.team.edges, ...(S.cross || []).filter((e) => !S.team.edges.some((x) => x.id === e.id))], cv.remap);
   if (graphAuto && nodes.length) { const p = treeLayout(nodes, edges.filter((e) => nodes.some((n) => n.id === e.from) && nodes.some((n) => n.id === e.to))); for (const n of nodes) { n.x = p[n.id].x; n.y = p[n.id].y; } }
   GV = { nodes, edges, clustered: nodes.some((n) => n.cluster) };
 }
@@ -928,7 +936,7 @@ function renderGraph() {
   const edges = GV.edges;
   const pairN = {}, pairI = {}; const pk = (e) => [e.from, e.to].sort().join('|'); edges.forEach((e) => { pairN[pk(e)] = (pairN[pk(e)] || 0) + 1; });
   const srcN = {}, srcI = {}; edges.forEach((e) => { srcN[e.from] = (srcN[e.from] || 0) + 1; });
-   const blocks = nodes.map((n) => ({ x: n.x - 4, y: n.y - 4, w: W + 8, h: H + 8 })); const pills = [];
+   const blocks = nodes.map((n) => ({ x: n.x - 4, y: n.y - 4, w: W + 8, h: (n.cluster ? H + 16 : H + 8) })); const pills = []; // cluster blocks include the stacked-cards peek below the card
    // open (non-done) task count per assignee — surfaces routing skew on the node cards
    const openCnt = {}; for (const t of (S.tasks || [])) if (t.status !== 'done' && t.assignee) openCnt[t.assignee] = (openCnt[t.assignee] || 0) + 1;
    edgeLayout = { nodes, blocks, per: [] };
@@ -960,15 +968,8 @@ function renderGraph() {
   for (const n of nodes) {
     if (n.ghost) { const g = el('g', { class: 'ghost', transform: `translate(${n.x},${n.y})` }, nL); el('rect', { width: W, height: H, rx: 12 }, g); el('text', { x: 14, y: 28, class: 'nname' }, g).textContent = clipText(n.name, 22); el('text', { x: 14, y: 46, class: 'nrole' }, g).textContent = 'in another team'; continue; }
     if (n.cluster) {
-      const cnt = { working: 0, 'needs-human': 0, idle: 0 }; n.members.forEach((m) => { cnt[nodeLive(m) === 'working' ? 'working' : nodeLive(m) === 'needs-human' ? 'needs-human' : 'idle']++; });
       const lv = liveOf(n); const g = el('g', { class: 'node cluster st-' + lv, transform: `translate(${n.x},${n.y})`, 'data-id': n.id }, nL);
-      el('rect', { class: 'card stack2', width: W, height: H, rx: 12, x: 8, y: 8 }, g); el('rect', { class: 'card stack1', width: W, height: H, rx: 12, x: 4, y: 4 }, g); el('rect', { class: 'card', width: W, height: H, rx: 12 }, g);
-      const c = agentColor(n.head); el('circle', { class: 'avatar', cx: 30, cy: 26, r: 14, style: `fill:var(--agent-${c})` }, g); el('text', { x: 30, y: 30.5, class: 'avtext', 'text-anchor': 'middle' }, g).textContent = n.members.length;
-      el('text', { x: 52, y: 23, class: 'nname' }, g).textContent = clipText(n.name, 18); el('text', { x: 52, y: 38, class: 'nrole' }, g).textContent = n.role + ' · expand';
-      n.members.slice(0, 16).forEach((m, i) => el('circle', { class: 'mdot s-' + nodeLive(m), cx: 16 + i * 10, cy: 54, r: 3.5 }, g));
-      el('text', { x: 12, y: 72, class: 'clsum' }, g).textContent = [cnt.working && cnt.working + ' working', cnt['needs-human'] && cnt['needs-human'] + ' needs you', cnt.idle && cnt.idle + ' idle'].filter(Boolean).join(' · ');
-      el('title', {}, g).textContent = n.members.map((m) => `${m.name} — ${nodeLive(m)}`).join('\n');
-      g.style.cursor = 'pointer'; g.onclick = (ev) => { ev.stopPropagation(); expandedClusters.add(n.head); renderGraph(); fitView(); };
+      drawClusterCard(g, n, () => { expandedClusters.add(n.head); renderGraph(); fitView(); });
       continue;
     }
     const live = nodeLive(n); const ns = (S.nstat || {})[n.id] || {}; const c = agentColor(n.id);
@@ -2364,19 +2365,32 @@ function renderOverview() {
   ovSig = sig;
   const stuck = new Set(Overview.stuckAgents(S.orch.agents, L, now, S.settings.stuckMinutes || 5));
   const hot = Overview.edgeFlashes(L, S.team.edges, now);
-  const ovNodes = spreadOverlaps(S.team.nodes);
-  const svg = $('#ov-graph'); svg.innerHTML = ''; const byId = Object.fromEntries(ovNodes.map((n) => [n.id, n]));
+  // Same cluster collapse as the Team graph (t_345af163): past CLUSTER_MIN agents the Overview shows one
+  // card per lead group too. Collapsed views auto-arrange like the Team's auto-layout (head-stored
+  // positions would scatter the few cards arbitrarily); small teams keep their stored layout.
+  // Copies: the Overview never writes back node x/y (the Team graph owns stored/manual positions).
+  const cv = GraphView.clusterView(S.team.nodes, S.team.edges, expandedClusters);
+  let ovNodes = cv.nodes; const ovEdges = GraphView.mapEdges(S.team.edges, cv.remap);
+  if (cv.clustered && ovNodes.length) { ovNodes = ovNodes.map((n) => ({ ...n })); const p = treeLayout(ovNodes, ovEdges); for (const n of ovNodes) { n.x = p[n.id].x; n.y = p[n.id].y; } }
+  else ovNodes = spreadOverlaps(ovNodes);
+  const svg = $('#ov-graph'); svg.innerHTML = ''; const byId = Object.fromEntries(S.team.nodes.map((n) => [n.id, n]));
+  const visById = Object.fromEntries(ovNodes.map((n) => [n.id, n]));
   const defs = el('defs', {}, svg);
   for (const t of ['assign', 'message', 'review']) { const m = el('marker', { id: 'ovarr-' + t, viewBox: '0 0 10 10', refX: 9, refY: 5, markerWidth: 8, markerHeight: 8, markerUnits: 'userSpaceOnUse', orient: 'auto-start-reverse' }, defs); el('path', { d: 'M0,1 L9,5 L0,9 z', class: 'arrow arrow-' + t }, m); }
   // Same orthogonal geometry (and parallel-edge offsets) as the Team graph, so both views read alike.
-  const pk = (e) => [e.from, e.to].sort().join('|'); const pairN = {}, pairI = {}; S.team.edges.forEach((e) => { pairN[pk(e)] = (pairN[pk(e)] || 0) + 1; });
+  const pk = (e) => [e.from, e.to].sort().join('|'); const pairN = {}, pairI = {}; ovEdges.forEach((e) => { pairN[pk(e)] = (pairN[pk(e)] || 0) + 1; });
   // Glance view: plain elbows between facing sides (drawn under the cards), no obstacle detours — detours made long bus lines that ran off-canvas.
-  for (const e of S.team.edges) {
-    const a = byId[e.from], b = byId[e.to]; if (!a || !b) continue; const type = e.type || 'assign';
+  for (const e of ovEdges) {
+    const a = visById[e.from], b = visById[e.to]; if (!a || !b) continue; const type = e.type || 'assign';
     const key = pk(e); const i = (pairI[key] = (pairI[key] ?? -1) + 1); const off = (i - (pairN[key] - 1) / 2) * 22 * (e.from < e.to ? 1 : -1);
     el('path', { d: edgeGeom(a, b, off).d, class: `edge edge-${type}` + (hot.has(e.id) ? ' flash' : ''), 'marker-end': `url(#ovarr-${type})` }, svg);
   }
   for (const n of ovNodes) {
+    if (n.cluster) {
+      const g = el('g', { class: 'node cluster st-' + liveOf(n), transform: `translate(${n.x},${n.y})`, 'data-id': n.id }, svg);
+      drawClusterCard(g, n, () => { expandedClusters.add(n.head); ovSig = null; renderOverview(); });
+      continue;
+    }
     const live = (S.orch.agents[n.id] || {}).status === 'working' ? 'working' : nodeLive(n); const isStuck = stuck.has(n.id);
     const g = el('g', { class: 'node' + (live === 'working' ? ' working st-working' : ' st-' + live) + (isStuck ? ' stuck' : '') + (rtuFor(n.id) ? ' rtpaused' : ''), transform: `translate(${n.x},${n.y})`, 'data-id': n.id }, svg);
     el('rect', { class: 'card', width: W, height: H, rx: 12 }, g);

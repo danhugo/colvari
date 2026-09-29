@@ -176,6 +176,11 @@ header .pill { font-variant-numeric:tabular-nums; } .pill.quiet { color:var(--mu
 #ov-graph .node.stuck .card { stroke:var(--warning-strong); stroke-width:2; animation:none; }
 #ov-graph .avtext { fill:#fff; font-size:11px; font-weight:var(--fw-bold); } #ov-graph .nname { font-size:13px; font-weight:var(--fw-semibold); } #ov-graph .nrole { font-size:11px; fill:var(--fg-muted); }
 #ov-graph .node.stuck .nrole { fill:var(--warning-strong); }
+/* Collapsed group cards mirror the Team graph's clusters (t_345af163) */
+#ov-graph .node.cluster .card { fill:var(--bg-raised); } #ov-graph .node.cluster .stack1, #ov-graph .node.cluster .stack2 { fill:var(--bg-hover); filter:none; }
+#ov-graph .node.cluster.st-working .card:not(.stack1):not(.stack2) { fill:var(--success-soft); }
+#ov-graph .mdot { fill:var(--fg-muted); opacity:.5; } #ov-graph .mdot.s-working { fill:var(--success); opacity:1; } #ov-graph .mdot.s-needs-human { fill:var(--warning-strong); opacity:1; }
+#ov-graph .clsum { fill:var(--fg-secondary); font-size:11px; }
 #ov-graph .status circle { fill:none; stroke:var(--fg-muted); stroke-width:2; } #ov-graph .status.s-working circle, #ov-graph .status.s-needs-human circle { stroke:none; } #ov-graph .status.s-working circle { fill:var(--success); } #ov-graph .status.s-needs-human circle { fill:var(--warning-strong); }
 #ov-graph .edge { fill:none; stroke:var(--edge); stroke-width:1.75; }
 #ov-graph .edge-assign { stroke:var(--accent); } #ov-graph .edge-message { stroke:var(--info); } #ov-graph .edge-review { stroke:var(--warning-strong); }
