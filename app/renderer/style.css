@@ -596,3 +596,24 @@ header > strong.brand { display:flex; align-items:center; gap:6px; font-weight:7
 #taskdetail { min-width:0; overflow-y:auto; overflow-x:hidden; transition:width var(--dur-base) var(--ease-out), padding var(--dur-base) var(--ease-out), border-color var(--dur-base) var(--ease-out), opacity var(--dur-base) var(--ease-out); }
 #taskdetail .td-inner { width:318px; } /* panel width − 2×padding − 2×border; keeps text from re-wrapping mid-animation */
 #taskdetail.closed { width:0; padding:0; border-color:transparent; opacity:0; overflow:hidden; }
+/* t_831325b9: Overview sweep - hide empty thread panel, drop always-on explainer (kept as tooltip) */
+#ov-threadpanel[hidden] { display:none; } .ov-purpose { display:none; }
+
+/* t_36c96112: weakness-sweep fixes */
+.seg { display:inline-flex; gap:2px; padding:2px; margin:8px 0; background:var(--bg-surface); border:1px solid var(--border); border-radius:var(--radius-sm); }
+.seg button { border:none; background:none; color:var(--fg-secondary); padding:3px 12px; font-size:var(--text-xs); }
+.seg button.on { background:var(--bg-hover); color:var(--fg); }
+.us-groups > * { display:none; } .us-groups[data-g="0"] > :nth-child(1), .us-groups[data-g="1"] > :nth-child(2), .us-groups[data-g="2"] > :nth-child(3), .us-groups[data-g="3"] > :nth-child(4) { display:block; }
+.us-groups table { width:100%; }
+.sb-more > summary { cursor:pointer; list-style:none; font-size:var(--text-xs); text-transform:uppercase; letter-spacing:.06em; font-weight:var(--fw-semibold); color:var(--muted); padding:0 var(--space-2); border-radius:var(--radius-xs); } .sb-more > summary::-webkit-details-marker { display:none; } .sb-more > summary::before { content:'▸'; display:inline-block; width:12px; } .sb-more[open] > summary::before { content:'▾'; } .sb-more > summary:hover { color:var(--fg-primary); background:var(--bg-hover); }
+.sb-more[open] > summary { margin-bottom:var(--space-2); } .sb-more select { width:100%; }
+#ov-timeline .lane.attn-blocked, #ov-timeline .lane.attn-error { fill:color-mix(in srgb, var(--danger) 6%, transparent); }
+#ov-timeline .lane.stuck { fill:color-mix(in srgb, var(--warning) 6%, transparent); }
+.cchip:not(.subagent) > summary { list-style:none; cursor:pointer; color:var(--fg-muted); font-family:var(--font-sans, inherit); font-size:var(--text-xs); max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.cchip:not(.subagent) > summary:hover { color:var(--fg-secondary); }
+.cchip:not(.subagent) > pre { background:var(--bg-code); border-radius:var(--radius-sm); padding:6px 8px; font-size:11.5px; white-space:pre-wrap; }
+header #tabs button[data-tab="settings"] .lbl { display:inline; }
+header #goal { min-width:180px; }
+
+.us-groups h4 { display:none; }
+.seg button:focus-visible { outline:2px solid var(--accent); outline-offset:1px; } .seg button.on:focus-visible { outline-offset:2px; box-shadow:0 0 0 1px var(--bg-app); }

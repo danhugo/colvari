@@ -1223,7 +1223,7 @@ const byPriorityThenTitle = (a, b) => PRIORITIES.indexOf(priorityOf(a)) - PRIORI
 // unchanged, and even while their tab was hidden — p95 100ms frames at run cadence. Each gate is a
 // cheap fingerprint of exactly what its renderer reads; hidden tabs skip entirely and re-render on
 // activation (sig reset in the tab-click handler).
-let boardSig = null, logSig = null, obsSig = null, usageSig = null;
+let boardSig = null, logSig = null, obsSig = null, usageSig = null, usageGroup = 0;
 const agentStamp = () => Object.entries(S.orch.agents || {}).map(([k, a]) => `${k}${a.status}${a.taskId || ''}${a.iteration || 0}${a.stall ? '!' : ''}${a.run && a.run.stall ? '!' : ''}`).join();
 let showAllDone = false;
 // Done column: the 20 most recently updated, but a selected card is never allowed to vanish under the fold (t_db029901).
@@ -1670,7 +1670,8 @@ function renderUsage() {
     <div class="stat"><small>Tracking</small><b>${led.rows.length} model key${led.rows.length === 1 ? '' : 's'}</b><small>${S.orch.usageSince ? `since ${new Date(S.orch.usageSince).toLocaleDateString()} · ` : ''}tokens are never summed across models</small></div>
   </div>${mism ? `<p class="warn">${mism} run(s) did not run on the billing mode set for the agent (see Billing column).</p>` : ''}
   <div class="us-breakdowns">${modelBars(led.rows)}${costBars('By runtime', rtBars)}${costBars('By agent', agBars)}</div>
-  <details><summary>Detailed tables</summary><div class="toolbar" style="align-items:flex-start">${modelTableBlock(led.rows)}${keyTableBlock('By agent', Object.entries(led.byAgent).flatMap(([name, rows2]) => rows2.map((row) => ({ name, row }))))}${billingTable(rs)}${keyTableBlock('By task', Object.entries(led.byTask).flatMap(([tid, g2]) => (g2.rows || g2).map((row) => ({ name: taskName(tid), row }))))}</div></details>`;
+  <details><summary>Detailed tables</summary><div class="seg" id="us-seg">${['Model', 'Agent', 'Billing', 'Task'].map((g, i) => `<button data-g="${i}" class="${i === usageGroup ? 'on' : ''}" aria-pressed="${i === usageGroup}">${g}</button>`).join('')}</div><div class="us-groups" data-g="${usageGroup}">${modelTableBlock(led.rows)}${keyTableBlock('By agent', Object.entries(led.byAgent).flatMap(([name, rows2]) => rows2.map((row) => ({ name, row }))))}${billingTable(rs)}${keyTableBlock('By task', Object.entries(led.byTask).flatMap(([tid, g2]) => (g2.rows || g2).map((row) => ({ name: taskName(tid), row }))))}</div></details>`;
+  $('#us-seg').onclick = (ev) => { const b = ev.target.closest('button[data-g]'); if (!b) return; usageGroup = +b.dataset.g; $('#us-seg').querySelectorAll('button').forEach((x) => { x.classList.toggle('on', x === b); x.setAttribute('aria-pressed', x === b); }); $('#us-summary .us-groups').dataset.g = usageGroup; };
   $('#us-runs').innerHTML = `<tr><th>Time</th><th>Agent</th><th>Task</th><th>Kind</th><th>Model</th><th>In</th><th>Out</th><th>Cache read</th><th>Cache write</th><th>Duration</th><th>Turns</th><th>Billing source</th><th>Cost</th></tr>` +
     (rs.slice().reverse().slice(0, 500).map((r) => `<tr><td>${new Date(r.startedAt).toLocaleString()}</td><td>${esc(r.agent || agentName(r.nodeId))}</td><td>${esc(r.task || taskName(r.taskId))}</td><td>${esc(r.kind)}${r.iteration > 1 ? ' #' + r.iteration : ''}</td><td title="${esc((r.models || []).join(', '))}">${esc(r.model || '?')}</td><td class="num">${r.inputTokens}</td><td class="num">${r.outputTokens}</td><td class="num">${r.cacheReadTokens}</td><td class="num">${r.cacheCreationTokens}</td><td class="num">${((r.durationMs || 0) / 1000).toFixed(1)}s</td><td class="num">${r.numTurns}</td><td>${billTag(r.billingSource, r.billingDetail)}${r.billingMismatch ? ` <span class="warn" title="agent billing mode: ${esc(r.billingMode)}">≠ ${esc(r.billingMode)}</span>` : ''}</td><td>${runCostCell(r)}</td></tr>`).join('') || '<tr><td colspan="13" class="muted">No runs recorded yet.</td></tr>');
   renderDiscovery();
@@ -2006,7 +2007,7 @@ function renderOverview() {
   const cur = ts.value || sel.task || (activeTask || S.tasks[S.tasks.length - 1] || {}).id || '';
   ts.innerHTML = S.tasks.map((t) => `<option value="${t.id}">${esc(t.title)} (${t.status})</option>`).join(''); ts.value = cur;
   const t = S.tasks.find((x) => x.id === ts.value); const open = new Set([...document.querySelectorAll('#ov-thread details[open]')].map((d) => d.dataset.k));
-  const head = $('#ov-threadhead');
+  const head = $('#ov-threadhead'); $('#ov-threadpanel').hidden = !t;
   if (!t) { head.innerHTML = ''; ts.classList.add('hidden'); }
   else {
     ts.classList.remove('hidden');
