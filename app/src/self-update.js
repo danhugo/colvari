@@ -120,7 +120,10 @@ class UpdateWatcher extends EventEmitter {
     this.git(['fetch', 'origin']); // best effort: offline / no remote is fine (local merges still count)
     const origin = this.git(['rev-parse', 'origin/' + this.baseBranch()]);
     const originSha = origin.code === 0 ? origin.out.trim() : null;
-    return { local: sha, origin: originSha, to: originSha && originSha !== sha ? originSha : sha };
+    // Only update *to* origin when it is strictly ahead of local (local is its ancestor); when local has
+    // unpushed merges (the usual dogfood case) origin is behind and local HEAD is the target.
+    const originAhead = originSha && originSha !== sha && this.git(['merge-base', '--is-ancestor', sha, originSha]).code === 0;
+    return { local: sha, origin: originSha, to: originAhead ? originSha : sha };
   }
   restartsLastHour() { const t = this.now(); return readHistory(this.store.dir).filter((x) => x.result === 'restarting' && t - Date.parse(x.ts) < 3600 * 1000).length; }
   status() {
