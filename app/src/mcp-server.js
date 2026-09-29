@@ -40,7 +40,7 @@ reg('request_self_update', 'PM only: ask the app to update itself to the newest 
 
 if (coreNow) {
   reg('recruit_agent', 'Core agent only: recruit a new agent into your own team. In ask mode the request first goes to the human Inbox and nothing changes; call this tool again once it is approved.', { name: z.string(), role: z.string(), prompt: z.string().optional(), runtime: z.string().optional(), model: z.string().optional(), effort: z.string().optional(), reason: z.string().describe('why the team change is needed') });
-  reg('retire_agent', 'Core agent only: retire an agent you recruited (refused while it owns an in_progress task; its todo tasks move back to you).', { nodeId: z.string(), reason: z.string().describe('why the team change is needed') });
+  reg('retire_agent', 'Core agent only: retire an agent you recruited (refused while it owns an in_progress task; its todo tasks move back to you). Protected agents refuse retirement — only the human can unprotect them.', { nodeId: z.string(), reason: z.string().describe('why the team change is needed') });
   reg('update_agent', 'Core agent only: change role/prompt/runtime/model/effort of an agent you recruited (patch whitelist; any other field is refused).', { nodeId: z.string(), patch: z.record(z.string(), z.unknown()), reason: z.string().describe('why the team change is needed') });
 }
 

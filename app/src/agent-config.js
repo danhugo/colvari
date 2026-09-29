@@ -19,7 +19,7 @@ const NODE_DEFAULTS = {
   effort: 'low', autoCompact: '', // autoCompact: '' = CLI default; 'auto', or a token window 100000-1000000
   autoCompactPct: '', // auto-compact threshold (% of the window); '' = use the project default (settings.autoCompactPct)
   enabledCapabilities: [], // names from node.capabilities.categorized (mode/skill/command/mcp) this agent should use
-  core: false, createdBy: '', recruitedAt: '', // core-agent team management: core:true on the one protected core; recruits carry who/when created them
+  core: false, createdBy: '', recruitedAt: '', protected: false, // team management: core on the one core; recruits carry who/when created them. protected blocks retirement only (canRetire); when the field is absent normalizeNode derives it from createdBy (human-made true, recruits false)
   ...MODE_DEFAULTS,
 };
 const NODE_FIELDS = Object.keys(NODE_DEFAULTS);
@@ -72,6 +72,9 @@ function normalizeNode(n = {}, base = NODE_DEFAULTS) {
   r.runtime = r.runtime ? String(r.runtime) : 'claude'; // unknown ids are kept so the run errors instead of silently using claude
   r.name = String(r.name || 'Agent'); r.role = String(r.role || '').trim() || 'Dev';
   r.core = !!r.core; r.createdBy = String(r.createdBy || ''); r.recruitedAt = String(r.recruitedAt || '');
+  // Absent flag derives from recruitment: nodes the human made (editor, presets, templates) are
+  // protected from retirement, recruits are not. Explicit values always win (the human's toggle).
+  r.protected = n.protected !== undefined ? !!n.protected : !r.createdBy;
   if (r.permissionMode && !PERMISSION_MODES.includes(r.permissionMode)) throw new Error('bad permission mode ' + r.permissionMode);
   r.allowedTools = toList(r.allowedTools); r.disallowedTools = toList(r.disallowedTools); r.addDirs = toList(r.addDirs);
   r.enabledCapabilities = toList(r.enabledCapabilities);

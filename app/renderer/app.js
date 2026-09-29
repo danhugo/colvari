@@ -822,9 +822,10 @@ function renderGraph() {
       el('rect', { class: 'ctxbar-fill ctx-' + cls, width: W * pct / 100, height: 4 }, ctxg);
       el('title', {}, ctxg).textContent = `${Math.round(pct)}% ctx · ${fmtTok(ns.contextTokens || 0)} / ${fmtTok(ns.contextWindow || 0)} tokens`;
     }
-    // hover quick actions
-    const qa = el('g', { class: 'qacts', transform: `translate(${W - 104},-30)` }, g);
-    [['✎', 'Edit', () => selectNode(n.id)], ['⧉', 'Duplicate', () => duplicateNode(n)], ['→', 'Connect from here', () => startConnect(n)], ['✕', 'Delete', () => deleteNode(n)]].forEach(([ic, tip, fn], k) => {
+    // hover quick actions (Delete hidden on protected nodes — unprotect in the editor first)
+    const qacts = [['✎', 'Edit', () => selectNode(n.id)], ['⧉', 'Duplicate', () => duplicateNode(n)], ['→', 'Connect from here', () => startConnect(n)], ...(!n.protected ? [['✕', 'Delete', () => deleteNode(n)]] : [])];
+    const qa = el('g', { class: 'qacts', transform: `translate(${W - qacts.length * 26},-30)` }, g);
+    qacts.forEach(([ic, tip, fn], k) => {
       const b = el('g', { class: 'qa', transform: `translate(${k * 26},0)` }, qa); el('rect', { width: 24, height: 22, rx: 6 }, b); el('text', { x: 12, y: 15.5, 'text-anchor': 'middle' }, b).textContent = ic; el('title', {}, b).textContent = tip;
       b.onmousedown = (ev) => ev.stopPropagation(); b.onclick = (ev) => { ev.stopPropagation(); fn(); };
     });
@@ -864,7 +865,11 @@ function startPan(ev) {
 const clipText = (s, max) => (String(s).length > max ? String(s).slice(0, max - 1) + '…' : String(s));
 function selectNode(id) { hideMenus(); sel = { ...sel, node: id, edge: null }; renderGraph(); renderNodeForm(); }
 async function duplicateNode(n) { const { id, ...rest } = n; const c = await call('addNode', { ...rest, name: n.name + ' copy', x: n.x + 30, y: n.y + H + 30 }); sel.node = c.id; refresh(); }
-async function deleteNode(n) { if (!confirm(`Delete ${n.name}?`)) return; await call('removeNode', n.id); sel.node = null; refresh(); }
+async function deleteNode(n) {
+  if (n.protected) { alert(`${n.name} is protected from retirement — clear "Protected" in its editor first.`); return; }
+  if (!confirm(`Delete ${n.name}?`)) return;
+  await call('removeNode', n.id); sel.node = null; refresh();
+}
 function startConnect(n) { connectMode = true; connectFrom = n.id; $('#connect').classList.add('on'); $('#hint').textContent = `From ${n.name}: click the target node`; renderGraph(); }
 async function connect(from, to, type) { try { await call('addEdge', from, to, type); lastEdgeType = type; } catch (e) { alert(e.message); } refresh(); }
 // Drag from a node's handle; drop on another node opens the edge-type popover (default = last used).
@@ -892,7 +897,7 @@ const hideMenus = () => { const m = $('#ctxmenu'); if (m) m.className = 'ctxmenu
 const menuItems = (items) => items.map((it, i) => it === '-' ? '<hr>' : `<button data-i="${i}" class="${it[2] || ''}">${it[0]}</button>`).join('');
 function bindMenu(items) { document.querySelectorAll('#ctxmenu button[data-i]').forEach((b) => b.onclick = act(async () => { hideMenus(); await items[b.dataset.i][1](); })); }
 function nodeMenu(ev, n) {
-  const items = [['Edit', () => selectNode(n.id)], ['Connect from here', () => startConnect(n)], ['Duplicate', () => duplicateNode(n)], ['Test agent', () => testAgents([n.id])], '-', ['Delete', () => deleteNode(n), 'danger']];
+  const items = [['Edit', () => selectNode(n.id)], ['Connect from here', () => startConnect(n)], ['Duplicate', () => duplicateNode(n)], ['Test agent', () => testAgents([n.id])], '-', ...(!n.protected ? [['Delete', () => deleteNode(n), 'danger']] : [])];
   showMenu(ev.clientX, ev.clientY, `<div class="mhead">${esc(n.name)}</div>` + menuItems(items)); bindMenu(items);
 }
 function edgeMenu(ev, e) {
@@ -959,7 +964,11 @@ window.addEventListener('resize', () => renderMinimap());
 $('#testteam').onclick = () => testAgents(S.team.nodes.map((n) => n.id));
 $('#delsel').onclick = async () => {
   if (sel.edge) await call('removeEdge', sel.edge);
-  else if (sel.node && confirm('Delete this agent?')) await call('removeNode', sel.node);
+  else if (sel.node) {
+    const pn = (S.team.nodes || []).find((x) => x.id === sel.node);
+    if (pn && pn.protected) alert(`${pn.name} is protected from retirement — clear "Protected" in its editor first.`);
+    else if (confirm('Delete this agent?')) await call('removeNode', sel.node);
+  }
   sel.node = sel.edge = null; refresh();
 };
 function renderNodeForm() {
@@ -983,6 +992,7 @@ function renderNodeForm() {
     <label>Role <span class="muted">(free text; presets: ${presets.length})</span></label><input id="nf-role" list="rolelist" value="${esc(n.role)}"><datalist id="rolelist">${C.roles.map((r) => `<option value="${esc(r)}">`).join('')}</datalist>
     <div class="toolbar"><button id="nf-applypreset" ${presets.some((p) => p.name.toLowerCase() === String(n.role).toLowerCase()) ? '' : 'disabled'}>Apply preset</button><button id="nf-savepreset">Save as role preset</button></div>
     <label class="inline"><input type="checkbox" id="nf-core" ${n.core ? 'checked' : ''}> Core agent <span class="muted">(protected; recruits and retires teammates; one per team)</span></label>
+    <label class="inline"><input type="checkbox" id="nf-protected" ${n.protected ? 'checked' : ''}> Protected from retirement <span class="muted">(agents cannot retire this node; only you may clear this)</span></label>
     <label>Runtime</label><select id="nf-runtime">${allRuntimeOptions().map((r) => `<option value="${r.id}" ${r.id === (n.runtime || 'claude') ? 'selected' : ''} ${r.installed ? '' : 'disabled'}>${esc(r.label)}${r.custom ? ' (custom)' : ''}${r.installed ? ' ' + esc(r.version || '') : ' (not installed)'}</option>`).join('')}</select>
     <div id="nf-caps" class="muted"></div>
     <div class="toolbar rtpresets"><span class="muted">Quick preset:</span>${RT_PRESETS.map((p) => `<button data-rtp="${p.name}" ${(C.runtimes || {})[p.runtime] && !C.runtimes[p.runtime].installed ? 'disabled title="' + p.runtime + ' not installed"' : ''}>${p.name} <small>${VENDOR[p.runtime]}/${p.model || 'default'}</small></button>`).join('')}</div>
@@ -1057,8 +1067,14 @@ function renderNodeForm() {
     disabledBoardTools: [...document.querySelectorAll('#nf-tools input')].filter((x) => !x.checked).map((x) => x.value),
   });
   // Core handover: clear the previous core in this team FIRST, then save — a failed second write
-  // leaves zero cores (safe), never two.
-  const saveNode = async (v) => { if (v.core) for (const o of S.team.nodes) if (o.id !== n.id && o.core) await call('updateNode', o.id, { core: false }); await call('updateNode', n.id, v); };
+  // leaves zero cores (safe), never two. `protected` never rides the updateNode patch (the store
+  // refuses the key): it goes through the human-only setNodeProtected IPC when the toggle changed.
+  const saveNode = async (v) => {
+    if (v.core) for (const o of S.team.nodes) if (o.id !== n.id && o.core) await call('updateNode', o.id, { core: false });
+    await call('updateNode', n.id, v);
+    const p = $('#nf-protected');
+    if (p && p.checked !== !!n.protected) await call('setNodeProtected', n.id, p.checked);
+  };
   $('#nf-save').onclick = act(async () => { await saveNode(read()); refresh(); });
   $('#nf-test').onclick = act(async () => { await saveNode(read()); await testAgents([n.id]); });
   $('#nf-savepreset').onclick = act(async () => {

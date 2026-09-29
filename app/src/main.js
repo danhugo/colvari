@@ -1820,6 +1820,9 @@ const api = {
     } catch (e) { return node; }
   },
   updateNode: (c, id, p) => TS(c).updateNode(id, p), removeNode: (c, id) => TS(c).removeNode(id),
+  // Human-only: the single writer of node.protected (the UI's agent-editor toggle). IPC is reachable
+  // only from the renderer; no MCP tool wraps it, and updateNode/store refuse the key everywhere else.
+  setNodeProtected: (c, id, v) => TS(c).setNodeProtected(id, v),
   addEdge: (c, a, b, type) => TS(c).addEdge(a, b, type), updateEdge: (c, id, p) => TS(c).updateEdge(id, p),
   savePreset: (c, p) => ST(c).savePreset(p), deletePreset: (c, name) => ST(c).deletePreset(name), removeEdge: (c, id) => TS(c).removeEdge(id),
   createTask: (c, t) => ST(c).createTask(t), updateTask: (c, id, p) => ST(c).updateTask(id, p), deleteTask: (c, id) => ST(c).deleteTask(id),

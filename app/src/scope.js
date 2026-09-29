@@ -47,5 +47,10 @@ const capPermissionMode = (coreMode, mode) => ((PERMISSION_RANK[mode] ?? PERMISS
 // teammates included). Nodes of other teams never reach this check — they are not resolvable in the
 // core's team-scoped store.
 const canManageAgent = (core, target) => !!core && !!target && target.id !== core.id && target.core !== true;
+// Retire scope, used by EVERY agent retire path: canManageAgent first (never itself, never a core
+// node), then the target's protected flag. Protected blocks retire only — update_agent keeps using
+// canManageAgent. Only the human may change `protected` (setNodeProtected IPC), so no agent, the
+// core included, can retire a protected teammate.
+const canRetire = (core, target) => canManageAgent(core, target) && target.protected !== true;
 
-module.exports = { outgoing, incoming, canAssign, canMessage, canReviewTask, reviewees, visibleTask, canModifyTask, canSetStatus, typeOf, AGENT_PATCH_FIELDS, PERMISSION_RANK, capPermissionMode, canManageAgent };
+module.exports = { outgoing, incoming, canAssign, canMessage, canReviewTask, reviewees, visibleTask, canModifyTask, canSetStatus, typeOf, AGENT_PATCH_FIELDS, PERMISSION_RANK, capPermissionMode, canManageAgent, canRetire };
