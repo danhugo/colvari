@@ -11,6 +11,7 @@
   --warning: #c98a00; --warning-soft: #f8ebcc; --warning-text: #7a5200; --warning-strong: #a15c00;
   --danger: #c33a2f; --danger-soft: #f8e0da; --info: #2f5ea8;
   --human: #221e19;
+  --selection: #0f7f86; /* selected edge + node in the graph (ink accent = assign edge, so selection needs its own colour) */
 }
 [data-theme="dark"] {
   --bg-app: #15120f; --bg-sidebar: #100e0b; --bg-surface: #1d1915; --bg-raised: #25201b; --bg-hover: #2e2822; --bg-active: #2e2a25;
@@ -23,6 +24,7 @@
   --warning: #f0a93c; --warning-soft: #3a2a10; --warning-text: #f0a93c; --warning-strong: #f0a93c;
   --danger: #ff7a6b; --danger-soft: #3d1c18; --info: #7fa8ff;
   --human: #f1ebe1;
+  --selection: #4fd1d9;
 }
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
   --bg-app: #15120f; --bg-sidebar: #100e0b; --bg-surface: #1d1915; --bg-raised: #25201b; --bg-hover: #2e2822; --bg-active: #2e2a25;
@@ -35,4 +37,5 @@
   --warning: #f0a93c; --warning-soft: #3a2a10; --warning-text: #f0a93c; --warning-strong: #f0a93c;
   --danger: #ff7a6b; --danger-soft: #3d1c18; --info: #7fa8ff;
   --human: #f1ebe1;
+  --selection: #4fd1d9;
 } }
