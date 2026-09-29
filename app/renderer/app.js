@@ -759,6 +759,7 @@ function renderGraph() {
       putChip(rows.length ? `$${cost.toFixed(2)} · ${rows.length} key${rows.length === 1 ? '' : 's'}` : 'no usage', 20, 'chip chip-usage', rows.length ? `${runtimeLabel(rtId)} usage, per model key (tokens are never summed across models): ${rows.map((r) => `${r.model}: ${r.runs} run(s) · ${r.costUsd != null ? '$' + r.costUsd.toFixed(4) + (r.costSource === 'estimated' ? ' est' : '') : 'cost —'}`).join(' · ')}` : `${runtimeLabel(rtId)} has no recorded usage yet`); }
     const effort = n.effort || 'low';
     for (const chip of [`E:${effort}`, n.autoCompact ? `AC:${n.autoCompact}` : null].filter(Boolean)) { const isDefaultEffort = chip === `E:${effort}` && !n.effort; putChip(chip, 14, 'chip chip-em' + (isDefaultEffort ? ' chip-default' : ''), chip.startsWith('E:') ? `Reasoning effort: ${effort}${isDefaultEffort ? ' (default)' : ''}` : `Auto-compact window: ${n.autoCompact}`); }
+    if (n.createdBy && !n.core) putChip('recruited', 10, 'chip chip-recruited', 'Recruited by ' + nodeName(n.createdBy));
     const capsSt = !n.capabilities ? 'none' : (n.capabilities.error || n.capabilities.ok === false) ? 'error' : 'ok';
     const cb = el('g', { class: 'capsdot caps-' + capsSt, transform: `translate(7,${H - 8})` }, g); el('circle', { r: 4 }, cb);
     el('title', {}, cb).textContent = capsSt === 'none' ? 'Capabilities not probed yet' : capsSt === 'error' ? 'Capability probe failed' : `Capabilities probed${n.capabilitiesProbedAt ? ' ' + new Date(n.capabilitiesProbedAt).toLocaleString() : ''}`;
@@ -768,6 +769,7 @@ function renderGraph() {
     const badge = el('g', { class: 'pfbadge pf-' + pf, transform: `translate(${W - bw - 30},-8)` }, g);
     el('title', {}, badge).textContent = pf === 'fail' && n.preflight ? 'Preflight failed: ' + n.preflight.error : 'Preflight: ' + PF_LABEL[pf];
     el('rect', { width: bw, height: 15, rx: 7 }, badge); el('text', { x: bw / 2, y: 11, 'font-size': 9, 'text-anchor': 'middle' }, badge).textContent = PF_LABEL[pf];
+    if (n.core) { const cl = el('g', { class: 'corelock', transform: 'translate(10,-8)' }, g); el('title', {}, cl).textContent = 'Core agent — protected; recruits and retires teammates'; el('rect', { width: 46, height: 15, rx: 7 }, cl); el('text', { x: 23, y: 11, 'font-size': 9, 'text-anchor': 'middle' }, cl).textContent = '🔒 core'; }
     if (live === 'working') {
       const ctxPct100 = typeof ns.contextPct === 'number' ? ns.contextPct * 100 : null;
       const pctTxt = typeof ctxPct100 === 'number' ? `${Math.round(Math.max(0, Math.min(100, ctxPct100)))}% ctx` : '— ctx';
@@ -955,6 +957,7 @@ function renderNodeForm() {
     <label>Name</label><input id="nf-name" value="${esc(n.name)}">
     <label>Role <span class="muted">(free text; presets: ${presets.length})</span></label><input id="nf-role" list="rolelist" value="${esc(n.role)}"><datalist id="rolelist">${C.roles.map((r) => `<option value="${esc(r)}">`).join('')}</datalist>
     <div class="toolbar"><button id="nf-applypreset" ${presets.some((p) => p.name.toLowerCase() === String(n.role).toLowerCase()) ? '' : 'disabled'}>Apply preset</button><button id="nf-savepreset">Save as role preset</button></div>
+    <label class="inline"><input type="checkbox" id="nf-core" ${n.core ? 'checked' : ''}> Core agent <span class="muted">(protected; recruits and retires teammates; one per team)</span></label>
     <label>Runtime</label><select id="nf-runtime">${allRuntimeOptions().map((r) => `<option value="${r.id}" ${r.id === (n.runtime || 'claude') ? 'selected' : ''} ${r.installed ? '' : 'disabled'}>${esc(r.label)}${r.custom ? ' (custom)' : ''}${r.installed ? ' ' + esc(r.version || '') : ' (not installed)'}</option>`).join('')}</select>
     <div id="nf-caps" class="muted"></div>
     <div class="toolbar rtpresets"><span class="muted">Quick preset:</span>${RT_PRESETS.map((p) => `<button data-rtp="${p.name}" ${(C.runtimes || {})[p.runtime] && !C.runtimes[p.runtime].installed ? 'disabled title="' + p.runtime + ' not installed"' : ''}>${p.name} <small>${VENDOR[p.runtime]}/${p.model || 'default'}</small></button>`).join('')}</div>
@@ -1025,14 +1028,18 @@ function renderNodeForm() {
     loopCount: +$('#nf-loopcount').value || 3, slashCommand: $('#nf-slash').value.trim(), continueSession: $('#nf-continue').checked,
     billingMode: $('#nf-billing').value, billingBaseUrl: $('#nf-billurl').value.trim(),
     budgetUsd: +$('#nf-budgetusd').value || 0, budgetTokens: +$('#nf-budgettok').value || 0, requireApproval: $('#nf-approval').checked,
+    core: $('#nf-core').checked,
     disabledBoardTools: [...document.querySelectorAll('#nf-tools input')].filter((x) => !x.checked).map((x) => x.value),
   });
-  $('#nf-save').onclick = act(async () => { await call('updateNode', n.id, read()); refresh(); });
-  $('#nf-test').onclick = act(async () => { await call('updateNode', n.id, read()); await testAgents([n.id]); });
+  // Core handover: clear the previous core in this team FIRST, then save — a failed second write
+  // leaves zero cores (safe), never two.
+  const saveNode = async (v) => { if (v.core) for (const o of S.team.nodes) if (o.id !== n.id && o.core) await call('updateNode', o.id, { core: false }); await call('updateNode', n.id, v); };
+  $('#nf-save').onclick = act(async () => { await saveNode(read()); refresh(); });
+  $('#nf-test').onclick = act(async () => { await saveNode(read()); await testAgents([n.id]); });
   $('#nf-savepreset').onclick = act(async () => {
     const v = read(); const name = await ask('Role preset name', v.role); if (!name) return;
     await call('savePreset', { name, systemPrompt: v.systemPrompt, allowedTools: v.allowedTools, disallowedTools: v.disallowedTools, permissionMode: v.permissionMode });
-    await call('updateNode', n.id, { ...v, role: name }); refresh();
+    await saveNode({ ...v, role: name }); refresh();
   });
   $('#nf-applypreset').onclick = act(async () => {
     const p = presets.find((x) => x.name.toLowerCase() === $('#nf-role').value.trim().toLowerCase()); if (!p) return;
@@ -1693,6 +1700,8 @@ function renderSettings() {
     <label>Claude CLI path</label><input id="st-claude" value="${esc(s.claudePath)}">
     <label>Max concurrent agents</label><input id="st-conc" type="number" min="1" max="8" value="${s.maxConcurrency}">
     <label>Max agent runs per Run (safety cap)</label><input id="st-runs" type="number" min="1" value="${s.maxRuns}">
+    <label>Max agents per team <span class="muted">(core agent recruit limit)</span></label><input id="st-maxagents" type="number" min="1" value="${s.maxAgents ?? 6}">
+    <label>Core team changes <span class="muted">(recruit / retire / update — ask the human first, or apply automatically)</span></label><select id="st-tcappr">${['ask', 'auto'].map((m) => `<option ${m === (s.teamChangeApproval ?? 'ask') ? 'selected' : ''}>${m}</option>`).join('')}</select>
     <label>Default permission mode (agents can override)</label><select id="st-perm">${['bypassPermissions', 'acceptEdits', 'default', 'plan'].map((m) => `<option ${m === s.permissionMode ? 'selected' : ''}>${m}</option>`).join('')}</select>
     <label>Project budget per Run, $ <span class="muted">(stops all agents; 0 = none)</span></label><input id="st-budgetusd" type="number" min="0" step="0.01" value="${s.budgetUsd || 0}">
     <label>Project token budget per Run <span class="muted">(input + output; 0 = none)</span></label><input id="st-budgettok" type="number" min="0" step="1000" value="${s.budgetTokens || 0}">
@@ -1720,6 +1729,7 @@ function renderSettings() {
   $('#st-save').onclick = async () => { await call('saveSettings', { claudePath: $('#st-claude').value.trim() || 'claude', maxConcurrency: +$('#st-conc').value || 2, maxRuns: +$('#st-runs').value || 30, permissionMode: $('#st-perm').value,
     budgetUsd: +$('#st-budgetusd').value || 0, budgetTokens: +$('#st-budgettok').value || 0, requireApproval: $('#st-approval').checked, notifications: $('#st-notify').checked, stuckMinutes: +$('#st-stuck').value || 5,
     stallTimeoutMin: Math.max(1, +$('#st-stall').value || 10),
+    maxAgents: Math.max(1, parseInt($('#st-maxagents').value, 10) || 6), teamChangeApproval: $('#st-tcappr').value === 'auto' ? 'auto' : 'ask',
     autoCompactPct: Math.max(0, Math.min(95, +$('#st-autocompactpct').value || 0)) }); refresh(); };
   renderUpdSettings();
   const stAr = $('#st-autorestart');
