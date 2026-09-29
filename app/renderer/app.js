@@ -86,7 +86,7 @@ async function refresh() {
     ctx = prevCtx; console.warn('refresh failed, keeping previous data', e); return;
   }
   if (runsChanged) await loadRuns(); // runs.json (796KB) is re-read only when its file actually changed
-  await loadLogs(ctx.p); await loadSelfUpdate();
+  await loadLogs(ctx.p); await loadSelfUpdate(); await loadCoreState();
   try { localStorage.setItem('ctx', JSON.stringify(ctx)); } catch {}
   renderAll();
 }
@@ -462,7 +462,73 @@ function renderHeader() {
   c.title = total > 0
     ? `API-eq (API-equivalent) $${total.toFixed(4)} — what all recorded usage would cost at API list prices; the same single total the Usage tab's grand total shows. Actually billed per token (API key / proxy / cloud): $${billed.toFixed(4)}. Covered by subscription, not billed per token: $${sub.toFixed(4)}. "est" marks list-price estimates for keys that report no cost themselves.`
     : 'No recorded usage yet.';
+  renderRestartPill(); renderWatchPill();
 }
+// ---------- core: restart-pending pill + "Core watching" indicator (plan t_42f310cf item 3, t_5a1661d5) ----------
+// IPC contract (Devon, t_20d5a23c / t_74f1f65d): pull getRestartState / getWatchStatus + pushes on
+// 'restart-state' / 'watch-status' (watch digests also arrive as kind:'watch' log lines). Until the
+// backend lands this runs on the last known state, stub-marked like the self-update chip above —
+// with nothing known, no pill shows at all rather than a wrong one.
+let rst = { pendingCount: 0, since: null, scheduledAfter: null, scheduledNow: false, gating: [], stub: true };
+let watch = { lastWatchAt: null, active: false, digest: '', intervalMin: 10, stub: true };
+// Defensive about the exact payload shape (Devon's tasks are still in flight): pending/count vs
+// pendingCount, afterTaskId vs scheduledAfter, gatedTaskIds vs gating.
+const normRestart = (d) => { d = d || {}; return {
+  pendingCount: Math.max(0, Number(d.pendingCount ?? d.pending ?? d.count) || 0),
+  since: d.since || null,
+  scheduledAfter: d.scheduledAfter || d.afterTaskId || null,
+  scheduledNow: !!d.scheduledNow || d.now === true,
+  gating: Array.isArray(d.gating) ? d.gating : Array.isArray(d.gatedTaskIds) ? d.gatedTaskIds : [],
+}; };
+const normWatch = (d) => { d = d || {}; return {
+  lastWatchAt: d.lastWatchAt || d.at || null,
+  active: d.active != null ? !!d.active : !!d.lastWatchAt,
+  digest: String(d.digest || ''),
+  intervalMin: Number(d.intervalMin) > 0 ? Number(d.intervalMin) : 10,
+}; };
+async function loadCoreState() {
+  try { let d; try { d = await squad.call('getRestartState', ctx); } catch { d = await squad.call('getRestartState'); } rst = { ...normRestart(d), stub: false }; }
+  catch { rst = { ...rst, stub: true }; } // no backend yet: keep the last known (stub) state
+  try { let d; try { d = await squad.call('getWatchStatus', ctx); } catch { d = await squad.call('getWatchStatus'); } watch = { ...normWatch(d), stub: false }; }
+  catch { watch = { ...watch, stub: true }; }
+}
+// A task is held by the restart gate if Devon's state lists it, or defensively via per-task flags.
+const rstGated = (t) => rst.gating.includes(t.id) || t.restartGated === true || t.waitReason === 'restart';
+const agoTxt = (ts) => { const a = ago(ts); return !a ? '' : a === 'now' ? 'just now' : `${a} ago`; };
+function renderRestartPill() {
+  const c = $('#restartst'); if (!c) return;
+  const armed = !!rst.scheduledAfter || rst.scheduledNow;
+  const show = armed || rst.pendingCount > 0;
+  c.classList.toggle('hidden', !show);
+  if (!show) return;
+  c.className = `pill rst-${armed ? 'armed' : 'pending'}`;
+  const n = rst.pendingCount;
+  const bits = ['Restart pending'];
+  if (n) bits.push(`${n} change${n === 1 ? '' : 's'}`);
+  if (rst.scheduledAfter) bits.push(`after ${shortTaskId(rst.scheduledAfter)}`);
+  else if (rst.scheduledNow) bits.push('once agents drain');
+  c.textContent = bits.join(' · ');
+  c.title = ['Merged changes wait for a core-scheduled restart — dispatch keeps running meanwhile.',
+    n ? `${n} change${n === 1 ? '' : 's'} landed since the last restart${rst.since ? ` (first ${agoTxt(rst.since)})` : ''}.` : '',
+    rst.scheduledAfter ? `Restarts once ${rst.scheduledAfter} is done and in-flight tasks drain.` : (rst.scheduledNow ? 'Restarts as soon as running agents finish.' : 'No restart armed yet — only the core agent (PM) can schedule one.'),
+    rst.gating.length ? `${rst.gating.length} not-yet-started task${rst.gating.length === 1 ? '' : 's'} held until then.` : '',
+    rst.stub ? 'backend pending' : ''].filter(Boolean).join(' ');
+}
+function renderWatchPill() {
+  const c = $('#watchst'); if (!c) return;
+  const t = watch.lastWatchAt ? new Date(watch.lastWatchAt).getTime() : 0;
+  // The loop goes idle-off when nothing is active; a fresh last check stays visible briefly.
+  const live = watch.active || (t && Date.now() - t < 30 * 60 * 1000);
+  c.classList.toggle('hidden', !live);
+  if (!live) return;
+  c.className = 'pill watchst';
+  c.textContent = `Core watching · last check ${agoTxt(watch.lastWatchAt) || '—'}`;
+  c.title = ['The core agent (PM) receives a periodic status digest: restart backlog, stalled tasks, idle agents, merge failures.',
+    watch.digest ? `Last digest: ${watch.digest}` : '', `Every ~${watch.intervalMin} min while work is active.`,
+    'Click to see digests in the logs.', watch.stub ? 'backend pending' : ''].filter(Boolean).join(' ');
+  c.onclick = () => showTab('obs');
+}
+setInterval(() => { const c = $('#watchst'); if (c && !c.classList.contains('hidden')) renderWatchPill(); }, 30e3); // keep "last check Xm ago" ticking without a run active
 // ---------- top-bar limits meter (subscription 5h/weekly windows; no $ shown, just % + reset countdown) ----------
 const fmtCountdown = (ms) => {
   if (ms <= 0) return 'now';
@@ -1291,6 +1357,7 @@ function renderBoard() {
         busyOther ? `<span class="tag elsewhere" title="${esc(nodeName(t.assignee))} is working on ${esc(taskTitle(w.taskId))}">working elsewhere</span>` : '',
         noWorker ? `<span class="tag noworker" title="in_progress but no live agent process for ${esc(nodeName(t.assignee))}">No worker</span>` : '',
         stallTag(t),
+        rstGated(t) ? `<span class="tag rstwait" title="held back by the restart gate${rst.scheduledAfter ? ` — starts after the core restart (after ${esc(shortTaskId(rst.scheduledAfter))})` : ' — starts after the core restarts'}">waits for restart</span>` : '',
         bl.length ? `<span class="tag blocked" title="waits for: ${esc(bl.map(taskTitle).join(', '))}">Blocked by ${esc(taskTitle(bl[0]).slice(0, 28))}${bl.length > 1 ? ` +${bl.length - 1}` : ''}</span>` : ready ? '<span class="tag ready">Ready</span>' : '',
         t.awaitingApproval ? '<span class="tag approval">needs approval</span>' : ''].join('');
       const snippet = String(t.description || '').replace(/\s+/g, ' ').trim();
@@ -1422,7 +1489,7 @@ function renderObs() {
   $('#budgetbar').innerHTML = (st.budgetUsd || st.budgetTokens ? `Run budget: ${st.budgetUsd ? `$${(S.orch.runCost || 0).toFixed(4)} / $${st.budgetUsd}` : ''}${st.budgetUsd && st.budgetTokens ? ' · ' : ''}${st.budgetTokens ? `token budget ${fmtTok(st.budgetTokens)} tok per run (enforced — per-key split in Usage; token totals are no longer summed)` : ''}` : '') + (stopMsg ? ` <span class="warn">Stopped: ${stopMsg}</span>` : '');
   const f = $('#logfilter'); f.innerHTML = '<option value="">All agents</option>' + nodes.map((n) => `<option value="${n.id}">${esc(n.name)}</option>`).join(''); f.value = cur;
 }
-const LOG_LEVEL = { error: 'error', stderr: 'error', tool_error: 'error', system: 'info', tool: 'tool', tool_result: 'tool', result: 'ok', raw: 'muted', compacted: 'compact', event: 'info', monitor: 'monitor' };
+const LOG_LEVEL = { error: 'error', stderr: 'error', tool_error: 'error', system: 'info', tool: 'tool', tool_result: 'tool', result: 'ok', raw: 'muted', compacted: 'compact', event: 'info', monitor: 'monitor', watch: 'watch' };
 // Monitor line (plan t_a4ceb629/C, watchdog decision): prefer the structured {reason, taskIds, action}
 // fields Dev A sends with the event; fall back to the raw text for lines persisted without them.
 function monitorText(l) {
@@ -1432,7 +1499,7 @@ function monitorText(l) {
 function logRow(l) {
   const w = who(l.nodeId); const lvl = LOG_LEVEL[l.kind] || 'text';
   const task = l.taskId ? `<span class="logtask" data-tasklink="${esc(l.taskId)}" title="${esc(l.task || l.taskId)} — open in task thread">${esc(shortTaskId(l.taskId))}</span>` : '';
-  const badge = l.kind === 'monitor' ? 'Monitor' : esc(l.kind);
+  const badge = l.kind === 'monitor' ? 'Monitor' : l.kind === 'watch' ? 'Watch' : esc(l.kind);
   const text = l.kind === 'monitor' ? monitorText(l) : esc(l.text);
   return `<div class="logrow lv-${lvl}"><span class="logtime">${new Date(l.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span><span class="avatar sm" style="background:${w.color}" title="${esc(w.name)}">${esc(w.ini)}</span><span class="logagent" title="${esc(w.name)}">${esc(w.name)}</span>${task}<span class="loglevel lv-${lvl}">${badge}</span><span class="logtext">${text}</span></div>`;
 }
@@ -2303,6 +2370,14 @@ let pending = null, pendingP = null;
 const onUpdPush = (d) => { upd = { ...normUpd(d), stub: false }; trackUpd(); renderSelfUpdate(); renderUpdSettings(); };
 if (squad.onSelfUpdateStatus) squad.onSelfUpdateStatus(onUpdPush);
 else { squad.on('selfUpdateStatus', onUpdPush); squad.on('self-update-status', onUpdPush); }
+// Restart/watch pushes: prefer dedicated bridge helpers, fall back to plausible channel names
+// (Devon adds the preload helpers when the backend lands — see contract on t_20d5a23c).
+const onRestartPush = (d) => { rst = { ...normRestart(d), stub: false }; renderHeader(); boardSig = null; renderBoard(); };
+const onWatchPush = (d) => { watch = { ...normWatch(d), stub: false }; renderHeader(); };
+if (squad.onRestartState) squad.onRestartState(onRestartPush);
+else { squad.on('restart-state', onRestartPush); squad.on('restartStatus', onRestartPush); }
+if (squad.onWatchStatus) squad.onWatchStatus(onWatchPush);
+else { squad.on('watch-status', onWatchPush); squad.on('watchStatus', onWatchPush); }
 squad.on('log', (l) => { logs.push(l); if (logs.length > 8000) logs.splice(0, 1000); renderLog(); renderLive(); });
 // In-app toast for orchestrator notifications (desktop notifications are shown by the main process).
 squad.on('notify', (n) => {
