@@ -511,6 +511,21 @@ header .pill { border:none; background:none; color:var(--fg-muted); font-size:va
 #graph .pendingwakebadge, #ov-graph .pendingwakebadge { cursor:default; }
 #graph .pendingwakebadge rect, #ov-graph .pendingwakebadge rect { fill:var(--bg); stroke:var(--border-strong); stroke-dasharray:3,2; }
 #graph .pendingwakebadge text, #ov-graph .pendingwakebadge text { fill:var(--fg-muted); font-size:9px; font-weight:var(--fw-semibold); }
+/* runtime unavailable (t_d33685f3): red paused strip under the card + dimmed, dashed-red card */
+#graph .rtubadge, #ov-graph .rtubadge { cursor:default; }
+#graph .rtubadge rect, #ov-graph .rtubadge rect { fill:var(--danger-soft); stroke:var(--danger); }
+#graph .rtubadge text, #ov-graph .rtubadge text { fill:var(--danger); font-size:9px; font-weight:var(--fw-semibold); }
+#graph .node.rtpaused .card, #ov-graph .node.rtpaused .card { stroke:var(--danger); stroke-width:1.5; stroke-dasharray:4,3; }
+#graph .node.rtpaused .avatar, #ov-graph .node.rtpaused .avatar { filter:grayscale(1); opacity:.55; }
+/* banner under the header, on every tab: the human must see a broken runtime without hunting for it */
+.rtbar { display:flex; align-items:center; gap:10px; padding:8px 12px; background:var(--danger-soft); border-bottom:1px solid var(--danger); color:var(--danger); flex:none; }
+.rtbar.hidden { display:none; }
+.rtbar .rt-ico { font-size:15px; }
+.rtbar .rt-body { display:flex; flex-direction:column; gap:2px; min-width:0; }
+.rtbar .rt-body b { color:var(--danger); }
+.rtbar .rt-err { font-family:var(--font-mono); font-size:11px; opacity:.92; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:560px; }
+.rtbar .rt-resume-err { font-size:11px; color:var(--warning-strong); }
+.rtbar .spacer { flex:1; }
 
 /* self-update: header status chip + restart history (t_506c0cb0) */
 .pill.upd-pending, .pill.upd-draining { color:var(--warn); border-color:var(--warn); }

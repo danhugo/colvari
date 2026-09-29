@@ -87,11 +87,12 @@ async function refresh() {
   }
   if (runsChanged) await loadRuns(); // runs.json (796KB) is re-read only when its file actually changed
   await loadLogs(ctx.p); await loadSelfUpdate(); await loadCoreState();
+  syncRtu(); // banner follows the snapshot across reloads / missed pushes
   try { localStorage.setItem('ctx', JSON.stringify(ctx)); } catch {}
   renderAll();
 }
 const nodeName = (id) => (S.allNodes.find((n) => n.id === id) || {}).name || (id ? id : 'unassigned');
-function renderAll() { renderSidebar(); renderGraph(); renderPreflightBar(); renderNodeForm(); renderBoard(); renderWiki(); renderObs(); renderSettings(); renderHeader(); renderSelfUpdate(); renderLimitMeter(); renderUsage(); renderOverview(); renderInbox(); renderGuide(); renderChat(); }
+function renderAll() { renderSidebar(); renderRtbar(); renderGraph(); renderPreflightBar(); renderNodeForm(); renderBoard(); renderWiki(); renderObs(); renderSettings(); renderHeader(); renderSelfUpdate(); renderLimitMeter(); renderUsage(); renderOverview(); renderInbox(); renderGuide(); renderChat(); }
 const fmtTok = (n) => { n = n || 0; return n >= 1e6 ? (n / 1e6).toFixed(2) + 'M' : n >= 1e4 ? (n / 1e3).toFixed(1) + 'k' : String(n); };
 const COST_NOTE = { subscription: 'Covered by subscription — not billed per token', other: 'API-equivalent (reported by Claude CLI)' };
 const VENDOR = { claude: 'Claude', codex: 'Codex', opencode: 'OpenCode' };
@@ -851,7 +852,7 @@ function renderGraph() {
   for (const n of nodes) {
     if (n.ghost) { const g = el('g', { class: 'ghost', transform: `translate(${n.x},${n.y})` }, nL); el('rect', { width: W, height: H, rx: 12 }, g); el('text', { x: 14, y: 28, class: 'nname' }, g).textContent = clipText(n.name, 22); el('text', { x: 14, y: 46, class: 'nrole' }, g).textContent = 'in another team'; continue; }
     const live = nodeLive(n); const ns = (S.nstat || {})[n.id] || {}; const c = agentColor(n.id);
-    const g = el('g', { class: 'node' + (sel.node === n.id || connectFrom === n.id ? ' sel' : '') + ' st-' + live + (live === 'working' ? ' working' : ''), transform: `translate(${n.x},${n.y})`, 'data-id': n.id }, nL);
+    const g = el('g', { class: 'node' + (sel.node === n.id || connectFrom === n.id ? ' sel' : '') + ' st-' + live + (live === 'working' ? ' working' : '') + (rtuFor(n.id) ? ' rtpaused' : ''), transform: `translate(${n.x},${n.y})`, 'data-id': n.id }, nL);
     el('rect', { class: 'card', width: W, height: H, rx: 12 }, g);
     el('rect', { class: 'stripe', width: 4, height: H - 20, x: 0, y: 10, rx: 2, style: `fill:var(--agent-${c})` }, g);
     el('circle', { class: 'avatar', cx: 30, cy: 26, r: 14, style: `fill:var(--agent-${c})` }, g);
@@ -895,8 +896,9 @@ function renderGraph() {
     }
     // wake badge is gated by wakeRun itself, not `live`: nodeLive trusts the possibly stale nstat status
     // stall badge outranks it: a stalled run must not read as one still working; pending-wake is lowest rank
-    const st = stallState(n.id);
+    const st = stallState(n.id); const pu = rtuFor(n.id);
     if (st) drawStallBadge(g, st, () => openWakeTask(st.taskId));
+    else if (pu) drawRtuBadge(g, pu);
     else { const wk = wakeRun(n.id); if (wk) drawWakeBadge(g, wk, () => openWakeTask(wk.taskId)); else { const wp = wakePending(n.id); if (wp) drawPendingBadge(g, wp); } }
     drawSubBadge(g, S.orch.agents[n.id] || {}, 46);
     el('title', {}, g).textContent = `${n.name} (${n.role}) — ${live}`;
@@ -1268,6 +1270,82 @@ function drawStallBadge(g, st, onclick) {
   el('title', {}, bg).textContent = full;
   if (st.taskId && onclick) bg.onclick = onclick;
 }
+// ---------- runtime unavailable (contract with Devon, t_419062e2 / t_d33685f3) ----------
+// When a runtime's runs fail fast with auth/model errors, core trips a per-runtime breaker: it stops
+// dispatching to that runtime (queued tasks wait) and emits runtime.unavailable; a successful resume
+// or a healthy run emits runtime.available. Push channels 'runtime-unavailable' / 'runtime-available'
+// match the dash style of the stall channels (camelCase variants registered until the preload grows
+// helpers, same as restart/watch above). Payload {runtime, error, agents, since, projectId}; error is
+// the redacted stderr tail (core caps ~2KB). Snapshot fallback: snapshotSlim carries orch.runtimeState
+// so the banner survives a page reload. Resume: call('resumeRuntime', runtime) clears the breaker and
+// re-dispatches the queued tasks.
+let rtu = null, rtuBusy = false, rtuErr = '', rtuHidden = false;
+function setRtu(d) {
+  if (!d || !d.runtime) return;
+  rtu = { runtime: d.runtime, error: String(d.error || ''), agents: Array.isArray(d.agents) ? d.agents : null, at: +d.since || +d.at || Date.now() };
+  rtuHidden = false; rtuErr = '';
+  renderRtbar(); renderGraph(); renderOverview();
+}
+function clearRtu(runtime) {
+  if (!rtu || (runtime && rtu.runtime !== runtime)) return;
+  rtu = null; rtuErr = '';
+  renderRtbar(); renderGraph(); renderOverview();
+}
+// Is this agent affected? Core's agents list wins when present; otherwise affected = agent's runtime
+// (nstat overrides the node config, same precedence as the Team chip row) matches the broken runtime.
+function rtuFor(id) {
+  if (!rtu) return null;
+  if (rtu.agents) return rtu.agents.includes(id) ? rtu : null;
+  const n = S.allNodes.find((x) => x.id === id); if (!n) return null;
+  return (((S.nstat || {})[id] || {}).runtime || n.runtime || 'claude') === rtu.runtime ? rtu : null;
+}
+// Reload / missed-push fallback: adopt unavailable state from the orchestrator snapshot, and drop our
+// copy once the snapshot reports the runtime healthy again (core recovered without a resume call).
+function syncRtu() {
+  const rs = (S.orch || {}).runtimeState || {};
+  const seen = new Set();
+  for (const [id, st] of Object.entries(rs)) {
+    seen.add(id);
+    if (st && st.state === 'unavailable') { if (!rtu || rtu.runtime !== id || (+st.since || 0) > rtu.at) setRtu({ runtime: id, error: st.error, agents: st.agents, since: st.since }); }
+  }
+  if (rtu && !seen.has(rtu.runtime)) clearRtu(rtu.runtime); // snapshot dropped the entry: healthy again
+}
+// Red strip below the card for agents whose runtime is unavailable — same slot as the wake/stall
+// badges, ranked under stall (a hung run is a distinct live problem) but above wake/pending: those
+// claim the agent is working or about to, which it cannot be on a broken runtime.
+function drawRtuBadge(g, r) {
+  const label = runtimeLabel(r.runtime);
+  const bg = el('g', { class: 'rtubadge', transform: `translate(4,${H + 3})` }, g);
+  el('rect', { width: W - 8, height: 13, rx: 6 }, bg);
+  el('text', { x: (W - 8) / 2, y: 9.5, 'text-anchor': 'middle' }, bg).textContent = clipText(`⏸ paused — ${label} unavailable`, 30);
+  el('title', {}, bg).textContent = r.error ? `${label} unavailable: ${r.error}` : `${label} unavailable — fix it, then resume from the banner`;
+}
+// Banner under the header, visible on every tab: names the runtime, the paused agents, the real error,
+// and offers the resume action (Cato's plan conditions: say if other runtimes exist; never imply work
+// moved to them). Resume failure text shows inline; the banner only clears on resume or core recovery.
+function renderRtbar() {
+  const b = $('#rtbar'); if (!b) return;
+  if (!rtu || rtuHidden) return b.classList.add('hidden');
+  const names = (rtu.agents ? rtu.agents.map((id) => nodeName(id)) : S.team.nodes.filter((n) => rtuFor(n.id)).map((n) => n.name)).filter(Boolean);
+  const others = Object.entries((S.config || {}).runtimes || {}).filter(([id, r]) => id !== rtu.runtime && r.installed !== false).map(([id]) => runtimeLabel(id));
+  const err = rtu.error ? `<div class="rt-err" title="${esc(rtu.error)}">${esc(clipText(rtu.error, 220))}</div>` : '';
+  const rerr = rtuErr ? `<div class="rt-resume-err">Resume failed: ${esc(rtuErr)}</div>` : '';
+  b.innerHTML = `<span class="rt-ico" aria-hidden="true">⏸</span>
+    <div class="rt-body"><b>Runtime “${esc(runtimeLabel(rtu.runtime))}” unavailable</b>
+    <span class="muted">${names.length ? esc(names.join(', ')) + ' paused' : 'no agents on it'} — new work to it waits${others.length ? ` · other runtimes still available: ${esc(others.join(', '))}` : ''}</span>${err}${rerr}</div>
+    <span class="spacer"></span>
+    <button id="rt-resume" class="primary"${rtuBusy ? ' disabled' : ''}>${rtuBusy ? 'Resuming…' : 'I fixed it — resume'}</button>
+    <button id="rt-dismiss" title="Hide until the state changes">✕</button>`;
+  b.classList.remove('hidden');
+  $('#rt-resume').onclick = async () => {
+    rtuBusy = true; rtuErr = ''; renderRtbar();
+    try { await call('resumeRuntime', rtu.runtime); clearRtu(rtu.runtime); await refresh(); }
+    catch (e) { rtuErr = String(e.message || e).replace(/^Error invoking remote method 'api':\s*(Error:\s*)?/, ''); }
+    finally { rtuBusy = false; renderRtbar(); }
+  };
+  $('#rt-dismiss').onclick = () => { rtuHidden = true; renderRtbar(); };
+}
+
 // Subagent chip on an agent card (Team graph + Overview): count + compact total tokens for the current
 // run's subagents. Per contract t_c33656ba the parent's own totals ALREADY include these — the badge is
 // a breakdown, never something to add on top. Hidden when the agent spawned nothing. y places it in the
@@ -2108,7 +2186,7 @@ function renderOverview() {
   }
   for (const n of ovNodes) {
     const live = (S.orch.agents[n.id] || {}).status === 'working' ? 'working' : nodeLive(n); const isStuck = stuck.has(n.id); const c = agentColor(n.id);
-    const g = el('g', { class: 'node' + (live === 'working' ? ' working st-working' : '') + (isStuck ? ' stuck' : ''), transform: `translate(${n.x},${n.y})`, 'data-id': n.id }, svg);
+    const g = el('g', { class: 'node' + (live === 'working' ? ' working st-working' : '') + (isStuck ? ' stuck' : '') + (rtuFor(n.id) ? ' rtpaused' : ''), transform: `translate(${n.x},${n.y})`, 'data-id': n.id }, svg);
     el('rect', { class: 'card', width: W, height: H, rx: 12 }, g);
     el('rect', { class: 'stripe', width: 4, height: H - 20, x: 0, y: 10, rx: 2, style: `fill:var(--agent-${c})` }, g);
     el('circle', { class: 'avatar', cx: 26, cy: 24, r: 13, style: `fill:var(--agent-${c})` }, g);
@@ -2116,8 +2194,9 @@ function renderOverview() {
     el('text', { x: 47, y: 21, class: 'nname' }, g).textContent = clipText(n.name, 16);
     el('text', { x: 47, y: 36, class: 'nrole' }, g).textContent = isStuck ? '⚠ stuck' : `${clipText(n.role, 14)} · ${live === 'working' ? 'Working' : humanStatus(live)}`;
     el('text', { x: 47, y: 50, 'font-size': 10, opacity: 0.8, class: 'ov-vendor' }, g).textContent = clipText(`${VENDOR[n.runtime || 'claude'] || n.runtime} · ${n.model || 'default'}`, 26);
-    const st = stallState(n.id);
+    const st = stallState(n.id); const pu = rtuFor(n.id);
     if (st) drawStallBadge(g, st, () => openWakeTask(st.taskId));
+    else if (pu) drawRtuBadge(g, pu);
     else if (live === 'working') { const wk = wakeRun(n.id); if (wk) drawWakeBadge(g, wk, () => openWakeTask(wk.taskId)); }
     else { const wp = wakePending(n.id); if (wp) drawPendingBadge(g, wp); }
     drawSubBadge(g, S.orch.agents[n.id] || {});
@@ -2403,6 +2482,11 @@ if (squad.onRestartState) squad.onRestartState(onRestartPush);
 else { squad.on('restart-state', onRestartPush); squad.on('restartStatus', onRestartPush); }
 if (squad.onWatchStatus) squad.onWatchStatus(onWatchPush);
 else { squad.on('watch-status', onWatchPush); squad.on('watchStatus', onWatchPush); }
+// Runtime unavailable/resumed pushes (contract on t_d33685f3); dash channels are primary.
+const onRtuPush = (d) => { if (d && d.projectId && d.projectId !== ctx.p) return; setRtu(d); };
+const onRtaPush = (d) => { if (d && d.projectId && d.projectId !== ctx.p) return; clearRtu(d && d.runtime); };
+squad.on('runtime-unavailable', onRtuPush); squad.on('runtimeUnavailable', onRtuPush);
+squad.on('runtime-available', onRtaPush); squad.on('runtimeAvailable', onRtaPush);
 squad.on('log', (l) => { logs.push(l); if (logs.length > 8000) logs.splice(0, 1000); renderLog(); renderLive(); });
 // In-app toast for orchestrator notifications (desktop notifications are shown by the main process).
 squad.on('notify', (n) => {
