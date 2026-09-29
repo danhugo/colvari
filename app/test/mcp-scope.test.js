@@ -53,14 +53,14 @@ test('real stdio MCP server enforces scope', async () => {
     return c;
   };
   const cd = await connect(dev.id);
-  const names = (await cd.listTools()).tools.map((t) => t.name).sort();
-  assert.deepEqual(names, ['ask_human', 'comment_task', 'create_task', 'list_tasks', 'list_team', 'read_messages', 'read_wiki', 'request_self_update', 'send_message', 'update_task_status', 'write_wiki']);
-  const bad = await cd.callTool({ name: 'create_task', arguments: { title: 'x', assignee: pm.id } });
-  assert.equal(bad.isError, true);
-  await cd.close();
   const cp = await connect(pm.id);
-  const ok = await cp.callTool({ name: 'create_task', arguments: { title: 'x', assignee: dev.id } });
-  assert.ok(!ok.isError);
-  assert.equal(s.listTasks({ assignee: dev.id }).length, 1);
-  await cp.close();
+  try {
+    const names = (await cd.listTools()).tools.map((t) => t.name).sort();
+    assert.deepEqual(names, ['ask_human', 'comment_task', 'create_task', 'list_tasks', 'list_team', 'read_messages', 'read_wiki', 'request_self_update', 'schedule_restart', 'send_message', 'update_task_status', 'write_wiki']);
+    const bad = await cd.callTool({ name: 'create_task', arguments: { title: 'x', assignee: pm.id } });
+    assert.equal(bad.isError, true);
+    const ok = await cp.callTool({ name: 'create_task', arguments: { title: 'x', assignee: dev.id } });
+    assert.ok(!ok.isError);
+    assert.equal(s.listTasks({ assignee: dev.id }).length, 1);
+  } finally { await cd.close(); await cp.close(); }
 });

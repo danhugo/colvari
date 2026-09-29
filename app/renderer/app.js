@@ -783,15 +783,20 @@ function zoomAt(f, cx, cy) {
   const z = Math.min(2.5, Math.max(0.25, VP.zoom * f)); const [wx, wy] = toWorld(cx, cy);
   VP = { zoom: z, x: cx - r.left - wx * z, y: cy - r.top - wy * z }; applyVP(); saveVP();
 }
-function graphBox(nodes) {
+function graphBox(nodes, withEdges = false) {
   if (!nodes.length) return { x: 0, y: 0, w: 400, h: 300 };
-  const xs = nodes.map((n) => n.x), ys = nodes.map((n) => n.y); const x = Math.min(...xs), y = Math.min(...ys);
-  return { x, y, w: Math.max(...xs) + W - x, h: Math.max(...ys) + H - y };
+  const xs = nodes.map((n) => n.x), ys = nodes.map((n) => n.y);
+  let x0 = Math.min(...xs), y0 = Math.min(...ys), x1 = Math.max(...xs) + W, y1 = Math.max(...ys) + H;
+  if (withEdges && edgeLayout && nodes.length > 1) for (const it of edgeLayout.per) { // edge routes (detours, dashed cross-team lines) count toward the fit box
+    const nums = (it.geo.d.match(/-?\d+(?:\.\d+)?/g) || []).map(Number);
+    for (let i = 0; i + 1 < nums.length; i += 2) { x0 = Math.min(x0, nums[i] - 8); x1 = Math.max(x1, nums[i] + 8); y0 = Math.min(y0, nums[i + 1] - 8); y1 = Math.max(y1, nums[i + 1] + 8); }
+  }
+  return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
 }
 let vpCount = 0, edgeLayout = null; // per-render edge geometry + DOM refs; patched in place by dragEdges during node drags
-function fitIfClipped() { const r = $('#graph').getBoundingClientRect(); const b = graphBox(allGraphNodes()); if (r.width && (b.x * VP.zoom + VP.x < 0 || b.y * VP.zoom + VP.y < 0 || (b.x + b.w) * VP.zoom + VP.x > r.width || (b.y + b.h) * VP.zoom + VP.y > r.height)) fitView(); }
+function fitIfClipped() { const r = $('#graph').getBoundingClientRect(); const b = graphBox(allGraphNodes(), true); if (r.width && (b.x * VP.zoom + VP.x < 0 || b.y * VP.zoom + VP.y < 0 || (b.x + b.w) * VP.zoom + VP.x > r.width || (b.y + b.h) * VP.zoom + VP.y > r.height)) fitView(); }
 function fitView() {
-  const r = $('#graph').getBoundingClientRect(); const b = graphBox(allGraphNodes()); const pad = 48;
+  const r = $('#graph').getBoundingClientRect(); const b = graphBox(allGraphNodes(), true); const pad = 48;
   const z = Math.min(1, Math.max(0.25, Math.min((r.width - pad * 2) / b.w, (r.height - pad * 2) / b.h)));
   VP = { zoom: z, x: (r.width - b.w * z) / 2 - b.x * z, y: (r.height - b.h * z) / 2 - b.y * z }; applyVP(); saveVP();
 }
