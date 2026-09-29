@@ -45,6 +45,8 @@ test('tick() sweeps orphaned in_progress tasks and re-dispatches instead of stop
   const s = pm.store(pm.list()[0].id);
   s.saveSettings({ claudePath: fake });
   const node = s.getTeam().nodes[0] || s.addNode({ name: 'D', role: 'Dev' });
+  const rev = s.addNode({ name: 'Rev', role: 'Reviewer' }); // the re-dispatched hand-off completes via reviewer pickup
+  s.addEdge(node.id, rev.id, 'review');
   const t = s.createTask({ title: 'stranded', assignee: node.id });
   s.updateTask(t.id, { status: 'in_progress' }); // simulate a crashed prior run, no live process
   const o = new Orchestrator(s);

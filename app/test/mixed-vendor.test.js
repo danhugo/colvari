@@ -17,6 +17,10 @@ test('mixed vendors: Claude/Opus PM -> Codex Dev -> Claude/Haiku Reviewer comple
   const P = s.addNode({ name: 'Pia', role: 'PM', runtime: 'claude', model: 'opus' });
   const D = s.addNode({ name: 'Cody', role: 'Dev', runtime: 'codex', model: 'gpt-5.6-terra' });
   const R = s.addNode({ name: 'Rex', role: 'Reviewer', runtime: 'claude', model: 'haiku' });
+  const R2 = s.addNode({ name: 'Rex2', role: 'Reviewer', runtime: 'claude', model: 'haiku' });
+  s.addEdge(P.id, R.id, 'review'); // plan's hand-off is verified by the reviewer (t_699b67b7: no auto-done)
+  s.addEdge(D.id, R.id, 'review'); // impl's hand-off is verified by the reviewer
+  s.addEdge(R.id, R2.id, 'review'); // Rex's own review task needs a reviewer too (no self edges)
   const plan = s.createTask({ title: 'plan', assignee: P.id });
   const impl = s.createTask({ title: 'impl', assignee: D.id, blockedBy: [plan.id] });
   const rev = s.createTask({ title: 'review', assignee: R.id, blockedBy: [impl.id] });
@@ -24,12 +28,13 @@ test('mixed vendors: Claude/Opus PM -> Codex Dev -> Claude/Haiku Reviewer comple
   await new Promise((res) => { o.once('done', res); o.start(); });
   assert.deepStrictEqual([plan, impl, rev].map((t) => s.getTask(t.id).status), ['done', 'done', 'done']);
   const lines = fs.readFileSync(log, 'utf8').split('@@@').filter(Boolean);
-  assert.deepStrictEqual(lines.map((l) => l.split(' ')[0]), ['claude', 'codex', 'claude'], 'vendors ran in dependency order');
-  assert.match(lines[0], /--model opus/); assert.match(lines[2], /--model haiku/);
-  assert.match(lines[1], /^codex exec --json .*-m gpt-5\.6-terra/);
+  // plan, Rex's pickup of plan, impl, Rex's pickup of impl, Rex's review task, Rex2's pickup of that.
+  assert.deepStrictEqual(lines.map((l) => l.split(' ')[0]), ['claude', 'claude', 'codex', 'claude', 'claude', 'claude'], 'vendors ran in dependency order');
+  assert.match(lines[0], /--model opus/); assert.match(lines[1], /--model haiku/); assert.match(lines[3], /--model haiku/);
+  assert.match(lines[2], /^codex exec --json .*-m gpt-5\.6-terra/);
   const runs = s.listRuns().filter((r) => r.kind === 'agent');
-  const byTask = (t) => runs.find((r) => r.taskId === t.id);
-  assert.deepStrictEqual([plan, impl, rev].map((t) => byTask(t).runtime), ['claude', 'codex', 'claude']);
-  assert.strictEqual(byTask(impl).inputTokens, 100); assert.strictEqual(byTask(impl).outputTokens, 10);
-  assert.strictEqual(byTask(impl).sessionId, 'T1');
+  const byAgent = (t, n) => runs.find((r) => r.taskId === t.id && r.nodeId === n.id); // the assignee's run, not a reviewer pickup
+  assert.deepStrictEqual([[plan, P], [impl, D], [rev, R]].map(([t, n]) => byAgent(t, n).runtime), ['claude', 'codex', 'claude']);
+  assert.strictEqual(byAgent(impl, D).inputTokens, 100); assert.strictEqual(byAgent(impl, D).outputTokens, 10);
+  assert.strictEqual(byAgent(impl, D).sessionId, 'T1');
 });

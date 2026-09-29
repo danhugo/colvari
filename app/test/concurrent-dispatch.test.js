@@ -11,6 +11,8 @@ function setup() {
   fs.chmodSync(fake, 0o755);
   const s = new Store(path.join(r, 'data')); s.saveSettings({ claudePath: fake, maxConcurrency: 0 });
   const ns = ['A', 'B', 'C'].map((n) => s.addNode({ name: n, role: 'Dev', workdir: path.join(r, 'w' + n) }));
+  const rev = s.addNode({ name: 'Rev', role: 'Reviewer' }); // clean hand-offs complete via reviewer pickup
+  for (const n of ns) s.addEdge(n.id, rev.id, 'review');
   return { s, ns };
 }
 

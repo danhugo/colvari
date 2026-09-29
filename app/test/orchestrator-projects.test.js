@@ -14,6 +14,8 @@ test('orchestrators run different projects concurrently and independently', asyn
   const orchs = pids.map((pid) => {
     const s = pm.store(pid); s.saveSettings({ claudePath: fake });
     const node = s.getTeam().nodes[0] || s.addNode({ name: 'D', role: 'Dev' });
+    const rev = s.addNode({ name: 'Rev', role: 'Reviewer' }); // the hand-off completes via reviewer pickup
+    s.addEdge(node.id, rev.id, 'review');
     s.createTask({ title: 'job ' + pid, assignee: node.id });
     return new Orchestrator(s);
   });
@@ -24,6 +26,6 @@ test('orchestrators run different projects concurrently and independently', asyn
   for (const [i, pid] of pids.entries()) {
     const ts = pm.store(pid).listTasks();
     assert.equal(ts.length, 1); assert.equal(ts[0].status, 'done');
-    assert.equal(snaps[i].runs, 1); assert.ok(Math.abs(snaps[i].totalCost - 0.01) < 1e-9);
+    assert.equal(snaps[i].runs, 2, 'dev run + reviewer pickup'); assert.ok(Math.abs(snaps[i].totalCost - 0.02) < 1e-9);
   }
 });
