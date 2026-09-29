@@ -12,7 +12,7 @@ const { autoCompactEnv } = require('../src/orchestrator.js');
 test('autoCompactEnv sends the percent the CLI expects, not the old fraction', () => {
   assert.equal(autoCompactEnv(40), '40'); // default project setting; old code sent "0.4"
   assert.equal(autoCompactEnv(85), '85');
-  assert.equal(autoCompactEnv(1), '1');
+  assert.equal(autoCompactEnv(10), '10');
   assert.equal(autoCompactEnv(100), '100');
   // the old fraction formula, kept here so a regression back to it fails this test
   assert.notEqual(autoCompactEnv(40), String(Math.min(1, 40 / 100)));
@@ -20,6 +20,10 @@ test('autoCompactEnv sends the percent the CLI expects, not the old fraction', (
 
 test('autoCompactEnv clamps out-of-range settings into the CLI-accepted (0,100] band', () => {
   assert.equal(autoCompactEnv(140), '100');
-  assert.equal(autoCompactEnv(0.4), '1'); // would otherwise be rejected/thrash like the old "0.4"
-  assert.equal(autoCompactEnv(1.4), '1');
+  // tiny percents floor at 10: the CLI computes threshold = min(floor(window*pct/100), window-13000)
+  // with no floor of its own, so 1% of even a 1M window (10k) sits below the ~25-30k session baseline
+  // and compacts at every turn — the same thrash as the old "0.4" fraction
+  assert.equal(autoCompactEnv(0.4), '10');
+  assert.equal(autoCompactEnv(1.4), '10');
+  assert.equal(autoCompactEnv(9.4), '10');
 });

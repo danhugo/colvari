@@ -30,13 +30,16 @@ function stimeToMs(s) {
 }
 
 // CLAUDE_AUTOCOMPACT_PCT_OVERRIDE value for a configured percent. claude 2.1.284 parses the env as a
-// percent (0-100], not a fraction: threshold = floor(window * pct/100). Verified live on 2.1.284 with a
-// 1M-window model: env=0.4 auto-compacted at pre_tokens 30414 (0.4% of 1M = 4k, below the fixed
-// ~25-30k context floor — the autocompact-thrashing bug), while 40/10/unset did not compact. Sending
-// the old fraction format ("0.4") is exactly what thrashed agents; the env must carry the percent.
-// Rounded and clamped into the CLI's accepted band so odd settings values degrade to a sane threshold.
+// percent (0-100], not a fraction: threshold = min(floor(window * pct/100), window - 13000). The CLI
+// applies no floor of its own, and a threshold at/below a session's ~25-30k baseline compacts at once
+// and re-compacts forever — "Autocompact is thrashing" agent death (reproduced live: env=0.4 on a 1M
+// window is 4k tokens and compacted at pre_tokens 30414). Sending the old fraction format ("0.4") is
+// exactly what thrashed agents; the env must carry the percent. Tiny percents are floored at 10%
+// (100k of a 1M window, safely above the baseline; windows under ~300k could still dip below it, but
+// that takes deliberately pairing a small window with a small pct) and clamped into the CLI's accepted
+// band so odd settings values degrade to a sane threshold.
 function autoCompactEnv(pct) {
-  return String(Math.min(100, Math.max(1, Math.round(pct))));
+  return String(Math.min(100, Math.max(10, Math.round(pct))));
 }
 
 // Wake-on-message: how often the orchestrator looks for unread agent->agent messages, how long a burst
