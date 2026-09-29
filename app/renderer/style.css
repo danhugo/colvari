@@ -617,3 +617,6 @@ header #goal { min-width:180px; }
 
 .us-groups h4 { display:none; }
 .seg button:focus-visible { outline:2px solid var(--accent); outline-offset:1px; } .seg button.on:focus-visible { outline-offset:2px; box-shadow:0 0 0 1px var(--bg-app); }
+.card .cmeta{display:flex;align-items:center;gap:6px}
+.card .cmeta .avatar.sm{width:16px;height:16px;font-size:9px}
+.card .cmeta .ccount{margin-left:auto;color:var(--muted,#8a8f9c)}
