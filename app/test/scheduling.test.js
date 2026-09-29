@@ -1,6 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs'); const os = require('os'); const path = require('path');
+const { execFileSync } = require('child_process');
 const { Store } = require('../src/store');
 const { Orchestrator } = require('../src/orchestrator');
 const C = require('../src/controls');
@@ -80,7 +81,9 @@ test('orchestrator: review task with a reviewer edge is dispatched to the review
   await done;
   assert.equal(s.getTask(t.id).status, 'done');
   assert.equal(s.getTask(dependent.id).status, 'done');
-  assert.equal(o.agent(rev.id).runs, 1, 'the reviewer must actually have run the task');
+  // dev's silent finish of the dependent also hands off to review now, so the reviewer runs twice:
+  // once for t, once for the dependent.
+  assert.equal(o.agent(rev.id).runs, 2, 'the reviewer must actually have run both hand-offs');
 });
 
 test('orchestrator: review task with no reviewer edge auto-advances to done so dependents unblock', async () => {
@@ -138,4 +141,53 @@ test("orchestrator: stop() with no running agents emits 'done' right away", asyn
   o.running = true; // nothing dispatched, no procs
   o.stop();
   await done; // must resolve synchronously/immediately, not hang
+});
+
+// ---- silent-exit hand-off ----
+
+// Repo-backed store with worktrees on and an agent script that commits real work, so the
+// auto-merge consequences of a status change are observable in the repo.
+function setupRepo(script = RESULT()) {
+  const repo = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'squad-exitrev-')));
+  const g = (cwd, ...a) => execFileSync('git', ['-c', 'user.email=a@b', '-c', 'user.name=a', ...a], { cwd, stdio: 'pipe' }).toString().trim();
+  g(repo, 'init', '-q', '-b', 'main');
+  fs.writeFileSync(path.join(repo, 'base.txt'), 'base\n');
+  fs.writeFileSync(path.join(repo, '.gitignore'), '.squad/\n');
+  g(repo, 'add', '.'); g(repo, 'commit', '-q', '-m', 'init');
+  const s = new Store(repo);
+  s.saveSettings({ claudePath: fakeClaude(repo, script), maxConcurrency: 1, useWorktrees: true });
+  return { repo, g, s };
+}
+const COMMIT_WORK = RESULT("echo work > work.txt\ngit add .\ngit -c user.email=a@b -c user.name=a commit -qm work\n");
+
+test('orchestrator: clean exit without status hands off to review without merging; no reviewer -> done on the sweep', async () => {
+  // (1) dev with a review edge: the silent exit is a review hand-off, not an instant done+merge
+  const a = setupRepo(COMMIT_WORK);
+  const dev = a.s.addNode({ name: 'Dev', role: 'Dev' });
+  const rev = a.s.addNode({ name: 'Rev', role: 'Reviewer' });
+  a.s.addEdge(dev.id, rev.id, 'review');
+  const t1 = a.s.createTask({ title: 'silent exit', assignee: dev.id });
+  const o1 = new Orchestrator(a.s);
+  o1.running = true;
+  await o1.runTask(a.s.getTeam().nodes.find((n) => n.id === dev.id), a.s.getTask(t1.id), a.s.getTeam(), a.s.getSettings());
+  const r1 = a.s.getTask(t1.id);
+  assert.equal(r1.status, 'review', 'a clean exit without status is a review hand-off, not done');
+  assert.equal(r1.parkedForHuman, undefined, 'a clean exit is a hand-off, not a human escalation');
+  assert.equal(a.g(a.repo, 'rev-list', '--count', `main..${r1.worktreeBranch}`), '1', 'the dev did commit work on the branch');
+  assert.ok(!fs.existsSync(path.join(a.repo, 'work.txt')), 'nothing is merged before the review happens');
+  assert.ok(!r1.comments.some((c) => /auto-merged/.test(c.text)), 'no merge is claimed');
+
+  // (2) no review edge anywhere: the same hand-off lands done when the sweep (next tick) runs
+  const b = setupRepo(COMMIT_WORK);
+  const dev2 = b.s.addNode({ name: 'Dev2', role: 'Dev' });
+  const t2 = b.s.createTask({ title: 'silent exit, no reviewer', assignee: dev2.id });
+  const o2 = new Orchestrator(b.s);
+  o2.running = true;
+  await o2.runTask(b.s.getTeam().nodes.find((n) => n.id === dev2.id), b.s.getTask(t2.id), b.s.getTeam(), b.s.getSettings());
+  assert.equal(b.s.getTask(t2.id).status, 'review');
+  o2.autoAdvanceReviews(b.s.getTeam());
+  const r2 = b.s.getTask(t2.id);
+  assert.equal(r2.status, 'done', 'the sweep finishes the hand-off when no reviewer is configured');
+  assert.ok(r2.comments.some((c) => c.author === 'orchestrator' && /auto-advanced/.test(c.text)));
+  assert.ok(fs.existsSync(path.join(b.repo, 'work.txt')), 'the hand-off still lands the merge once done');
 });

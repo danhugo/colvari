@@ -590,9 +590,16 @@ class Orchestrator extends EventEmitter {
       (this._autoAdvanced ||= new Set());
       if (this._autoAdvanced.has(t.id)) continue;
       this._autoAdvanced.add(t.id);
-      this.store.updateTask(t.id, { status: 'done' });
-      this.store.commentTask(t.id, 'orchestrator', 'auto-advanced to done: no reviewer is configured for this task (no review edge from the assignee).');
-      this.log(t.assignee, 'system', `↷ "${t.title}" auto-advanced to done (no reviewer)`);
+      const g = C.gateStatus('done', team.nodes.find((n) => n.id === t.assignee), this.store.getSettings());
+      if (g.status === 'done') {
+        this.store.updateTask(t.id, { status: 'done' });
+        this.store.commentTask(t.id, 'orchestrator', 'auto-advanced to done: no reviewer is configured for this task (no review edge from the assignee).');
+        this.log(t.assignee, 'system', `↷ "${t.title}" auto-advanced to done (no reviewer)`);
+      } else {
+        // Approval-gated project with no reviewer: a silent exit may not become done unattended.
+        this.store.updateTask(t.id, g);
+        this.store.commentTask(t.id, 'orchestrator', 'no reviewer is configured for this task and the project requires approval: waiting for a human to approve it as done.');
+      }
     }
     return out;
   }
@@ -749,8 +756,9 @@ class Orchestrator extends EventEmitter {
 
   async runTask(node, task, team, settings) {
     this.runs++;
+    const reviewPickup = task.status === 'review'; // dispatched to review a hand-off: ending clean approves it
     this.store.updateTask(task.id, { status: 'in_progress' });
-    const a = this.agent(node.id); a.status = 'working'; a.lastError = null; a.taskId = task.id; a.task = task.title; a.runs++; a.iteration = 1;
+    const a = this.agent(node.id); a.status = 'working'; a.lastError = null; a.taskId = task.id; a.task = task.title; a.runs++; a.iteration = 1; a.reviewPickup = reviewPickup;
     this.procs.set(node.id, { kill() {} }); // reserve the slot synchronously
     try {
       this.changed();
@@ -873,14 +881,17 @@ class Orchestrator extends EventEmitter {
         this.store.updateTask(task.id, { status: 'review', parkedForHuman: true });
         this.store.commentTask(task.id, 'orchestrator', judge.inconclusive ? `Goal check was inconclusive after ${i} iteration(s): ${judge.reason}. Check the result yourself.` : `Goal condition not met after ${i} iteration(s) (${reason}): ${judge.reason}`);
       } else if (t && t.status === 'in_progress' && !this.drainCutoff) {
-        // Agent ended without updating status: success -> done, failure -> back to review for a human.
+        // Agent ended without updating status: a normal dispatch hands off to review —
+        // autoAdvanceReviews() then moves it to the reviewer, or straight to done when none is
+        // configured — so nothing merges unreviewed. A run dispatched to review that ends clean
+        // approves the hand-off (done); a failed/stopped run parks for a human instead.
         // (A run killed by the self-update drain cutoff skips this: its task stays in_progress so the
         // post-restart reconcile re-dispatches it instead of parking it for a human.)
         const ok = code === 0 && this.running && !stoppedWhy && !(m.mode === 'goal' && !(judge && judge.met));
-        const g = gate(ok ? 'done' : 'review');
+        const g = gate(ok && a.reviewPickup ? 'done' : 'review');
         if (!ok) g.parkedForHuman = true;
         this.store.updateTask(task.id, g);
-        this.store.commentTask(task.id, 'orchestrator', stoppedWhy ? `Agent stopped (${stoppedWhy}) after ${i} iteration(s); moved to review.` : `Agent exited (code ${code}) without setting status after ${i} iteration(s) (${reason}); moved automatically.`);
+        this.store.commentTask(task.id, 'orchestrator', stoppedWhy ? `Agent stopped (${stoppedWhy}) after ${i} iteration(s); moved to review.` : `Agent exited (code ${code}) without setting status after ${i} iteration(s) (${reason}); moved to review.`);
       } else if (t && t.status === 'review' && !t.parkedForHuman && code !== 0 && this.running && !stoppedWhy && !this.drainCutoff) {
         // The agent itself moved this to 'review' (clearing parkedForHuman) but the process then crashed
         // (nonzero exit). A crashed run must never look like a clean hand-off eligible for silent
