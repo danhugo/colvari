@@ -48,7 +48,7 @@ main { flex:1; overflow:hidden; } .tab { display:none; height:100%; padding:10px
 /* All six statuses share one row, Trello-style (t_1c907493) — done and merge_conflict used to wrap
    onto a second row of orphan columns. Narrow windows scroll horizontally instead. */
 #columns { flex:1; display:grid; grid-template-columns:repeat(6,minmax(175px,1fr)); gap:8px; overflow:auto; } .col { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:8px; min-height:0; }
-.col h3 { margin:0 0 8px; font-size:12px; text-transform:uppercase; color:var(--muted); } .card { border:1px solid var(--line); border-radius:6px; padding:7px; margin-bottom:6px; cursor:pointer; background:var(--bg); } .card.sel { border-color:var(--acc); }
+.col h3 { margin:0 0 8px; font-size:12px; text-transform:uppercase; color:var(--muted); white-space:nowrap; } .card { border:1px solid var(--line); border-radius:6px; padding:7px; margin-bottom:6px; cursor:pointer; background:var(--bg); } .card.sel { border-color:var(--acc); }
 .card small { color:var(--muted); display:block; } .comment { border-left:3px solid var(--line); padding:2px 8px; margin:6px 0; white-space:pre-wrap; }
 .wk-toolbar { margin-bottom:6px; } .wk-toolbar button { width:100%; } #wk-search { width:100%; margin-bottom:8px; }
 .wk-pages { flex:1; overflow:auto; min-height:0; }
@@ -90,7 +90,7 @@ table { border-collapse:collapse; background:var(--card); } td, th { border:1px 
 /* Agent rows (t_e503dd78): avatar · name over a status line ("working · t_xxxx title"), model as
    secondary muted text — every line ellipsizes cleanly instead of clipping mid-word. Count is a
    labelled muted badge; ⏹/✉ appear on hover so they stop cramming the row. */
-.logagent-row { display:flex; align-items:center; gap:8px; padding:5px 7px; border-radius:var(--radius-sm); cursor:pointer; }
+.logagent-row { display:flex; align-items:center; gap:8px; padding:5px 7px; border-radius:var(--radius-sm); cursor:pointer; position:relative; }
 .logagent-row:hover { background:var(--bg-hover); } .logagent-row.sel { background:var(--bg-active); color:var(--acc); }
 .logagent-row .lameta { flex:1; min-width:0; }
 .logagent-row .lameta b, .logagent-row .lastat, .logagent-row .lamodel { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
@@ -99,7 +99,11 @@ table { border-collapse:collapse; background:var(--card); } td, th { border:1px 
 .logagent-row .lst-working { color:var(--success-text); font-weight:var(--fw-medium); } .logagent-row .lst-idle { color:var(--fg-muted); }
 .logagent-row .ltid { font-family:var(--font-mono); font-size:10px; padding:0 4px; border-radius:var(--radius-xs); background:var(--bg-code); border:1px solid var(--border); }
 .logagent-row .lacount { flex:0 0 auto; min-width:20px; text-align:center; padding:0 6px; border-radius:var(--radius-full); background:var(--bg-code); border:1px solid var(--border); color:var(--fg-muted); font-size:10px; font-variant-numeric:tabular-nums; }
-.logagent-row .lactions { flex:0 0 auto; display:flex; gap:2px; opacity:0; transition:opacity var(--dur-fast) var(--ease-out); }
+/* Actions overlay the row end instead of consuming flex width, so the meta column keeps full
+   width and the model line doesn't truncate at the default 220px panel (t_d789a2c2). The fill
+   matches the row's hover/selected bg so it cleanly covers the count chip while visible. */
+.logagent-row .lactions { position:absolute; right:5px; top:50%; transform:translateY(-50%); display:flex; gap:2px; padding:1px; background:var(--bg-hover); border-radius:var(--radius-sm); opacity:0; transition:opacity var(--dur-fast) var(--ease-out); }
+.logagent-row.sel .lactions { background:var(--bg-active); }
 .logagent-row:hover .lactions, .logagent-row:focus-within .lactions { opacity:1; }
 .logagent-row .lactions button { padding:1px 5px; font-size:11px; }
 
@@ -463,11 +467,17 @@ header .pill { border:none; background:none; color:var(--fg-muted); font-size:va
 /* Level filter (t_e503dd78): one segmented control — a raised on-segment inside a shared track with a
    per-level colour dot — instead of three loose outlined toggles with check glyphs. */
 .linklike { background:none; border:none; padding:0; color:var(--accent, #4a9eff); text-decoration:underline; cursor:pointer; font:inherit; }
-.lvchips { display:inline-flex; gap:2px; padding:2px; background:var(--bg-code); border:1px solid var(--border-strong); border-radius:var(--radius-sm); }
-.lvchip { display:inline-flex; align-items:center; gap:5px; padding:2px 9px; border:none; background:none; border-radius:var(--radius-xs); color:var(--fg-muted); font-size:10.5px; font-weight:var(--fw-medium); cursor:pointer; text-transform:uppercase; letter-spacing:.02em; }
+/* Level filter: one segmented control — joined segments inside a single track, selected segment
+   tinted in its level colour with the AA-safe text pair for the theme (t_d789a2c2). */
+.lvchips { display:inline-flex; align-items:stretch; gap:2px; padding:2px; background:var(--bg-code); border:1px solid var(--border); border-radius:var(--radius-sm); }
+.lvchip { display:inline-flex; align-items:center; gap:5px; padding:2px 9px; border:none; background:none; border-radius:calc(var(--radius-sm) - 2px); color:var(--fg-muted); font-size:10.5px; font-weight:var(--fw-medium); cursor:pointer; text-transform:uppercase; letter-spacing:.02em; }
+.lvchip:hover { color:var(--fg-secondary); background:var(--bg-hover); }
 .lvchip .dot { width:7px; height:7px; border-radius:50%; background:currentColor; opacity:.45; }
-.lvchip.on { background:var(--bg-surface); color:var(--fg); box-shadow:var(--shadow-sm); }
+.lvchip.on { color:var(--fg-primary); background:var(--bg-surface); box-shadow:inset 0 0 0 1px var(--border-strong); }
 .lvchip.on .dot { opacity:1; }
+.lvchip.lv-info.on { color:var(--info); background:color-mix(in srgb, var(--info) 10%, var(--bg-surface)); box-shadow:inset 0 0 0 1px color-mix(in srgb, var(--info) 30%, transparent); }
+.lvchip.lv-warn.on { color:var(--warning-text); background:color-mix(in srgb, var(--warning) 12%, var(--bg-surface)); box-shadow:inset 0 0 0 1px color-mix(in srgb, var(--warning) 30%, transparent); }
+.lvchip.lv-error.on { color:var(--danger); background:color-mix(in srgb, var(--danger) 10%, var(--bg-surface)); box-shadow:inset 0 0 0 1px color-mix(in srgb, var(--danger) 30%, transparent); }
 .lvchip.lv-error .dot { background:var(--danger); } .lvchip.lv-warn .dot { background:var(--warning); } .lvchip.lv-info .dot { background:var(--info); }
 /* Auto-scroll as a real toggle: the hidden input keeps it keyboard-operable (focus ring on the track). */
 .asswitch { position:relative; display:inline-flex; align-items:center; gap:6px; cursor:pointer; color:var(--fg-secondary); font-size:12px; }
