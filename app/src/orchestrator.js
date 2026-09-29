@@ -79,8 +79,10 @@ const WATCH = { LONG_TASK_MIN: 45 };
 
 // Scheduled restarts (plan t_42f310cf item 1): merges only count toward a restart; a schedule
 // (core tool / human pill / cap) arms it. CAP is the safety valve — that many landed changes with
-// no schedule auto-arm a drain-and-restart (overridable via the restartCap setting).
-const RESTART = { CAP: 20 };
+// no schedule auto-arm a drain-and-restart (overridable via the restartCap setting). IDLE_SWEEP_MS
+// is the cadence of the always-on restart sweep: while no Run is active tick() is dead, so this
+// timer is what makes an armed schedule fire within a minute of true idle (t_acae4863).
+const RESTART = { CAP: 20, IDLE_SWEEP_MS: 15000 };
 
 function buildPrompt(team, node, task, extra = {}) {
   node = { ...normalizeNode(applyPreset(node, extra.presets)), id: node.id };
@@ -205,6 +207,13 @@ class Orchestrator extends EventEmitter {
     this._restartAfter = null;
     this._restartPushed = null;
     this._noUpdaterLogged = false;
+    // Always-on restart sweep (t_acae4863): tick() evaluates sweepRestart only while a Run is
+    // active (running=true), so a schedule armed while the company is idle — the PM's
+    // schedule_restart tool, the cap crossing after the run ended, a pill with lingering procs —
+    // was never evaluated again and sat armed for hours. This timer keeps the sweep alive when
+    // idle; tick() stays the fast path while running. unref'd: it must not hold the process open.
+    this._restartTimer = setInterval(() => { try { if (!this.running) this.sweepRestart(); } catch {} }, RESTART.IDLE_SWEEP_MS);
+    if (this._restartTimer.unref) this._restartTimer.unref();
     // A fired marker here means the previous process relaunched itself: the schedule did its job.
     // Consume it now (Cato t_42f310cf #4: cleared only after the new process boots — never before
     // the restart, or a crash mid-relaunch loses it; never left set, or state reads stale).
@@ -924,13 +933,30 @@ class Orchestrator extends EventEmitter {
   // changes wait, the armed schedule, and the not-yet-started tasks the gate is holding.
   restartState() {
     const rp = (this.store.meta() || {}).restartPending || {};
-    return {
+    const scheduled = !!(rp.scheduledNow || rp.afterTaskId);
+    const armed = scheduled && !rp.firedAt;
+    const nodes = (this.store.getTeam().nodes || []);
+    const busy = [...this.procs.keys()].map((id) => (nodes.find((n) => n.id === id) || {}).name || id);
+    const st = {
       pendingCount: Math.max(0, Number(rp.count) || 0),
       since: rp.since || null,
       scheduledAfter: rp.afterTaskId || null,
       scheduledNow: !!rp.scheduledNow,
       gating: this._restartGating || [],
+      busyAgents: busy,
+      blockedReason: null,
     };
+    // Why an armed, not-yet-fired schedule is not firing yet (t_acae4863, for the pill's subtitle):
+    // the anchor, the drain, or the updater itself. With nothing armed, say so too — a pending
+    // count alone is not a scheduled restart and must not read as one that should already have run.
+    if (!scheduled) st.blockedReason = 'no schedule armed — arm one with the pill or schedule_restart (the cap auto-arms)';
+    else if (armed) {
+      const after = rp.afterTaskId ? this.store.getTask(rp.afterTaskId) : null;
+      if (rp.afterTaskId && (!after || after.status !== 'done')) st.blockedReason = `waiting for the anchor task (${after ? after.status : 'missing'})`;
+      else if (busy.length) st.blockedReason = `waiting for ${busy.length} running agent${busy.length > 1 ? 's' : ''}: ${busy.join(', ')}`;
+      else if (this.updater && this.updater.phase !== 'idle') st.blockedReason = `self-update is ${this.updater.phase}`;
+    }
+    return st;
   }
   _pushRestartState() {
     const k = JSON.stringify(this.restartState());
@@ -939,11 +965,12 @@ class Orchestrator extends EventEmitter {
     this.emit('restart-state', this.restartState());
   }
 
-  // Per tick: cap auto-schedule, anchor failover, dispatch gating, and the fire itself. Eligible
-  // means armed with {now} or a done anchor, every agent drained, and the updater idle. The actual
-  // relaunch is the UpdateWatcher's flow (drain grace with halt, tests on the target sha,
-  // relaunch, boot resume). The gate STAYS on after firing — the one-second tick window before the
-  // watcher pauses dispatch must not start new work; boot-clear releases it after the relaunch.
+  // Per tick while a Run is active, and (via _restartTimer) every IDLE_SWEEP_MS while idle: cap
+  // auto-schedule, anchor failover, dispatch gating, and the fire itself. Eligible means armed
+  // with {now} or a done anchor, every agent drained, and the updater idle. The actual relaunch is
+  // the UpdateWatcher's flow (drain grace with halt, tests on the target sha, relaunch, boot
+  // resume). The gate STAYS on after firing — the one-second tick window before the watcher pauses
+  // dispatch must not start new work; boot-clear releases it after the relaunch.
   sweepRestart() {
     let rp = (this.store.meta() || {}).restartPending;
     const scheduled = !!rp && !!(rp.scheduledNow || rp.afterTaskId);
