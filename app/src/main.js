@@ -48,6 +48,7 @@ function orchFor(pid) {
     o.on('run.stalled', (e) => send('run-stalled', { ...e, projectId: pid }));
     o.on('run.recovering', (e) => send('run-recovering', { ...e, projectId: pid }));
     o.on('run.recovery_failed', (e) => send('run-recovery-failed', { ...e, projectId: pid }));
+    o.on('watch-status', (w) => send('watch-status', { ...w, projectId: pid }));
     orchs.set(pid, o);
   }
   return o;
@@ -2050,6 +2051,8 @@ const api = {
       status: inbox.some((i) => i.nodeId === n.id) ? 'needs-human' : (ag[n.id] || {}).status === 'working' || st[n.id] === 'busy' ? 'working' : 'idle' }])); },
   crossEdges: (c) => TS(c).incomingCrossEdges(), setViewport: (c, v) => TS(c).setViewport(v), getViewport: (c) => TS(c).getViewport(), setPositions: (c, pos) => TS(c).setPositions(pos),
   run: (c) => orchFor(c.p).start(), stop: (c) => orchFor(c.p).stop(),
+  // Core-agent watch (plan t_42f310cf item 2): pull the watch indicator state; live updates arrive on the 'watch-status' push channel.
+  getWatchStatus: (c) => orchFor(c.p).watchStatus(),
   getSelfUpdateStatus: (c) => ({ ...watcherFor(c.p).status(), devMode: DEV_MODE }),
   setAutoRestart: (c, on) => { if (DEV_MODE) ST(c).saveSettings({ autoRestart: !!on }); return { ...watcherFor(c.p).status(), devMode: DEV_MODE }; },
   restartSelfUpdate: (c) => { watcherFor(c.p).restartNow(); return { ...watcherFor(c.p).status(), devMode: DEV_MODE }; },
