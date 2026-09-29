@@ -828,10 +828,10 @@ function renderGraph() {
       el('title', {}, cbg).textContent = ns.lastCompact ? `Compacted ${fmtTok(ns.lastCompact.preTokens)}→${fmtTok(ns.lastCompact.postTokens)}` : 'Compacted';
     }
     // wake badge is gated by wakeRun itself, not `live`: nodeLive trusts the possibly stale nstat status
-    // stall badge outranks it: a stalled run must not read as one still working
+    // stall badge outranks it: a stalled run must not read as one still working; pending-wake is lowest rank
     const st = stallState(n.id);
     if (st) drawStallBadge(g, st, () => openWakeTask(st.taskId));
-    else { const wk = wakeRun(n.id); if (wk) drawWakeBadge(g, wk, () => openWakeTask(wk.taskId)); }
+    else { const wk = wakeRun(n.id); if (wk) drawWakeBadge(g, wk, () => openWakeTask(wk.taskId)); else { const wp = wakePending(n.id); if (wp) drawPendingBadge(g, wp); } }
     drawSubBadge(g, S.orch.agents[n.id] || {}, 46);
     el('title', {}, g).textContent = `${n.name} (${n.role}) — ${live}`;
     if (typeof ns.contextPct === 'number' && live === 'working') {
@@ -1138,6 +1138,11 @@ const wakeLabel = (id) => { const w = wakeRun(id); return w ? `Working — woken
 // Short badge text for drawWakeBadge: sender first, so the 30-char clip keeps WHO woke the agent
 // (t_0cd29f4d); the linked task title trails and at that width usually survives only in the tooltip.
 const wakeBadgeText = (w, task) => `${w.from} ✉ "${w.excerpt}"${w.queued ? ` (+${w.queued})` : ''}${task ? ` · ${task}` : ''}`;
+// Pending wake (t_139bd3eb): unread agent->agent messages held back by the per-agent wake gap —
+// a.wakePending {count, suppressed, nextWakeAt} from the orchestrator snapshot; absent = nothing pending.
+function wakePending(id) { const w = (S.orch.agents[id] || {}).wakePending; return w && +w.count > 0 ? w : null; }
+const pendingWakeText = (w) => { const n = +w.count; return w.suppressed ? `${n} message${n === 1 ? '' : 's'} pending — wake in ~${Math.max(1, Math.round((w.nextWakeAt - Date.now()) / 60000))}min` : `${n} message${n === 1 ? '' : 's'} pending — waking…`; };
+const pendingWakeBadgeText = (w) => { const n = +w.count; return w.suppressed ? `${n} pending — wake in ~${Math.max(1, Math.round((w.nextWakeAt - Date.now()) / 60000))}min` : `${n} pending — waking…`; };
 // Shared badge drawing for the Team and Overview node SVGs: a strip just below the node card
 // (inside the card there is no free row — the chip row and ctx bar own the bottom edge).
 function drawWakeBadge(g, w, onclick) {
@@ -1147,6 +1152,15 @@ function drawWakeBadge(g, w, onclick) {
   el('text', { x: (W - 8) / 2, y: 9.5, 'text-anchor': 'middle' }, bg).textContent = clipText(wakeBadgeText(w, w.taskId ? taskTitle(w.taskId) : null), 30);
   el('title', {}, bg).textContent = full;
   if (w.taskId && onclick) bg.onclick = onclick;
+}
+// Pending-wake strip, same slot as the wake/stall badges at the lowest rank (an actual wake or a
+// stall says more than messages waiting). Deliberately calm — dashed neutral, not an alarm color.
+function drawPendingBadge(g, wp) {
+  const full = pendingWakeText(wp);
+  const bg = el('g', { class: 'pendingwakebadge', transform: `translate(4,${H + 3})` }, g);
+  el('rect', { width: W - 8, height: 13, rx: 6 }, bg);
+  el('text', { x: (W - 8) / 2, y: 9.5, 'text-anchor': 'middle' }, bg).textContent = clipText(pendingWakeBadgeText(wp), 30);
+  el('title', {}, bg).textContent = full;
 }
 const openWakeTask = (taskId) => { sel.task = taskId; showTab('board'); renderBoard(); };
 // Stall / recovery state (contract with Devon, t_10137e17): the supervisor logs run.stalled /
@@ -1227,7 +1241,7 @@ function renderIdle() {
   document.querySelectorAll('.idlebanner[data-where="team"]').forEach((b) => { b.classList.toggle('hidden', !show); if (!show) return;
     b.innerHTML = `<span class="pres idle"><i></i></span><b>${idle.length} agent${idle.length > 1 ? 's' : ''} idle</b><span class="muted">${esc(idle.slice(0, 4).map((n) => n.name).join(', '))}${idle.length > 4 ? '…' : ''}</span><span class="spacer"></span><button class="primary" data-assignidle="${idle[0].id}">Assign work</button>`; });
   document.querySelectorAll('[data-assignidle]').forEach((b) => b.onclick = () => { showTab('board'); $('#nt-assignee').value = b.dataset.assignidle; $('#nt-title').focus(); });
-  $('#presence').innerHTML = S.allNodes.map((n) => { const p = presence(n.id); const wk = wakeLabel(n.id); return `<span class="pchip ${p}${wk ? ' wake' : ''}" title="${esc(wk || n.role)}"><span class="pres ${p}"><i></i></span>${esc(n.name)} <span class="muted">${wk ? esc(clipText(wk, 52)) : p}</span></span>`; }).join('');
+  $('#presence').innerHTML = S.allNodes.map((n) => { const p = presence(n.id); const wk = wakeLabel(n.id); const wp = wk ? null : wakePending(n.id); const pt = wk || (wp ? pendingWakeText(wp) : ''); return `<span class="pchip ${p}${wk ? ' wake' : ''}" title="${esc(pt || n.role)}"><span class="pres ${p}"><i></i></span>${esc(n.name)} <span class="muted">${pt ? esc(clipText(pt, 52)) : p}</span></span>`; }).join('');
   const wakes = S.allNodes.map((n) => ({ n, w: wakeRun(n.id) })).filter((x) => x.w);
   const wb = $('#wakebar');
   if (wb) { wb.classList.toggle('hidden', !wakes.length);
@@ -1893,6 +1907,7 @@ const normUpd = (d) => {
     reason: d.reason || '',
     fromSha: shortSha(d.fromSha ?? d.from),
     toSha: shortSha(d.toSha ?? d.to),
+    deferredTo: shortSha(d.deferredTo ?? ''),
     waiting: d.waitingOn || d.waiting || [],
     lastError: d.lastError || d.error || '',
     history: (d.history || d.restarts || []).map((h) => ({
@@ -1915,8 +1930,18 @@ const updWaitingCount = (w) => (typeof w === 'number' ? w : Array.isArray(w) ? w
 function renderSelfUpdate() {
   const c = $('#updst'); if (!c) return;
   const live = updIsLive() && upd.devMode !== false; // dev-only feature: no pill outside dev mode
-  c.classList.toggle('hidden', !live);
-  if (!live) { renderUpdVeil(false); return; }
+  // A guard-deferred restart (t_f6976152) keeps phase 'idle' — no veil, dispatch keeps running — but
+  // the queued update must stay visible or the waiting commits look ignored (t_139bd3eb).
+  const deferred = !live && upd.state === 'idle' && !!upd.deferredTo && upd.devMode !== false;
+  c.classList.toggle('hidden', !live && !deferred);
+  if (!live) {
+    renderUpdVeil(false);
+    if (!deferred) return;
+    c.className = 'pill upd-deferred';
+    c.textContent = 'update waiting';
+    c.title = `Restart deferred — ${upd.deferredTo} queued; retries once the restart guard clears (min spacing / hourly cap). Dispatch keeps running meanwhile.`;
+    return;
+  }
   c.className = 'pill upd-' + upd.state;
   const n = updWaitingCount(upd.waiting);
   c.textContent = n ? `${UPD_STATES[upd.state]} · ${n}` : UPD_STATES[upd.state];
@@ -2011,6 +2036,7 @@ function renderOverview() {
     const st = stallState(n.id);
     if (st) drawStallBadge(g, st, () => openWakeTask(st.taskId));
     else if (live === 'working') { const wk = wakeRun(n.id); if (wk) drawWakeBadge(g, wk, () => openWakeTask(wk.taskId)); }
+    else { const wp = wakePending(n.id); if (wp) drawPendingBadge(g, wp); }
     drawSubBadge(g, S.orch.agents[n.id] || {});
     const sg = el('g', { class: 'status s-' + live, transform: `translate(${W - 14},14)` }, g); el('circle', { r: 5 }, sg); el('title', {}, sg).textContent = live;
     el('title', {}, g).textContent = `${n.name} (${n.role}) — ${isStuck ? 'stuck' : live}`;
