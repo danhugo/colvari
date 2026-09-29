@@ -585,6 +585,16 @@ header .pill .rstact:disabled { opacity:.55; cursor:default; }
 header .pill .rsterr { margin-left:6px; font-size:10px; opacity:.8; }
 header .pill.watchst { cursor:pointer; }
 .tag.rstwait { background:var(--warning-soft); color:var(--warning-text); padding:0 var(--space-2); }
+/* blocker popover (t_ec59eefa): the restart chip's hover card — the full "waiting on" breakdown that
+   does not fit the pill; styled like the update notice card, tucked under the chip's right edge */
+.rstpop { position:fixed; z-index:901; width:330px; background:var(--bg-raised); border:1px solid var(--warn); border-radius:var(--radius-md); box-shadow:var(--shadow-lg); padding:10px 12px; display:flex; flex-direction:column; gap:4px; font-size:var(--text-xs); }
+.rstpop.hidden { display:none; }
+.rstpop .rp-title { font-weight:var(--fw-semibold); color:var(--warning-text); }
+.rstpop .rp-row { color:var(--fg); }
+.rstpop .rp-sec { margin-top:2px; font-size:10px; letter-spacing:.5px; text-transform:uppercase; color:var(--fg-muted); }
+.rstpop ul { margin:0; padding-left:16px; display:flex; flex-direction:column; gap:3px; }
+.rstpop .rp-note { color:var(--fg-muted); }
+header .pill .rstlbl { cursor:help; }
 /* watch digests: green like ok-results but bold, so the periodic core digest is scannable in the feed */
 .logrow.lv-watch, .loglevel.lv-watch { color:var(--term-green); } .logrow.lv-watch .logtext { font-weight:600; }
 .updhist { width:100%; margin:6px 0; } .updhist td, .updhist th { padding:3px 6px; font-size:12px; }
