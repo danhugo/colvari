@@ -43,7 +43,7 @@
       <button id="chat-newpill" class="hidden">↓ <span></span> new</button>
       <div id="chat-mentions" class="hidden"></div>
       <div id="chat-yourturn" class="hidden"></div>
-      <div class="composer"><div id="chat-preview" class="muted"></div><div id="chat-att" class="att-chips hidden"></div><div class="row"><textarea id="chat-input" rows="2" placeholder="Message #company — @Name task · @Name? question · plain text starts a goal"></textarea><button id="chat-attach" class="icon" title="Attach files (or paste / drop images)"><svg class="navicon" viewBox="0 0 24 24"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button><button id="chat-send" class="primary">Send</button></div></div>
+      <div class="composer"><div id="chat-preview" class="muted"></div><div id="chat-att" class="att-chips hidden"></div><div class="row"><textarea id="chat-input" rows="2" placeholder="Message #company…" title="@Name task · @Name? question · plain text starts a goal"></textarea><button id="chat-attach" class="icon" title="Attach files (or paste / drop images)"><svg class="navicon" viewBox="0 0 24 24"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button><button id="chat-send" class="primary">Send</button></div></div>
       <input id="chat-file" type="file" multiple class="hidden">
     </div><aside id="chat-thread" class="hidden"></aside></div>
   </section>
@@ -67,8 +67,9 @@
       <input id="wk-search" type="search" placeholder="Search pages…">
       <div id="wikipages" class="wk-pages"></div>
     </aside>
-    <div class="panel grow"><div class="toolbar"><input id="wk-title" placeholder="Page title"><button id="wk-save" class="primary">Save</button><button id="wk-edit">Edit / Preview</button><button id="wk-del">Delete</button></div>
-    <textarea id="wk-content" rows="24" class="hidden"></textarea><div id="wk-view" class="md"></div></div></div>
+    <div class="panel grow"><div id="wk-empty" class="wk-emptystate hidden"><svg viewBox="0 0 24 24" width="40" height="40" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M6 3h9l4 4v14H6zM14 3v5h5M9 13h7M9 17h5"/></svg><h3>No page selected</h3><p class="muted">Pick a page on the left, or write a runbook, glossary or notes for the team.</p><button id="wk-empty-new" class="primary">＋ New page</button></div>
+    <div id="wk-editor" class="wk-editor"><div class="toolbar"><input id="wk-title" placeholder="Page title"><button id="wk-save" class="primary">Save</button><button id="wk-edit">Edit / Preview</button><details id="wk-more" class="wk-more"><summary title="More actions" aria-label="More actions">…</summary><div class="wk-menu"><button id="wk-del">Delete page…</button></div></details></div>
+    <textarea id="wk-content" rows="24" class="hidden"></textarea><div id="wk-view" class="md"></div></div></div></div>
   </section>
   <section id="tab-obs" class="tab">
     <div class="split"><aside id="logagents" class="panel narrow"></aside>

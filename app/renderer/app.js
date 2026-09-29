@@ -875,7 +875,7 @@ function renderGraph() {
     const capsSt = !n.capabilities ? 'none' : (n.capabilities.error || n.capabilities.ok === false) ? 'error' : 'ok';
     const cb = el('g', { class: 'capsdot caps-' + capsSt, transform: `translate(7,${H - 8})` }, g); el('circle', { r: 4 }, cb);
     el('title', {}, cb).textContent = capsSt === 'none' ? 'Capabilities not probed yet' : capsSt === 'error' ? 'Capability probe failed' : `Capabilities probed${n.capabilitiesProbedAt ? ' ' + new Date(n.capabilitiesProbedAt).toLocaleString() : ''}`;
-    const sg = el('g', { class: 'status s-' + live, transform: `translate(${W - 16},16)` }, g); el('circle', { r: 5 }, sg); el('title', {}, sg).textContent = live;
+    const sg = el('g', { class: 'status s-' + live, transform: `translate(${W - 16},16)` }, g); el('circle', { r: 6 }, sg); el('title', {}, sg).textContent = live;
     const pres = el('g', { class: 'pres ' + presence(n.id), transform: `translate(${W - 16},16)` }, g); el('circle', { r: 8 }, pres);
     const pf = pfState(n);
     const badge = el('g', { class: 'pfbadge pf-' + pf, transform: `translate(${W - 34},16)` }, g);
@@ -1513,12 +1513,15 @@ function renderWiki() {
   const titles = Object.keys(S.wiki).sort().filter((t) => !q || t.toLowerCase().includes(q) || (S.wiki[t].content || '').toLowerCase().includes(q));
   const all = Object.keys(S.wiki).length;
   $('#wikipages').innerHTML = titles.length
-    ? titles.map((t) => `<div class="${t === sel.page ? 'sel' : ''}" data-t="${esc(t)}"><b>${esc(t)}</b><br><small class="muted">by ${esc(S.wiki[t].author)}</small></div>`).join('')
+    ? titles.map((t) => `<div class="${t === sel.page ? 'sel' : ''}" data-t="${esc(t)}"><b>${esc(t)}</b><small class="wk-meta">${esc(S.wiki[t].author)}${agoTxt(S.wiki[t].updatedAt) ? ' · ' + agoTxt(S.wiki[t].updatedAt) : ''}</small></div>`).join('')
     : all ? '<p class="muted wk-empty-body">No pages match your search.</p>' : '<p class="muted wk-empty-body">No pages yet. Click + New page to write your first one — e.g. a runbook, a glossary, or notes for the team.</p>';
   document.querySelectorAll('#wikipages div[data-t]').forEach((d) => d.onclick = () => { sel.page = d.dataset.t; wikiEdit = false; loadPage(); renderWiki(); });
   if (sel.page && S.wiki[sel.page] && !wikiEdit) loadPage();
-  else if (!sel.page) $('#wk-view').innerHTML = all ? '<p class="muted wk-empty-body">Pick a page on the left, or start a new one.</p>' : '<p class="muted wk-empty-body">No wiki pages yet. Click + New page on the left to write the first one — a runbook, a glossary, or anything the team should share.</p>';
+  const empty = !sel.page && !wikiEdit;
+  $('#wk-empty').classList.toggle('hidden', !empty); $('#wk-editor').classList.toggle('hidden', empty);
+  $('#wk-empty h3').textContent = all ? 'No page selected' : 'No wiki pages yet';
 }
+$('#wk-empty-new').onclick = () => $('#wk-new').click();
 $('#wk-new').onclick = () => { sel.page = null; wikiEdit = true; $('#wk-title').value = ''; $('#wk-content').value = ''; showWiki(); renderWiki(); };
 $('#wk-search').oninput = renderWiki;
 function loadPage() { const p = S.wiki[sel.page]; if (!p) return; $('#wk-title').value = p.title; $('#wk-content').value = p.content; showWiki(); }
@@ -1532,7 +1535,7 @@ function showWiki() {
 }
 $('#wk-edit').onclick = () => { wikiEdit = !wikiEdit; showWiki(); };
 $('#wk-save').onclick = async () => { const t = $('#wk-title').value.trim(); if (!t) return; await call('writeWiki', t, $('#wk-content').value); sel.page = t; wikiEdit = false; refresh(); };
-$('#wk-del').onclick = async () => { if (sel.page && confirm('Delete page?')) { await call('deleteWiki', sel.page); sel.page = null; $('#wk-title').value = ''; $('#wk-content').value = ''; refresh(); } };
+$('#wk-del').onclick = async () => { $('#wk-more').open = false; if (sel.page && confirm(`Delete page "${sel.page}"? This can't be undone.`)) { await call('deleteWiki', sel.page); sel.page = null; $('#wk-title').value = ''; $('#wk-content').value = ''; refresh(); } };
 
 // ---------- observability ----------
 const logTeamNodes = () => sel.logTeam ? S.allNodes.filter((n) => n.teamId === sel.logTeam) : S.allNodes;
@@ -1965,26 +1968,35 @@ $('#us-clear').onclick = act(async () => { if (!confirm('Clear the usage history
 function renderSettings() {
   const s = S.settings;
   const tplCur = $('#tpl-select') ? $('#tpl-select').value : '';
-  $('#settingsform').innerHTML = `<h3>Settings</h3><p class="muted">Project data: ${esc(S.dir)}</p>
-    <label>Template for new project/team</label><select id="tpl-select">${Object.entries(P.templates).map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join('')}</select>
-    <label>Claude CLI path</label><input id="st-claude" value="${esc(s.claudePath)}">
-    <label>Max concurrent agents</label><input id="st-conc" type="number" min="1" max="8" value="${s.maxConcurrency}">
-    <label>Max agent runs per Run (safety cap)</label><input id="st-runs" type="number" min="1" value="${s.maxRuns}">
-    <label>Max agents per team <span class="muted">(core agent recruit limit)</span></label><input id="st-maxagents" type="number" min="1" value="${s.maxAgents ?? 6}">
-    <label>Core team changes <span class="muted">(recruit / retire / update — ask the human first, or apply automatically)</span></label><select id="st-tcappr">${['ask', 'auto'].map((m) => `<option ${m === (s.teamChangeApproval ?? 'ask') ? 'selected' : ''}>${m}</option>`).join('')}</select>
-    <label>Default permission mode (agents can override)</label><select id="st-perm">${['bypassPermissions', 'acceptEdits', 'default', 'plan'].map((m) => `<option ${m === s.permissionMode ? 'selected' : ''}>${m}</option>`).join('')}</select>
-    <label>Project budget per Run, $ <span class="muted">(stops all agents; 0 = none)</span></label><input id="st-budgetusd" type="number" min="0" step="0.01" value="${s.budgetUsd || 0}">
-    <label>Project token budget per Run <span class="muted">(input + output; 0 = none)</span></label><input id="st-budgettok" type="number" min="0" step="1000" value="${s.budgetTokens || 0}">
-    <label>Stuck warning after N minutes without output</label><input id="st-stuck" type="number" min="1" value="${s.stuckMinutes || 5}">
-    <label>Stall timeout — stop + auto-resume a silent run after N minutes <span class="muted">(max 2 recoveries, then the task is marked recovery failed)</span></label><input id="st-stall" type="number" min="1" value="${s.stallTimeoutMin ?? 10}">
-    <label>Auto-compact at % <span class="muted">(context usage that triggers /compact; 0 = off)</span></label><input id="st-autocompactpct" type="number" min="0" max="95" value="${s.autoCompactPct ?? 40}">
-    <label class="inline"><input type="checkbox" id="st-approval" ${s.requireApproval ? 'checked' : ''}> Require human approval for every agent's "done"</label>
-    <label class="inline"><input type="checkbox" id="st-notify" ${s.notifications === false ? '' : 'checked'}> Desktop notifications (approval needed, budget reached, run finished)</label>
-    <p><button id="st-save" class="primary">Save settings</button></p>
-    ${upd.devMode === false ? '' : `<hr><h3>App updates</h3>
+  $('#settingsform').innerHTML = `<h3 class="set-pagetitle">Settings</h3>
+    <div class="set-path"><span>Project data</span><code title="${esc(S.dir)}">${esc(S.dir)}</code><button id="st-copydir" title="Copy path">Copy</button></div>
+    <section class="set-sec"><h3>Runtime</h3><div class="set-rows">
+    <div class="set-row stack"><div class="set-lab"><label for="st-claude">Claude CLI path</label><p class="set-hint">Binary used to launch agents. Leave as-is unless your CLI lives outside PATH.</p></div><input id="st-claude" value="${esc(s.claudePath)}"></div>
+    <div class="set-row"><div class="set-lab"><label for="tpl-select">Template for new project / team</label></div><div class="set-ctl"><select id="tpl-select">${Object.entries(P.templates).map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join('')}</select></div></div>
+    <div class="set-row"><div class="set-lab"><label for="st-perm">Default permission mode</label><p class="set-hint">Agents can override this per node.</p></div><div class="set-ctl"><select id="st-perm">${['bypassPermissions', 'acceptEdits', 'default', 'plan'].map((m) => `<option ${m === s.permissionMode ? 'selected' : ''}>${m}</option>`).join('')}</select></div></div>
+    </div></section>
+    <section class="set-sec"><h3>Limits &amp; budgets</h3><div class="set-rows">
+    <div class="set-row"><div class="set-lab"><label for="st-conc">Max concurrent agents</label><p class="set-hint">How many agents may run at the same time.</p></div><div class="set-num"><input id="st-conc" type="number" min="1" max="8" value="${s.maxConcurrency}"><span class="set-unit">agents</span></div></div>
+    <div class="set-row"><div class="set-lab"><label for="st-maxagents">Max agents per team</label><p class="set-hint">Core agent recruit limit.</p></div><div class="set-num"><input id="st-maxagents" type="number" min="1" value="${s.maxAgents ?? 6}"><span class="set-unit">agents</span></div></div>
+    <div class="set-row"><div class="set-lab"><label for="st-runs">Max agent runs per Run</label><p class="set-hint">Safety cap for the scheduler.</p></div><div class="set-num"><input id="st-runs" type="number" min="1" value="${s.maxRuns}"><span class="set-unit">runs</span></div></div>
+    <div class="set-row"><div class="set-lab"><label for="st-budgetusd">Project budget per Run</label><p class="set-hint">Stops all agents when reached. 0 = no limit.</p></div><div class="set-num"><span class="set-unit">$</span><input id="st-budgetusd" type="number" min="0" step="0.01" value="${s.budgetUsd || 0}"></div></div>
+    <div class="set-row"><div class="set-lab"><label for="st-budgettok">Project token budget per Run</label><p class="set-hint">Input + output. 0 = no limit.</p></div><div class="set-num"><input id="st-budgettok" type="number" min="0" step="1000" value="${s.budgetTokens || 0}"><span class="set-unit">tokens</span></div></div>
+    <div class="set-row"><div class="set-lab"><label for="st-autocompactpct">Auto-compact at</label><p class="set-hint">Context usage that triggers /compact. 0 = off.</p></div><div class="set-num"><input id="st-autocompactpct" type="number" min="0" max="95" value="${s.autoCompactPct ?? 40}"><span class="set-unit">%</span></div></div>
+    </div></section>
+    <section class="set-sec"><h3>Recovery</h3><div class="set-rows">
+    <div class="set-row"><div class="set-lab"><label for="st-stuck">Stuck warning after</label><p class="set-hint">Flag a run that has been silent this long.</p></div><div class="set-num"><input id="st-stuck" type="number" min="1" value="${s.stuckMinutes || 5}"><span class="set-unit">min</span></div></div>
+    <div class="set-row"><div class="set-lab"><label for="st-stall">Stall timeout</label><p class="set-hint">Stop + auto-resume a silent run. Max 2 recoveries, then the task is marked recovery failed.</p></div><div class="set-num"><input id="st-stall" type="number" min="1" value="${s.stallTimeoutMin ?? 10}"><span class="set-unit">min</span></div></div>
+    </div></section>
+    <section class="set-sec"><h3>Approvals</h3><div class="set-rows">
+    <div class="set-row"><div class="set-lab"><label>Require approval for every agent's "done"</label><p class="set-hint">A human confirms before a task counts as done.</p></div><div class="set-ctl"><input type="checkbox" id="st-approval" ${s.requireApproval ? 'checked' : ''}></div></div>
+    <div class="set-row"><div class="set-lab"><label for="st-tcappr">Core team changes</label><p class="set-hint">Recruit / retire / update — ask the human first, or apply automatically.</p></div><div class="set-ctl"><select id="st-tcappr">${['ask', 'auto'].map((m) => `<option ${m === (s.teamChangeApproval ?? 'ask') ? 'selected' : ''}>${m}</option>`).join('')}</select></div></div>
+    <div class="set-row"><div class="set-lab"><label>Desktop notifications</label><p class="set-hint">Approval needed, budget reached, run finished.</p></div><div class="set-ctl"><input type="checkbox" id="st-notify" ${s.notifications === false ? '' : 'checked'}></div></div>
+    </div></section>
+    <p class="set-actions"><button id="st-save" class="primary">Save settings</button></p>
+    ${upd.devMode === false ? '' : `<hr><section class="set-sec"><h3>App updates</h3>
     <label class="inline"><input type="checkbox" id="st-autorestart" ${upd.enabled ? 'checked' : ''}> Auto-restart on new merged code</label>
     <p class="muted">When new commits land on this app's base branch: pause the scheduler, wait for running agents to finish, test the new code, then relaunch and resume the run. Failed tests cancel the restart.</p>
-    <div id="upd-history"></div>`}
+    <div id="upd-history"></div></section>`}
     <h3>Role presets (this project)</h3><p class="muted">Presets appear as role suggestions. A new agent whose role matches a preset gets its prompt, tools and permission mode.</p>
     <table id="presettable"><tr><th>Name</th><th>Permission</th><th>Allowed</th><th>Disallowed</th><th></th></tr>${(s.rolePresets || []).map((p) => `<tr><td>${esc(p.name)}</td><td>${esc(p.permissionMode || 'default')}</td><td>${esc(p.allowedTools.join(', '))}</td><td>${esc(p.disallowedTools.join(', '))}</td><td><button data-editp="${esc(p.name)}">Edit</button><button data-delp="${esc(p.name)}">Delete</button></td></tr>`).join('')}</table>
     <div id="presetform"><label>Name</label><input id="pr-name"><label>Default system prompt</label><textarea id="pr-prompt" rows="3"></textarea>
@@ -1993,6 +2005,10 @@ function renderSettings() {
     <p><button id="pr-save">Save preset</button></p></div>
     <hr>${renderRuntimesSection()}`;
   const ts = $('#tpl-select'); if (ts && tplCur) ts.value = tplCur;
+  $('#st-copydir').onclick = async () => {
+    try { await navigator.clipboard.writeText(S.dir); } catch { const t = document.createElement('textarea'); t.value = S.dir; document.body.appendChild(t); t.select(); document.execCommand('copy'); t.remove(); }
+    $('#st-copydir').textContent = 'Copied'; setTimeout(() => { const b = $('#st-copydir'); if (b) b.textContent = 'Copy'; }, 1200);
+  };
   wireRuntimesSection(); wireDraftForm();
   document.querySelectorAll('[data-delp]').forEach((b) => b.onclick = act(async () => { await call('deletePreset', b.dataset.delp); refresh(); }));
   document.querySelectorAll('[data-editp]').forEach((b) => b.onclick = () => { const p = s.rolePresets.find((x) => x.name === b.dataset.editp); $('#pr-name').value = p.name; $('#pr-prompt').value = p.systemPrompt; $('#pr-allowed').value = p.allowedTools.join(', '); $('#pr-disallowed').value = p.disallowedTools.join(', '); $('#pr-perm').value = p.permissionMode; });
@@ -2176,7 +2192,7 @@ function renderOverview() {
     el('circle', { class: 'avatar', cx: 26, cy: 24, r: 13, style: `fill:var(--agent-${c})` }, g);
     el('text', { x: 26, y: 28.5, class: 'avtext', 'text-anchor': 'middle' }, g).textContent = initials(n.name);
     el('text', { x: 47, y: 21, class: 'nname' }, g).textContent = clipText(n.name, 16);
-    el('text', { x: 47, y: 36, class: 'nrole' }, g).textContent = isStuck ? '⚠ stuck' : `${clipText(n.role, 14)}${live === 'working' ? ' · working' : ''}`;
+    el('text', { x: 47, y: 36, class: 'nrole' }, g).textContent = isStuck ? '⚠ stuck' : `${clipText(n.role, 14)} · ${live === 'working' ? 'Working' : humanStatus(live)}`;
     el('text', { x: 47, y: 50, 'font-size': 10, opacity: 0.8, class: 'ov-vendor' }, g).textContent = clipText(`${VENDOR[n.runtime || 'claude'] || n.runtime} · ${n.model || 'default'}`, 26);
     const st = stallState(n.id); const pu = rtuFor(n.id);
     if (st) drawStallBadge(g, st, () => openWakeTask(st.taskId));
@@ -2208,7 +2224,7 @@ function renderOverview() {
   const ATTN_BADGE = { waiting_for_human: '⏳', blocked: '⛔', error: '❗' };
   const tlbox = $('#ov-timeline'); tlbox.innerHTML = '';
   if (hiddenCount) { const note = document.createElement('div'); note.className = 'ovtl-note'; note.textContent = `${hiddenCount} idle lane${hiddenCount > 1 ? 's' : ''} hidden (no activity in the last 15m)`; tlbox.appendChild(note); }
-  if (!ids.length) { const empty = document.createElement('p'); empty.className = 'muted ovtl-empty'; empty.textContent = 'No agent activity in the last 15 minutes.'; tlbox.appendChild(empty); }
+  if (!ids.length) { const empty = document.createElement('p'); empty.className = 'muted ovtl-empty'; empty.textContent = 'No activity in the last 15m'; tlbox.appendChild(empty); }
   else {
     const tl = el('svg', { width: LW + PX + 10, height: ids.length * LH + 18 }, null);
     const defs = el('defs', {}, tl);
@@ -2234,8 +2250,10 @@ function renderOverview() {
   else {
     ts.classList.remove('hidden');
     const as = byId[t.assignee]; const ac = as ? agentColor(as.id) : 0;
-    head.innerHTML = `<div class="ovth-title">${esc(t.title)}</div><div class="ovth-meta"><span class="ovth-status ${esc(t.status)}">${esc(t.status)}</span>${as ? `<span class="ovth-assignee"><span class="ovth-av" style="background:var(--agent-${ac})">${esc(initials(as.name))}</span>${esc(as.name)}</span>` : '<span class="muted">Unassigned</span>'}</div>`;
+    head.innerHTML = `<div class="ovth-title">${esc(t.title)}</div><div class="ovth-meta"><span class="ovth-status ${esc(t.status)}">${esc(humanStatus(t.status))}</span>${as ? `<span class="ovth-assignee"><span class="ovth-av" style="background:var(--agent-${ac})">${esc(initials(as.name))}</span>${esc(as.name)}</span>` : '<span class="muted">Unassigned</span>'}</div>`;
   }
+  function humanStatus(s) { const w = String(s || '').replaceAll('_', ' '); return w.charAt(0).toUpperCase() + w.slice(1); }
+  const ovAvatar = (id) => { const n = byId[id]; return n ? `<span class="ovth-av" style="background:var(--agent-${agentColor(id)})">${esc(initials(n.name))}</span>` : `<span class="ovth-av sys">${id === 'human' ? 'H' : '•'}</span>`; };
   // Collapsible nested block for a subagent's tool activity inside the task thread (native <details>,
   // open state preserved via data-k like the tool chips).
   const ovSubBlock = (it, depth) => {
@@ -2248,9 +2266,9 @@ function renderOverview() {
   };
   // Task thread capped to the latest 300 entries before nesting; older history stays on the Board.
   const threadItems = t ? Overview.taskThread(t, L, S.messages) : []; const cut = Math.max(0, threadItems.length - 300); const shown = cut ? threadItems.slice(-300) : threadItems;
-  $('#ov-thread').innerHTML = !t ? '<p class="muted empty">No tasks yet.</p>' : (cut ? `<p class="muted empty">${cut} earlier entries hidden — open the task on the Board for the full history.</p>` : '') + (Subagents.nestRows(shown, subRecOf, t.assignee).map((it, k) => it.kind === 'sub' ? ovSubBlock(it, 0) : it.l.type === 'tool'
+  $('#ov-thread').innerHTML = !t ? '<p class="muted empty">No tasks yet — create one on the Board and messages will appear here.</p>' : (cut ? `<p class="muted empty">${cut} earlier entries hidden — open the task on the Board for the full history.</p>` : '') + (Subagents.nestRows(shown, subRecOf, t.assignee).map((it, k) => it.kind === 'sub' ? ovSubBlock(it, 0) : it.l.type === 'tool'
     ? `<details data-k="${k}" ${open.has(String(k)) ? 'open' : ''}><summary class="chip">🔧 ${esc(it.l.summary)}</summary><pre>${esc(it.l.text)}</pre></details>`
-    : `<div class="comment ${it.l.type === 'message' ? 'msg' : ''}"><b>${esc(it.l.type === 'message' ? `${nodeName(it.l.who)} → ${nodeName(it.l.to)}` : it.l.who === 'human' || it.l.who === 'orchestrator' ? it.l.who : nodeName(it.l.who))}</b> <small class="muted">${new Date(it.l.at).toLocaleTimeString()}</small><br>${esc(it.l.text)}</div>`).join('') || '<p class="muted empty">Nothing yet.</p>');
+    : `<div class="comment ${it.l.type === 'message' ? 'msg' : ''}">${ovAvatar(it.l.who)}<b>${esc(it.l.type === 'message' ? `${nodeName(it.l.who)} → ${nodeName(it.l.to)}` : it.l.who === 'human' || it.l.who === 'orchestrator' ? it.l.who : nodeName(it.l.who))}</b> <small class="muted">${new Date(it.l.at).toLocaleTimeString()}</small><br>${esc(it.l.text)}</div>`).join('') || '<p class="muted empty">No messages yet — the assignee\'s updates will appear here.</p>');
   ovLive = stuck.size > 0 || hot.size > 0 || Object.values(lanes).some((l) => l.runs.some((r) => r.live));
 }
 $('#ov-task').onchange = renderOverview;
@@ -2281,7 +2299,11 @@ function bubble(e) {
     return `<details class="cchip subagent"><summary>🤖 ${esc(rec.description || 'Subagent')} <span class="substatus ss-${esc(rec.status || 'unknown')}">${esc(rec.status || 'unknown')}</span> <span class="submeta">${esc(meta)}</span> <span class="subcount">${e.total}</span></summary><div class="subevents">${sevHtml(e)}${(e.children || []).map(childHtml).join('')}</div></details>${tl ? `<span class="bubble linked"${link}>${tl}</span>` : ''}<br>`;
   }
   if (e.type === 'question') return `<div class="bubble question" data-iid="${e.inboxId}">❓ <b>Question for you</b>${tl}<br>${esc(e.text)}<br>${e.choices.map((c) => `<button class="primary ch-choice" data-v="${esc(c)}">${esc(c)}</button>`).join('')}<textarea class="ch-ans" rows="1" placeholder="Or type an answer"></textarea><button class="ch-send">Answer</button></div>`;
-  const text = e.type === 'handoff' ? `📋 assigned “${e.text}” to @${who(e.to).name}` : e.type === 'message' ? `✉ @${who(e.to).name} ${e.text}` : e.type === 'comment' ? `💬 ${e.text}` : e.text;
+  const ico = (p) => `<svg viewBox="0 0 24 24" aria-hidden="true">${p}</svg>`;
+  const IC = { handoff: '<path d="M5 12h14M13 6l6 6-6 6"/>', message: '<path d="M4 6h16v12H4zM4 7l8 6 8-6"/>', comment: '<path d="M4 5h16v11H8l-4 4z"/>' };
+  if (IC[e.type]) { const t = e.type === 'handoff' ? `assigned “${e.text}” to @${who(e.to).name}` : e.type === 'message' ? `@${who(e.to).name} ${e.text}` : e.text;
+    return `<div class="bubble evrow ${e.type}${link ? ' linked' : ''}"${link}>${ico(IC[e.type])}<span>${esc(t)}</span>${tl}${rep}</div>`; }
+  const text = e.text;
   const attsHtml = Chat.attThumbs(e.atts);
   return `<div class="bubble ${e.type}${link ? ' linked' : ''}"${link}>${esc(text)}${attsHtml}${tl}${rep}</div>`;
 }
@@ -2289,8 +2311,11 @@ function bubble(e) {
 const mergeGroups = (gs) => gs.reduce((out, g) => { const p = out[out.length - 1]; if (p && p.who === g.who && g.items[0].type !== 'question' && p.items[0].type !== 'question') p.items.push(...g.items); else out.push({ ...g, items: [...g.items] }); return out; }, []).map((g) => ({ ...g, items: Chat.collapseRepeats(g.items) }));
 const needsYou = () => new Set([...(S.inbox || []).map((i) => i.nodeId), ...CH.asks]);
 const avatarHtml = (id, working, ask) => { const w = who(id); return `<div class="avatar${w.human ? ' human' : ''}${working.has(id) ? ' working' : ''}${ask.has(id) ? ' ask' : ''}" style="background:${w.color}" title="${esc(w.name)}${working.has(id) ? ' · working' : ask.has(id) ? ' · needs you' : ''}">${esc(w.ini)}</div>`; };
+// ≥3 consecutive handoffs from one actor fold into one expandable "assigned N tasks" row.
+const bubbleRuns = (items) => { const out = []; for (let i = 0; i < items.length;) { let j = i; while (j < items.length && items[j].type === 'handoff') j++;
+  if (j - i >= 3) { const run = items.slice(i, j); out.push(`<details class="evrun"><summary class="evrow"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg><span>assigned ${run.length} tasks</span></summary>${run.map(bubble).join('')}</details>`); i = j; } else { j = Math.max(j, i + 1); out.push(...items.slice(i, j).map(bubble)); i = j; } } return out.join(''); };
 const renderGroups = (events, working) => { const ask = needsYou(); return mergeGroups(Chat.group(events)).map((g) => { const w = who(g.who);
-  return `<div class="cgroup${w.human ? ' self' : ''}">${avatarHtml(g.who, working, ask)}<div class="cbody"><div class="cname">${esc(w.name)}${w.role ? `<span class="role">${esc(w.role)}</span>` : ''}${w.human ? '' : vbadge((S.allNodes || []).find((n) => n.id === g.who))}<time>${new Date(g.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time></div>${g.items.map(bubble).join('')}</div></div>`; }).join(''); };
+  return `<div class="cgroup${w.human ? ' self' : ''}">${avatarHtml(g.who, working, ask)}<div class="cbody"><div class="cname">${esc(w.name)}${w.role ? `<span class="role">${esc(w.role)}</span>` : ''}${w.human ? '' : vbadge((S.allNodes || []).find((n) => n.id === g.who))}<time>${new Date(g.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time></div>${bubbleRuns(g.items)}</div></div>`; }).join(''); };
 // Sticky "Your turn" bar above the composer: every pending ask_human question/approval.
 function renderYourTurn(ev) {
   const seen = new Set((S.inbox || []).map((i) => i.id)); const items = [...(S.inbox || []), ...ev.filter((e) => e.type === 'question' && !seen.has(e.inboxId)).map((e) => ({ id: e.inboxId, nodeId: e.who, question: e.text, choices: e.choices, kind: 'question' }))]; const bar = $('#chat-yourturn'); bar.classList.toggle('hidden', !items.length);
