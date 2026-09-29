@@ -2594,6 +2594,7 @@ composerEl.addEventListener('dragleave', () => composerEl.classList.remove('drag
 composerEl.addEventListener('drop', (e) => { e.preventDefault(); composerEl.classList.remove('dragover'); const files = [...(e.dataTransfer?.files || [])]; if (files.length) act(addChatFiles)(files); });
 
 // ---------- human inbox (ask_human questions + approvals) ----------
+const ibOpen = new Map();
 function renderInbox() {
   const items = S.inbox || []; const n = items.length ? String(items.length) : '';
   $('#inbox-tab-badge').textContent = n;
@@ -2604,7 +2605,10 @@ function renderInbox() {
     <textarea class="ib-text" rows="2" placeholder="${i.kind === 'approval' ? 'Or describe the changes you want' : 'Your answer'}"></textarea>
     <p><button class="ib-send">${i.kind === 'approval' ? 'Request changes' : 'Send answer'}</button></p></div></div>`).join('') : `<div class="ib-empty"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12 6.5 5h11L20 12v6a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 18v-6ZM4 12h5.5l1 2h3l1-2H20"/></svg><h3>You're all caught up</h3><p>Agent questions, approvals and merge conflicts that need your call land here.</p><button class="ib-board">Go to Board</button></div>`;
   const ibb = document.querySelector('.ib-board'); if (ibb) ibb.onclick = () => showTab('board');
-  document.querySelectorAll('.inboxitem .ib-head').forEach((h) => { const t = () => { const o = h.nextElementSibling.classList.toggle('hidden'); h.setAttribute('aria-expanded', String(!o)); }; h.onclick = t; h.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); t(); } }; });
+  document.querySelectorAll('.inboxitem .ib-head').forEach((h) => { const t = () => { const o = h.nextElementSibling.classList.toggle('hidden'); h.setAttribute('aria-expanded', String(!o)); ibOpen.set(h.parentElement.dataset.iid, !o); }; h.onclick = t; h.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); t(); } }; });
+  // Newest "your turn" item starts expanded so its choices show without a click; user toggles are remembered across re-renders.
+  const newest = items.reduce((m, i) => (!m || (i.createdAt || i.at || 0) >= (m.createdAt || m.at || 0) ? i : m), null);
+  document.querySelectorAll('.inboxitem').forEach((d) => { const id = d.dataset.iid; if (ibOpen.get(id) ?? (newest && newest.id === id)) { d.querySelector('.ib-body').classList.remove('hidden'); d.querySelector('.ib-head').setAttribute('aria-expanded', 'true'); } });
   document.querySelectorAll('.inboxitem').forEach((d) => {
     const answer = (v) => act(async () => { if (!v) return; await call('answerInbox', d.dataset.iid, v); refresh(); })();
     d.querySelectorAll('.ib-choice').forEach((b) => b.onclick = () => answer(b.dataset.v));
