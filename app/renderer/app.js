@@ -612,13 +612,14 @@ async function renderLimitMeter() {
   m.innerHTML = `<span class="lm-part lm-${cls}" title="${esc(title)}">Limits: ${state} <b>${esc(worst.label)}</b><i class="lm-bar"><i class="lm-fill" style="width:${pct}%"></i></i>${ms > 0 ? `<small>↻${fmtCountdown(ms)}</small>` : ''}</span>`;
 }
 function showTab(name) { document.querySelector(`#tabs button[data-tab="${name}"]`).click(); }
-$('#run').onclick = async () => {
+$('#run').onclick = async (runAtts) => {
+  runAtts = Array.isArray(runAtts) ? runAtts : null; // chatSend passes saved attachments; real clicks pass an Event
   const goal = $('#goal').value.trim();
   if (!S.team.nodes.length) { alert('Add at least one agent in the Team tab first.'); return showTab('team'); }
   if (goal) {
     const hasIn = new Set(S.team.edges.map((e) => e.to));
     const lead = S.team.nodes.find((n) => n.id === sel.node) || S.team.nodes.find((n) => !hasIn.has(n.id)) || S.team.nodes[0];
-    await call('createTask', { title: goal.slice(0, 80), description: goal, assignee: lead.id }); $('#goal').value = '';
+    await call('createTask', { title: goal.slice(0, 80), description: goal, assignee: lead.id, ...(runAtts ? { attachments: runAtts } : {}) }); $('#goal').value = '';
   } else if (!S.tasks.some((t) => t.status === 'todo')) { alert('Type a goal next to Run (or create a todo task in Board) first.'); return $('#goal').focus(); }
   const bad = S.allNodes.filter((n) => ['fail', 'untested', 'stale'].includes(pfState(n)));
   if (bad.length && !confirm(`Preflight not passed for ${bad.length} agent(s):\n${bad.map((n) => `- ${n.name}: ${n.preflightStatus === 'fail' ? 'FAILED' + (n.preflight && n.preflight.error ? ' (' + n.preflight.error.slice(0, 120) + ')' : '') : n.preflightStatus === 'stale' ? 'config changed since test' : 'untested'}`).join('\n')}\n\nRun anyway? (Use "Test team" in the Team tab to check them.)`)) return showTab('team');
@@ -2037,12 +2038,11 @@ function bubble(e) {
   }
   if (e.type === 'question') return `<div class="bubble question" data-iid="${e.inboxId}">❓ <b>Question for you</b>${tl}<br>${esc(e.text)}<br>${e.choices.map((c) => `<button class="primary ch-choice" data-v="${esc(c)}">${esc(c)}</button>`).join('')}<textarea class="ch-ans" rows="1" placeholder="Or type an answer"></textarea><button class="ch-send">Answer</button></div>`;
   const text = e.type === 'handoff' ? `📋 assigned “${e.text}” to @${who(e.to).name}` : e.type === 'message' ? `✉ @${who(e.to).name} ${e.text}` : e.type === 'comment' ? `💬 ${e.text}` : e.text;
-  return `<div class="bubble ${e.type}${link ? ' linked' : ''}"${link}>${esc(text)}${tl}${rep}</div>`;
+  const attsHtml = Chat.attThumbs(e.atts);
+  return `<div class="bubble ${e.type}${link ? ' linked' : ''}"${link}>${esc(text)}${attsHtml}${tl}${rep}</div>`;
 }
-// Collapse consecutive identical messages (same type/target/text) from one author into one bubble + a ×N badge at the end.
-const collapseRepeats = (items) => items.reduce((out, it) => { const p = out[out.length - 1]; if (p && p.type === it.type && p.text === it.text && p.to === it.to && it.type !== 'tool' && it.type !== 'question' && it.type !== 'subagent') p.count = (p.count || 1) + 1; else out.push({ ...it }); return out; }, []);
-// Merge adjacent same-author groups (no repeated "You" headers); questions stay separate.
-const mergeGroups = (gs) => gs.reduce((out, g) => { const p = out[out.length - 1]; if (p && p.who === g.who && g.items[0].type !== 'question' && p.items[0].type !== 'question') p.items.push(...g.items); else out.push({ ...g, items: [...g.items] }); return out; }, []).map((g) => ({ ...g, items: collapseRepeats(g.items) }));
+// Collapse repeats moved to Chat.collapseRepeats (pure, unit-tested); merge adjacent same-author groups (no repeated "You" headers); questions stay separate.
+const mergeGroups = (gs) => gs.reduce((out, g) => { const p = out[out.length - 1]; if (p && p.who === g.who && g.items[0].type !== 'question' && p.items[0].type !== 'question') p.items.push(...g.items); else out.push({ ...g, items: [...g.items] }); return out; }, []).map((g) => ({ ...g, items: Chat.collapseRepeats(g.items) }));
 const needsYou = () => new Set([...(S.inbox || []).map((i) => i.nodeId), ...CH.asks]);
 const avatarHtml = (id, working, ask) => { const w = who(id); return `<div class="avatar${w.human ? ' human' : ''}${working.has(id) ? ' working' : ''}${ask.has(id) ? ' ask' : ''}" style="background:${w.color}" title="${esc(w.name)}${working.has(id) ? ' · working' : ask.has(id) ? ' · needs you' : ''}">${esc(w.ini)}</div>`; };
 const renderGroups = (events, working) => { const ask = needsYou(); return mergeGroups(Chat.group(events)).map((g) => { const w = who(g.who);
@@ -2114,9 +2114,13 @@ function pickMention(name) { const i = $('#chat-input'); i.value = i.value.repla
 async function chatSend() {
   const i = $('#chat-input'); const p = Chat.parseComposer(i.value, S.team.nodes); if (!p) return;
   if (p.kind === 'error') return chatPreview();
-  if (p.kind === 'task') { await call('createTask', { title: p.text.slice(0, 80), description: p.text, assignee: p.nodeId }); if (!S.orch.running) await call('run'); }
-  else if (p.kind === 'message') await call('sendToAgent', p.nodeId, p.text);
-  else { if (!confirm(`Start a new goal for the team?\n\n“${p.text.slice(0, 200)}”\n\nThis runs your agents (may cost tokens).`)) return; $('#goal').value = p.text; await $('#run').onclick(); }
+  if (chatAtts.some((a) => !a.path)) return; // blocked until every chip saved (a failed chip must be removed first)
+  const atts = chatAtts.length ? chatAtts.map(({ path, name, mime, size }) => ({ path, name, mime, size })) : null;
+  if (p.kind === 'task') { await call('createTask', { title: p.text.slice(0, 80), description: p.text, assignee: p.nodeId, ...(atts ? { attachments: atts } : {}) }); if (!S.orch.running) await call('run'); }
+  else if (p.kind === 'message') await call('sendToAgent', p.nodeId, p.text, ...(atts ? [null, { attachments: atts }] : []));
+  else { if (!confirm(`Start a new goal for the team?\n\n“${p.text.slice(0, 200)}”\n\nThis runs your agents (may cost tokens).`)) return; $('#goal').value = p.text; await $('#run').onclick(atts); }
+  for (const a of chatAtts) if (a.url) URL.revokeObjectURL(a.url);
+  chatAtts.length = 0; renderChatAtts();
   i.value = ''; chatPreview(); chatSig = null; refresh();
 }
 $('#chat-input').addEventListener('input', chatPreview);
@@ -2129,6 +2133,53 @@ $('#chat-input').addEventListener('keydown', (e) => {
 $('#chat-send').onclick = act(chatSend);
 document.querySelector('#tabs button[data-tab=chat]').addEventListener('click', () => setTimeout(() => { chatSig = null; renderChat(); }));
 setInterval(renderChat, 1000);
+
+// ---------- composer attachments (t_993822cf): paste / drop / attach button, chips, lazy thumbs ----------
+// A chip is added optimistically (local object-URL preview for images), saved in the background via
+// squad.saveAttachment, then swaps to the saved file:// thumbnail (object URL revoked on swap, remove, send).
+const chatAtts = []; // {name, mime, size, url?, path?, error?} — path set only after a successful save
+const attChipHtml = (a, i) => `<div class="att-chip${a.error ? ' err' : ''}" data-i="${i}">` +
+  (a.path ? `<img class="att-thumb" src="${esc(Chat.fileUrl(a.path))}" loading="lazy" alt="" title="${esc(a.name)} · ${Chat.fmtSize(a.size)}">`
+    : a.url ? `<img class="att-thumb" src="${a.url}" alt="" title="${esc(a.name)}">` : a.error ? '<span class="att-nopic">⚠</span>' : '<span class="att-spin" title="saving…"></span>') +
+  `<span class="att-name">${esc(a.name)}</span><span class="muted">${Chat.fmtSize(a.size)}</span>` +
+  (a.error ? `<span class="att-err" title="${esc(a.error)}">⚠ ${esc(a.error)}</span>` : '') +
+  `<button class="att-x" title="Remove attachment">×</button></div>`;
+function renderChatAtts() {
+  const box = $('#chat-att');
+  box.classList.toggle('hidden', !chatAtts.length);
+  box.innerHTML = chatAtts.map(attChipHtml).join('');
+  box.querySelectorAll('.att-chip').forEach((d) => d.querySelector('.att-x').onclick = () => {
+    const a = chatAtts[+d.dataset.i]; if (a.url) URL.revokeObjectURL(a.url); // revoke even before the save finished
+    chatAtts.splice(+d.dataset.i, 1); renderChatAtts();
+  });
+  const blocked = chatAtts.some((a) => !a.path);
+  $('#chat-send').disabled = blocked;
+  $('#chat-send').title = blocked ? 'Waiting for attachments to finish saving (remove failed ones first)' : '';
+}
+async function addChatFiles(files) {
+  if (!files.length) return;
+  if (chatAtts.length + files.length > 12) return alert('Too many attachments (max 12 per message).');
+  for (const f of files) {
+    const a = { name: f.name || (String(f.type).startsWith('image/') ? 'pasted-image.png' : 'pasted-file'), mime: f.type || 'application/octet-stream', size: f.size, url: null, path: null, error: null };
+    if (String(a.mime).startsWith('image/') && f.type) a.url = URL.createObjectURL(f);
+    chatAtts.push(a); renderChatAtts();
+    let bytes; try { bytes = new Uint8Array(await f.arrayBuffer()); } catch { a.error = 'cannot read file'; if (a.url) { URL.revokeObjectURL(a.url); a.url = null; } renderChatAtts(); continue; }
+    a.size = bytes.length;
+    let r; try { r = await squad.saveAttachment(ctx, { name: a.name, mime: a.mime, bytes }); }
+    catch (e) { r = { error: String(e.message || e).replace(/^Error invoking remote method 'api': (Error: )?/, '') }; }
+    if (!chatAtts.includes(a)) continue; // removed while saving (its URL is already revoked)
+    if (!r || r.error) { a.error = (r && r.error) || 'save failed'; } // keep the preview; its URL is revoked on remove/send
+    else { Object.assign(a, { path: r.path, name: r.name, size: r.size }); if (a.url) { URL.revokeObjectURL(a.url); a.url = null; } }
+    renderChatAtts();
+  }
+}
+$('#chat-input').addEventListener('paste', (e) => { const files = [...(e.clipboardData?.files || [])]; if (!files.length) return; e.preventDefault(); act(addChatFiles)(files); });
+$('#chat-attach').onclick = () => $('#chat-file').click();
+$('#chat-file').onchange = (e) => { const files = [...e.target.files]; e.target.value = ''; act(addChatFiles)(files); };
+const composerEl = document.querySelector('.composer');
+composerEl.addEventListener('dragover', (e) => { e.preventDefault(); composerEl.classList.add('dragover'); });
+composerEl.addEventListener('dragleave', () => composerEl.classList.remove('dragover'));
+composerEl.addEventListener('drop', (e) => { e.preventDefault(); composerEl.classList.remove('dragover'); const files = [...(e.dataTransfer?.files || [])]; if (files.length) act(addChatFiles)(files); });
 
 // ---------- human inbox (ask_human questions + approvals) ----------
 function renderInbox() {
