@@ -11,7 +11,12 @@ const arg = (k) => { const i = process.argv.indexOf(k); return i > 0 ? process.a
 const store = new Store(arg('--project'));
 const tools = makeTools(store, arg('--node'));
 // Only register the tools enabled for this agent (checked again on every call).
-const enabled = new Set(enabledTools(store.getTeam().nodes.find((n) => n.id === arg('--node'))));
+const callerNode = store.getTeam().nodes.find((n) => n.id === arg('--node'));
+const enabled = new Set(enabledTools(callerNode));
+// Team management tools are listed only for a node that is core:true at startup; a node the human
+// makes core later picks them up on its next run (no hot reload). The tools also re-check the flag
+// on every call, so this registration is only the tool listing, not the guard.
+const coreNow = !!(callerNode && callerNode.core === true);
 const server = new McpServer({ name: 'board', version: '0.1.0' });
 const STATUS = z.enum(['todo', 'in_progress', 'review', 'done', 'waiting_for_human']);
 const PRIORITY = z.enum(['P0', 'P1', 'P2', 'P3']);
@@ -32,5 +37,11 @@ reg('ask_human', 'Ask the human a question and WAIT for the answer (blocks until
 reg('read_wiki', 'Read a wiki page by title, or list page titles when title is omitted.', { title: z.string().optional() });
 reg('write_wiki', 'Create or overwrite a markdown wiki page.', { title: z.string(), content: z.string() });
 reg('request_self_update', 'PM only: ask the app to update itself to the newest merged code (safe restart: waits for agents, runs tests, relaunches). Honors the auto-restart setting and restart guards.', { reason: z.string().optional().describe('why the update is being requested') });
+
+if (coreNow) {
+  reg('recruit_agent', 'Core agent only: recruit a new agent into your own team. In ask mode the request first goes to the human Inbox and nothing changes; call this tool again once it is approved.', { name: z.string(), role: z.string(), prompt: z.string().optional(), runtime: z.string().optional(), model: z.string().optional(), effort: z.string().optional(), reason: z.string().describe('why the team change is needed') });
+  reg('retire_agent', 'Core agent only: retire an agent you recruited (refused while it owns an in_progress task; its todo tasks move back to you).', { nodeId: z.string(), reason: z.string().describe('why the team change is needed') });
+  reg('update_agent', 'Core agent only: change role/prompt/runtime/model/effort of an agent you recruited (patch whitelist; any other field is refused).', { nodeId: z.string(), patch: z.record(z.string(), z.unknown()), reason: z.string().describe('why the team change is needed') });
+}
 
 server.connect(new StdioServerTransport());

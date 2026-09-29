@@ -35,4 +35,17 @@ function canModifyTask(team, nodeId, task) {
 function canSetStatus(team, nodeId, task, status) {
   return canModifyTask(team, nodeId, task) || (['review', 'done'].includes(status) && canReviewTask(team, nodeId, task));
 }
-module.exports = { outgoing, incoming, canAssign, canMessage, canReviewTask, reviewees, visibleTask, canModifyTask, canSetStatus, typeOf };
+// ---- core-agent team management (recruit_agent / retire_agent / update_agent) ----
+// update_agent may change ONLY these node fields (prompt maps to systemPrompt in board-tools); any
+// other key is refused, so a core can never set core/createdBy/disabledBoardTools/... on a teammate.
+const AGENT_PATCH_FIELDS = ['role', 'prompt', 'runtime', 'model', 'effort'];
+// Permissiveness order used to cap a recruit's permission mode at its core's: a recruit never runs
+// with more power than the agent that created it. plan (read-only) < default < acceptEdits < bypass.
+const PERMISSION_RANK = { plan: 0, default: 1, acceptEdits: 2, bypassPermissions: 3 };
+const capPermissionMode = (coreMode, mode) => ((PERMISSION_RANK[mode] ?? PERMISSION_RANK.default) > (PERMISSION_RANK[coreMode] ?? PERMISSION_RANK.default) ? coreMode : mode);
+// A core may retire/update ONLY agents it recruited itself: never itself, never a core node, never a
+// human-made node (createdBy empty). Nodes of other teams never reach this check — they are not
+// resolvable in the core's team-scoped store.
+const canManageAgent = (core, target) => !!core && !!target && target.id !== core.id && target.core !== true && target.createdBy === core.id;
+
+module.exports = { outgoing, incoming, canAssign, canMessage, canReviewTask, reviewees, visibleTask, canModifyTask, canSetStatus, typeOf, AGENT_PATCH_FIELDS, PERMISSION_RANK, capPermissionMode, canManageAgent };
