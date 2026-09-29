@@ -1145,12 +1145,12 @@ async function guiE2E() {
     expect('wake: Board banner shows woken-by-message with presence chip and task link', board.wakebar && board.text.includes('woken by message from Pia') && board.chip && board.text.includes('Wake demo'), board);
     await shot('wake-board-on');
     await ex(`$('#tabs button[data-tab=team]').click(); await w(200);`);
-    const team = await ex(`${seed} await w(100); return { badge: !!document.querySelector('#graph .wakerunbadge'), linked: !!document.querySelector('#graph .wakerunbadge.linked') }`);
-    expect('wake: Team node shows the linked wake badge', team.badge && team.linked, team);
+    const team = await ex(`${seed} await w(100); return { badge: !!document.querySelector('#graph .wakerunbadge'), linked: !!document.querySelector('#graph .wakerunbadge.linked'), txt: (document.querySelector('#graph .wakerunbadge text') || {}).textContent || '' }`);
+    expect('wake: Team node shows the linked wake badge, visible text keeps the sender after the clip (t_0cd29f4d)', team.badge && team.linked && team.txt.includes('Pia'), team);
     await shot('wake-team-on');
     await ex(`$('#tabs button[data-tab=overview]').click(); await w(200);`);
-    const ov = await ex(`${seed} await w(100); return { badge: !!document.querySelector('#ov-graph .wakerunbadge'), working: !!document.querySelector('#ov-graph .node.working') }`);
-    expect('wake: Overview node shows the wake badge while working', ov.badge && ov.working, ov);
+    const ov = await ex(`${seed} await w(100); return { badge: !!document.querySelector('#ov-graph .wakerunbadge'), working: !!document.querySelector('#ov-graph .node.working'), txt: (document.querySelector('#ov-graph .wakerunbadge text') || {}).textContent || '' }`);
+    expect('wake: Overview node shows the wake badge while working, visible text keeps the sender', ov.badge && ov.working && ov.txt.includes('Pia'), ov);
     await shot('wake-overview-on');
     await ex(`$('#tabs button[data-tab=board]').click(); await w(200);`);
     const off = await ex(`S.orch.agents = {}; renderIdle(); renderGraph(); renderOverview(); await w(100); return { wakebarHidden: $('#wakebar').classList.contains('hidden'), chip: !!document.querySelector('#presence .pchip.wake') }`);
@@ -1173,15 +1173,15 @@ async function guiE2E() {
     await ex(`await refresh(); await w(200);`); // pick up the seeded task before injecting wake state
     const seed = (onTask) => `S.orch.agents = { '${dev.id}': { status: 'working', activity: { trigger: 'message', messageId: 'm1', fromNodeId: '${pmN.id}', excerpt: 'Please look at the failing test', taskId: null, count: 2, startedAt: Date.now() }${onTask ? `, taskId: '${task.id}'` : ''} } }; renderIdle(); renderGraph(); renderOverview(); renderChat();`;
     await ex(`$('#tabs button[data-tab=team]').click(); await w(200);`);
-    const team = await ex(`${seed(false)} await w(100); return { badge: !!document.querySelector('#graph .wakerunbadge'), chip: !!document.querySelector('#presence .pchip.wake'), typing: '' }`);
-    expect('wakebusy: wake badge shows despite the in_progress task (was bare working)', team.badge && team.chip, team);
+    const team = await ex(`${seed(false)} await w(100); return { badge: !!document.querySelector('#graph .wakerunbadge'), chip: !!document.querySelector('#presence .pchip.wake'), typing: '', txt: (document.querySelector('#graph .wakerunbadge text') || {}).textContent || '' }`);
+    expect('wakebusy: wake badge shows despite the in_progress task (was bare working), visible text keeps the sender', team.badge && team.chip && team.txt.includes('Pia'), team);
     await shot('wakebusy-team');
     const chat = await ex(`$('#tabs button[data-tab=chat]').click(); await w(200); ${seed(false)} await w(100); return { typing: $('#chat-typing').textContent || '' }`);
     expect('wakebusy: chat header shows the wake reason, not bare "Name is working"', chat.typing.includes('woken by message from Pia') && !/^Devon is working/.test(chat.typing), chat);
     await shot('wakebusy-chat');
     await ex(`$('#tabs button[data-tab=overview]').click(); await w(200);`);
-    const ov = await ex(`${seed(false)} await w(100); return { badge: !!document.querySelector('#ov-graph .wakerunbadge') }`);
-    expect('wakebusy: Overview shows the wake badge despite the in_progress task', ov.badge, ov);
+    const ov = await ex(`${seed(false)} await w(100); return { badge: !!document.querySelector('#ov-graph .wakerunbadge'), txt: (document.querySelector('#ov-graph .wakerunbadge text') || {}).textContent || '' }`);
+    expect('wakebusy: Overview shows the wake badge despite the in_progress task, visible text keeps the sender', ov.badge && ov.txt.includes('Pia'), ov);
     await shot('wakebusy-overview');
     // The veto still applies when the live run IS the task run (a.taskId set): badge goes away.
     await ex(`$('#tabs button[data-tab=team]').click(); await w(200);`);
