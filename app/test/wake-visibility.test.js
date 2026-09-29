@@ -39,6 +39,7 @@ test('wake-run visibility: reason shows while the run is live, clears after', as
   await waitFor(() => o.agent(b.id).status === 'working');
   const mid = o.snapshot();
   assert.equal(mid.agents[b.id].taskId, null, 'working, but not on a task');
+  assert.equal(mid.agents[b.id].activity.count, 1, 'count = unread msgs delivered in this run');
   assert.ok(mid.active.some((x) => x.nodeId === b.id && x.taskId === null), 'live entry without a task');
   assert.equal(woken.length, 1, 'woken_by_message pushed once');
   assert.equal(woken[0].nodeId, b.id);
@@ -55,4 +56,26 @@ test('wake-run visibility: reason shows while the run is live, clears after', as
   assert.equal(run.taskId, null);
   assert.equal(run.exitCode, 0);
   assert.equal(s.getTask(t.id).status, 'review');
+});
+
+test('wake activity carries the queued count: 2 unread messages -> count 2 (+1 queued in the UI)', async () => {
+  const d = tmp('squad-wakecount-');
+  const fake = fakeClaude(d, `sleep 0.5\n` + RESULT);
+  const s = new Store(path.join(d, 'p')); s.saveSettings({ claudePath: fake });
+  const a = s.addNode({ name: 'Ada', role: 'Dev' }); const b = s.addNode({ name: 'Bo', role: 'Dev' });
+  s.addEdge(a.id, b.id);
+  const o = new Orchestrator(s);
+  const ta = makeTools(s, a.id);
+  // Both messages land inside one sweep window -> one wake run delivering both.
+  ta.send_message({ to: 'Bo', text: 'first: the log tab is blank' });
+  ta.send_message({ to: 'Bo', text: 'second: also the badge is missing' });
+
+  await waitFor(() => o.agent(b.id).status === 'working');
+  const mid = o.snapshot();
+  assert.equal(mid.agents[b.id].activity.count, 2, 'both unread msgs counted');
+  assert.equal(mid.agents[b.id].activity.excerpt, 'first: the log tab is blank', 'excerpt from the first message');
+
+  await waitFor(() => o.agent(b.id).status === 'idle');
+  const done = o.snapshot();
+  assert.equal(done.agents[b.id].activity, null, 'cleared when the run ends');
 });
