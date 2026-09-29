@@ -854,9 +854,9 @@ function graphBox(nodes, withEdges = false) {
 let vpCount = 0, edgeLayout = null; // per-render edge geometry + DOM refs; patched in place by dragEdges during node drags
 function fitIfClipped() { const r = $('#graph').getBoundingClientRect(); const b = graphBox(allGraphNodes(), true); if (r.width && (b.x * VP.zoom + VP.x < 0 || b.y * VP.zoom + VP.y < 0 || (b.x + b.w) * VP.zoom + VP.x > r.width || (b.y + b.h) * VP.zoom + VP.y > r.height)) fitView(); }
 function fitView() {
-  const r = $('#graph').getBoundingClientRect(); const b = graphBox(allGraphNodes(), true); const pad = 48;
-  const z = Math.min(1, Math.max(0.25, Math.min((r.width - pad * 2) / b.w, (r.height - pad * 2) / b.h)));
-  VP = { zoom: z, x: (r.width - b.w * z) / 2 - b.x * z, y: (r.height - b.h * z) / 2 - b.y * z }; applyVP(); saveVP();
+  const r = $('#graph').getBoundingClientRect(); const b = graphBox(allGraphNodes(), true); const px = r.width * 0.075, py = r.height * 0.075; // fit fills ~85% of the canvas
+  const z = Math.min(1, Math.max(0.7, Math.min((r.width - px * 2) / b.w, (r.height - py * 2) / b.h))); // never below 70%: pan instead
+  VP = { zoom: z, x: b.w * z > r.width - px * 2 ? px - b.x * z : (r.width - b.w * z) / 2 - b.x * z, y: b.h * z > r.height - py * 2 ? py - b.y * z : (r.height - b.h * z) / 2 - b.y * z }; applyVP(); saveVP();
 }
 // ---------- graph view model: automatic layered tree + team clusters above CLUSTER_MIN agents ----------
 // The stored x/y stay the user's manual layout; while graphAuto is on, the view lays the assign hierarchy
@@ -898,7 +898,8 @@ function treeLayout(nodes, edges) {
   const loners = roots.filter((r) => !(kids[r.id] || []).length);
   for (const r of roots) if ((kids[r.id] || []).length) x += place(r.id, x, 40);
   const rest = loners.concat(nodes.filter((n) => !pos[n.id] && !loners.includes(n))).filter((n) => !pos[n.id]);
-  const cols = rest.length > 4 ? Math.ceil(Math.sqrt(rest.length * 1.6)) : rest.length;
+  const cr = ($('#graph') || {}).getBoundingClientRect ? $('#graph').getBoundingClientRect() : { width: 0 }, asp = cr.width && cr.height ? cr.width / cr.height : 1.6;
+  let cols = rest.length > 4 ? Math.max(3, Math.ceil(Math.sqrt(rest.length * asp * 0.55))) : rest.length; if (rest.length > 4) cols = Math.ceil(rest.length / Math.ceil(rest.length / cols)); // balanced rows (12 -> 4x3)
   rest.forEach((n, i) => { pos[n.id] = { x: x + (i % cols) * GX, y: 40 + Math.floor(i / cols) * (H + 40) }; });
   return pos;
 }
@@ -1243,6 +1244,7 @@ $('#delsel').onclick = async () => {
 };
 function renderNodeForm() {
   const f = $('#nodeform'); const n = S.team.nodes.find((x) => x.id === sel.node);
+  f.classList.toggle('hidden', !n && !S.team.edges.some((x) => x.id === sel.edge)); // collapse the help panel when nothing is selected
   if (!n) {
     const e = S.team.edges.find((x) => x.id === sel.edge);
     if (!e) { f.innerHTML = '<h3>Team</h3><p class="muted">Select an agent to edit it. Edge A → B: <b>assign</b> = A can create tasks for B (and message B), <b>message</b> = A can message B, <b>review</b> = B reviews A\'s tasks (can move them to review/done).</p>'; return; }
