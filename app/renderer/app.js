@@ -740,12 +740,13 @@ function renderGraph() {
   const nodes = allGraphNodes(); const byId = Object.fromEntries(nodes.map((n) => [n.id, n]));
   const edges = [...S.team.edges, ...(S.cross || []).filter((e) => !S.team.edges.some((x) => x.id === e.id))];
   const pairN = {}, pairI = {}; const pk = (e) => [e.from, e.to].sort().join('|'); edges.forEach((e) => { pairN[pk(e)] = (pairN[pk(e)] || 0) + 1; });
+  const srcN = {}, srcI = {}; edges.forEach((e) => { srcN[e.from] = (srcN[e.from] || 0) + 1; });
   const blocks = nodes.map((n) => ({ x: n.x - 4, y: n.y - 4, w: W + 8, h: H + 8 })); const pills = [];
   edgeLayout = { nodes, blocks, per: [] };
   for (const e of edges) {
     const a = byId[e.from], b = byId[e.to]; if (!a || !b) continue;
     const key = pk(e); const i = (pairI[key] = (pairI[key] ?? -1) + 1); const cnt = pairN[key];
-    const sign = e.from < e.to ? 1 : -1; const off = (i - (cnt - 1) / 2) * 22 * sign;
+    const sign = e.from < e.to ? 1 : -1; const lane = (srcI[e.from] = (srcI[e.from] ?? -1) + 1); const off = (i - (cnt - 1) / 2) * 22 * sign + (lane - ((srcN[e.from] || 1) - 1) / 2) * 14;
     const type = e.type || 'assign'; const cross = !!(e.crossTeam || a.ghost || b.ghost); const g = edgeGeom(a, b, off, blocks, edgeSeed(e));
     const isSel = sel.edge === e.id;
     const L = cross ? xL : eL; const hit = el('path', { d: g.d, class: 'edgehit' }, L);
@@ -784,23 +785,23 @@ function renderGraph() {
     const sb = sub.count ? subBadgeInfo(sub) : null;
     let cx = 12, cy = 46;
     const putChip = (text, max, cls, title) => { const t = clipText(text, max); const w = 10 + t.length * 5.6; const lim = cy === 46 && sb ? W - sb.w - 12 : W - 10; if (cx + w > lim && cx > 12) { cx = 12; cy = 62; } const cg = el('g', { class: cls, transform: `translate(${cx},${cy})` }, g); if (title) el('title', {}, cg).textContent = title; el('rect', { width: w, height: 14, rx: 7 }, cg); el('text', { x: w / 2, y: 10.5, 'text-anchor': 'middle' }, cg).textContent = t; cx += w + 4; };
-    for (const chip of [runtimeLabel(rtId), ns.model || n.model || 'default'].filter(Boolean)) putChip(chip, 14, 'chip');
-    if (rtId !== 'claude') { const rows = ((S.orch.ledger || {}).byAgent || {})[n.name] || []; const cost = rows.reduce((c, r) => c + (r.costUsd || 0), 0);
+    if (VP.zoom >= 0.6) for (const chip of [runtimeLabel(rtId), ns.model || n.model || 'default'].filter(Boolean)) putChip(chip, 14, 'chip');
+    if (VP.zoom >= 0.6 && rtId !== 'claude') { const rows = ((S.orch.ledger || {}).byAgent || {})[n.name] || []; const cost = rows.reduce((c, r) => c + (r.costUsd || 0), 0);
       putChip(rows.length ? `$${cost.toFixed(2)} · ${rows.length} key${rows.length === 1 ? '' : 's'}` : 'no usage', 20, 'chip chip-usage', rows.length ? `${runtimeLabel(rtId)} usage, per model key (tokens are never summed across models): ${rows.map((r) => `${r.model}: ${r.runs} run(s) · ${r.costUsd != null ? '$' + r.costUsd.toFixed(4) + (r.costSource === 'estimated' ? ' est' : '') : 'cost —'}`).join(' · ')}` : `${runtimeLabel(rtId)} has no recorded usage yet`); }
     const effort = n.effort || 'low';
-    for (const chip of [`E:${effort}`, n.autoCompact ? `AC:${n.autoCompact}` : null].filter(Boolean)) { const isDefaultEffort = chip === `E:${effort}` && !n.effort; putChip(chip, 14, 'chip chip-em' + (isDefaultEffort ? ' chip-default' : ''), chip.startsWith('E:') ? `Reasoning effort: ${effort}${isDefaultEffort ? ' (default)' : ''}` : `Auto-compact window: ${n.autoCompact}`); }
-    if (n.createdBy && !n.core) putChip('recruited', 10, 'chip chip-recruited', 'Recruited by ' + nodeName(n.createdBy));
+    if (VP.zoom >= 0.6) for (const chip of [`E:${effort}`, n.autoCompact ? `AC:${n.autoCompact}` : null].filter(Boolean)) { const isDefaultEffort = chip === `E:${effort}` && !n.effort; putChip(chip, 14, 'chip chip-em' + (isDefaultEffort ? ' chip-default' : ''), chip.startsWith('E:') ? `Reasoning effort: ${effort}${isDefaultEffort ? ' (default)' : ''}` : `Auto-compact window: ${n.autoCompact}`); }
+    if (VP.zoom >= 0.6 && n.createdBy && !n.core) putChip('recruited', 10, 'chip chip-recruited', 'Recruited by ' + nodeName(n.createdBy));
     const capsSt = !n.capabilities ? 'none' : (n.capabilities.error || n.capabilities.ok === false) ? 'error' : 'ok';
     const cb = el('g', { class: 'capsdot caps-' + capsSt, transform: `translate(7,${H - 8})` }, g); el('circle', { r: 4 }, cb);
     el('title', {}, cb).textContent = capsSt === 'none' ? 'Capabilities not probed yet' : capsSt === 'error' ? 'Capability probe failed' : `Capabilities probed${n.capabilitiesProbedAt ? ' ' + new Date(n.capabilitiesProbedAt).toLocaleString() : ''}`;
     const sg = el('g', { class: 'status s-' + live, transform: `translate(${W - 16},16)` }, g); el('circle', { r: 5 }, sg); el('title', {}, sg).textContent = live;
     const pres = el('g', { class: 'pres ' + presence(n.id), transform: `translate(${W - 16},16)` }, g); el('circle', { r: 8 }, pres);
-    const pf = pfState(n); const bw = 8 + PF_LABEL[pf].length * 6;
-    const badge = el('g', { class: 'pfbadge pf-' + pf, transform: `translate(${W - bw - 30},-8)` }, g);
+    const pf = pfState(n);
+    const badge = el('g', { class: 'pfbadge pf-' + pf, transform: `translate(${W - 34},16)` }, g);
     el('title', {}, badge).textContent = pf === 'fail' && n.preflight ? 'Preflight failed: ' + n.preflight.error : 'Preflight: ' + PF_LABEL[pf];
-    el('rect', { width: bw, height: 15, rx: 7 }, badge); el('text', { x: bw / 2, y: 11, 'font-size': 9, 'text-anchor': 'middle' }, badge).textContent = PF_LABEL[pf];
+    el('circle', { r: 3.5 }, badge);
     if (n.core) { const cl = el('g', { class: 'corelock', transform: 'translate(10,-8)' }, g); el('title', {}, cl).textContent = 'Core agent — protected; recruits and retires teammates'; el('rect', { width: 46, height: 15, rx: 7 }, cl); el('text', { x: 23, y: 11, 'font-size': 9, 'text-anchor': 'middle' }, cl).textContent = '🔒 core'; }
-    if (live === 'working') {
+    if (live === 'working' && typeof ns.contextPct === 'number') {
       const ctxPct100 = typeof ns.contextPct === 'number' ? ns.contextPct * 100 : null;
       const pctTxt = typeof ctxPct100 === 'number' ? `${Math.round(Math.max(0, Math.min(100, ctxPct100)))}% ctx` : '— ctx';
       const pctCls = typeof ctxPct100 !== 'number' ? 'unknown' : ctxPct100 >= 85 ? 'danger' : ctxPct100 >= (S.settings.autoCompactPct || 40) ? 'warn' : 'ok';
@@ -1209,7 +1210,7 @@ function noteWakes() {
 function renderIdle() {
   noteWakes();
   const idle = S.team.nodes.filter((n) => presence(n.id) === 'idle'); const show = S.team.nodes.length && idle.length;
-  document.querySelectorAll('.idlebanner').forEach((b) => { b.classList.toggle('hidden', !show); if (!show) return;
+  document.querySelectorAll('.idlebanner[data-where="team"]').forEach((b) => { b.classList.toggle('hidden', !show); if (!show) return;
     b.innerHTML = `<span class="pres idle"><i></i></span><b>${idle.length} agent${idle.length > 1 ? 's' : ''} idle</b><span class="muted">${esc(idle.slice(0, 4).map((n) => n.name).join(', '))}${idle.length > 4 ? '…' : ''}</span><span class="spacer"></span><button class="primary" data-assignidle="${idle[0].id}">Assign work</button>`; });
   document.querySelectorAll('[data-assignidle]').forEach((b) => b.onclick = () => { showTab('board'); $('#nt-assignee').value = b.dataset.assignidle; $('#nt-title').focus(); });
   $('#presence').innerHTML = S.allNodes.map((n) => { const p = presence(n.id); const wk = wakeLabel(n.id); return `<span class="pchip ${p}${wk ? ' wake' : ''}" title="${esc(wk || n.role)}"><span class="pres ${p}"><i></i></span>${esc(n.name)} <span class="muted">${wk ? esc(clipText(wk, 52)) : p}</span></span>`; }).join('');
@@ -1235,7 +1236,7 @@ const ago = (ts) => { if (!ts) return ''; const sec = (Date.now() - new Date(ts)
 // activation (sig reset in the tab-click handler).
 let boardSig = null, logSig = null, obsSig = null, usageSig = null, usageGroup = 0;
 const agentStamp = () => Object.entries(S.orch.agents || {}).map(([k, a]) => `${k}${a.status}${a.taskId || ''}${a.iteration || 0}${a.stall ? '!' : ''}${a.run && a.run.stall ? '!' : ''}`).join();
-let showAllDone = false;
+let showAllDone = false; let doneOpen = false;
 // Done column: the 20 most recently updated, but a selected card is never allowed to vanish under the fold (t_db029901).
 const doneCards = () => { const all = S.tasks.filter((t) => t.status === 'done').slice().sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || ''))); if (showAllDone) return all.slice().sort(byPriorityThenTitle); const top = all.slice(0, 20); const s = all.find((x) => x.id === sel.task); if (s && !top.includes(s)) { top.pop(); top.push(s); } return top; };
 function renderBoard() {
@@ -1246,8 +1247,8 @@ function renderBoard() {
   sa.innerHTML = S.allNodes.map((n) => `<option value="${n.id}">${esc(n.name)} (${n.role})</option>`).join('') || '<option value="">(add agents first)</option>';
   if (cur) sa.value = cur;
   renderIdle();
-  $('#columns').innerHTML = STATUSES.map((st) => { const total = S.tasks.filter((t) => t.status === st).length; return `<div class="col"><h3>${st === 'done' && !showAllDone && total > 20 ? `done (20 of ${total})` : `${st.replaceAll('_', ' ')} (${total})`}</h3>${st === 'todo' && !S.tasks.length ? '<div class="hint-first">Create a goal task, assign it to an agent (usually the PM), then press Run.</div>' : ''}${
-    (st === 'done' ? doneCards() : S.tasks.filter((t) => t.status === st).slice().sort(byPriorityThenTitle)).map((t) => { const bl = openBlockers(t); const w = (S.orch.agents[t.assignee] || {});
+  $('#columns').innerHTML = ['todo', 'in_progress', 'waiting_for_human', 'review', 'merge_conflict', 'done'].map((st) => { const total = S.tasks.filter((t) => t.status === st).length; const fold = st === 'done' && !doneOpen; return `<div class="col ${st}${fold ? ' folded' : ''}"><h3 ${st === 'done' ? 'id="done-h" style="cursor:pointer" title="Toggle done"' : ''}>${st === 'done' ? (fold ? '▸ ' : '▾ ') : ''}${st === 'done' && !showAllDone && total > 20 ? `done (20 of ${total})` : `${st.replaceAll('_', ' ')} (${total})`}</h3>${st === 'todo' && !S.tasks.length ? '<div class="hint-first">Create a goal task, assign it to an agent (usually the PM), then press Run.</div>' : ''}${
+    (fold ? [] : st === 'done' ? doneCards() : S.tasks.filter((t) => t.status === st).slice().sort(byPriorityThenTitle)).map((t) => { const bl = openBlockers(t); const w = (S.orch.agents[t.assignee] || {});
       // Worker state must match reality: an agent with a live run is busy — on THIS task (or an
       // unattributed wake run for it) reads "live", on another task reads "working elsewhere",
       // and only an assignee with no live process at all earns "No worker".
@@ -1258,7 +1259,6 @@ function renderBoard() {
       const busyOther = ip && busy && !live;
       const noWorker = ip && t.assignee && !busy;
       const ready = !bl.length && ['todo', 'backlog'].includes(t.status);
-      const ac = t.assignee ? agentColor(t.assignee) : 0;
       const tags = [live ? '<span class="tag live">live</span>' : '',
         busyOther ? `<span class="tag elsewhere" title="${esc(nodeName(t.assignee))} is working on ${esc(taskTitle(w.taskId))}">working elsewhere</span>` : '',
         noWorker ? `<span class="tag noworker" title="in_progress but no live agent process for ${esc(nodeName(t.assignee))}">No worker</span>` : '',
@@ -1266,7 +1266,8 @@ function renderBoard() {
         bl.length ? `<span class="tag blocked" title="waits for: ${esc(bl.map(taskTitle).join(', '))}">Blocked by ${esc(taskTitle(bl[0]).slice(0, 28))}${bl.length > 1 ? ` +${bl.length - 1}` : ''}</span>` : ready ? '<span class="tag ready">Ready</span>' : '',
         t.awaitingApproval ? '<span class="tag approval">needs approval</span>' : ''].join('');
       const snippet = String(t.description || '').replace(/\s+/g, ' ').trim();
-      return `<div class="card ${sel.task === t.id ? 'sel' : ''}${t.awaitingApproval ? ' approval' : ''}" data-id="${t.id}"><b>${esc(t.title)}</b>${snippet && snippet !== t.title ? `<span class="cdesc" title="${esc(snippet)}">${esc(clipText(snippet, 100))}</span>` : ''}${tags ? `<span class="ctags">${tags}</span>` : ''}<span class="cmeta">${priorityBadge(t)}${t.assignee ? `<i class="adot" style="background:var(--agent-${ac})"></i>${esc(nodeName(t.assignee))}` : '<span class="muted">unassigned</span>'}<span class="spacer"></span>💬 ${t.comments.length} · ${ago(t.updatedAt) || '—'}</span></div>`; }).join('')}${st === 'done' && total > 20 ? `<button class="ghost" id="toggle-done">${showAllDone ? 'Show recent only' : 'Show all done'}</button>` : ''}</div>`; }).join('');
+      return `<div class="card ${sel.task === t.id ? 'sel' : ''}${t.awaitingApproval ? ' approval' : ''}" data-id="${t.id}"><b>${esc(t.title)}</b>${snippet && snippet !== t.title ? `<span class="cdesc" title="${esc(snippet)}">${esc(clipText(snippet, 100))}</span>` : ''}${tags ? `<span class="ctags">${tags}</span>` : ''}<small class="cmeta">${priorityBadge(t)}${t.assignee ? `<span class="avatar sm" style="background:${who(t.assignee).color}" title="${esc(nodeName(t.assignee))}">${esc(who(t.assignee).ini)}</span><span class="cname">${esc(nodeName(t.assignee))}</span>` : '<span class="muted">unassigned</span>'}<span class="cago" title="last updated">${ago(t.updatedAt) || '—'}</span>${t.comments.length ? `<span class="ccount" title="${t.comments.length} comment${t.comments.length === 1 ? '' : 's'}">💬 ${t.comments.length}</span>` : ''}</small></div>`; }).join('')}${st === 'done' && !fold && total > 20 ? `<button class="ghost" id="toggle-done">${showAllDone ? 'Show recent only' : 'Show all done'}</button>` : ''}</div>`; }).join('');
+  if ($('#done-h')) $('#done-h').onclick = () => { doneOpen = !doneOpen; boardSig = ''; renderBoard(); };
   if ($('#toggle-done')) $('#toggle-done').onclick = () => { showAllDone = !showAllDone; boardSig = ''; renderBoard(); };
   document.querySelectorAll('.card').forEach((c) => c.onclick = () => { sel.task = c.dataset.id; renderBoard(); });
   const d = $('#taskdetail'); const t = S.tasks.find((x) => x.id === sel.task);
@@ -1687,6 +1688,7 @@ function renderUsage() {
     .map((x) => ({ ...x, sub: `${x.models} model key${x.models === 1 ? '' : 's'}`, title: `${x.runs} run${x.runs === 1 ? '' : 's'} · cost only — tokens would cross models here` }));
   const agBars = Object.entries(led.byAgent).map(([name, rows2]) => { const top = rows2.slice().sort((a, b) => rowTokTotal(b) - rowTokTotal(a))[0];
     return { name, cost: rows2.some((r) => r.costUsd != null) ? rows2.reduce((a, r) => a + (r.costUsd || 0), 0) : null, sub: `${rows2.length} key${rows2.length === 1 ? '' : 's'} · top: ${top && top.model}`, title: `${name}: per-key rows under Detailed tables` }; });
+  if (!RUNS.length) { $('#us-summary').innerHTML = '<div class="us-empty"><b>No runs yet</b><p>Cost, token and model breakdowns appear here after an agent finishes its first run.</p></div>'; $('#us-runs').innerHTML = ''; renderDiscovery(); renderUsageLimits(); return; }
   $('#us-summary').innerHTML = usageHero(rs, led, { global: globalCost, filtered }) + `
   <div class="us-vendor"><small>One row per account — where the money actually goes (billing source + its detail: which login, API key or endpoint) — with each account's model keys nested beneath. Token columns stay strictly per key (never summed across models); cost is the only grand total. "—" marks keys whose cost is unknown, "est" marks list-price estimates.</small><h4>By account</h4>${accounts.length ? accountTable(accounts) : '<p class="muted">No usage recorded yet.</p>'}</div>
   <div class="cards">
@@ -2318,3 +2320,5 @@ $('#reopenguide').onclick = () => { G.hidden = false; G.forced = true; localStor
 
 // Theme: mirror the OS/nativeTheme scheme onto <html data-theme> so tokens flip reliably (media query alone didn't re-apply in Electron).
 { const mq = matchMedia('(prefers-color-scheme: dark)'); const apply = () => document.documentElement.dataset.theme = mq.matches ? 'dark' : 'light'; apply(); mq.addEventListener('change', apply); squad.on('theme', (t) => { document.documentElement.dataset.theme = t.dark ? 'dark' : 'light'; }); }
+// Add-task form: description row stays collapsed until the title is focused.
+$('#nt-title').addEventListener('focus', () => { $('#nt-desc').style.display = ''; });

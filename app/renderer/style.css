@@ -85,8 +85,8 @@ table { border-collapse:collapse; background:var(--card); } td, th { border:1px 
 .bill-subscription { color:var(--ok); border-color:var(--ok); } .bill-api { color:var(--warn); border-color:var(--warn); } .bill-proxy, .bill-bedrock, .bill-vertex { color:var(--acc); border-color:var(--acc); }
 .costnote { color:var(--muted); font-size:11px; } .warn { color:var(--warn); } #us-summary table { margin:6px 0; }
 
-#graph .pfbadge rect { stroke:none; } #graph .pfbadge text { fill:var(--fg-on-accent); font-weight:600; }
-#graph .pf-pass rect { fill:var(--ok); } #graph .pf-fail rect { fill:var(--danger); } #graph .pf-stale rect, #graph .pf-testing rect { fill:var(--warn); } #graph .pf-untested rect { fill:var(--muted); }
+#graph .pfbadge circle { stroke:none; } #graph .pfbadge text { fill:var(--fg-on-accent); font-weight:600; }
+#graph .pf-pass circle { fill:var(--ok); } #graph .pf-fail circle { fill:var(--danger); } #graph .pf-stale circle, #graph .pf-testing circle { fill:var(--warn); } #graph .pf-untested circle { fill:var(--muted); opacity:.5; }
 #graph .pfbadge { pointer-events:all; }
 #graph .ctxbar-bg { fill:var(--line); } #graph .ctxbar-fill.ctx-ok { fill:var(--ok); } #graph .ctxbar-fill.ctx-warn { fill:var(--warn); } #graph .ctxbar-fill.ctx-danger { fill:var(--danger); }
 #graph .ctxpct { font-size:9.5px; font-family:var(--font-mono); fill:var(--fg-secondary); } #graph .ctxpct.ctx-warn { fill:var(--warn); } #graph .ctxpct.ctx-danger { fill:var(--danger); font-weight:600; } #graph .ctxpct.ctx-unknown { fill:var(--fg-muted); }
@@ -211,7 +211,9 @@ header { background:var(--bg-surface); box-shadow:var(--shadow-sm); padding:var(
 nav button { color:var(--fg-secondary); border-radius:var(--radius-sm); transition:color var(--dur-fast) var(--ease-out), background var(--dur-fast), border-color var(--dur-fast); }
 nav button:hover { background:var(--bg-hover); color:var(--fg-primary); }
 /* selected nav state: filled accent chip, not an underline — must read ≥3:1 against idle neighbours */
-nav button.active { color:var(--accent-text); background:var(--accent-soft); border-color:var(--accent); font-weight:var(--fw-medium); }
+nav button.active { color:var(--accent-text); background:var(--accent-soft); border-color:transparent; font-weight:var(--fw-medium); }
+nav button:focus:not(:focus-visible) { outline:none; }
+nav button:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
 nav button.active:hover { background:var(--accent-soft); }
 button, input, select, textarea { border-radius:var(--radius-sm); transition:border-color var(--dur-fast), background var(--dur-fast), box-shadow var(--dur-fast); }
 button:hover { background:var(--bg-hover); } button.primary:hover { background:color-mix(in srgb, var(--accent) 88%, black); }
@@ -236,7 +238,8 @@ button:focus-visible, input:focus, select:focus, textarea:focus { outline:none; 
 .card .cdesc { display:block; color:var(--fg-secondary); font-size:var(--text-xs); line-height:1.35; margin-top:2px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .card .ctags { display:flex; flex-wrap:wrap; gap:4px; margin-top:var(--space-1); }
 .card .cmeta { display:flex; align-items:center; flex-wrap:wrap; gap:2px 6px; margin-top:2px; color:var(--fg-muted); font-size:var(--text-xs); }
-.adot { width:8px; height:8px; border-radius:50%; display:inline-block; flex:none; }
+.card .cmeta .cago { margin-left:auto; color:var(--fg-muted); font-variant-numeric:tabular-nums; }
+.card .cmeta .cago + .ccount { margin-left:4px; }
 .col:not(:has(.card)):not(:has(.hint-first))::after { content:'Nothing here yet'; display:block; color:var(--fg-muted); font-size:var(--text-xs); text-align:center; padding:var(--space-6) 0; }
 .hint-first { margin-top:var(--space-2); padding:var(--space-6) var(--space-3); border:1px dashed var(--border-strong); border-radius:var(--radius-md); color:var(--fg-muted); font-size:var(--text-xs); text-align:center; }
 /* tags read as quiet text; only alert states keep a tinted chip */
@@ -634,3 +637,25 @@ header #goal { min-width:180px; }
 
 .us-groups h4 { display:none; }
 .seg button:focus-visible { outline:2px solid var(--accent); outline-offset:1px; } .seg button.on:focus-visible { outline-offset:2px; box-shadow:0 0 0 1px var(--bg-app); }
+.card .cmeta{display:flex;align-items:center;gap:6px}
+.card .cmeta .avatar.sm{width:16px;height:16px;font-size:9px}
+.card .cmeta .ccount{margin-left:auto;color:var(--muted,#8a8f9c)}
+
+/* Board: one horizontal row, per-column vertical scroll */
+#columns { display:flex; gap:8px; overflow-x:auto; overflow-y:hidden; min-height:0; }
+#columns .col { flex:1 1 0; min-width:190px; overflow-y:auto; min-height:0; }
+#columns .col h3 { position:sticky; top:-8px; background:inherit; z-index:1; padding:2px 0; }
+#columns .col.folded { flex:0 0 120px; min-width:120px; }
+#columns .col.folded::after { content:none !important; }
+#columns .col.merge_conflict h3 { color:var(--danger); }
+#columns .col.merge_conflict:has(.card) { border:1px solid var(--danger); background:color-mix(in srgb, var(--danger) 6%, var(--bg-sidebar)); }
+
+/* usage: spacing, help tooltip, sticky anchors, empty state */
+.us-hero { margin:16px 0; gap:16px; } .us-kpis { gap:16px; } .us-breakdowns { gap:16px; margin:16px 0; }
+#us-summary .cards, #us-discovery, #us-limits { margin-top:16px; } #us-summary h4, #us-discovery h3, #us-limits h3 { margin:16px 0 8px; }
+.us-vendor { margin:16px 0; } .us-vendor > small { margin-bottom:8px; }
+.us-help { width:22px; height:22px; padding:0; border-radius:var(--radius-full); color:var(--fg-muted); font-size:var(--text-xs); }
+.us-anchors { position:sticky; top:0; z-index:5; display:flex; gap:4px; padding:6px 0; background:var(--bg-app); border-bottom:1px solid var(--line); }
+.us-anchors a { padding:2px 10px; border-radius:var(--radius-full); color:var(--fg-secondary); font-size:var(--text-xs); text-decoration:none; } .us-anchors a:hover { background:var(--bg-hover); color:var(--fg-primary); }
+#us-summary, #us-discovery, #us-limits, #us-runs { scroll-margin-top:40px; }
+.us-empty { margin:16px 0; padding:var(--space-6) var(--space-3); border:1px dashed var(--border-strong); border-radius:var(--radius-md); text-align:center; color:var(--fg-muted); }

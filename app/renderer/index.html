@@ -47,8 +47,8 @@
   </section>
   <section id="tab-board" class="tab">
     <div class="toolbar"><input id="nt-title" placeholder="New task / goal title"><select id="nt-assignee"></select><button id="nt-add" class="primary">Create task</button></div>
-    <textarea id="nt-desc" placeholder="Description (optional)" rows="2"></textarea>
-    <div class="idlebanner hidden" data-where="board"></div><div id="wakebar" class="hidden"></div><div id="presence" class="presence"></div>
+    <textarea id="nt-desc" placeholder="Description (optional)" rows="2" style="display:none"></textarea>
+    <div id="wakebar" class="hidden"></div><div id="presence" class="presence"></div>
     <div class="split"><div id="columns"></div><aside id="taskdetail" class="panel closed"></aside></div>
   </section>
   <section id="tab-wiki" class="tab">
@@ -70,7 +70,8 @@
   </section>
   <section id="tab-usage" class="tab">
     <div class="toolbar"><label>Agent <select id="us-agent"><option value="">All</option></select></label><label>Billing <select id="us-billing"><option value="">All</option><option>subscription</option><option>api</option><option>proxy</option><option>bedrock</option><option>vertex</option><option>unknown</option></select></label>
-      <button id="us-export" class="primary">Export CSV</button><button id="us-exportall">Export CSV (all projects)</button><button id="us-clear">Clear history</button><span class="muted">Usage is tracked per runtime · provider · model in the ledger — token columns are per key and never summed across models; cost is the only grand total. Costs are the CLI-reported figure or a list-price estimate (marked est).</span></div>
+      <button id="us-export" class="primary">Export CSV</button><button id="us-exportall">Export CSV (all projects)</button><button id="us-clear">Clear history</button><button id="us-help" class="us-help" type="button" aria-label="About usage tracking" title="Usage is tracked per runtime · provider · model in the ledger — token columns are per key and never summed across models; cost is the only grand total. Costs are the CLI-reported figure or a list-price estimate (marked est).">?</button></div>
+    <nav class="us-anchors" id="us-anchors"><a href="#us-summary">Cost</a><a href="#us-discovery">Discovery</a><a href="#us-limits">Limits</a><a href="#us-runs">Runs</a></nav>
     <div id="us-summary"></div>
     <div id="us-discovery"></div>
     <div id="us-limits"></div>
