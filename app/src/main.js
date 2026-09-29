@@ -1045,7 +1045,7 @@ async function guiE2E() {
     for (const theme of ['light', 'dark']) {
       require('electron').nativeTheme.themeSource = theme; await ex(`await w(300);`);
       for (const tab of ['chat', 'board', 'overview', 'team', 'wiki', 'obs', 'usage', 'settings', 'inbox']) {
-        await ex(`$('#tabs button[data-tab=${tab}]').click(); await w(700);`); await sh(`${tab}-${theme}`);
+        await ex(`$('[data-tab=${tab}]').click(); await w(700);`); await sh(`${tab}-${theme}`);
         if (tab === 'board') { await ex(`const c = document.querySelector('#board, .board'); if (c) c.scrollLeft = 99999; await w(300);`); await sh(`board-right-${theme}`); }
         if (tab === 'usage') { await ex(`const m = document.querySelector('#usage, .view.active, main'); (document.scrollingElement || m).scrollTop = 99999; if (m) m.scrollTop = 99999; await w(300);`); await sh(`usage-scrolled-${theme}`); }
         if (tab === 'team') { await ex(`try { VP.zoom = 0.3; applyView && applyView(); } catch (e) {} await w(300);`); await sh(`team-small-${theme}`); }
