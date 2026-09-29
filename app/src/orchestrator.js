@@ -937,6 +937,7 @@ class Orchestrator extends EventEmitter {
     const armed = scheduled && !rp.firedAt;
     const nodes = (this.store.getTeam().nodes || []);
     const busy = [...this.procs.keys()].map((id) => (nodes.find((n) => n.id === id) || {}).name || id);
+    const nameOf = (id) => (nodes.find((n) => n.id === id) || {}).name || id;
     const st = {
       pendingCount: Math.max(0, Number(rp.count) || 0),
       since: rp.since || null,
@@ -945,17 +946,29 @@ class Orchestrator extends EventEmitter {
       gating: this._restartGating || [],
       busyAgents: busy,
       blockedReason: null,
+      waitingReasons: [],
     };
-    // Why an armed, not-yet-fired schedule is not firing yet (t_acae4863, for the pill's subtitle):
-    // the anchor, the drain, or the updater itself. With nothing armed, say so too — a pending
-    // count alone is not a scheduled restart and must not read as one that should already have run.
-    if (!scheduled) st.blockedReason = 'no schedule armed — arm one with the pill or schedule_restart (the cap auto-arms)';
-    else if (armed) {
+    // Why the restart has not fired yet (t_acae4863, for the pill's subtitle). waitingReasons is the
+    // UI contract Uma's renderer normalizes (t_ec59eefa): human-readable, most-blocking first;
+    // blockedReason mirrors [0] for single-line reads. A pending count alone is not a scheduled
+    // restart — when nothing is armed but changes have landed, say exactly that.
+    const waiting = st.waitingReasons;
+    const phase = this.updater && this.updater.phase;
+    if (!scheduled) {
+      if (st.pendingCount > 0) {
+        const cap = Math.max(1, Number(this.store.getSettings().restartCap) || RESTART.CAP);
+        waiting.push(`not armed — ${st.pendingCount} change${st.pendingCount === 1 ? '' : 's'} pending (cap ${cap})`);
+      }
+    } else {
       const after = rp.afterTaskId ? this.store.getTask(rp.afterTaskId) : null;
-      if (rp.afterTaskId && (!after || after.status !== 'done')) st.blockedReason = `waiting for the anchor task (${after ? after.status : 'missing'})`;
-      else if (busy.length) st.blockedReason = `waiting for ${busy.length} running agent${busy.length > 1 ? 's' : ''}: ${busy.join(', ')}`;
-      else if (this.updater && this.updater.phase !== 'idle') st.blockedReason = `self-update is ${this.updater.phase}`;
+      if (armed && rp.afterTaskId && (!after || after.status !== 'done')) waiting.push(`anchor ${rp.afterTaskId} is ${after ? after.status : 'missing'}`);
+      if (armed && busy.length) {
+        const who = busy.map((n, i) => { const id = [...this.procs.keys()][i]; const tid = (this.agents[id] || {}).taskId; return tid ? `${n} (${tid})` : n; });
+        waiting.push(`${busy.length} agent${busy.length > 1 ? 's' : ''} still running: ${who.join(', ')}`);
+      }
+      if (phase && phase !== 'idle') waiting.push(`updater: ${phase}`);
     }
+    st.blockedReason = waiting[0] || null;
     return st;
   }
   _pushRestartState() {

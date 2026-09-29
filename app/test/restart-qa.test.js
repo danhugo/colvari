@@ -154,7 +154,8 @@ test('qa: the fired schedule survives every sweep of the old process and is cons
   assert.equal(st.scheduledNow, false);
   assert.deepEqual(st.gating, []);
   assert.deepEqual(st.busyAgents, []);
-  assert.match(st.blockedReason, /no schedule armed/);
+  assert.deepEqual(st.waitingReasons, [], 'nothing pending, nothing armed: no reasons');
+  assert.equal(st.blockedReason, null);
 });
 
 // ---- case 5 (t_b1939389): the busy→idle loop — pending while busy, fires on idle, clears on boot ----
