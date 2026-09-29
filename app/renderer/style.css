@@ -815,6 +815,70 @@ details.evrun .evrow { padding-left:0; }
 .wk-more { position:relative; } .wk-more > summary { list-style:none; cursor:pointer; padding:4px 10px; border:1px solid var(--border-strong); border-radius:6px; line-height:1.3; } .wk-more > summary::-webkit-details-marker { display:none; } .wk-more > summary:hover { background:var(--bg-hover); }
 .wk-menu { position:absolute; right:0; top:100%; margin-top:4px; z-index:20; background:var(--bg-raised); border:1px solid var(--border-strong); border-radius:6px; padding:4px; min-width:140px; box-shadow:0 4px 14px rgba(0,0,0,.25); } .wk-menu button { width:100%; text-align:left; color:var(--danger); }
 
+/* ===== Identity pass (t_300e8fd2): "iridescence" — see design/tokens.css v2 ===== */
+/* Display type: Space Grotesk carries the brand voice — wordmark, section headers,
+   page titles, stat numbers, empty-state headings. UI text stays Inter. */
+header > strong.brand { font-family: var(--font-display); font-weight: var(--fw-bold); letter-spacing: -.02em; font-size: 15px; }
+.brandmark .bm-arc { color: var(--accent); } .brandmark .bm-dots { color: var(--fg-primary); }
+.col h3, #sidebar h4, .sb-head h4, .ovtl-head label, #settingsform h3, .sb-more > summary { font-family: var(--font-display); letter-spacing: var(--track-caps); }
+.set-pagetitle, .wk-emptystate h3, .cempty b, #helpdlg h3, #nodeform h3 { font-family: var(--font-display); letter-spacing: -.01em; }
+.stat b, .us-kpis b { font-family: var(--font-display); font-weight: var(--fw-bold); font-variant-numeric: tabular-nums; letter-spacing: -.01em; }
+/* Depth: raised surfaces get the top-edge highlight layered over their shadow. */
+.panel, .col, .stat, .gcontrols, #minimap, #ov-timelinewrap, .us-kpis > div, .us-chart, .us-card, #goalpop { box-shadow: var(--hl), var(--shadow-sm); }
+.card:hover { box-shadow: var(--hl), var(--shadow-md); }
+.card.sel, .card.approval { box-shadow: var(--ring), var(--hl), var(--shadow-md); }
+/* Signature primary: teal gradient with a deep border and a pressed state. */
+button.primary { background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 92%, white), var(--accent)); border-color: var(--accent-deep); box-shadow: var(--hl), var(--shadow-sm); text-shadow: 0 1px 0 rgba(255,255,255,.12); }
+button.primary:hover { background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 88%, white), color-mix(in srgb, var(--accent) 90%, black)); }
+button.primary:active { transform: translateY(.5px); box-shadow: var(--shadow-sm); }
+.gtoolbar .tgroup > button.primary { background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 92%, white), var(--accent)); }
+/* Motion on view + overlay state changes (quiet, 120–260ms; reduced-motion handled globally). */
+.tab.active { animation: view-in var(--dur-in) var(--ease-out); }
+@keyframes view-in { from { opacity: 0; transform: translateY(4px); } }
+.goalpop, .ctxmenu, .wk-menu, #chat-mentions, #chat-thread { animation: pop-in var(--dur-base) var(--ease-out); }
+@keyframes pop-in { from { opacity: 0; transform: scale(.985) translateY(2px); } }
+button, .pchip, .tag, .badge, .pill, .avatar, .cchip summary, .lvchip, .asswitch .sw { transition-timing-function: var(--ease-out); }
+/* Avatars: glass-pebble treatment — slight inner highlight + soft edge, squircle default.
+   Leads/PMs read as circles (shape = standing in the team graph, see who()). */
+.avatar { box-shadow: inset 0 1px 0 rgba(255,255,255,.28), 0 1px 2px rgba(37,33,24,.18); border-radius: 30%; }
+.avatar.is-lead { border-radius: 50%; }
+/* Empty states: display-font heading, accent-tinted glyph, one quiet sentence + one action. */
+.cempty svg, .wk-emptystate svg { color: var(--accent); opacity: .85; }
+.us-empty, .hint-first { border-style: dashed; }
+.col:not(:has(.card)):not(:has(.hint-first))::after { content:'Nothing here yet'; font-style: italic; letter-spacing: .01em; }
+/* Overview cards must read at 100% (Vex audit #3): ≥12px on node labels, only the Overview graph. */
+#ov-graph .nname { font-size: 14px; }
+#ov-graph .nrole { font-size: 12px; }
+#ov-graph .avtext { font-size: 12px; }
+#ov-graph .chip text { font-size: 11px; }
+#ov-graph .ctxpct { font-size: 10.5px; }
+/* Chat: sticky translucent room header (depth without a hard line). */
+.chat-head { position: sticky; top: 0; z-index: 3; background: color-mix(in srgb, var(--bg-surface) 86%, transparent); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); }
+/* Text selection picks up the accent. */
+::selection { background: color-mix(in srgb, var(--accent) 25%, transparent); }
+/* Modern thin scrollbars: quiet until hovered, never layout-shifting. */
+::-webkit-scrollbar { width: 11px; height: 11px; }
+::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--fg-muted) 32%, transparent); border-radius: 8px; border: 3px solid transparent; background-clip: padding-box; }
+::-webkit-scrollbar-thumb:hover { background: color-mix(in srgb, var(--fg-muted) 55%, transparent); background-clip: padding-box; border: 3px solid transparent; }
+::-webkit-scrollbar-corner, ::-webkit-scrollbar-track { background: transparent; }
+.loglist::-webkit-scrollbar-thumb { background: rgba(255,255,255,.16); background-clip: padding-box; border: 3px solid transparent; }
+/* Wiki: one filled "+ New page" CTA (the empty state's); the list-toolbar one goes quiet. */
+.wk-toolbar #wk-new { background: transparent; border-color: transparent; color: var(--fg-muted); font-weight: var(--fw-medium); box-shadow: none; }
+.wk-toolbar #wk-new:hover { background: var(--bg-hover); color: var(--fg-primary); }
+
+/* Node status states (Overview + Team graphs): idle mutes the disc, working gets a pulsing
+   success ring, stuck gets a warning ring; lead agents wear a star on the disc edge. */
+#ov-graph .node .avatar, #graph .node .avatar { transition: opacity var(--dur-base) var(--ease-out); }
+#ov-graph .node:not(.working):not(.stuck) .avatar, #graph .node:not(.working):not(.stuck):not(.sel) .avatar { opacity: .5; filter: grayscale(.92); }
+#graph .node.st-idle .avatar { filter: grayscale(.92); }
+#ov-graph .node.stuck .avatar, #graph .node.stuck .avatar { opacity: 1; stroke: var(--warning); stroke-width: 2.5; }
+#ov-graph .node.working .avatar, #graph .node.working .avatar { stroke: var(--success); stroke-width: 2.5; animation: avpulse 2.2s var(--ease-out) infinite; }
+@keyframes avpulse { 0%, 100% { stroke-opacity: 1; } 50% { stroke-opacity: .4; } }
+#ov-graph .leadstar, #graph .leadstar { font-size: 11px; fill: var(--accent); stroke: var(--bg-surface); stroke-width: 3px; paint-order: stroke; font-weight: var(--fw-bold); }
+.glegend .leadkey { font-style: normal; color: var(--accent); font-weight: var(--fw-bold); }
+/* Sidebar team rows wear their team hue so the avatar palette is legible at a glance. */
+#teamlist > div { display: flex; align-items: center; gap: 7px; }
+.teamdot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
 /* Team graph readability (t_2aaf566c): hierarchy (assign) edges stay solid; message/review edges are ghosts until a node/edge is hovered or selected; edges into working agents flow. */
 #graph .edge.secondary { opacity:.14; stroke-width:1.25; transition:opacity var(--dur-fast); }
 #graph .edge.hl, #graph .edge.secondary.sel { opacity:1; stroke-width:2.5; }
@@ -837,6 +901,20 @@ details.evrun .evrow { padding-left:0; }
 #graph .node.cluster.st-working .card:not(.stack1):not(.stack2) { fill:var(--success-soft); }
 #graph .mdot { fill:var(--fg-muted); opacity:.5; } #graph .mdot.s-working { fill:var(--success); opacity:1; } #graph .mdot.s-needs-human { fill:var(--warning-strong); opacity:1; }
 #graph .clsum { fill:var(--fg-secondary); font-size:11px; }
+
+/* Header theme toggle: moon in light mode (click for dark), sun in dark mode. */
+#themebtn .icon-sun, #themebtn .icon-moon { display: none; }
+#themebtn .icon-moon { display: block; }
+[data-theme="dark"] #themebtn .icon-moon, :root:not([data-theme="light"]) #themebtn .icon-moon { display: none; }
+[data-theme="dark"] #themebtn .icon-sun, :root:not([data-theme="light"]) #themebtn .icon-sun { display: block; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) #themebtn .icon-moon { display: none; } :root:not([data-theme="light"]) #themebtn .icon-sun { display: block; } }
+/* The Overview SVG is sized exactly to the wrap by auto-fit; as inline-replaced content it
+   would add a baseline descender gap and phantom scrollbars. Block it. */
+#ov-graph { display: block; }
+
+/* Overview legend: absolutely pinned inside the wrap — the sticky float below a block-level
+   svg extended the scrollable area and produced phantom scrollbars. */
+#ov-graph-wrap .ov-legend { position: absolute; left: 12px; bottom: 10px; top: auto; float: none; margin: 0; }
 
 /* Usage: one sub-tab at a time, legible chips, 2-col limits grid, equal stat cards */
 .us-anchors button { padding:2px 12px; border:0; border-radius:var(--radius-full); background:transparent; color:var(--fg-secondary); font-size:var(--text-sm,13px); cursor:pointer; }
