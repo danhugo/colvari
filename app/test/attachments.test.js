@@ -108,3 +108,37 @@ test('buildClaudeArgs adds --add-dir for opts.attachDir after the node addDirs',
   const only = buildClaudeArgs({ name: 'Dev', role: 'Dev' }, 'p', {}, null, { attachDir: '/store/attachments' });
   assert.deepEqual(only.slice(only.indexOf('--add-dir') + 1), ['/store/attachments']);
 });
+
+test('two uploads with the same name never overwrite each other', () => {
+  const s = tmp();
+  const a = s.saveAttachment({ name: 'dup.png', mime: 'image/png', bytes: Buffer.from([1]) });
+  const b = s.saveAttachment({ name: 'dup.png', mime: 'image/png', bytes: Buffer.from([2, 2]) });
+  assert.ok(!a.error && !b.error);
+  assert.notEqual(a.path, b.path, 'each upload gets its own file');
+  assert.ok(fs.existsSync(a.path) && fs.existsSync(b.path));
+  assert.deepEqual([...fs.readFileSync(a.path)], [1]);
+  assert.deepEqual([...fs.readFileSync(b.path)], [2, 2]);
+});
+
+// Every prompt that prints "Attached files:" must run with opts.attachDir, else the agent gets a
+// path it cannot read. wakeRun is its own args path (task+human share runTask's runAtts line), so it
+// is the one that can drift — drive it with a stubbed runtime + spawnRun and record the opts.
+test('wakeRun passes attachDir when its messages carry attachments, and not otherwise', async () => {
+  const RT = require('../src/runtimes');
+  const orig = RT.getRuntime;
+  const seen = [];
+  RT.getRuntime = () => ({ buildArgs: (cfg, prompt, settings, mcp, opts) => { seen.push(opts); return ['echo']; } });
+  try {
+    const s = tmp();
+    const n = s.addNode({ name: 'Dev', role: 'Dev' });
+    const o = new Orchestrator(s);
+    o.spawnRun = async () => ({ code: 0 });
+    const team = s.getTeam();
+    const node = team.nodes.find((x) => x.id === n.id);
+    const att = [{ path: path.join(s.attachmentsDir(), '5-bc.png'), name: '5-bc.png', mime: 'image/png', size: 2 }];
+    await o.wakeRun(node, [{ id: 'm_1', from: 'human', to: n.id, text: 'look', attachments: att }], team, s.getSettings());
+    assert.equal(seen[0].attachDir, s.attachmentsDir(), 'wake run with attachments gets the dir');
+    await o.wakeRun(node, [{ id: 'm_2', from: 'human', to: n.id, text: 'plain' }], team, s.getSettings());
+    assert.equal(seen[1].attachDir, undefined, 'plain wake run gets no dir');
+  } finally { RT.getRuntime = orig; }
+});

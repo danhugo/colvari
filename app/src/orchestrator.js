@@ -446,7 +446,10 @@ class Orchestrator extends EventEmitter {
       const resume = this.lastSession(node.id);
       this.log(node.id, 'system', `▶ ${node.name} wakes to handle messages in ${cwd}${resume ? ' [resume ' + resume + ']' : ''}`);
       let args = null;
-      try { args = RT.getRuntime(cfg.runtime).buildArgs(cfg, wakePrompt(team, node, msgs), settings, this.mcpConfig(node), { resume, cwd, env }); }
+      // Wake messages can carry attachments (their paths are in wakePrompt): pass the dir like the
+      // task-run path does, or the agent gets a path it cannot read.
+      const wakeAtts = msgs.flatMap((m) => m.attachments || []);
+      try { args = RT.getRuntime(cfg.runtime).buildArgs(cfg, wakePrompt(team, node, msgs), settings, this.mcpConfig(node), { resume, cwd, env, ...(wakeAtts.length ? { attachDir: this.store.attachmentsDir() } : {}) }); }
       catch (e) { this.log(node.id, 'error', 'bad agent settings: ' + e.message); }
       const r = await this.spawnRun(node, args, cwd, env, settings, { ...meta, resumedFrom: args && resume ? resume : null });
       a.status = 'idle'; a.iteration = 0; a.activity = null;
