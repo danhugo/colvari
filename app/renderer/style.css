@@ -620,3 +620,12 @@ header #goal { min-width:180px; }
 .card .cmeta{display:flex;align-items:center;gap:6px}
 .card .cmeta .avatar.sm{width:16px;height:16px;font-size:9px}
 .card .cmeta .ccount{margin-left:auto;color:var(--muted,#8a8f9c)}
+
+/* Board: one horizontal row, per-column vertical scroll */
+#columns { display:flex; gap:8px; overflow-x:auto; overflow-y:hidden; min-height:0; }
+#columns .col { flex:1 1 0; min-width:190px; overflow-y:auto; min-height:0; }
+#columns .col h3 { position:sticky; top:-8px; background:inherit; z-index:1; padding:2px 0; }
+#columns .col.folded { flex:0 0 120px; min-width:120px; }
+#columns .col.folded::after { content:none !important; }
+#columns .col.merge_conflict h3 { color:var(--danger); }
+#columns .col.merge_conflict:has(.card) { border:1px solid var(--danger); background:color-mix(in srgb, var(--danger) 6%, var(--bg-sidebar)); }
