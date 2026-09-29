@@ -186,8 +186,9 @@ test('restart during wait: draining waits for running agents (within the grace) 
 
 // One long run used to freeze the whole team: dispatch is paused during the drain, so a 12+ minute
 // run left 13 todo tasks waiting behind it indefinitely. The drain now has a grace deadline
-// (drainTimeoutMin, default 5): past it the stragglers are halted and the update proceeds — their
-// tasks resume after the restart (reconcileOrphanedTasks + session resume), wasRunning stays true.
+// (drainTimeoutMin, default 30): past it the stragglers that were never cut before are halted and
+// the update proceeds — their tasks resume after the restart (reconcileOrphanedTasks + session
+// resume), wasRunning stays true. A task already cut once is spared and waited for indefinitely.
 test('drain grace: runs outlasting the deadline are halted and the update proceeds', async () => {
   let t = Date.now();
   let halted = 0;
@@ -200,7 +201,7 @@ test('drain grace: runs outlasting the deadline are halted and the update procee
   assert.strictEqual(w.phase, 'restarting');
   assert.strictEqual(halted, 1, 'the stragglers were stopped at the deadline');
   assert.strictEqual(w.relaunched, 1);
-  assert.ok(w.store.logs.some((l) => /drain grace \(5min\) over with \d+ run\(s\) still active/.test(l.text)), 'the cut is logged');
+  assert.ok(w.store.logs.some((l) => /drain grace \(30min\) over with \d+ run\(s\) still active/.test(l.text)), 'the cut is logged');
   assert.strictEqual(readRestartState(w.store.dir).wasRunning, true, 'the Run still resumes after the restart');
 });
 
@@ -531,10 +532,10 @@ test('drain cutoff: haltProcs stops a long run, the task stays re-dispatchable a
   assert.strictEqual(after.status, 'in_progress', 'a cut task is restart-interrupted, not crashed');
   assert.strictEqual(after.parkedForHuman, undefined, 'never parked for a human');
 
-  // The update completes (or aborts): unpausing — main.js also clears drainCutoff — reconciles the
-  // cut task back to todo and re-dispatches it; with a fast fake it runs to done.
+  // The update completes (or aborts): unpausing — main.js also clears the drain-cut markers —
+  // reconciles the cut task back to todo and re-dispatches it; with a fast fake it runs to done.
   fs.writeFileSync(fake, '#!/bin/sh\necho \'{"type":"result","subtype":"success","session_id":"s2","total_cost_usd":0.001,"num_turns":1,"usage":{"input_tokens":10,"output_tokens":10}}\'\n');
-  o.dispatchPaused = false; o.drainCutoff = false; o.tick();
+  o.dispatchPaused = false; o.clearDrainCuts(); o.tick();
   await waitFor(() => !o.running, 're-dispatched run finished');
   assert.strictEqual(s.getTask(task.id).status, 'done');
   assert.ok(s.readLogs().some((l) => /reset to todo/.test(l.text)), 'the reconcile sweep logged the reset');
