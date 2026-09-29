@@ -2374,7 +2374,10 @@ function renderOverview() {
   // Fit the graph to the available canvas without ever shrinking node text below its authored (readable) size:
   // fit the whole graph in the wrap (never clipped); shrink down to 0.6 before letting the wrap scroll, grow up to 1.3.
   const gbox = graphBox(ovNodes), gpad = 28, bw = gbox.w + gpad * 2, bh = gbox.h + gpad * 2;
-  const wrap = svg.parentElement, r = wrap.getBoundingClientRect();
+  const wrap = svg.parentElement;
+  // clientWidth/Height (not the bounding rect): they exclude scrollbars, so sizing against them
+  // cannot re-introduce the scrollbar the sizing itself would prevent.
+  const r = { width: wrap.clientWidth, height: wrap.clientHeight };
   // Auto-fit zooms small graphs to fill the canvas; the 0.85 floor keeps 12px labels >=10px
   // effective (the original complaint was ~8px) while 24-agent graphs avoid a scrollbar.
   // Genuinely huge graphs still pan/drag in the wrap.
@@ -2382,7 +2385,9 @@ function renderOverview() {
   const vbw = Math.max(bw, r.width ? r.width / scale : bw), vbh = Math.max(bh, r.height ? r.height / scale : bh);
   svg.setAttribute('viewBox', `${gbox.x - gpad - (vbw - bw) / 2} ${gbox.y - gpad - (vbh - bh) / 2} ${vbw} ${vbh}`);
   svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
-  svg.style.width = `${vbw * scale}px`; svg.style.height = `${vbh * scale}px`;
+  // Cap at the wrap size (minus 1px for rounding) — preserveAspectRatio 'meet' letterboxes the
+  // rest, so the svg can never overflow its wrap and phantom scrollbars can't appear.
+  svg.style.width = `${Math.min(vbw * scale, r.width - 1)}px`; svg.style.height = `${Math.min(vbh * scale, r.height - 1)}px`;
   $('#ov-stuck').innerHTML = [...stuck].map((id) => `<div class="stuckbar">⚠ <b>${esc(nodeName(id))}</b> has produced no output for ${S.settings.stuckMinutes || 5}+ min<span class="spacer"></span><button data-ovstop="${id}">Stop</button><button data-ovnudge="${id}">Nudge</button></div>`).join('');
   document.querySelectorAll('[data-ovstop]').forEach((b) => b.onclick = act(async () => { await call('stopAgent', b.dataset.ovstop); refresh(); }));
   document.querySelectorAll('[data-ovnudge]').forEach((b) => b.onclick = act(async () => { await call('sendToAgent', b.dataset.ovnudge, 'Status check: you have produced no output for a while. Reply with a short status (what you are doing, whether you are blocked), then continue or finish your task.'); refresh(); }));

@@ -908,3 +908,10 @@ button, .pchip, .tag, .badge, .pill, .avatar, .cchip summary, .lvchip, .asswitch
 [data-theme="dark"] #themebtn .icon-moon, :root:not([data-theme="light"]) #themebtn .icon-moon { display: none; }
 [data-theme="dark"] #themebtn .icon-sun, :root:not([data-theme="light"]) #themebtn .icon-sun { display: block; }
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) #themebtn .icon-moon { display: none; } :root:not([data-theme="light"]) #themebtn .icon-sun { display: block; } }
+/* The Overview SVG is sized exactly to the wrap by auto-fit; as inline-replaced content it
+   would add a baseline descender gap and phantom scrollbars. Block it. */
+#ov-graph { display: block; }
+
+/* Overview legend: absolutely pinned inside the wrap — the sticky float below a block-level
+   svg extended the scrollable area and produced phantom scrollbars. */
+#ov-graph-wrap .ov-legend { position: absolute; left: 12px; bottom: 10px; top: auto; float: none; margin: 0; }
