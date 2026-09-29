@@ -13,11 +13,11 @@
   --human: #221e19;
 }
 [data-theme="dark"] {
-  --bg-app: #15120f; --bg-sidebar: #100e0b; --bg-surface: #1d1915; --bg-raised: #25201b; --bg-hover: #2e2822; --bg-active: #3a2f22;
+  --bg-app: #15120f; --bg-sidebar: #100e0b; --bg-surface: #1d1915; --bg-raised: #25201b; --bg-hover: #2e2822; --bg-active: #2e2a25;
   --bg-bubble: #25201b; --bg-bubble-self: #3a2f22; --bg-code: #110f0c;
   --fg-primary: #f1ebe1; --fg-secondary: #c4baaa; --fg-muted: #9a8f7f; --fg-on-accent: #1a1612;
   --border: #2d2721; --border-strong: #3d352c;
-  --accent: #efe6d6; --accent-soft: #3a2f22; --accent-text: #e6bb82;
+  --accent: #efe6d6; --accent-soft: #3a2f22; --accent-text: #efe6d6;
   --edge: #7a6f62;
   --success: #5cc98a; --success-soft: #16301f; --success-text: #5cc98a;
   --warning: #f0a93c; --warning-soft: #3a2a10; --warning-text: #f0a93c; --warning-strong: #f0a93c;
@@ -25,11 +25,11 @@
   --human: #f1ebe1;
 }
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
-  --bg-app: #15120f; --bg-sidebar: #100e0b; --bg-surface: #1d1915; --bg-raised: #25201b; --bg-hover: #2e2822; --bg-active: #3a2f22;
+  --bg-app: #15120f; --bg-sidebar: #100e0b; --bg-surface: #1d1915; --bg-raised: #25201b; --bg-hover: #2e2822; --bg-active: #2e2a25;
   --bg-bubble: #25201b; --bg-bubble-self: #3a2f22; --bg-code: #110f0c;
   --fg-primary: #f1ebe1; --fg-secondary: #c4baaa; --fg-muted: #9a8f7f; --fg-on-accent: #1a1612;
   --border: #2d2721; --border-strong: #3d352c;
-  --accent: #efe6d6; --accent-soft: #3a2f22; --accent-text: #e6bb82;
+  --accent: #efe6d6; --accent-soft: #3a2f22; --accent-text: #efe6d6;
   --edge: #7a6f62;
   --success: #5cc98a; --success-soft: #16301f; --success-text: #5cc98a;
   --warning: #f0a93c; --warning-soft: #3a2a10; --warning-text: #f0a93c; --warning-strong: #f0a93c;
