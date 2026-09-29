@@ -486,9 +486,10 @@ const normWatch = (d) => { d = d || {}; return {
   digest: String(d.digest || ''),
   intervalMin: Number(d.intervalMin) > 0 ? Number(d.intervalMin) : 10,
 }; };
+let rstSeen = false; // any successful pull or push proves the backend exists; a failed pull after that must not re-stub (buttons would vanish while real state is on screen)
 async function loadCoreState() {
-  try { let d; try { d = await squad.call('getRestartState', ctx); } catch { d = await squad.call('getRestartState'); } rst = { ...normRestart(d), stub: false }; }
-  catch { rst = { ...rst, stub: true }; } // no backend yet: keep the last known (stub) state
+  try { let d; try { d = await squad.call('getRestartState', ctx); } catch { d = await squad.call('getRestartState'); } rst = { ...normRestart(d), stub: false }; rstSeen = true; }
+  catch { if (!rstSeen) rst = { ...rst, stub: true }; } // no backend yet: keep the last known (stub) state
   try { let d; try { d = await squad.call('getWatchStatus', ctx); } catch { d = await squad.call('getWatchStatus'); } watch = { ...normWatch(d), stub: false }; }
   catch { watch = { ...watch, stub: true }; }
 }
@@ -507,12 +508,42 @@ function renderRestartPill() {
   if (n) bits.push(`${n} change${n === 1 ? '' : 's'}`);
   if (rst.scheduledAfter) bits.push(`after ${shortTaskId(rst.scheduledAfter)}`);
   else if (rst.scheduledNow) bits.push('once agents drain');
-  c.textContent = bits.join(' · ');
+  const label = document.createElement('span');
+  label.textContent = bits.join(' · ');
+  c.replaceChildren(label);
+  // Human escape hatch (Cato t_42f310cf #7). Hidden while stubbed: without the core-restart
+  // backend the calls are guaranteed no-ops, so showing buttons would just invite dead clicks.
+  if (!rst.stub) {
+    c.appendChild(rstBtn('Restart now', 'Restart immediately — in-flight tasks finish, then the app relaunches with the merged changes.', () => rstAction('now'), rstBusy === 'now'));
+    if (armed) c.appendChild(rstBtn('Cancel schedule', 'Cancel the scheduled restart — the landed changes stay pending until the core schedules one again.', () => rstAction('cancel'), rstBusy === 'cancel'));
+    if (rstErr) { const e = document.createElement('span'); e.className = 'rsterr'; e.textContent = rstErr; c.appendChild(e); }
+  }
   c.title = ['Merged changes wait for a core-scheduled restart — dispatch keeps running meanwhile.',
     n ? `${n} change${n === 1 ? '' : 's'} landed since the last restart${rst.since ? ` (first ${agoTxt(rst.since)})` : ''}.` : '',
     rst.scheduledAfter ? `Restarts once ${rst.scheduledAfter} is done and in-flight tasks drain.` : (rst.scheduledNow ? 'Restarts as soon as running agents finish.' : 'No restart armed yet — only the core agent (PM) can schedule one.'),
     rst.gating.length ? `${rst.gating.length} not-yet-started task${rst.gating.length === 1 ? '' : 's'} held until then.` : '',
     rst.stub ? 'backend pending' : ''].filter(Boolean).join(' ');
+}
+const rstBtn = (txt, tip, fn, busy) => { const b = document.createElement('button'); b.className = 'rstact'; b.textContent = busy ? '…' : txt; b.title = tip; b.disabled = !!rstBusy; b.onclick = fn; return b; };
+// restartNow / cancelRestart (Devon, t_20d5a23c contract): the state push re-renders this pill;
+// if the push is missed we re-pull getRestartState. Failure surfaces briefly and inline.
+let rstBusy = null; let rstErr = null;
+async function rstAction(kind) {
+  if (rstBusy || rst.stub) return;
+  rstBusy = kind; renderRestartPill();
+  const names = kind === 'now' ? ['restartNow', 'restartPendingNow'] : ['cancelRestart', 'cancelScheduledRestart'];
+  let ok = false, err = null;
+  for (const nm of names) {
+    try { let r; try { r = await squad.call(nm, ctx); } catch { r = await squad.call(nm); } if (r && r.error) throw new Error(r.error); ok = true; break; }
+    catch (e) { err = e; }
+  }
+  rstBusy = null;
+  if (ok) { rstErr = null; loadCoreState().then(renderHeader).catch(() => {}); }
+  else {
+    rstErr = (err && err.message) || 'not available';
+    renderRestartPill();
+    setTimeout(() => { if (rstErr === ((err && err.message) || 'not available')) { rstErr = null; renderRestartPill(); } }, 4000);
+  }
 }
 function renderWatchPill() {
   const c = $('#watchst'); if (!c) return;
@@ -2372,7 +2403,7 @@ if (squad.onSelfUpdateStatus) squad.onSelfUpdateStatus(onUpdPush);
 else { squad.on('selfUpdateStatus', onUpdPush); squad.on('self-update-status', onUpdPush); }
 // Restart/watch pushes: prefer dedicated bridge helpers, fall back to plausible channel names
 // (Devon adds the preload helpers when the backend lands — see contract on t_20d5a23c).
-const onRestartPush = (d) => { rst = { ...normRestart(d), stub: false }; renderHeader(); boardSig = null; renderBoard(); };
+const onRestartPush = (d) => { rst = { ...normRestart(d), stub: false }; rstSeen = true; renderHeader(); boardSig = null; renderBoard(); };
 const onWatchPush = (d) => { watch = { ...normWatch(d), stub: false }; renderHeader(); };
 if (squad.onRestartState) squad.onRestartState(onRestartPush);
 else { squad.on('restart-state', onRestartPush); squad.on('restartStatus', onRestartPush); }
