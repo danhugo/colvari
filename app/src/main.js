@@ -573,18 +573,22 @@ async function guiE2E() {
     const rl = (pct, hrs) => ({ pct, resetsAt: new Date(Date.now() + hrs * 3600000).toISOString() });
     const grab = `(async () => ({ txt: $('#limitmeter').textContent, hidden: $('#limitmeter').classList.contains('hidden'), chips: document.querySelectorAll('#limitmeter [data-provider]').length, st: await call('usageStatus') }))()`;
     // Chip geometry: provider chips must lay out side by side (bounding rects never intersect) and the
-    // "· limits unknown" wording must be fully visible — never shrink-ellipsised ("Codex U… lim…") and
-    // never clipped by the meter's own overflow (regression for the 1400px header overlap).
+    // "· limits unknown" wording must be fully visible — never shrink-ellipsised ("Codex U… lim…").
+    // Since the meter became the header's clip valve (flex-shrink:1 at every width, t_5847fa5f), a few
+    // pixels of tail clip under mild pressure is by design — the contract is that the HEADER never
+    // overflows, Run/Stop/help stay visible, and no chip is squeezed into nothing.
     const geom = `(async () => { const m = $('#limitmeter');
       const chips = [...m.querySelectorAll('[data-provider]')].map((c) => { const r = c.getBoundingClientRect(); return { p: c.dataset.provider, l: Math.round(r.left), r: Math.round(r.right) }; });
       let overlap = null;
       for (let i = 0; i < chips.length && !overlap; i++) for (let j = i + 1; j < chips.length; j++) { const a = chips[i], b = chips[j]; if (a.l < b.r - 1 && b.l < a.r - 1) overlap = [a.p, b.p]; }
       const unknown = [...m.querySelectorAll('.lm-unknown')].map((c) => { const s = c.querySelector('small'); return { p: c.dataset.provider, txt: c.textContent.trim(), cut: s ? s.scrollWidth > s.clientWidth : false }; });
-      return { chips, overlap, unknown, clipped: m.scrollWidth > m.clientWidth + 1 }; })()`;
+      const h = document.querySelector('header'); const vis = (s) => { const e = document.querySelector(s); if (!e) return false; const r = e.getBoundingClientRect(); return r.width > 0 && r.left >= -1 && r.right <= window.innerWidth + 1; };
+      return { chips, overlap, unknown, clipped: m.scrollWidth > m.clientWidth + 1, fit: h.scrollWidth <= h.clientWidth + 1, run: vis('#run'), stop: vis('#stop'), help: vis('#help') }; })()`;
     const geomCheck = async (label) => {
       const g = await ex(`return ${geom}`);
       expect(`limits-providers: ${label} — chips lay side by side, bounding rects do not overlap`, g.chips.length >= 1 && !g.overlap, g);
-      expect(`limits-providers: ${label} — every chip fully visible, meter clips nothing`, !g.clipped, g);
+      expect(`limits-providers: ${label} — header fits, Run/Stop/help visible`, g.fit && g.run && g.stop && g.help, g);
+      expect(`limits-providers: ${label} — every chip keeps a legible width, never squeezed away`, g.chips.every((c) => c.r - c.l >= 100), g);
       if (g.unknown.length) expect(`limits-providers: ${label} — unknown wording legible ("· limits unknown", never ellipsised)`, g.unknown.every((u) => !u.cut && /· limits unknown/.test(u.txt)), g.unknown);
       return g;
     };
@@ -1242,6 +1246,41 @@ async function guiE2E() {
     await shot('37-dynamicteam-settings');
     console.log('[gui-e2e] dynamicteam', JSON.stringify({ cores: cores().map((n) => n.id), createdBy: ps.getTeam().nodes.find((n) => n.id === ra.id).createdBy, settings: { maxAgents: psettings.getSettings().maxAgents, teamChangeApproval: psettings.getSettings().teamChangeApproval } }));
   };
+  // Top bar must fit any window width with BOTH provider chips filled (bug t_19ec5471): header never
+  // overflows (scrollWidth <= clientWidth), Run/Stop/Help/goal stay visible, and the tokens/cost pills
+  // hide exactly at the 1100px breakpoint. Widths swept via setContentSize so the CSS viewport is exact.
+  const topbarShots = async () => {
+    await waitFor(`return !!document.querySelector('#tpl-select option')`); await ex(`await refresh();`); const cur = await ex(`return { p: ctx.p, t: S.teamId }`);
+    const p = cur.p || pid(); const ts = pm.store(p, cur.t); const o = orchFor(p);
+    let nodes = ts.getTeam().nodes;
+    if (nodes.length < 2) { ts.addNode({ name: 'Pia', role: 'PM', runtime: 'claude', model: 'opus', x: 60, y: 60 }); ts.addNode({ name: 'Devon', role: 'Dev', runtime: 'codex', model: 'gpt-5.6-terra', x: 320, y: 60 }); nodes = ts.getTeam().nodes; }
+    const rl = (pct, hrs) => ({ pct, resetsAt: new Date(Date.now() + hrs * 3600000).toISOString() });
+    o.subscriptionRateLimits = { [nodes[0].id]: { fiveHour: rl(0.42, 1), weekly: rl(0.13, 72) }, [nodes[1].id]: { fiveHour: rl(0.66, 2) } };
+    // Real usage rows too: empty #totaltokens/#totalcost hide themselves, and the human's overflow
+    // happens with both pills populated.
+    for (let i = 0; i < 3; i++) {
+      ts.addRun({ id: 'tb-c' + i, projectId: p, nodeId: nodes[0].id, agent: nodes[0].name, kind: 'agent', runtime: 'claude', billingSource: 'subscription', startedAt: new Date(Date.now() - i * 1000).toISOString(), inputTokens: 5000, outputTokens: 1200, reportedCostUsd: 0.02 + i * 0.01 });
+      ts.addRun({ id: 'tb-x' + i, projectId: p, nodeId: nodes[1].id, agent: nodes[1].name, kind: 'agent', runtime: 'codex', billingSource: 'subscription', startedAt: new Date(Date.now() - i * 1000).toISOString(), inputTokens: 4000, outputTokens: 900, reportedCostUsd: 0.02 + i * 0.01 });
+    }
+    await ex(`await refresh(); await w(500);`);
+    expect('topbar: both provider chips filled before sweeping widths', await ex(`return document.querySelectorAll('#limitmeter [data-provider]').length >= 2 && !$('#limitmeter').classList.contains('hidden')`));
+    expect('topbar: usage pills populated (ledger + cost visible)', await ex(`return !$('#totaltokens').classList.contains('hidden') && !$('#totalcost').classList.contains('hidden') && !/no usage yet|no cost yet/.test($('#totaltokens').textContent + $('#totalcost').textContent)`));
+    const measure = `(async () => { const h = document.querySelector('header'); const d = document.documentElement; const vis = (s) => { const e = document.querySelector(s); if (!e || e.getClientRects().length === 0) return false; const r = e.getBoundingClientRect(); return r.width > 0 && r.left >= 0 && r.right <= window.innerWidth && r.top >= 0 && r.bottom <= window.innerHeight; };
+      return { sw: Math.max(d.scrollWidth, document.body.scrollWidth), cw: Math.min(d.clientWidth, document.body.clientWidth), edge: Math.round(Math.max(...[...h.children].map((c) => c.getBoundingClientRect().right))), iw: window.innerWidth, hdrSw: h.scrollWidth, hdrCw: h.clientWidth, run: vis('#run'), stop: vis('#stop'), help: vis('#help'), goal: vis('#goal'), tokens: vis('#totaltokens'), cost: vis('#totalcost') }; })()`;
+    const prevSize = win.getContentSize();
+    for (const cw of [1600, 1400, 1101, 1100, 900]) {
+      win.setContentSize(cw, Math.max(600, Math.min(prevSize[1], 800))); await new Promise((r) => setTimeout(r, 350));
+      const m = await ex(`return ${measure}`);
+      expect(`topbar: no horizontal scroll at ${cw}px (page scrollWidth ${m.sw} <= ${m.cw})`, m.sw <= m.cw + 1, m);
+      expect(`topbar: no header item cut off at ${cw}px (rightmost edge ${m.edge} <= window ${m.iw})`, m.edge <= m.iw + 1, m);
+      expect(`topbar: Run/Stop/Help/goal visible at ${cw}px`, m.run && m.stop && m.help && m.goal, m);
+      if (cw === 1100) expect('topbar: tokens/cost pills hidden at the 1100px breakpoint', !m.tokens && !m.cost, m);
+      if (cw === 1101) expect('topbar: tokens/cost pills still shown just above the breakpoint', m.tokens && m.cost, m);
+      await shot(`topbar-${cw}`);
+    }
+    o.subscriptionRateLimits = {};
+    win.setContentSize(prevSize[0], prevSize[1]); await ex(`await refresh(); await w(300);`);
+  };
   try {
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'helpycode') { await helpycodeShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'wikilogs') { await wikiLogsShots(); throw null; }
@@ -1264,6 +1303,7 @@ async function guiE2E() {
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'wake') { await wakeShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'subagents') { await subagentShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'dynamicteam') { await dynamicTeamShots(); throw null; }
+    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'topbar') { await topbarShots(); throw null; }
     // project/team management through the UI: create a project from the Startup template, then a Solo team, then switch back.
     // Wait until the template select is filled (the first refresh loads the templates) before choosing one.
     await ex(`$('#tabs button[data-tab=team]').click(); await w(300);`); // Chat is the default tab; the flow below clicks the graph
