@@ -556,3 +556,6 @@ rect.usb-rep, i.usb-rep { fill:var(--accent); background:var(--accent); } rect.u
 .usr-val { font-variant-numeric:tabular-nums; white-space:nowrap; }
 .usr-bar { display:flex; height:6px; border-radius:3px; background:var(--bg-app); overflow:hidden; margin-top:3px; }
 
+/* Colvari brand */
+header > strong.brand { display:flex; align-items:center; gap:6px; font-weight:700; letter-spacing:-.02em; color:var(--fg-primary); }
+.brandmark { width:20px; height:20px; color:var(--accent-text); } .brandmark.big { width:40px; height:40px; display:block; margin:0 auto 8px; }

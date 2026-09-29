@@ -1,4 +1,4 @@
-# Agents Squad (MVP)
+# Colvari (MVP)
 
 A desktop app for running a small team of Claude Code agents. Agents coordinate through a shared board and wiki. This is the minimal version of `../BLUEPRINT.md` (sections 4, 6, 7 and 9).
 

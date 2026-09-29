@@ -158,7 +158,8 @@ function applyTheme(theme) {
 function createWindow() {
   const theme = getPrefs().theme; nativeTheme.themeSource = ['light', 'dark'].includes(theme) ? theme : 'system';
   const mac = process.platform === 'darwin';
-  win = new BrowserWindow({ width: 1400, height: 900, title: 'Agents Squad', backgroundColor: BG[nativeTheme.shouldUseDarkColors ? 'dark' : 'light'],
+  if (mac) app.dock?.setIcon(path.join(__dirname, '..', 'build', 'icon.png'));
+  win = new BrowserWindow({ width: 1400, height: 900, title: 'Colvari', icon: path.join(__dirname, '..', 'build', 'icon.png'), backgroundColor: BG[nativeTheme.shouldUseDarkColors ? 'dark' : 'light'],
     ...(mac ? { titleBarStyle: 'hiddenInset', vibrancy: 'sidebar', visualEffectState: 'followWindow' } : { titleBarStyle: 'hidden', titleBarOverlay: true }),
     webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false } });
   win.webContents.on('console-message', (_e, level, message) => { if (level >= 2) console.error('[renderer]', message); });

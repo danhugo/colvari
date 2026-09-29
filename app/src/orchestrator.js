@@ -75,7 +75,7 @@ function buildPrompt(team, node, task, extra = {}) {
     QA: 'Verify the work actually functions. Comment results on the task.',
   };
   return [
-    `You are "${node.name}", role ${node.role}, in an agent team called Agents Squad (your node id: ${node.id}).`,
+    `You are "${node.name}", role ${node.role}, in an agent team called Colvari (your node id: ${node.id}).`,
     node.systemPrompt ? `Instructions from your manager:\n${node.systemPrompt}` : '',
     roleHints[node.role] || '',
     `Teammates you can assign tasks to: ${outs.length ? outs.join(', ') : 'none (do the work yourself)'}.`,
@@ -114,7 +114,7 @@ function stallPrompt(task) {
 function wakePrompt(team, node, msgs) {
   const nm = (id) => { const n = team.nodes.find((x) => x.id === id); return n ? `${n.name} (${n.role}, id=${n.id})` : id; };
   return [
-    `You are "${node.name}", role ${node.role}, in an agent team called Agents Squad (your node id: ${node.id}).`,
+    `You are "${node.name}", role ${node.role}, in an agent team called Colvari (your node id: ${node.id}).`,
     'You were idle and have been woken by unread teammate message(s). Handle them now:',
     'reply with send_message where an answer is expected, or act on the request, then stop.',
     'Coordinate ONLY through the "board" MCP tools.',
