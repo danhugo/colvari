@@ -1096,13 +1096,16 @@ function wakeRun(id) {
   return { from: nodeName(w.fromNodeId || w.from || ''), excerpt: String(w.excerpt || ''), taskId: w.taskId || w.relatedTaskId || null, queued: Math.max(0, (w.count || 1) - 1) };
 }
 const wakeLabel = (id) => { const w = wakeRun(id); return w ? `Working — woken by message from ${w.from}: "${w.excerpt}"${w.queued ? ` (+${w.queued} queued)` : ''}` : ''; };
+// Short badge text for drawWakeBadge: sender first, so the 30-char clip keeps WHO woke the agent
+// (t_0cd29f4d); the linked task title trails and at that width usually survives only in the tooltip.
+const wakeBadgeText = (w, task) => `${w.from} ✉ "${w.excerpt}"${w.queued ? ` (+${w.queued})` : ''}${task ? ` · ${task}` : ''}`;
 // Shared badge drawing for the Team and Overview node SVGs: a strip just below the node card
 // (inside the card there is no free row — the chip row and ctx bar own the bottom edge).
 function drawWakeBadge(g, w, onclick) {
   const full = `Working — woken by message from ${w.from}: "${w.excerpt}"${w.queued ? ` (+${w.queued} queued)` : ''}`;
   const bg = el('g', { class: 'wakerunbadge' + (w.taskId ? ' linked' : ''), transform: `translate(4,${H + 3})` }, g);
   el('rect', { width: W - 8, height: 13, rx: 6 }, bg);
-  el('text', { x: (W - 8) / 2, y: 9.5, 'text-anchor': 'middle' }, bg).textContent = clipText(full, 30);
+  el('text', { x: (W - 8) / 2, y: 9.5, 'text-anchor': 'middle' }, bg).textContent = clipText(wakeBadgeText(w, w.taskId ? taskTitle(w.taskId) : null), 30);
   el('title', {}, bg).textContent = full;
   if (w.taskId && onclick) bg.onclick = onclick;
 }

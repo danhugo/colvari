@@ -22,7 +22,7 @@ function buildRenderer() {
     'let PRESENCE = "busy";',
     'const presence = () => PRESENCE;',
     'const nodeName = (id) => (S.allNodes.find((n) => n.id === id) || {}).name || id;',
-    'return { wakeRun, wakeLabel, S, setPresence: (p) => { PRESENCE = p; } };',
+    'return { wakeRun, wakeLabel, wakeBadgeText, S, setPresence: (p) => { PRESENCE = p; } };',
   ];
   return new Function(body.join('\n'))();
 }
@@ -40,6 +40,16 @@ test('wake run shows its info even when an in_progress task is assigned (was bar
   assert.equal(w.excerpt, 'please look at the failing test');
   assert.equal(w.queued, 1, 'count 2 -> +1 queued');
   assert.match(R.wakeLabel('n1'), /woken by message from Pia: "please look at the failing test" \(\+1 queued\)/);
+});
+
+test('badge text leads with the sender so a clipped strip still says who (t_0cd29f4d)', () => {
+  // drawWakeBadge shows this clipped to 30 chars; the full sentence (wakeLabel) stays in the tooltip.
+  const txt = R.wakeBadgeText({ from: 'Pia', excerpt: 'please look at the failing test', queued: 1 }, 'Wake demo');
+  assert.equal(txt, 'Pia ✉ "please look at the failing test" (+1) · Wake demo');
+  assert.equal(R.wakeBadgeText({ from: 'Pia', excerpt: 'p', queued: 0 }, null), 'Pia ✉ "p"', 'no suffixes when queued 0 / no task');
+  const clipped = txt.length > 30 ? txt.slice(0, 29) + '…' : txt; // clipText(full, 30) as drawWakeBadge applies it
+  assert.ok(clipped.includes('Pia'), 'sender survives the 30-char clip, was the bug');
+  assert.ok(clipped.includes('please look'), 'part of the preview stays readable');
 });
 
 test('task badge still wins: a live run ON the task hides wake info', () => {
