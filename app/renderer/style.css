@@ -232,8 +232,8 @@ header .pill { font-variant-numeric:tabular-nums; } .pill.quiet { color:var(--mu
 .cbody { min-width:0; flex:1; } .cname { font-weight:700; } .role { font-size:10px; padding:0 6px; border-radius:6px; background:var(--bg-hover); color:var(--fg-secondary); margin-left:6px; font-weight:600; } .cname time { color:var(--fg-muted); font-size:11px; font-weight:400; margin-left:6px; }
 .bubble { margin:3px 0; white-space:pre-wrap; word-break:break-word; line-height:1.4; } .bubble.thought { color:var(--fg-secondary); } .bubble.action, .bubble.handoff { color:var(--accent-text); } .bubble.error { color:var(--term-red); }
 .bubble.linked { cursor:pointer; } .bubble.linked:hover .tlink { text-decoration:underline; } .tlink { color:var(--accent-text); font-size:11px; margin-left:6px; }
-.cchip { display:inline-block; margin:2px 0; } .cchip summary { list-style:none; cursor:pointer; display:inline-block; background:var(--bg-code); border:1px solid var(--border-strong); border-radius:12px; padding:1px 10px; font:11px ui-monospace,monospace; color:var(--term-yellow); }
-.cchip pre { white-space:pre-wrap; word-break:break-word; background:var(--bg-code); border-radius:6px; padding:6px 8px; font-size:11px; margin:4px 0; max-width:720px; }
+.cchip { display:block; margin:2px 0; max-width:100%; } .cchip summary { list-style:none; cursor:pointer; display:inline-block; max-width:100%; overflow-wrap:anywhere; background:var(--bg-code); border:1px solid var(--border-strong); border-radius:12px; padding:1px 10px; font:11px ui-monospace,monospace; color:var(--term-yellow); }
+.cchip pre { white-space:pre-wrap; word-break:break-word; background:var(--bg-code); border-radius:6px; padding:6px 8px; font-size:11px; margin:4px 0; max-width:min(720px, 100%); }
 .bubble.question { border:1px solid var(--accent); background:var(--accent-soft); border-radius:8px; padding:8px 10px; } .bubble.question textarea { width:100%; margin-top:6px; background:var(--bg-surface); color:var(--fg-primary); border-color:var(--border-strong); }
 .bubble.question button, .composer button { margin:6px 6px 0 0; }
 #chat-typing { color:var(--success); font-size:12px; } #chat-typing .dots::after { content:'…'; animation:blink 1.2s infinite; } @keyframes blink { 50% { opacity:.2; } }
@@ -659,8 +659,8 @@ header .pill .rstlbl { cursor:help; }
 #ov-thread .subthread .chip { margin:3px 0; }
 
 /* Chat: one compact collapsible chip per subagent — never a flood of child tool bubbles */
-.cchip.subagent > summary { display:inline-flex; align-items:center; gap:6px; color:var(--acc); }
-.cchip.subagent .subevents { background:var(--bg-code); border:1px solid var(--line); border-radius:var(--radius-sm, 6px); padding:5px 8px; margin:4px 0; max-width:720px; font-size:11.5px; }
+.cchip.subagent > summary { display:inline-flex; align-items:center; gap:6px; flex-wrap:wrap; max-width:100%; color:var(--acc); }
+.cchip.subagent .subevents { background:var(--bg-code); border:1px solid var(--line); border-radius:var(--radius-sm, 6px); padding:5px 8px; margin:4px 0; max-width:min(720px, 100%); font-size:11.5px; }
 .cchip.subagent .sev { padding:1px 0; color:var(--fg-secondary); word-break:break-word; }
 .cchip.subagent .sev + .sev { border-top:1px dashed var(--line); }
 .cchip.subagent .sev-tool { color:var(--term-yellow); }
@@ -818,8 +818,11 @@ header #stop:hover { background:var(--danger-soft); color:var(--danger); }
 #sidebar .sb-actions button { width:24px; height:24px; color:var(--fg-secondary); }
 
 /* Chat: collapsed task-event runs, monochrome event rows, same-size You avatar, single-field composer */
-.evrow { display:flex; align-items:center; gap:6px; min-height:20px; max-height:24px; color:var(--fg-secondary); font-size:var(--text-sm); }
-.evrow svg { width:12px; height:12px; flex:0 0 auto; stroke:currentColor; fill:none; stroke-width:1.6; stroke-linecap:round; stroke-linejoin:round; }
+/* No max-height here: event rows carry real messages that wrap on real data — a capped row
+   paints its overflow over the lines below (t_e4c53cc2). Spans shrink+wrap instead. */
+.evrow { display:flex; align-items:flex-start; gap:6px; min-height:20px; color:var(--fg-secondary); font-size:var(--text-sm); }
+.evrow > span { min-width:0; overflow-wrap:anywhere; }
+.evrow svg { width:12px; height:12px; flex:0 0 auto; margin-top:3px; stroke:currentColor; fill:none; stroke-width:1.6; stroke-linecap:round; stroke-linejoin:round; }
 details.evrun > summary { cursor:pointer; list-style:none; } details.evrun > summary::-webkit-details-marker { display:none; }
 details.evrun > summary::after { content:'▸'; margin-left:4px; } details.evrun[open] > summary::after { content:'▾'; }
 details.evrun .evrow { padding-left:0; }
@@ -984,4 +987,11 @@ button, .pchip, .tag, .badge, .pill, .avatar, .cchip summary, .lvchip, .asswitch
 .cgroup .bubble code { font-family:var(--font-mono); font-size:.9em; background:var(--bg-code); color:var(--fg-primary); padding:0 4px; border-radius:var(--radius-xs, 3px); white-space:pre-wrap; }
 .cgroup .bubble pre.cmd-pre { font-family:var(--font-mono); font-size:var(--text-xs, 12px); background:var(--bg-code); color:var(--fg-primary); border:1px solid var(--border); border-radius:var(--radius-sm); padding:var(--space-2) var(--space-3); margin:4px 0; white-space:pre; overflow-x:auto; max-width:100%; }
 .cgroup .bubble a { color:var(--accent-text); }
+/* t_e4c53cc2 — real-data stress: nothing in Chat may paint over other text.
+   Headers and one-line metadata shrink with an ellipsis instead of overflowing;
+   long unbroken tokens (names, URLs, CJK runs) wrap anywhere instead of spilling. */
+.chat-head .muted, #chat-typing { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+#chat-thread .chat-head > b { min-width:0; flex:0 1 auto; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.cgroup .cname { overflow-wrap:anywhere; }
+.yt-item { flex-wrap:wrap; } .yt-item > span:not(.spacer) { min-width:0; overflow-wrap:anywhere; }
 .idlebanner.hidden { display:none; }
