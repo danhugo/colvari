@@ -29,6 +29,16 @@ function stimeToMs(s) {
   return Math.round(((hrs * 60 + mins) * 60 + secs) * 1000);
 }
 
+// CLAUDE_AUTOCOMPACT_PCT_OVERRIDE value for a configured percent. claude 2.1.284 parses the env as a
+// percent (0-100], not a fraction: threshold = floor(window * pct/100). Verified live on 2.1.284 with a
+// 1M-window model: env=0.4 auto-compacted at pre_tokens 30414 (0.4% of 1M = 4k, below the fixed
+// ~25-30k context floor — the autocompact-thrashing bug), while 40/10/unset did not compact. Sending
+// the old fraction format ("0.4") is exactly what thrashed agents; the env must carry the percent.
+// Rounded and clamped into the CLI's accepted band so odd settings values degrade to a sane threshold.
+function autoCompactEnv(pct) {
+  return String(Math.min(100, Math.max(1, Math.round(pct))));
+}
+
 // Wake-on-message: how often the orchestrator looks for unread agent->agent messages, how long a burst
 // may coalesce into one dispatch, and the ping-pong guard (max auto-wakes per sender->recipient pair
 // per window). Exported so tests can shorten the timings.
@@ -774,12 +784,11 @@ class Orchestrator extends EventEmitter {
       const bill = U.applyBillingEnv(cfg, this.env(cfg)); const env = bill.env;
       for (const w of bill.warnings) this.log(node.id, 'error', w);
       const meta = { taskId: task.id, task: task.title, billingMode: cfg.billingMode || 'auto', runtime: cfg.runtime || 'claude' };
-      // Verified empirically (claude 2.1.283): CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=<fraction 0-1> makes the CLI
-      // auto-compact on its own once context passes that fraction of the window (confirmed via a live
-      // compact_boundary event). So this is set at spawn instead of the app sending /compact itself.
+      // claude >=2.1.284 reads CLAUDE_AUTOCOMPACT_PCT_OVERRIDE as a percent (0-100] of the context
+      // window (see autoCompactEnv) — this is set at spawn instead of the app sending /compact itself.
       // Per-agent threshold wins over the project default so thinkers (PM/reviewer/critic) can compact later.
       const autoCompactPct = Number(cfg.autoCompactPct || (settings.autoCompactPct ?? 40));
-      if (meta.runtime === 'claude' && autoCompactPct > 0) env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE = String(Math.min(1, autoCompactPct / 100));
+      if (meta.runtime === 'claude' && autoCompactPct > 0) env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE = autoCompactEnv(autoCompactPct);
       a.runtime = meta.runtime; a.model = cfg.model || '';
       let resume = task.sessionId || (m.continueSession ? this.lastSession(node.id) : null);
       this.log(node.id, 'system', `▶ ${node.name} starts "${task.title}" in ${cwd} [mode=${m.mode}${resume ? ', resume ' + resume : ''}]`);
@@ -1089,4 +1098,4 @@ class Orchestrator extends EventEmitter {
     }
   }
 }
-module.exports = { Orchestrator, buildPrompt, humanPrompt, wakePrompt, stallPrompt, WAKE, STALL };
+module.exports = { Orchestrator, buildPrompt, humanPrompt, wakePrompt, stallPrompt, WAKE, STALL, autoCompactEnv };
