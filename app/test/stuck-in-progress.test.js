@@ -46,3 +46,22 @@ test('orchestrator resets and re-dispatches orphaned in_progress tasks instead o
 
   assert.ok(finalTasks.every((t) => t.status === 'done'), `all tasks (incl. the previously blocked one) should complete: ${JSON.stringify(finalTasks.map((t) => [t.title, t.status]))}`);
 });
+
+// Regression for t_d79c74fc: a run that ends with an undispatchable task in review (reviewer session
+// died before sign-off) must tell the human why it stopped, never log "Finished." with work still open.
+test('run with a task in review and nothing dispatchable stops with a reason naming the task', async () => {
+  const { s, ns } = setup(2);
+  const t = s.createTask({ title: 'open review', assignee: ns[0].id });
+  s.updateTask(t.id, { status: 'review', awaitingApproval: true }); // approval-gated review: autoAdvanceReviews must not move it
+
+  const logs = [];
+  const o = new Orchestrator(s);
+  o.on('log', (l) => logs.push(l.text));
+  const done = new Promise((resolve) => o.on('done', resolve));
+  o.start();
+  await done;
+
+  const stop = logs.find((l) => /^Stopped:|^No more todo/.test(l)) || '';
+  assert.ok(!/Finished/.test(stop), `run must not claim Finished with a task still in review: "${stop}"`);
+  assert.ok(/^Stopped: 1 unfinished task\(s\)/.test(stop) && stop.includes(t.id) && stop.includes('review'), `stop reason must name the stuck task and its state: "${stop}"`);
+});

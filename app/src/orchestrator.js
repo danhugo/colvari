@@ -698,7 +698,12 @@ class Orchestrator extends EventEmitter {
       // process exited/crashed without updating status) and re-dispatch them instead of blocking forever.
       if (this.reconcileOrphanedTasks()) { setImmediate(() => this.tick()); return; }
       this.running = false;
-      const why = !todo.length && !ready.length ? 'No more todo tasks. Finished.' : !ready.length ? `Stopped: ${todo.length} todo task(s) are blocked by unfinished dependencies or over budget` : 'Stopped: run limit reached';
+      // A run must not read as a clean "Finished." while undispatchable unfinished work (open review,
+      // waiting_for_human, merge_conflict, a stray in_progress) remains on the board.
+      const stuck = all.filter((t) => ['in_progress', 'review', 'waiting_for_human', 'merge_conflict'].includes(t.status));
+      const why = !todo.length && !ready.length
+        ? (stuck.length ? `Stopped: ${stuck.length} unfinished task(s) with no agent to pick them up (${stuck.map((t) => `${t.id} ${t.status}`).join(', ')})` : 'No more todo tasks. Finished.')
+        : !ready.length ? `Stopped: ${todo.length} todo task(s) are blocked by unfinished dependencies or over budget` : 'Stopped: run limit reached';
       this.log(null, 'system', why);
       const waiting = all.filter((t) => t.awaitingApproval).length;
       this.notify('Run finished', why + (waiting ? ` ${waiting} task(s) wait for your approval.` : ''));
