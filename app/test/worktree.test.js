@@ -63,6 +63,40 @@ test('merge conflict aborts with error and leaves base clean', () => {
   assert.strictEqual(fs.readFileSync(path.join(d, 'a.txt'), 'utf8'), 'ours\n');
 });
 
+// t_8ace5439: a dirty main checkout must refuse the merge (naming the files) instead of
+// letting git merge fail or half-apply around uncommitted work (the t_048c41be incident).
+test('dirty main checkout: merge refused, nothing merged, dirty files named', () => {
+  const { d, g, t } = repoWithTask('t_10');
+  fs.writeFileSync(path.join(t.worktreePath, 'b.txt'), 'new\n');
+  g(t.worktreePath, 'add', '.'); g(t.worktreePath, 'commit', '-q', '-m', 'work');
+  // Both status kinds: untracked ("??") and worktree-modified (" M", first line — the one
+  // a blob-level trim() would corrupt).
+  fs.writeFileSync(path.join(d, 'dirty.txt'), 'uncommitted\n');
+  fs.writeFileSync(path.join(d, 'a.txt'), 'modified\n');
+  const head = g(d, 'rev-parse', 'HEAD');
+  const r = worktreeMerge(t);
+  assert.strictEqual(r.merged, false);
+  assert.strictEqual(r.refused, true);
+  assert.ok(r.dirty.includes('dirty.txt') && r.dirty.includes('a.txt'), `dirty list names the files: ${JSON.stringify(r.dirty)}`);
+  assert.strictEqual(g(d, 'rev-parse', 'HEAD'), head, 'no merge happened');
+  assert.ok(!fs.existsSync(path.join(d, 'b.txt')), 'branch work stayed out of base');
+});
+
+test('only .squad/ dirty in main: merge still runs (managed files are not real dirt)', () => {
+  const { d, g, t } = repoWithTask('t_11');
+  fs.writeFileSync(path.join(t.worktreePath, 'b.txt'), 'new\n');
+  g(t.worktreePath, 'add', '.'); g(t.worktreePath, 'commit', '-q', '-m', 'work');
+  // A tracked, modified file under .squad/ (board data) shows in porcelain but must not block:
+  // staged NEW files would make git itself refuse, so track it first, then dirty it.
+  fs.mkdirSync(path.join(d, '.squad', 'board'), { recursive: true });
+  fs.writeFileSync(path.join(d, '.squad', 'board', 'x.json'), '{}\n');
+  g(d, 'add', '-f', '.squad/board/x.json'); g(d, 'commit', '-qam', 'board file');
+  fs.writeFileSync(path.join(d, '.squad', 'board', 'x.json'), '{"v":2}\n');
+  const r = worktreeMerge(t);
+  assert.strictEqual(r.merged, true);
+  assert.strictEqual(fs.readFileSync(path.join(d, 'b.txt'), 'utf8'), 'new\n');
+});
+
 test('discard removes worktree and branch', () => {
   const { d, g, t } = repoWithTask('t_5');
   worktreeDiscard(t);
