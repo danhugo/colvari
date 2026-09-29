@@ -210,7 +210,5 @@ test('watchdog: a stale-task nudge wakes the core once, with the monitor event (
   const nudges = s.listMessages({ to: pm.id }).filter((m) => /stale work/.test(m.text));
   assert.equal(nudges.length, 1, 'no wake loop: the same stale set nudges once');
   assert.equal(nudges[0].read, true, 'the wake consumed the nudge message');
-  // t_8df2cab6 lead route: no review edge for dev, so the LEAD (PM) reviews both hand-offs;
-  // runs = dev's 2 task runs + PM's 2 review pickups + PM's 1 nudge wake.
-  assert.equal(o.runs, 5, 'dev ran both tasks, the PM reviewed both as lead, and woke once for the nudge');
+  assert.equal(o.runs, 5, 'dev ran both tasks, the PM woke once for the nudge, then reviewed both hand-offs as the dev\'s lead (review chain: review edge -> lead)');
 });

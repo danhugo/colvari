@@ -295,7 +295,7 @@ async function guiE2E() {
     const seedWorking = `S.orch = { ...S.orch, running: true, runs: 1, agents: { '${b.id}': { status: 'working', taskId: '${t.id}' } } }; renderHeader(); chatSig = null; renderChat();`;
     await ex(`window._refresh = refresh; refresh = async () => {}; if (!$('#tab-chat.active')) $('#tabs button[data-tab=chat]').click(); ${seedWorking} await w(400);`);
     const typing = await ex(`return { typing: $('#chat-typing').textContent, header: $('#runstate').textContent, dot: !!document.querySelector('#chat-room .avatar.working') }`);
-    expect('chat: working indicator (text, running header, green dot)', typing.typing.includes(b.name + ' is working') && typing.header.startsWith('running') && typing.dot, typing);
+    expect('chat: working indicator (text, running header, green dot)', typing.typing.includes(b.name + ' is working') && /^\d+ running/.test(typing.header) && typing.dot, typing);
     await shot('19-chat-working'); await ex(`refresh = window._refresh; await refresh();`);
     const origRun = api.run; api.run = () => ({ stubbed: true });
     await ex(`CH.thread = null; const i = $('#chat-input'); i.value = '@${b.name.slice(0, 2)}'; i.dispatchEvent(new Event('input')); await w(200);`);
@@ -849,7 +849,7 @@ async function guiE2E() {
     if (nodes.length < 2) { ps.addNode({ name: 'Pia', role: 'PM', x: 60, y: 60 }); ps.addNode({ name: 'Devon', role: 'Dev', x: 320, y: 160 }); nodes = ps.getTeam().nodes; }
     const [a, b] = nodes;
     await ex(`$('#tabs button[data-tab=wiki]').click(); await refresh(); sel.page = null; renderWiki(); await w(300);`);
-    const wempty = await ex(`return { list: $('#wikilist').textContent, view: $('#wk-view').textContent }`);
+    const wempty = await ex(`return { list: $('#wikilist').textContent, view: $('#wk-empty').textContent }`);
     expect('wiki: empty state (no pages)', /No pages yet/.test(wempty.list) && /No wiki pages yet/.test(wempty.view), wempty);
     await shot('28-wiki-empty');
     await ex(`$('#tabs button[data-tab=obs]').click(); await refresh(); await w(300);`);

@@ -1,26 +1,6 @@
 // Idle-agent detection (pure): busy = has an in_progress task or a live run; idle otherwise.
 // A PM (any node with an assign edge to others) with open goals gets nudged about its idle reports.
 const OPEN = (t) => t.status !== 'done';
-const { outgoing, incoming } = require('./scope');
-const { isBlocked } = require('./controls');
-
-// Reviewer routing (t_8df2cab6): a task entering review must land with a LIVE reviewer — a node
-// that still exists in the team (a retire removes it), never the assignee (no self-review), and
-// passing the caller's availability check. Route order:
-//   1. an agent with a review edge to the assignee          -> route 'review'
-//   2. the assignee's lead (an assign edge into it)         -> route 'lead'
-//   3. nobody live                                          -> route 'human' (caller gates on approval)
-// `stage` (0/1/2) is the task's persisted escalation level: 1 skips route 1 (the review-edge
-// reviewer was re-woken and never came), 2 goes straight to the human. Pure — the orchestrator
-// injects availability (paused runtime, budget stop) so tests and callers share the graph rules.
-function pickReviewer(team, task, available = () => true, stage = 0) {
-  const nodes = team.nodes || [];
-  const find = (id) => nodes.find((n) => n.id === id) || null;
-  const usable = (n) => n && n.id !== task.assignee && available(n);
-  if (stage < 1) { const r = outgoing(team, task.assignee, ['review']).map(find).find(usable); if (r) return { reviewer: r, route: 'review' }; }
-  if (stage < 2) { const l = incoming(team, task.assignee, ['assign']).map(find).find(usable); if (l) return { reviewer: l, route: 'lead' }; }
-  return { reviewer: null, route: 'human' };
-}
 
 function agentStates(team, tasks, agents = {}) {
   const out = {};
@@ -73,35 +53,49 @@ function idleNudges(team, tasks, agents = {}, opts = {}) {
       }
     }
   }
-  // Idle company, workable open work (t_8df2cab6): with the Run up, no live run anywhere, and a todo
-  // task that could actually start (assignee set, not blocked, not approval-gated/parked), wake the
-  // task owner's lead — the assign edge into the assignee — else the core. Only genuinely workable
-  // tasks count: waiting_for_human and blocked piles must not keep re-waking a finished company
-  // (that would be a wake loop). The nudge loop's condition-key debounce + wake gap throttle the
-  // repetition; once the lead dispatches, the task leaves todo and the condition clears.
-  if (opts.companyIdle) {
-    const core = coreNode(team);
-    // No double-nudging: a stale-reported task already reached the core, and a task owned or
-    // created by a PM whose idle-reports nudge is firing in this same sweep is already covered by
-    // that nudge — 'open' is for work that would otherwise go unnoticed.
-    const staleIds = new Set(res.flatMap((r) => (r.kind === 'stale' ? r.taskIds : [])));
-    const covered = new Set(res.filter((r) => !r.kind || r.kind === 'idle').map((r) => r.pmId));
-    const byTarget = new Map();
-    for (const t of tasks) {
-      if (t.status !== 'todo' || !t.assignee || t.awaitingApproval || t.parkedForHuman || isBlocked(t, tasks)) continue;
-      if (staleIds.has(t.id) || covered.has(t.assignee) || (t.createdBy && covered.has(t.createdBy))) continue;
-      const lead = incoming(team, t.assignee, ['assign']).map((id) => (team.nodes || []).find((n) => n.id === id)).find((n) => n && n.id !== t.assignee);
-      const target = (lead || core || {}).id;
-      if (!target) continue;
-      if (!byTarget.has(target)) byTarget.set(target, []);
-      byTarget.get(target).push(t);
-    }
-    for (const [target, ts] of byTarget) {
-      const list = ts.slice(0, 4).map((t) => `"${String(t.title || t.id).slice(0, 40)}"`);
-      res.push({ pmId: target, idle: [], taskIds: ts.map((t) => t.id), kind: 'open', text: `${ts.length} task${ts.length > 1 ? 's' : ''} ready but nobody is working: ${list.join(', ')}${ts.length > 4 ? ` +${ts.length - 4} more` : ''}` });
-    }
+  return res;
+}
+
+// -> [{ nodeId, taskIds, kind: 'company', text }] when EVERY agent is idle while open work remains
+// (t_8df2cab6): a board where nobody is running but tasks are unfinished must wake someone — each
+// open task wakes its owner (assignee); an owner that cannot act (missing or budget-stopped)
+// escalates to the owner's lead (first assign edge into the owner). Skipped on purpose: review
+// hand-offs (the review watchdog's job), human-gated tasks (waiting_for_human / parkedForHuman /
+// awaitingApproval), and blocked todos — a blocked task's owner cannot start it, so waking them
+// only burns a run; the blocker's own wake (or the human) unblocks it.
+function idleCompanyWakes(team, tasks, agents = {}) {
+  const nodes = team.nodes || [];
+  if (!nodes.length) return [];
+  const st = agentStates(team, tasks, agents);
+  if (Object.values(st).some((s) => s === 'busy')) return [];
+  const blocked = (t) => (t.blockedBy || []).some((id) => { const b = tasks.find((x) => x.id === id); return b && b.status !== 'done'; });
+  const skip = (t) => t.status === 'done' || t.status === 'review' || t.status === 'waiting_for_human' || t.awaitingApproval || t.parkedForHuman || (t.status === 'todo' && blocked(t));
+  const open = tasks.filter((t) => !skip(t));
+  if (!open.length) return [];
+  const dead = (id) => !nodes.some((n) => n.id === id) || !!(agents[id] || {}).budgetStop;
+  const leadOf = (id) => (team.edges || [])
+    .filter((e) => (e.type || 'assign') === 'assign' && e.to === id).map((e) => e.from)
+    .find((f) => !dead(f)) || null;
+  const byNode = new Map();
+  // A recipient the plain idle nudge already wakes (a lead with assign reports and open goals) must
+  // not also get a company wake for the same tick — one wake with agency beats two with task lists.
+  const covered = new Set((team.nodes || []).filter((n) => {
+    const reports = (team.edges || []).some((e) => e.from === n.id && (e.type || 'assign') === 'assign');
+    const goals = tasks.some((t) => OPEN(t) && (t.assignee === n.id || t.createdBy === n.id));
+    return reports && goals;
+  }).map((n) => n.id));
+  for (const t of open) {
+    const rid = !dead(t.assignee) ? t.assignee : leadOf(t.assignee);
+    if (!rid || covered.has(rid)) continue;
+    if (!byNode.has(rid)) byNode.set(rid, []);
+    byNode.get(rid).push(t);
+  }
+  const res = [];
+  for (const [nodeId, ts] of byNode) {
+    const list = ts.slice(0, 4).map((t) => `"${String(t.title || t.id).slice(0, 40)}" (${t.status})`).join(', ');
+    res.push({ nodeId, taskIds: ts.map((t) => t.id), kind: 'company', text: `every agent is idle but ${ts.length} open task${ts.length > 1 ? 's' : ''} remain${ts.length > 4 ? ` (e.g. ${list} +${ts.length - 4} more)` : `: ${list}`} — pick yours back up, unblock or reassign it` });
   }
   return res;
 }
 
-module.exports = { agentStates, idleNudges, coreNode, pickReviewer };
+module.exports = { agentStates, idleNudges, idleCompanyWakes, coreNode };

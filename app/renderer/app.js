@@ -373,7 +373,7 @@ function renderSidebar() {
   if (sig === sidebarSig) return;
   sidebarSig = sig;
   $('#projectlist').innerHTML = P.projects.map((p) => `<div data-pid="${p.id}" class="${p.id === ctx.p ? 'sel' : ''}">${esc(p.name)}${p.running ? '<span class="dot" title="running"></span>' : ''}</div>`).join('');
-  $('#teamlist').innerHTML = teams.map((t) => `<div data-tid="${t.id}" class="${t.id === ctx.t ? 'sel' : ''}">${esc(t.name)}</div>`).join('');
+  $('#teamlist').innerHTML = teams.map((t) => `<div data-tid="${t.id}" class="${t.id === ctx.t ? 'sel' : ''}"><i class="teamdot" style="background:var(--agent-${teamHue(t.id)})"></i>${esc(t.name)}</div>`).join('');
 }
 function switchTo(c) {
   if (c.p !== ctx.p) { sel = { node: null, edge: null, task: null, page: null, logTeam: '' }; wikiEdit = false; $('#wk-title').value = ''; $('#wk-content').value = ''; }
@@ -741,7 +741,37 @@ $('#stop').onclick = async () => { await call('stop'); refresh(); };
 const W = 184, H = 80, SVGNS = 'http://www.w3.org/2000/svg';
 function el(tag, attrs, parent) { const e = document.createElementNS(SVGNS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); parent && parent.appendChild(e); return e; }
 let VP = { x: 20, y: 20, zoom: 1 }, vpTeam = null, vpSave = null, lastEdgeType = 'assign', linkDrag = null;
-const agentColor = (id) => { let h = 0; for (const c of String(id)) h = (h * 31 + c.charCodeAt(0)) >>> 0; return (h % 8) + 1; };
+// Team-tied colour system (t_300e8fd2): the hue belongs to the TEAM (hash of teamId), so a
+// screenshot reads team clustering, not noise; members within a team step toward --agent-mix
+// (80% / 62%) so teammates are distinguishable while staying in the team's hue family.
+// Team-tied hue: a team's index among the project's teams (sorted by id — stable across
+// machines) so up to 8 teams get DISTINCT hues; hash fallback covers unknown/teamless ids.
+const _teamHue = new Map(); let _teamHueSrc = null;
+const teamHue = (teamId) => {
+  if (!teamId) return 0;
+  const teams = (S.project && S.project.teams) || [];
+  if (teams !== _teamHueSrc) { _teamHue.clear(); _teamHueSrc = teams; } // self-invalidating: any project/team change swaps the array
+  if (_teamHue.has(teamId)) return _teamHue.get(teamId);
+  const i = teams.slice().sort((a, b) => String(a.id).localeCompare(String(b.id))).findIndex((t) => t.id === teamId);
+  const hue = i < 0 ? 0 : (i % 8) + 1;
+  _teamHue.set(teamId, hue);
+  return hue;
+};
+const agentColor = (id) => {
+  const n = S.allNodes.find((x) => x.id === id);
+  const hue = n ? teamHue(n.teamId) : 0;
+  if (hue) return hue;
+  let h = 0; for (const c of String(id)) h = (h * 31 + c.charCodeAt(0)) >>> 0; return (h % 8) + 1;
+};
+const agentStep = (id) => {
+  const n = S.allNodes.find((x) => x.id === id);
+  if (!n || !n.teamId) return 0;
+  const i = S.allNodes.filter((x) => x.teamId === n.teamId).findIndex((x) => x.id === id);
+  return i < 0 ? 0 : i % 3;
+};
+const agentVar = (id) => { const s = agentStep(id); return s ? `color-mix(in srgb, var(--agent-${agentColor(id)}) ${s === 1 ? 80 : 62}%, var(--agent-mix))` : `var(--agent-${agentColor(id)})`; };
+// Leads/PMs read as circles vs the member squircle (avatarHtml adds the class).
+const isLeadRole = (role) => /\b(pm|lead|manager|chief|director|head)\b/i.test(String(role || ''));
 const edgeSeed = (e) => { let h = 0; for (const c of String(e.id || '')) h = (h * 31 + c.charCodeAt(0)) >>> 0; return h; };
 const initials = (s) => String(s || '?').split(/\s+/).map((w) => w[0]).join('').slice(0, 2).toUpperCase();
 const nodeLive = (n) => ((S.nstat || {})[n.id] || {}).status || ((S.orch.agents[n.id] || {}).status === 'working' ? 'working' : 'idle');
@@ -753,27 +783,80 @@ function zoomAt(f, cx, cy) {
   const z = Math.min(2.5, Math.max(0.25, VP.zoom * f)); const [wx, wy] = toWorld(cx, cy);
   VP = { zoom: z, x: cx - r.left - wx * z, y: cy - r.top - wy * z }; applyVP(); saveVP();
 }
-function graphBox(nodes) {
+function graphBox(nodes, withEdges = false) {
   if (!nodes.length) return { x: 0, y: 0, w: 400, h: 300 };
-  const xs = nodes.map((n) => n.x), ys = nodes.map((n) => n.y); const x = Math.min(...xs), y = Math.min(...ys);
-  return { x, y, w: Math.max(...xs) + W - x, h: Math.max(...ys) + H - y };
+  const xs = nodes.map((n) => n.x), ys = nodes.map((n) => n.y);
+  let x0 = Math.min(...xs), y0 = Math.min(...ys), x1 = Math.max(...xs) + W, y1 = Math.max(...ys) + H;
+  if (withEdges && edgeLayout && nodes.length > 1) for (const it of edgeLayout.per) { // edge routes (detours, dashed cross-team lines) count toward the fit box
+    const nums = (it.geo.d.match(/-?\d+(?:\.\d+)?/g) || []).map(Number);
+    for (let i = 0; i + 1 < nums.length; i += 2) { x0 = Math.min(x0, nums[i] - 8); x1 = Math.max(x1, nums[i] + 8); y0 = Math.min(y0, nums[i + 1] - 8); y1 = Math.max(y1, nums[i + 1] + 8); }
+  }
+  return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
 }
 let vpCount = 0, edgeLayout = null; // per-render edge geometry + DOM refs; patched in place by dragEdges during node drags
-function fitIfClipped() { const r = $('#graph').getBoundingClientRect(); const b = graphBox(allGraphNodes()); if (r.width && (b.x * VP.zoom + VP.x < 0 || b.y * VP.zoom + VP.y < 0 || (b.x + b.w) * VP.zoom + VP.x > r.width || (b.y + b.h) * VP.zoom + VP.y > r.height)) fitView(); }
+function fitIfClipped() { const r = $('#graph').getBoundingClientRect(); const b = graphBox(allGraphNodes(), true); if (r.width && (b.x * VP.zoom + VP.x < 0 || b.y * VP.zoom + VP.y < 0 || (b.x + b.w) * VP.zoom + VP.x > r.width || (b.y + b.h) * VP.zoom + VP.y > r.height)) fitView(); }
 function fitView() {
-  const r = $('#graph').getBoundingClientRect(); const b = graphBox(allGraphNodes()); const pad = 48;
+  const r = $('#graph').getBoundingClientRect(); const b = graphBox(allGraphNodes(), true); const pad = 48;
   const z = Math.min(1, Math.max(0.25, Math.min((r.width - pad * 2) / b.w, (r.height - pad * 2) / b.h)));
   VP = { zoom: z, x: (r.width - b.w * z) / 2 - b.x * z, y: (r.height - b.h * z) / 2 - b.y * z }; applyVP(); saveVP();
 }
+// ---------- graph view model: automatic layered tree + team clusters above CLUSTER_MIN agents ----------
+// The stored x/y stay the user's manual layout; while graphAuto is on, the view lays the assign hierarchy
+// out as a tidy top-down tree (lead on top, reports underneath). Past CLUSTER_MIN agents each lead's
+// WHOLE group (assign-subtree + edge-attached reviewers, >=3 agents — grouping lives in src/graph-view.js)
+// collapses into one cluster card (count + working/idle summary); click expands it.
+let graphAuto = true, GV = null; const expandedClusters = new Set();
+const liveOf = (n) => (n.cluster ? (n.members.some((m) => nodeLive(m) === 'working') ? 'working' : n.members.some((m) => nodeLive(m) === 'needs-human') ? 'needs-human' : 'idle') : nodeLive(n));
+// Shared collapsed-group card for the Team and Overview graphs: stacked cards, member-count avatar,
+// live member dots and a working/idle summary; onExpand unfolds the group back into member cards.
+function drawClusterCard(g, n, onExpand) {
+  const cnt = { working: 0, 'needs-human': 0, idle: 0 }; n.members.forEach((m) => { cnt[nodeLive(m) === 'working' ? 'working' : nodeLive(m) === 'needs-human' ? 'needs-human' : 'idle']++; });
+  // Back cards peek straight DOWN only: side anchors exit at the main card's left/right edges, so a
+  // diagonal stack would put its overhang under every edge start (and the card-crossing check).
+  el('rect', { class: 'card stack2', width: W, height: H, rx: 12, x: 0, y: 10 }, g); el('rect', { class: 'card stack1', width: W, height: H, rx: 12, x: 0, y: 5 }, g); el('rect', { class: 'card', width: W, height: H, rx: 12 }, g);
+  const c = agentColor(n.head); el('circle', { class: 'avatar', cx: 30, cy: 26, r: 14, style: `fill:var(--agent-${c})` }, g); el('text', { x: 30, y: 30.5, class: 'avtext', 'text-anchor': 'middle' }, g).textContent = n.members.length;
+  el('text', { x: 52, y: 23, class: 'nname' }, g).textContent = clipText(n.name, 18); el('text', { x: 52, y: 38, class: 'nrole' }, g).textContent = n.role + ' · expand';
+  n.members.slice(0, 16).forEach((m, i) => el('circle', { class: 'mdot s-' + nodeLive(m), cx: 16 + i * 10, cy: 54, r: 3.5 }, g));
+  el('text', { x: 12, y: 72, class: 'clsum' }, g).textContent = [cnt.working && cnt.working + ' working', cnt['needs-human'] && cnt['needs-human'] + ' needs you', cnt.idle && cnt.idle + ' idle'].filter(Boolean).join(' · ');
+  el('title', {}, g).textContent = n.members.map((m) => `${m.name} — ${nodeLive(m)}`).join('\n');
+  g.style.cursor = 'pointer'; g.onclick = (ev) => { ev.stopPropagation(); onExpand(); };
+}
+function treeLayout(nodes, edges) {
+  const ids = new Set(nodes.map((n) => n.id)), kids = {}, hasParent = new Set(); const GX = W + 36, GY = H + 64, pos = {};
+  for (const e of edges) if ((e.type || 'assign') === 'assign' && ids.has(e.from) && ids.has(e.to) && e.from !== e.to && !hasParent.has(e.to)) { (kids[e.from] ||= []).push(e.to); hasParent.add(e.to); }
+  const seen = new Set();
+  const place = (id, x0, y) => {
+    seen.add(id); const ks = (kids[id] || []).filter((k) => !seen.has(k));
+    if (!ks.length) { pos[id] = { x: x0, y }; return GX; }
+    if (ks.length > 5 && ks.every((k) => !(kids[k] || []).length)) { // many leaf reports: wrap into a 5-wide block
+      const cols = 5; ks.forEach((k, i) => { seen.add(k); pos[k] = { x: x0 + (i % cols) * GX, y: y + GY + Math.floor(i / cols) * (H + 26) }; });
+      pos[id] = { x: x0 + (Math.min(cols, ks.length) - 1) * GX / 2, y }; return Math.min(cols, ks.length) * GX;
+    }
+    let x = x0; for (const k of ks) if (!seen.has(k)) x += place(k, x, y + GY);
+    const first = pos[ks[0]].x, last = pos[ks[ks.length - 1]].x; pos[id] = { x: (first + last) / 2, y }; return Math.max(GX, x - x0);
+  };
+  const roots = nodes.filter((n) => !hasParent.has(n.id)).sort((p, q) => (q.core ? 1 : 0) - (p.core ? 1 : 0)); let x = 40;
+  for (const r of roots) x += place(r.id, x, 40);
+  for (const n of nodes) if (!pos[n.id]) { pos[n.id] = { x, y: 40 }; x += GX; }
+  return pos;
+}
+function buildView() {
+  const real = S.team.nodes;
+  const cv = GraphView.clusterView(real, S.team.edges, expandedClusters);
+  const nodes = cv.nodes;
+  const edges = GraphView.mapEdges([...S.team.edges, ...(S.cross || []).filter((e) => !S.team.edges.some((x) => x.id === e.id))], cv.remap);
+  if (graphAuto && nodes.length) { const p = treeLayout(nodes, edges.filter((e) => nodes.some((n) => n.id === e.from) && nodes.some((n) => n.id === e.to))); for (const n of nodes) { n.x = p[n.id].x; n.y = p[n.id].y; } }
+  GV = { nodes, edges, clustered: nodes.some((n) => n.cluster) };
+}
 // Nodes from other teams linked by cross-team edges, shown as dashed ghosts beside the graph.
 function ghostNodes() {
-  const mine = new Set(S.team.nodes.map((n) => n.id)); const b = graphBox(S.team.nodes); const out = new Map();
+  const vis = GV ? GV.nodes : S.team.nodes; const mine = new Set(S.team.nodes.map((n) => n.id)); const b = graphBox(vis); const out = new Map();
   for (const e of S.team.edges) if (!mine.has(e.to) && !out.has(e.to)) out.set(e.to, { id: e.to, side: 1 });
   for (const e of S.cross || []) if (!mine.has(e.from) && !out.has(e.from)) out.set(e.from, { id: e.from, side: -1 });
   let r = 0, l = 0;
   return [...out.values()].map((g) => ({ ...g, ghost: true, name: nodeName(g.id), role: 'other team', x: g.side > 0 ? b.x + b.w + 120 : b.x - W - 120, y: b.y + (g.side > 0 ? r++ : l++) * (H + 40) }));
 }
-const allGraphNodes = () => [...S.team.nodes, ...ghostNodes()];
+const allGraphNodes = () => [...(GV ? GV.nodes : S.team.nodes), ...ghostNodes()];
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 // ---------- orthogonal edge routing ----------
 // Edges are elbow (right-angle) paths, never diagonals: a horizontally-dominated pair exits through
@@ -844,16 +927,16 @@ function edgeGeom(a, b, off, obs = [], seed = 0) {
 }
 const overlaps = (r, q) => r.x < q.x + q.w && q.x < r.x + r.w && r.y < q.y + q.h && q.y < r.y + r.h;
 function renderGraph() {
-  const svg = $('#graph'); svg.innerHTML = '';
+  const svg = $('#graph'); svg.innerHTML = ''; buildView();
   if (vpTeam !== ctx.t) { vpTeam = ctx.t; vpCount = 0; } // first open always re-fits (once visible, see below) — a persisted viewport can be stale (tiny/panned away)
   const defs = el('defs', {}, svg);
   for (const t of ['assign', 'message', 'review', 'sel']) { const m = el('marker', { id: 'arr-' + t, viewBox: '0 0 10 10', refX: 9, refY: 5, markerWidth: 8, markerHeight: 8, markerUnits: 'userSpaceOnUse', orient: 'auto-start-reverse' }, defs); el('path', { d: 'M0,1 L9,5 L0,9 z', class: 'arrow arrow-' + t }, m); }
   const vp = el('g', { class: 'viewport' }, svg); const eL = el('g', { class: 'edges' }, vp), nL = el('g', { class: 'nodes' }, vp), xL = el('g', { class: 'edges cross-layer' }, vp), lL = el('g', { class: 'labels' }, vp); // cross-team edges draw above nodes so the dashed line into the ghost stays visible
   const nodes = allGraphNodes(); const byId = Object.fromEntries(nodes.map((n) => [n.id, n]));
-  const edges = [...S.team.edges, ...(S.cross || []).filter((e) => !S.team.edges.some((x) => x.id === e.id))];
+  const edges = GV.edges;
   const pairN = {}, pairI = {}; const pk = (e) => [e.from, e.to].sort().join('|'); edges.forEach((e) => { pairN[pk(e)] = (pairN[pk(e)] || 0) + 1; });
   const srcN = {}, srcI = {}; edges.forEach((e) => { srcN[e.from] = (srcN[e.from] || 0) + 1; });
-   const blocks = nodes.map((n) => ({ x: n.x - 4, y: n.y - 4, w: W + 8, h: H + 8 })); const pills = [];
+   const blocks = nodes.map((n) => ({ x: n.x - 4, y: n.y - 4, w: W + 8, h: (n.cluster ? H + 16 : H + 8) })); const pills = []; // cluster blocks include the stacked-cards peek below the card
    // open (non-done) task count per assignee — surfaces routing skew on the node cards
    const openCnt = {}; for (const t of (S.tasks || [])) if (t.status !== 'done' && t.assignee) openCnt[t.assignee] = (openCnt[t.assignee] || 0) + 1;
    edgeLayout = { nodes, blocks, per: [] };
@@ -864,12 +947,12 @@ function renderGraph() {
     const type = e.type || 'assign'; const cross = !!(e.crossTeam || a.ghost || b.ghost); const g = edgeGeom(a, b, off, blocks, edgeSeed(e));
     const isSel = sel.edge === e.id;
     const L = cross ? xL : eL; const hit = el('path', { d: g.d, class: 'edgehit' }, L);
-    const ep = el('path', { d: g.d, class: `edge edge-${type}` + (cross ? ' cross' : '') + (isSel ? ' sel' : ''), 'marker-end': `url(#arr-${isSel ? 'sel' : type})`, 'data-id': e.id }, L);
+    const ep = el('path', { d: g.d, class: `edge edge-${type}` + (type === 'assign' ? ' primary' : ' secondary') + (byId[e.to] && !byId[e.to].ghost && liveOf(byId[e.to]) === 'working' ? ' active' : '') + (cross ? ' cross' : '') + (isSel ? ' sel' : ''), 'marker-end': `url(#arr-${isSel ? 'sel' : type})`, 'data-id': e.id }, L);
     // Label pill at the curve midpoint, nudged along the normal until it clears nodes and other pills.
     // At far zoom (lod-far, <0.6) every pill is one more strand in the tangle — the edge colour and the
     // legend already carry the type, so pills drop out unless the edge is selected (t_1c907493).
     const pick = (ev) => { ev.stopPropagation(); hideMenus(); sel = { ...sel, edge: e.id, node: null }; renderGraph(); renderNodeForm(); };
-    const pg = VP.zoom >= 0.6 || isSel ? (() => {
+    const pg = isSel ? (() => { // label pills only for the selected edge: colour + legend carry the type, hover reveals the rest
       const label = type + (cross ? ' · cross-team' : ''); const pw = 10 + label.length * 5.8, ph = 16;
       let [px, py] = g.mid; for (let s = 0, r = { x: px - pw / 2, y: py - ph / 2, w: pw, h: ph }; s < 12 && [...blocks, ...pills].some((q) => overlaps(r, q)); s++) { const d = (s % 2 ? -1 : 1) * Math.ceil((s + 1) / 2) * 12; px = g.mid[0] + g.n[0] * d; py = g.mid[1] + g.n[1] * d; r = { x: px - pw / 2, y: py - ph / 2, w: pw, h: ph }; }
       pills.push({ x: px - pw / 2, y: py - ph / 2, w: pw, h: ph });
@@ -884,11 +967,17 @@ function renderGraph() {
   }
   for (const n of nodes) {
     if (n.ghost) { const g = el('g', { class: 'ghost', transform: `translate(${n.x},${n.y})` }, nL); el('rect', { width: W, height: H, rx: 12 }, g); el('text', { x: 14, y: 28, class: 'nname' }, g).textContent = clipText(n.name, 22); el('text', { x: 14, y: 46, class: 'nrole' }, g).textContent = 'in another team'; continue; }
+    if (n.cluster) {
+      const lv = liveOf(n); const g = el('g', { class: 'node cluster st-' + lv, transform: `translate(${n.x},${n.y})`, 'data-id': n.id }, nL);
+      drawClusterCard(g, n, () => { expandedClusters.add(n.head); renderGraph(); fitView(); });
+      continue;
+    }
     const live = nodeLive(n); const ns = (S.nstat || {})[n.id] || {}; const c = agentColor(n.id);
     const g = el('g', { class: 'node' + (sel.node === n.id || connectFrom === n.id ? ' sel' : '') + ' st-' + live + (live === 'working' ? ' working' : '') + (rtuFor(n.id) ? ' rtpaused' : ''), transform: `translate(${n.x},${n.y})`, 'data-id': n.id }, nL);
     el('rect', { class: 'card', width: W, height: H, rx: 12 }, g);
-    el('rect', { class: 'stripe', width: 4, height: H - 20, x: 0, y: 10, rx: 2, style: `fill:var(--agent-${c})` }, g);
-    el('circle', { class: 'avatar', cx: 30, cy: 26, r: 14, style: `fill:var(--agent-${c})` }, g);
+    el('rect', { class: 'stripe', width: 4, height: H - 20, x: 0, y: 10, rx: 2, style: `fill:${agentVar(n.id)}` }, g);
+    el('circle', { class: 'avatar', cx: 30, cy: 26, r: 14, style: `fill:${agentVar(n.id)};--av:${agentVar(n.id)}` }, g);
+    if (isLeadRole(n.role)) el('text', { x: 40, y: 37, class: 'leadstar', 'text-anchor': 'middle' }, g).textContent = '★';
     el('text', { x: 30, y: 30.5, class: 'avtext', 'text-anchor': 'middle' }, g).textContent = initials(n.name);
     el('text', { x: 52, y: 23, class: 'nname' }, g).textContent = clipText(n.name, Math.max(6, Math.round(16 / Math.max(1, 11 / (13 * VP.zoom)))));
     el('text', { x: 52, y: 38, class: 'nrole' }, g).textContent = clipText(n.role, 20);
@@ -910,6 +999,7 @@ function renderGraph() {
     const cb = el('g', { class: 'capsdot caps-' + capsSt, transform: `translate(7,${H - 8})` }, g); el('circle', { r: 4 }, cb);
     el('title', {}, cb).textContent = capsSt === 'none' ? 'Capabilities not probed yet' : capsSt === 'error' ? 'Capability probe failed' : `Capabilities probed${n.capabilitiesProbedAt ? ' ' + new Date(n.capabilitiesProbedAt).toLocaleString() : ''}`;
     const sg = el('g', { class: 'status s-' + live, transform: `translate(${W - 16},16)` }, g); el('circle', { r: 6 }, sg); el('title', {}, sg).textContent = live;
+    const sp = el('g', { class: 'stpill sp-' + live, transform: `translate(${W - 78},-8)` }, g); el('rect', { width: 70, height: 16, rx: 8 }, sp); el('text', { x: 35, y: 12, 'text-anchor': 'middle' }, sp).textContent = live === 'working' ? '● Working' : live === 'needs-human' ? '● Needs you' : 'Idle';
     const pres = el('g', { class: 'pres ' + presence(n.id), transform: `translate(${W - 16},16)` }, g); el('circle', { r: 8 }, pres);
     const pf = pfState(n);
     const badge = el('g', { class: 'pfbadge pf-' + pf, transform: `translate(${W - 34},16)` }, g);
@@ -953,6 +1043,8 @@ function renderGraph() {
     });
     const h = el('circle', { class: 'handle', cx: W, cy: H / 2, r: 6 }, g); el('title', {}, h).textContent = 'Drag to connect';
     h.onmousedown = (ev) => startLink(ev, n);
+    const hl = (on) => { svg.classList.toggle('focusing', on); for (const it of edgeLayout.per) if (it.a === n || it.b === n) it.path.classList.toggle('hl', on); g.classList.toggle('hl', on); };
+    g.onmouseenter = () => hl(true); g.onmouseleave = () => hl(false);
     g.onmousedown = (ev) => { if (ev.button === 0) startDrag(ev, n, g); else if (ev.button === 2) { ev.stopPropagation(); selectNode(n.id); nodeMenu(ev, n); } };
     g.oncontextmenu = (ev) => { ev.preventDefault(); ev.stopPropagation(); if ($('#ctxmenu').classList.contains('hidden')) { selectNode(n.id); nodeMenu(ev, n); } };
   }
@@ -972,7 +1064,7 @@ function renderMinimap() {
   if (fits) return;
   const x0 = Math.min(b.x, view.x) - 20, y0 = Math.min(b.y, view.y) - 20, x1 = Math.max(b.x + b.w, view.x + view.w) + 20, y1 = Math.max(b.y + b.h, view.y + view.h) + 20;
   mm.setAttribute('viewBox', `${x0} ${y0} ${x1 - x0} ${y1 - y0}`);
-  for (const n of nodes) el('rect', { x: n.x, y: n.y, width: W, height: H, rx: 12, class: n.ghost ? 'mghost' : 'mnode', style: n.ghost ? '' : `fill:var(--agent-${agentColor(n.id)})` }, mm);
+  for (const n of nodes) el('rect', { x: n.x, y: n.y, width: W, height: H, rx: 12, class: n.ghost ? 'mghost' : 'mnode', style: n.ghost ? '' : `fill:${agentVar(n.id)}` }, mm);
   el('rect', { ...view, width: view.w, height: view.h, class: 'mview' }, mm);
   mm.onmousedown = (ev) => { const go = (e) => { const mr = mm.getBoundingClientRect(); const s = Math.max((x1 - x0) / mr.width, (y1 - y0) / mr.height); const wx = x0 + (e.clientX - mr.left - (mr.width - (x1 - x0) / s) / 2) * s, wy = y0 + (e.clientY - mr.top - (mr.height - (y1 - y0) / s) / 2) * s; VP.x = r.width / 2 - wx * VP.zoom; VP.y = r.height / 2 - wy * VP.zoom; const v = $('#graph > g.viewport'); v && v.setAttribute('transform', `translate(${VP.x},${VP.y}) scale(${VP.zoom})`); };
     go(ev); const up = () => { window.removeEventListener('mousemove', go); window.removeEventListener('mouseup', up); applyVP(); saveVP(); }; window.addEventListener('mousemove', go); window.addEventListener('mouseup', up); };
@@ -1034,17 +1126,9 @@ function canvasMenu(ev) {
 async function addAgentAt(x, y) { const k = S.team.nodes.length; const role = k === 0 ? 'PM' : 'Dev'; const n = await call('addNode', { name: `${role} ${k + 1}`, role, x: Math.round(x), y: Math.round(y) }); sel.node = n.id; refresh(); }
 // Layered (Sugiyama-lite) layout: longest-path layers over assign/review edges, barycentre ordering, centred rows.
 async function autoLayout() {
-  const ns = S.team.nodes; if (!ns.length) return; const ids = new Set(ns.map((n) => n.id));
-  const es = S.team.edges.filter((e) => ids.has(e.from) && ids.has(e.to) && e.from !== e.to && (e.type || 'assign') !== 'message');
-  const layer = Object.fromEntries(ns.map((n) => [n.id, 0]));
-  for (let it = 0; it < ns.length; it++) { let ch = false; for (const e of es) if (layer[e.to] < layer[e.from] + 1 && layer[e.from] + 1 < ns.length) { layer[e.to] = layer[e.from] + 1; ch = true; } if (!ch) break; }
-  const layers = []; ns.forEach((n) => (layers[layer[n.id]] ||= []).push(n.id)); const rows = []; layers.filter(Boolean).forEach((l) => { for (let i = 0; i < l.length; i += 4) rows.push(l.slice(i, i + 4)); });
-  const pos = {}; const maxW = Math.max(...rows.filter(Boolean).map((r) => r.length)); const GX = W + 60, GY = H + 80;
-  rows.filter(Boolean).forEach((row, li) => {
-    if (li) { const bc = (id) => { const p = es.filter((e) => e.to === id && pos[e.from]).map((e) => pos[e.from].x); return p.length ? p.reduce((a, b) => a + b, 0) / p.length : Infinity; }; row.sort((a, b) => bc(a) - bc(b)); }
-    const x0 = 40 + (maxW - row.length) * GX / 2; row.forEach((id, i) => { pos[id] = { x: Math.round(x0 + i * GX), y: 40 + li * GY }; });
-  });
-  await call('setPositions', pos); await refresh(); fitView();
+  if (!S.team.nodes.length) return; graphAuto = true; expandedClusters.clear(); renderGraph();
+  if (!GV.clustered) await call('setPositions', Object.fromEntries(S.team.nodes.map((n) => [n.id, { x: n.x, y: n.y }])));
+  fitView();
 }
 // While a node is dragged, re-route every edge against its new position and patch the existing
 // path/pill DOM in place, so connections track the card live instead of jumping on mouseup.
@@ -1068,7 +1152,7 @@ function startDrag(ev, n, g) {
   const mv = (e) => { moved = moved || Math.abs(e.clientX - sx) + Math.abs(e.clientY - sy) > 2; if (!moved) return; n.x = Math.round(ox + (e.clientX - sx) / VP.zoom); n.y = Math.round(oy + (e.clientY - sy) / VP.zoom); g.setAttribute('transform', `translate(${n.x},${n.y})`); dragEdges(n); };
   const up = async () => {
     window.removeEventListener('mousemove', mv); window.removeEventListener('mouseup', up);
-    if (moved) { await call('updateNode', n.id, { x: n.x, y: n.y }); renderGraph(); return; }
+    if (moved) { if (graphAuto) { graphAuto = false; if (!GV.clustered) await call('setPositions', Object.fromEntries(S.team.nodes.map((m) => [m.id, { x: m.x, y: m.y }]))); } await call('updateNode', n.id, { x: n.x, y: n.y }); renderGraph(); return; }
     if (connectMode) {
       if (!connectFrom) { connectFrom = n.id; $('#hint').textContent = `From ${n.name}: now click the target node`; }
       else { const from = connectFrom; connectFrom = null; connectMode = false; $('#connect').classList.remove('on'); $('#hint').textContent = ''; return connect(from, n.id, $('#edgetype').value); }
@@ -1605,7 +1689,6 @@ function renderWiki() {
   $('#wk-empty').classList.toggle('hidden', !empty); $('#wk-editor').classList.toggle('hidden', empty);
   $('#wk-empty h3').textContent = all ? 'No page selected' : 'No wiki pages yet';
 }
-$('#wk-empty-new').onclick = () => $('#wk-new').click();
 $('#wk-new').onclick = () => { sel.page = null; wikiEdit = true; $('#wk-title').value = ''; $('#wk-content').value = ''; showWiki(); renderWiki(); };
 $('#wk-search').oninput = renderWiki;
 function loadPage() { const p = S.wiki[sel.page]; if (!p) return; $('#wk-title').value = p.title; $('#wk-content').value = p.content; showWiki(); }
@@ -1623,6 +1706,7 @@ $('#wk-del').onclick = async () => { $('#wk-more').open = false; if (sel.page &&
 
 // ---------- observability ----------
 const logTeamNodes = () => sel.logTeam ? S.allNodes.filter((n) => n.teamId === sel.logTeam) : S.allNodes;
+const obsIdleOpen = new Set();
 function renderObs() {
   if (!$('#tab-obs').classList.contains('active')) return;
   const okey = [S.v && S.v.project, S.v && S.v.teams, S.v && S.v.settings, ctx.p, logs.length, (logs[logs.length - 1] || {}).at, S.tasks.length, sel.logTeam, S.orch.runCost, S.orch.runTokens, agentStamp()].join('|');
@@ -1635,7 +1719,12 @@ function renderObs() {
   const counts = {}; let total = 0;
   const ids = new Set(nodes.map((n) => n.id));
   for (const l of logs) if (l.projectId === ctx.p && ids.has(l.nodeId)) { counts[l.nodeId] = (counts[l.nodeId] || 0) + 1; total++; }
-  const rows = nodes.map((n) => { const a = S.orch.agents[n.id] || {}; const w = who(n.id);
+  const idleKey = (n) => { const a = S.orch.agents[n.id] || {}; return (!a.status || a.status === 'idle') && !a.taskId && cur !== n.id ? `${runtimeLabel(n.runtime || 'claude')} · ${n.model || 'default'}` : null; };
+  const idleGroups = {}; for (const n of nodes) { const k = idleKey(n); if (k) (idleGroups[k] = idleGroups[k] || []).push(n); }
+  const collapsed = new Set(); let idleRows = '';
+  for (const [k, g] of Object.entries(idleGroups)) if (g.length > 2 && !obsIdleOpen.has(k)) { g.forEach((n) => collapsed.add(n.id));
+    idleRows += `<div class="logagent-row idlegroup" data-idle="${esc(k)}"><span class="avatar sm" style="background:#3a3f4b">${g.length}</span><span class="lameta"><b>${g.length} idle agents</b><small class="lastat">${esc(k)} · click to expand</small></span><span class="lacount">${g.reduce((x, n) => x + (counts[n.id] || 0), 0)}</span></div>`; }
+  const rows = idleRows + nodes.filter((n) => !collapsed.has(n.id)).map((n) => { const a = S.orch.agents[n.id] || {}; const w = who(n.id);
     const ttl = a.task || (S.tasks.find((t) => t.id === a.taskId) || {}).title || '';
     // Status line reads "working · t_xxxx title"; the model is secondary muted text below (t_e503dd78).
     const stat = [`<span class="lst-${esc(a.status || 'idle')}">${esc(a.status || 'idle')}</span>`,
@@ -1645,6 +1734,7 @@ function renderObs() {
     return `<div class="logagent-row ${cur === n.id ? 'sel' : ''}" data-id="${n.id}"><span class="avatar sm ${a.status === 'working' ? 'working' : ''}" style="background:${w.color}" title="${esc(w.name)}">${esc(w.ini)}</span><span class="lameta"><b>${esc(n.name)}</b><small class="lastat">${stat}</small><small class="lamodel" title="${esc(model)}">${esc(model)}</small></span><span class="lacount" title="${counts[n.id] || 0} log lines">${counts[n.id] || 0}</span><span class="lactions">${a.status === 'working' ? `<button data-stopagent="${n.id}" title="Stop">⏹</button>` : ''}<button data-msgagent="${n.id}" title="Message">✉</button></span></div>`; }).join('');
   $('#logagents').innerHTML = `<div class="logagent-row ${!cur ? 'sel' : ''}" data-id=""><span class="avatar sm" style="background:#3a3f4b">∀</span><span class="lameta"><b>All agents</b><small class="lastat">every session</small></span><span class="lacount" title="${total} log lines">${total}</span></div>` +
     (rows || '<p class="muted logempty">No agents in this team.</p>');
+  document.querySelectorAll('#logagents [data-idle]').forEach((d) => d.onclick = () => { obsIdleOpen.add(d.dataset.idle); obsSig = ''; renderObs(); });
   document.querySelectorAll('#logagents .logagent-row[data-id]').forEach((d) => d.onclick = (e) => { if (e.target.closest('.lactions')) return; $('#logfilter').value = d.dataset.id; renderLog(); renderObs(); });
   document.querySelectorAll('[data-stopagent]').forEach((b) => b.onclick = act(async (e) => { e.stopPropagation(); await call('stopAgent', b.dataset.stopagent); refresh(); }));
   document.querySelectorAll('[data-msgagent]').forEach((b) => b.onclick = act(async (e) => { e.stopPropagation(); const v = await ask(`Message to ${nodeName(b.dataset.msgagent)} (a running agent is interrupted and resumed with it)`); if (v) { await call('sendToAgent', b.dataset.msgagent, v); refresh(); } }));
@@ -1661,11 +1751,22 @@ function monitorText(l) {
   const ids = Array.isArray(l.taskIds) && l.taskIds.length ? ` (${l.taskIds.join(', ')})` : '';
   return esc(([l.action, l.reason].filter(Boolean).join(' — ') || l.text) + ids);
 }
+// "Read {"file_path":"/a/b.js"}" -> summary "Read b.js"; the raw JSON only shows on expand.
+function humanLog(t) {
+  const m = /^\s*([\w.:-]+)?\s*(\{[\s\S]*\}|\[[\s\S]*\])\s*$/.exec(t || ''); if (!m) return null;
+  let o; try { o = JSON.parse(m[2]); } catch { return null; }
+  const pick = o && !Array.isArray(o) && (o.file_path || o.path || o.command || o.pattern || o.url || o.description || o.query);
+  const arg = pick ? String(pick).split('\n')[0] : '';
+  const head = [m[1] || 'Event', arg].filter(Boolean).join(' ');
+  return { head: head.length > 140 ? head.slice(0, 139) + '…' : head, json: JSON.stringify(o, null, 2) };
+}
 function logRow(l) {
   const w = who(l.nodeId); const lvl = LOG_LEVEL[l.kind] || 'text';
   const task = l.taskId ? `<span class="logtask" data-tasklink="${esc(l.taskId)}" title="${esc(l.task || l.taskId)} — open in task thread">${esc(shortTaskId(l.taskId))}</span>` : '';
   const badge = l.kind === 'monitor' ? 'Monitor' : l.kind === 'watch' ? 'Watch' : esc(l.kind);
-  const text = l.kind === 'monitor' ? monitorText(l) : esc(l.text);
+  let text = l.kind === 'monitor' ? monitorText(l) : esc(l.text);
+  const hum = humanLog(l.text);
+  if (hum && l.kind !== 'monitor') text = `<details class="logjson"><summary>${esc(hum.head)}</summary><pre>${esc(hum.json)}</pre></details>`;
   return `<div class="logrow lv-${lvl}"><span class="logtime">${new Date(l.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span><span class="avatar sm" style="background:${w.color}" title="${esc(w.name)}">${esc(w.ini)}</span><span class="logagent" title="${esc(w.name)}">${esc(w.name)}</span>${task}<span class="loglevel lv-${lvl}">${badge}</span><span class="logtext">${text}</span></div>`;
 }
 // ---------- subagents (contract: t_c33656ba) ----------
@@ -1721,6 +1822,7 @@ function renderLog() {
   const prevH = box.scrollHeight, prevTop = box.scrollTop;
   const all = logs.filter((l) => l.projectId === ctx.p && (!teamIds || teamIds.has(l.nodeId)));
   const base = all.filter((l) => (!f || l.nodeId === f) && (!q || l.text.toLowerCase().includes(q)));
+  base.sort((a, b) => (a.at || 0) - (b.at || 0));
   let rows = base.filter((l) => logLevels.has(severityOf(l)));
   let hiddenInfo = 0;
   if (!rows.length && base.length) {
@@ -1953,7 +2055,7 @@ function renderUsage() {
     .map((x) => ({ ...x, sub: `${x.models} model key${x.models === 1 ? '' : 's'}`, title: `${x.runs} run${x.runs === 1 ? '' : 's'} · cost only — tokens would cross models here` }));
   const agBars = Object.entries(led.byAgent).map(([name, rows2]) => { const top = rows2.slice().sort((a, b) => rowTokTotal(b) - rowTokTotal(a))[0];
     return { name, cost: rows2.some((r) => r.costUsd != null) ? rows2.reduce((a, r) => a + (r.costUsd || 0), 0) : null, sub: `${rows2.length} key${rows2.length === 1 ? '' : 's'} · top: ${top && top.model}`, title: `${name}: per-key rows under Detailed tables` }; });
-  if (!RUNS.length) { $('#us-summary').innerHTML = '<div class="us-empty"><b>No runs yet</b><p>Cost, token and model breakdowns appear here after an agent finishes its first run.</p></div>'; $('#us-runs').innerHTML = ''; renderDiscovery(); renderUsageLimits(); return; }
+  if (!RUNS.length) { $('#us-summary').innerHTML = '<div class="us-empty"><svg class="us-empty-ico" viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M4 20V10M11 20V4M18 20v-7"/></svg><b>No runs yet</b><p>Cost, token and model breakdowns appear here after an agent finishes its first run.</p><button type="button" class="primary" id="us-run-goal">Run a goal</button></div>'; $('#us-runs').innerHTML = ''; { const b = $('#us-run-goal'); if (b) b.onclick = () => showTab('chat'); } renderDiscovery(); renderUsageLimits(); return; }
   $('#us-summary').innerHTML = usageHero(rs, led, { global: globalCost, filtered }) + `
   <div class="us-vendor"><small>One row per account — where the money actually goes (billing source + its detail: which login, API key or endpoint) — with each account's model keys nested beneath. Token columns stay strictly per key (never summed across models); cost is the only grand total. "—" marks keys whose cost is unknown, "est" marks list-price estimates.</small><h4>By account</h4>${accounts.length ? accountTable(accounts) : '<p class="muted">No usage recorded yet.</p>'}</div>
   <div class="cards">
@@ -1988,7 +2090,7 @@ async function renderDiscovery() {
   const cnt = (n) => n > 0 ? String(n) : '—';
   const reason = (!st || (!st.fiveHour.limit && !st.weekly.limit)) ? await noLimitDataReason() : null;
   const limPart = (label, u) => {
-    if (!u || !u.limit) return `<span class="lm-part lm-pending" title="No ${esc(label)} limit set or reported yet"><b>${esc(label)}</b> <small>${reason ? `– no limit data: ${esc(reason)}` : '– no limit set'}</small></span>`;
+    if (!u || !u.limit) return `<span class="lm-part lm-pending" title="${esc(label)}: ${reason ? `no limit data — ${esc(reason)}` : 'no limit set or reported yet'}"><b>${esc(label)}</b> <small>— ${reason ? 'no data' : 'not set'}</small></span>`;
     const pct = Math.min(100, Math.round(u.pct * 100)); const cls = u.pause ? 'danger' : u.warn ? 'warn' : 'ok';
     const ms = u.resetsAt ? new Date(u.resetsAt).getTime() - Date.now() : 0;
     const resetTitle = ms > 0 ? ` · resets in ${fmtCountdown(ms)}` : '';
@@ -2009,7 +2111,7 @@ async function renderDiscovery() {
 }
 // ---------- usage limits (5h/weekly for subscription, tokens/cost for API) ----------
 function usageLimitBar(label, u, fmt) {
-  if (!u || !u.limit) return `<div class="stat"><small>${esc(label)}</small><b>${fmt((u && u.used) || 0)}</b><small class="muted">no limit set</small></div>`;
+  if (!u || !u.limit) return `<div class="stat"><small>${esc(label)}</small><b>${u && u.used ? fmt(u.used) : '—'}</b><small class="muted">no limit set</small></div>`;
   const pct = Math.min(100, Math.round((u.pct != null ? u.pct : (u.used / u.limit)) * 100));
   const cls = u.pause ? 'danger' : u.warn ? 'warn' : 'ok';
   return `<div class="stat"><small>${esc(label)}</small><b>${fmt(u.used)} <span class="muted">/ ${fmt(u.limit)}</span></b>
@@ -2024,12 +2126,12 @@ async function renderUsageLimits() {
   const provs = limitProviders(st);
   $('#us-limits').innerHTML = `<h3>Usage limits</h3><p class="muted">The top bar shows only the worst provider as one summary chip; every provider's limit windows are listed here (5h/weekly budgets settable below).</p>${st && st.warn ? `<p class="warn">Approaching a usage limit.</p>` : ''}${st && st.pause ? `<p class="warn">A usage limit has been reached; new runs may be paused.</p>` : ''}
     ${provs.length ? `<div class="limitmeter us-list">${provs.map((p) => providerChipHtml(p, false)).join('')}</div>` : ''}
-    <div class="toolbar" style="align-items:flex-start">
+    <div class="lim-wrap">
     <div class="cards">
       ${usageLimitBar('API key/proxy, reported cost', st && st.cost, money)}
       ${usageLimitBar('API key/proxy, tokens', st && st.tokens, fmtTok)}
     </div>
-    <form id="lim-form" class="toolbar" style="flex-wrap:wrap">
+    <form id="lim-form" class="lim-grid">
       <label>5h limit, $ <input id="lim-5h" type="number" min="0" step="1" value="${lim.fiveHourLimit || ''}" placeholder="none"></label>
       <label>Weekly limit, $ <input id="lim-7d" type="number" min="0" step="1" value="${lim.weeklyLimit || ''}" placeholder="none"></label>
       <label>API cost limit, $ <input id="lim-apiusd" type="number" min="0" step="1" value="${lim.costLimit || ''}" placeholder="none"></label>
@@ -2042,6 +2144,13 @@ async function renderUsageLimits() {
     refresh();
   });
 }
+function usageSub(name) {
+  const ids = { summary: ['#us-summary'], discovery: ['#us-discovery'], limits: ['#us-limits'], runs: ['#us-runs-wrap'] };
+  for (const k in ids) $(ids[k][0]).hidden = k !== name;
+  $('#us-anchors').querySelectorAll('button').forEach((b) => { const on = b.dataset.sub === name; b.classList.toggle('on', on); b.setAttribute('aria-selected', on); });
+}
+$('#us-anchors').onclick = (ev) => { const b = ev.target.closest('button[data-sub]'); if (b) usageSub(b.dataset.sub); };
+usageSub('summary');
 $('#us-agent').onchange = renderUsage; $('#us-billing').onchange = renderUsage;
 const download = (name, text, type) => { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], { type })); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000); };
 $('#us-export').onclick = act(async () => download(`usage-${(S.project.name || 'project').replace(/[^\w-]+/g, '_')}.csv`, await call('usageCSV', false), 'text/csv'));
@@ -2256,24 +2365,38 @@ function renderOverview() {
   ovSig = sig;
   const stuck = new Set(Overview.stuckAgents(S.orch.agents, L, now, S.settings.stuckMinutes || 5));
   const hot = Overview.edgeFlashes(L, S.team.edges, now);
-  const ovNodes = spreadOverlaps(S.team.nodes);
-  const svg = $('#ov-graph'); svg.innerHTML = ''; const byId = Object.fromEntries(ovNodes.map((n) => [n.id, n]));
+  // Same cluster collapse as the Team graph (t_345af163): past CLUSTER_MIN agents the Overview shows one
+  // card per lead group too. Collapsed views auto-arrange like the Team's auto-layout (head-stored
+  // positions would scatter the few cards arbitrarily); small teams keep their stored layout.
+  // Copies: the Overview never writes back node x/y (the Team graph owns stored/manual positions).
+  const cv = GraphView.clusterView(S.team.nodes, S.team.edges, expandedClusters);
+  let ovNodes = cv.nodes; const ovEdges = GraphView.mapEdges(S.team.edges, cv.remap);
+  if (cv.clustered && ovNodes.length) { ovNodes = ovNodes.map((n) => ({ ...n })); const p = treeLayout(ovNodes, ovEdges); for (const n of ovNodes) { n.x = p[n.id].x; n.y = p[n.id].y; } }
+  else ovNodes = spreadOverlaps(ovNodes);
+  const svg = $('#ov-graph'); svg.innerHTML = ''; const byId = Object.fromEntries(S.team.nodes.map((n) => [n.id, n]));
+  const visById = Object.fromEntries(ovNodes.map((n) => [n.id, n]));
   const defs = el('defs', {}, svg);
   for (const t of ['assign', 'message', 'review']) { const m = el('marker', { id: 'ovarr-' + t, viewBox: '0 0 10 10', refX: 9, refY: 5, markerWidth: 8, markerHeight: 8, markerUnits: 'userSpaceOnUse', orient: 'auto-start-reverse' }, defs); el('path', { d: 'M0,1 L9,5 L0,9 z', class: 'arrow arrow-' + t }, m); }
   // Same orthogonal geometry (and parallel-edge offsets) as the Team graph, so both views read alike.
-  const pk = (e) => [e.from, e.to].sort().join('|'); const pairN = {}, pairI = {}; S.team.edges.forEach((e) => { pairN[pk(e)] = (pairN[pk(e)] || 0) + 1; });
+  const pk = (e) => [e.from, e.to].sort().join('|'); const pairN = {}, pairI = {}; ovEdges.forEach((e) => { pairN[pk(e)] = (pairN[pk(e)] || 0) + 1; });
   // Glance view: plain elbows between facing sides (drawn under the cards), no obstacle detours — detours made long bus lines that ran off-canvas.
-  for (const e of S.team.edges) {
-    const a = byId[e.from], b = byId[e.to]; if (!a || !b) continue; const type = e.type || 'assign';
+  for (const e of ovEdges) {
+    const a = visById[e.from], b = visById[e.to]; if (!a || !b) continue; const type = e.type || 'assign';
     const key = pk(e); const i = (pairI[key] = (pairI[key] ?? -1) + 1); const off = (i - (pairN[key] - 1) / 2) * 22 * (e.from < e.to ? 1 : -1);
     el('path', { d: edgeGeom(a, b, off).d, class: `edge edge-${type}` + (hot.has(e.id) ? ' flash' : ''), 'marker-end': `url(#ovarr-${type})` }, svg);
   }
   for (const n of ovNodes) {
-    const live = (S.orch.agents[n.id] || {}).status === 'working' ? 'working' : nodeLive(n); const isStuck = stuck.has(n.id); const c = agentColor(n.id);
-    const g = el('g', { class: 'node' + (live === 'working' ? ' working st-working' : '') + (isStuck ? ' stuck' : '') + (rtuFor(n.id) ? ' rtpaused' : ''), transform: `translate(${n.x},${n.y})`, 'data-id': n.id }, svg);
+    if (n.cluster) {
+      const g = el('g', { class: 'node cluster st-' + liveOf(n), transform: `translate(${n.x},${n.y})`, 'data-id': n.id }, svg);
+      drawClusterCard(g, n, () => { expandedClusters.add(n.head); ovSig = null; renderOverview(); });
+      continue;
+    }
+    const live = (S.orch.agents[n.id] || {}).status === 'working' ? 'working' : nodeLive(n); const isStuck = stuck.has(n.id);
+    const g = el('g', { class: 'node' + (live === 'working' ? ' working st-working' : ' st-' + live) + (isStuck ? ' stuck' : '') + (rtuFor(n.id) ? ' rtpaused' : ''), transform: `translate(${n.x},${n.y})`, 'data-id': n.id }, svg);
     el('rect', { class: 'card', width: W, height: H, rx: 12 }, g);
-    el('rect', { class: 'stripe', width: 4, height: H - 20, x: 0, y: 10, rx: 2, style: `fill:var(--agent-${c})` }, g);
-    el('circle', { class: 'avatar', cx: 26, cy: 24, r: 13, style: `fill:var(--agent-${c})` }, g);
+    el('rect', { class: 'stripe', width: 4, height: H - 20, x: 0, y: 10, rx: 2, style: `fill:${agentVar(n.id)}` }, g);
+    el('circle', { class: 'avatar', cx: 26, cy: 24, r: 13, style: `fill:${agentVar(n.id)};--av:${agentVar(n.id)}` }, g);
+    if (isLeadRole(n.role)) el('text', { x: 35.5, y: 34, class: 'leadstar', 'text-anchor': 'middle' }, g).textContent = '★';
     el('text', { x: 26, y: 28.5, class: 'avtext', 'text-anchor': 'middle' }, g).textContent = initials(n.name);
     el('text', { x: 47, y: 21, class: 'nname' }, g).textContent = clipText(n.name, 16);
     el('text', { x: 47, y: 36, class: 'nrole' }, g).textContent = isStuck ? '⚠ stuck' : `${clipText(n.role, 14)} · ${live === 'working' ? 'Working' : humanStatus(live)}`;
@@ -2289,13 +2412,21 @@ function renderOverview() {
   }
   // Fit the graph to the available canvas without ever shrinking node text below its authored (readable) size:
   // fit the whole graph in the wrap (never clipped); shrink down to 0.6 before letting the wrap scroll, grow up to 1.3.
-  const gbox = graphBox(ovNodes), gpad = 40, bw = gbox.w + gpad * 2, bh = gbox.h + gpad * 2;
-  const wrap = svg.parentElement, r = wrap.getBoundingClientRect();
-  const scale = clamp(r.width && r.height ? Math.min(r.width / bw, r.height / bh) : 1, 0.6, 1.3);
+  const gbox = graphBox(ovNodes), gpad = 28, bw = gbox.w + gpad * 2, bh = gbox.h + gpad * 2;
+  const wrap = svg.parentElement;
+  // clientWidth/Height (not the bounding rect): they exclude scrollbars, so sizing against them
+  // cannot re-introduce the scrollbar the sizing itself would prevent.
+  const r = { width: wrap.clientWidth, height: wrap.clientHeight };
+  // Auto-fit zooms small graphs to fill the canvas; the 0.85 floor keeps 12px labels >=10px
+  // effective (the original complaint was ~8px) while 24-agent graphs avoid a scrollbar.
+  // Genuinely huge graphs still pan/drag in the wrap.
+  const scale = clamp(r.width && r.height ? Math.min(r.width / bw, r.height / bh) : 1, 0.85, 1.6);
   const vbw = Math.max(bw, r.width ? r.width / scale : bw), vbh = Math.max(bh, r.height ? r.height / scale : bh);
   svg.setAttribute('viewBox', `${gbox.x - gpad - (vbw - bw) / 2} ${gbox.y - gpad - (vbh - bh) / 2} ${vbw} ${vbh}`);
   svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
-  svg.style.width = `${vbw * scale}px`; svg.style.height = `${vbh * scale}px`;
+  // Cap at the wrap size (minus 1px for rounding) — preserveAspectRatio 'meet' letterboxes the
+  // rest, so the svg can never overflow its wrap and phantom scrollbars can't appear.
+  svg.style.width = `${Math.min(vbw * scale, r.width - 1)}px`; svg.style.height = `${Math.min(vbh * scale, r.height - 1)}px`;
   $('#ov-stuck').innerHTML = [...stuck].map((id) => `<div class="stuckbar">⚠ <b>${esc(nodeName(id))}</b> has produced no output for ${S.settings.stuckMinutes || 5}+ min<span class="spacer"></span><button data-ovstop="${id}">Stop</button><button data-ovnudge="${id}">Nudge</button></div>`).join('');
   document.querySelectorAll('[data-ovstop]').forEach((b) => b.onclick = act(async () => { await call('stopAgent', b.dataset.ovstop); refresh(); }));
   document.querySelectorAll('[data-ovnudge]').forEach((b) => b.onclick = act(async () => { await call('sendToAgent', b.dataset.ovnudge, 'Status check: you have produced no output for a while. Reply with a short status (what you are doing, whether you are blocked), then continue or finish your task.'); refresh(); }));
@@ -2333,11 +2464,11 @@ function renderOverview() {
   if (!t) { head.innerHTML = ''; ts.classList.add('hidden'); }
   else {
     ts.classList.remove('hidden');
-    const as = byId[t.assignee]; const ac = as ? agentColor(as.id) : 0;
-    head.innerHTML = `<div class="ovth-title">${esc(t.title)}</div><div class="ovth-meta"><span class="ovth-status ${esc(t.status)}">${esc(humanStatus(t.status))}</span>${as ? `<span class="ovth-assignee"><span class="ovth-av" style="background:var(--agent-${ac})">${esc(initials(as.name))}</span>${esc(as.name)}</span>` : '<span class="muted">Unassigned</span>'}</div>`;
+    const as = byId[t.assignee];
+    head.innerHTML = `<div class="ovth-title">${esc(t.title)}</div><div class="ovth-meta"><span class="ovth-status ${esc(t.status)}">${esc(humanStatus(t.status))}</span>${as ? `<span class="ovth-assignee"><span class="ovth-av" style="background:${agentVar(as.id)}">${esc(initials(as.name))}</span>${esc(as.name)}</span>` : '<span class="muted">Unassigned</span>'}</div>`;
   }
   function humanStatus(s) { const w = String(s || '').replaceAll('_', ' '); return w.charAt(0).toUpperCase() + w.slice(1); }
-  const ovAvatar = (id) => { const n = byId[id]; return n ? `<span class="ovth-av" style="background:var(--agent-${agentColor(id)})">${esc(initials(n.name))}</span>` : `<span class="ovth-av sys">${id === 'human' ? 'H' : '•'}</span>`; };
+  const ovAvatar = (id) => { const n = byId[id]; return n ? `<span class="ovth-av" style="background:${agentVar(id)}">${esc(initials(n.name))}</span>` : `<span class="ovth-av sys">${id === 'human' ? 'H' : '•'}</span>`; };
   // Collapsible nested block for a subagent's tool activity inside the task thread (native <details>,
   // open state preserved via data-k like the tool chips).
   const ovSubBlock = (it, depth) => {
@@ -2366,9 +2497,9 @@ setInterval(renderOverview, 1000);
 
 // ---------- chat: #company room, task threads, working indicator, composer ----------
 const CH = { thread: null, key: '', mi: 0, asks: [] };
-const who = (id) => { const n = S.allNodes.find((x) => x.id === id); return n ? { name: n.name, role: n.role, color: Chat.avatarColor(n.id), ini: Chat.initials(n.name) } : id === 'human' ? { name: 'You', role: '', color: 'transparent', ini: '', human: true } : { name: id || 'system', role: '', color: '#3a3f4b', ini: '⚙' }; };
+const who = (id) => { const n = S.allNodes.find((x) => x.id === id); return n ? { name: n.name, role: n.role, color: agentVar(n.id), ini: Chat.initials(n.name), lead: isLeadRole(n.role) } : id === 'human' ? { name: 'You', role: '', color: 'transparent', ini: '', human: true } : { name: id || 'system', role: '', color: 'var(--bg-hover)', ini: '⚙', sys: true }; };
 function bubble(e) {
-  const link = e.taskId && !CH.thread ? ` data-thread="${e.taskId}"` : ''; const tl = link ? `<span class="tlink">↳ ${esc(taskTitle(e.taskId).slice(0, 40))}</span>` : '';
+  const link = e.taskId && !CH.thread ? ` data-thread="${e.taskId}"` : ''; const tt = link ? taskTitle(e.taskId) : ''; const tl = link && !e._sameTask ? `<span class="tlink" title="${esc(tt)}">↳ ${esc(tt)}</span>` : '';
   const rep = e.count > 1 ? `<span class="repeat" title="repeated ${e.count} times">×${e.count}</span>` : '';
   if (e.type === 'tool') return `<details class="cchip"><summary>🔧 ${esc(e.label)}</summary><pre>${esc(e.text)}${e.result != null ? '\n→ ' + esc(String(e.result).slice(0, 2000)) : ''}</pre></details>${tl ? `<span class="bubble linked"${link}>${tl}</span>` : ''}<br>`;
   // One collapsible bubble per subagent (children folded in roomEvents, sub-subagents nested inside):
@@ -2389,14 +2520,22 @@ function bubble(e) {
     return `<div class="bubble evrow ${e.type}${link ? ' linked' : ''}"${link}>${ico(IC[e.type])}<span>${esc(t)}</span>${tl}${rep}</div>`; }
   const text = e.text;
   const attsHtml = Chat.attThumbs(e.atts);
-  return `<div class="bubble ${e.type}${link ? ' linked' : ''}"${link}>${esc(text)}${attsHtml}${tl}${rep}</div>`;
+  return `<div class="bubble ${e.type}${link ? ' linked' : ''}"${link}>${chatMd(text)}${attsHtml}${tl}${rep}</div>`;
+}
+// Agent messages are markdown: render the light subset (fences, inline code, bold, links, bullets,
+// headings) inside the pre-wrap bubble so real messages don't show raw ** and ` (t_h0a1c2e3).
+function chatMd(src) {
+  return esc(String(src ?? '')).split(/```/).map((b, i) => i % 2 ? `<pre class="cmd-pre">${b.replace(/^\w*\n/, '').replace(/\n$/, '')}</pre>` : b
+    .replace(/^(\s*)[-*] /gm, '$1• ').replace(/^#{1,4} (.*)$/gm, '<b>$1</b>')
+    .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>').replace(/`([^`\n]+)`/g, '<code>$1</code>')
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')).join('');
 }
 // Collapse repeats moved to Chat.collapseRepeats (pure, unit-tested); merge adjacent same-author groups (no repeated "You" headers); questions stay separate.
 const mergeGroups = (gs) => gs.reduce((out, g) => { const p = out[out.length - 1]; if (p && p.who === g.who && g.items[0].type !== 'question' && p.items[0].type !== 'question') p.items.push(...g.items); else out.push({ ...g, items: [...g.items] }); return out; }, []).map((g) => ({ ...g, items: Chat.collapseRepeats(g.items) }));
 const needsYou = () => new Set([...(S.inbox || []).map((i) => i.nodeId), ...CH.asks]);
-const avatarHtml = (id, working, ask) => { const w = who(id); return `<div class="avatar${w.human ? ' human' : ''}${working.has(id) ? ' working' : ''}${ask.has(id) ? ' ask' : ''}" style="background:${w.color}" title="${esc(w.name)}${working.has(id) ? ' · working' : ask.has(id) ? ' · needs you' : ''}">${esc(w.ini)}</div>`; };
+const avatarHtml = (id, working, ask) => { const w = who(id); return `<div class="avatar${w.lead ? ' is-lead' : ''}${w.human ? ' human' : ''}${w.sys ? ' sys' : ''}${working.has(id) ? ' working' : ''}${ask.has(id) ? ' ask' : ''}" style="background:${w.color}" title="${esc(w.name)}${working.has(id) ? ' · working' : ask.has(id) ? ' · needs you' : ''}">${esc(w.ini)}</div>`; };
 // ≥3 consecutive handoffs from one actor fold into one expandable "assigned N tasks" row.
-const bubbleRuns = (items) => { const out = []; for (let i = 0; i < items.length;) { let j = i; while (j < items.length && items[j].type === 'handoff') j++;
+const bubbleRuns = (items) => { const out = []; items.forEach((it, k) => { it._sameTask = k > 0 && !!it.taskId && items[k - 1].taskId === it.taskId; }); for (let i = 0; i < items.length;) { let j = i; while (j < items.length && items[j].type === 'handoff') j++;
   if (j - i >= 3) { const run = items.slice(i, j); out.push(`<details class="evrun"><summary class="evrow"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg><span>assigned ${run.length} tasks</span></summary>${run.map(bubble).join('')}</details>`); i = j; } else { j = Math.max(j, i + 1); out.push(...items.slice(i, j).map(bubble)); i = j; } } return out.join(''); };
 const renderGroups = (events, working) => { const ask = needsYou(); return mergeGroups(Chat.group(events)).map((g) => { const w = who(g.who);
   return `<div class="cgroup${w.human ? ' self' : ''}">${avatarHtml(g.who, working, ask)}<div class="cbody"><div class="cname">${esc(w.name)}${w.role ? `<span class="role">${esc(w.role)}</span>` : ''}${w.human ? '' : vbadge((S.allNodes || []).find((n) => n.id === g.who))}<time>${new Date(g.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time></div>${bubbleRuns(g.items)}</div></div>`; }).join(''); };
@@ -2460,7 +2599,7 @@ function chatPreview() {
   pv.textContent = Chat.preview(p); pv.className = p ? p.kind : 'muted';
   const ms = Chat.mentionMatches(v, S.team.nodes); const box = $('#chat-mentions'); box.classList.toggle('hidden', !ms || !ms.length);
   CH.mi = Math.min(CH.mi, Math.max(0, (ms || []).length - 1));
-  box.innerHTML = (ms || []).map((n, i) => `<div data-name="${esc(n.name)}" class="${i === CH.mi ? 'sel' : ''}"><span class="avatar" style="background:${Chat.avatarColor(n.id)}">${esc(Chat.initials(n.name))}</span>${esc(n.name)} <span class="role">${esc(n.role)}</span></div>`).join('');
+  box.innerHTML = (ms || []).map((n, i) => `<div data-name="${esc(n.name)}" class="${i === CH.mi ? 'sel' : ''}"><span class="avatar${isLeadRole(n.role) ? ' is-lead' : ''}" style="background:${agentVar(n.id)}">${esc(Chat.initials(n.name))}</span>${esc(n.name)} <span class="role">${esc(n.role)}</span></div>`).join('');
   box.querySelectorAll('div').forEach((d) => d.onmousedown = (e) => { e.preventDefault(); pickMention(d.dataset.name); });
 }
 function pickMention(name) { const i = $('#chat-input'); i.value = i.value.replace(/@(\w*)$/, '@' + name + ' '); i.focus(); CH.mi = 0; chatPreview(); }
@@ -2535,16 +2674,21 @@ composerEl.addEventListener('dragleave', () => composerEl.classList.remove('drag
 composerEl.addEventListener('drop', (e) => { e.preventDefault(); composerEl.classList.remove('dragover'); const files = [...(e.dataTransfer?.files || [])]; if (files.length) act(addChatFiles)(files); });
 
 // ---------- human inbox (ask_human questions + approvals) ----------
+const ibOpen = new Map();
 function renderInbox() {
-  const items = S.inbox || []; const n = items.length ? String(items.length) : '';
+  const items = [...(S.inbox || [])].sort((a, b) => (b.createdAt || b.at || 0) - (a.createdAt || a.at || 0)); const n = items.length ? String(items.length) : '';
   $('#inbox-tab-badge').textContent = n;
   const taskTitle = (id) => (S.tasks.find((t) => t.id === id) || {}).title || '';
   $('#inboxlist').innerHTML = items.length ? items.map((i) => `<div class="inboxitem" data-iid="${i.id}">
-    <small>${i.kind === 'approval' ? 'Approval' : 'Question'} from <b>${esc(nodeName(i.nodeId))}</b>${i.taskId ? ' · task: ' + esc(taskTitle(i.taskId)) : ''} · ${esc(new Date(i.at).toLocaleString())}</small>
-    <p>${esc(i.question)}</p>
-    <p>${(i.kind === 'approval' ? ['approve'] : i.choices).map((c) => `<button class="ib-choice primary" data-v="${esc(c)}">${esc(c)}</button>`).join(' ')}</p>
+    <div class="ib-head" role="button" tabindex="0" aria-expanded="false">${S.allNodes.some((x) => x.id === i.nodeId) ? avatarHtml(i.nodeId, new Set(), new Set([i.nodeId])) : '<div class="avatar" style="background:#3a3f4b" title="System">⚙</div>'}<div class="ib-main"><div class="ib-q">${esc(i.question)}</div><small class="ib-meta">${i.kind === 'approval' ? 'Approval' : 'Question'} · ${S.allNodes.some((x) => x.id === i.nodeId) ? esc(nodeName(i.nodeId)) : 'System'}${i.taskId ? ' · ' + esc(taskTitle(i.taskId)) : ''}</small></div><small class="ib-time" title="${esc(new Date(i.at).toLocaleString())}">${esc(agoTxt(i.at) || 'just now')}</small></div>
+    <div class="ib-body hidden"><p>${(i.kind === 'approval' ? ['approve'] : i.choices).map((c) => `<button class="ib-choice primary" data-v="${esc(c)}">${esc(c)}</button>`).join(' ')}</p>
     <textarea class="ib-text" rows="2" placeholder="${i.kind === 'approval' ? 'Or describe the changes you want' : 'Your answer'}"></textarea>
-    <p><button class="ib-send">${i.kind === 'approval' ? 'Request changes' : 'Send answer'}</button></p></div>`).join('') : '<p class="muted">Nothing waiting for you.</p>';
+    <p><button class="ib-send">${i.kind === 'approval' ? 'Request changes' : 'Send answer'}</button></p></div></div>`).join('') : `<div class="ib-empty"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12 6.5 5h11L20 12v6a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 18v-6ZM4 12h5.5l1 2h3l1-2H20"/></svg><h3>You're all caught up</h3><p>Agent questions, approvals and merge conflicts that need your call land here.</p><button class="ib-board">Go to Board</button></div>`;
+  const ibb = document.querySelector('.ib-board'); if (ibb) ibb.onclick = () => showTab('board');
+  document.querySelectorAll('.inboxitem .ib-head').forEach((h) => { const t = () => { const o = h.nextElementSibling.classList.toggle('hidden'); h.setAttribute('aria-expanded', String(!o)); ibOpen.set(h.parentElement.dataset.iid, !o); }; h.onclick = t; h.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); t(); } }; });
+  // Newest "your turn" item starts expanded so its choices show without a click; user toggles are remembered across re-renders.
+  const newest = items.reduce((m, i) => (!m || (i.createdAt || i.at || 0) >= (m.createdAt || m.at || 0) ? i : m), null);
+  document.querySelectorAll('.inboxitem').forEach((d) => { const id = d.dataset.iid; if (ibOpen.get(id) ?? (newest && newest.id === id)) { d.querySelector('.ib-body').classList.remove('hidden'); d.querySelector('.ib-head').setAttribute('aria-expanded', 'true'); } });
   document.querySelectorAll('.inboxitem').forEach((d) => {
     const answer = (v) => act(async () => { if (!v) return; await call('answerInbox', d.dataset.iid, v); refresh(); })();
     d.querySelectorAll('.ib-choice').forEach((b) => b.onclick = () => answer(b.dataset.v));
@@ -2635,7 +2779,11 @@ function renderGuide() {
 $('#reopenguide').onclick = () => { G.hidden = false; G.forced = true; localStorage.removeItem('guideHidden'); renderGuide(); };
 
 // Theme: mirror the OS/nativeTheme scheme onto <html data-theme> so tokens flip reliably (media query alone didn't re-apply in Electron).
-{ const mq = matchMedia('(prefers-color-scheme: dark)'); const apply = () => document.documentElement.dataset.theme = mq.matches ? 'dark' : 'light'; apply(); mq.addEventListener('change', apply); squad.on('theme', (t) => { document.documentElement.dataset.theme = t.dark ? 'dark' : 'light'; }); }
+{ const mq = matchMedia('(prefers-color-scheme: dark)'); const override = () => { try { const o = localStorage.getItem('themeOverride'); if (o === 'light' || o === 'dark') return o; } catch {} return null; };
+  const apply = () => document.documentElement.dataset.theme = override() || (mq.matches ? 'dark' : 'light');
+  apply(); mq.addEventListener('change', apply);
+  squad.on('theme', (t) => { if (!override()) document.documentElement.dataset.theme = t.dark ? 'dark' : 'light'; });
+  $('#themebtn').onclick = () => { const cur = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'; try { localStorage.setItem('themeOverride', cur); } catch {} document.documentElement.dataset.theme = cur; }; }
 // macOS draws the hiddenInset traffic lights over the page's top-left; flag the platform so the
 // header can inset its content (brand first) clear of the window controls.
 if (/Mac/i.test(navigator.userAgent)) document.documentElement.dataset.platform = 'mac';

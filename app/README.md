@@ -7,8 +7,8 @@ A desktop app for running a small team of Claude Code agents. Agents coordinate 
 ```bash
 npm install
 npm start          # Electron app (data root ~/.agents-squad, override with AGENTS_SQUAD_HOME=<dir>; AGENTS_SQUAD_PROJECT=<dir> is an equivalent alias, used by gui-e2e)
-npm test           # unit + integration tests with a fake claude CLI (includes a real stdio MCP round trip)
-npm run e2e        # real claude CLI in a temp dir: preflight, PM -> Dev team, then haiku loop + workflow agents (costs about $0.50 API-equivalent)
+npm test           # unit + integration tests with a fake claude CLI (includes a real stdio MCP round trip); run against a fresh temp store
+npm run e2e        # real claude CLI in a temp dir: preflight, PM -> Dev team, then haiku loop + workflow agents; the driver approves the review hand-off before asserting (clean runs end in review, not done) (costs about $0.50 API-equivalent); temp store, like npm test
 npm run gui-e2e    # drives the real UI (templates, agent panel, preflight, Run, usage, F6), asserts every check, exits 1 on failure;
                    # screenshots go to e2e-shots/. Uses a fresh temp project dir via AGENTS_SQUAD_PROJECT (set by the script).
                    # Test instances (gui-e2e / smoke) never touch real data: an explicit AGENTS_SQUAD_PROJECT beats an inherited
@@ -19,6 +19,14 @@ npm run smoke:real # real-machine check (no fixtures): discovery against real $H
 ```
 
 You need the `claude` CLI on your PATH and logged in.
+
+**Test/demo isolation contract.** Tests and demos must never touch the real store (`~/.agents-squad`):
+`npm test`, `npm run e2e` and the gui-e2e/smoke scripts all set `AGENTS_SQUAD_PROJECT` to a fresh
+temp dir (plus `AGENTS_SQUAD_TEST_ISOLATION=1`), and `test/store-leak-guard.test.js` fails the suite
+if a run is not isolated or a project appears/changes in the real store mid-run. If you drive the app
+from a script (Electron driver, demo, ad-hoc check), set `AGENTS_SQUAD_GUI_E2E=1` (or `AGENTS_SQUAD_SMOKE=1`)
+in its environment so `src/main.js` isolates the data root — a driver that requires `src/main.js` with
+the ambient env otherwise creates projects in the user's real list (that is how a "Red demo" once leaked in).
 
 ## Projects and teams
 
@@ -156,6 +164,8 @@ Guards keep this from restart-looping: at least 10 minutes since the last restar
 The PM can also trigger the same guarded flow after a merge with the board MCP tool **`request_self_update`** (registered in `src/mcp-server.js` for PM-role nodes only). It honors the Settings toggle and all the guards above, and the outcome is logged to the activity feed.
 
 Tests: `node --test test/self-update.test.js` drives the real flow against a temp git repo with injected test/build/relaunch fakes (no real-model runs): new commit → drain → pass → restart-state written → resume on boot; test failure → no restart; busy agents are drained within the grace deadline (past it they are halted and their tasks resume after the restart; `drainTimeoutMin 0` restores wait-forever); a dirty checkout is refused before anyone is paused.
+
+**Scheduled restarts**: a landed merge never restarts the app on its own — each auto-merge only bumps a pending counter (`restartPending` in the project state; the header pill and the `getRestartState` IPC show how many changes are waiting and since when). An actual restart is armed solely by the PM-only board tool **`schedule_restart`** — `{afterTaskId}` restarts once that task is done and in-flight work drains (anchors that may never finish — `waiting_for_human` or a blocked `todo` — are refused at schedule time), `{now:true}` restarts once agents drain — or by the human **Restart now / Cancel schedule** pill, or automatically once `restartCap` (Settings, default 20) changes pile up with nothing armed (the PM is notified once per crossing). While a schedule is armed the scheduler pauses all *new* dispatch (reviews included) except the anchor task itself, which must run for the restart to come due; the gate deliberately survives the fire until the relaunch, so no run can slip into the second before the watcher pauses dispatch. Firing reuses the update flow above — the drain is bounded by `drainTimeoutMin` (stragglers are stopped at the deadline and their tasks resume after the restart), then tests on the target sha, then relaunch. The fired schedule is persisted so a crash mid-relaunch cannot lose it, and it is consumed only when the new process boots, which also lifts the dispatch gate; cancelling disarms without losing the pending count. Tests: `test/restart.test.js` and `test/restart-qa.test.js`.
 
 ### Live-proof recipe (dogfood)
 

@@ -47,8 +47,14 @@ function checkModes() {
   return fails;
 }
 orch.on('done', (snap) => {
+  // Review gate (t_699b67b7): a clean run hands its task off to review and — with no reviewer
+  // configured for the assignee — it STAYS in review instead of auto-advancing to done. The driver
+  // stands in as the reviewer: every task must have reached the hand-off, then each review task is
+  // approved through the store's own approval gate before the all-done assertions run.
+  const stranded = store.listTasks().filter((t) => t.status !== 'review' && t.status !== 'done');
+  for (const t of store.listTasks()) if (t.status === 'review') store.approveTask(t.id, true, 'e2e driver approves the review hand-off (no reviewer configured)');
   if (phase === 1) {
-    const early = store.listTasks().every((t) => t.status === 'done') && fs.existsSync(path.join(work, 'hello.txt'));
+    const early = !stranded.length && store.listTasks().every((t) => t.status === 'done') && fs.existsSync(path.join(work, 'hello.txt'));
     if (early && !process.env.E2E_SKIP_MODES) return startModes();
   }
   clearTimeout(timer);
@@ -56,6 +62,7 @@ orch.on('done', (snap) => {
   console.log('\nTasks:'); for (const t of tasks) console.log(` - [${t.status}] ${t.title} -> ${(store.getTeam().nodes.find((n) => n.id === t.assignee) || {}).name}`);
   console.log('Total cost: $' + snap.totalCost.toFixed(4));
   const fails = [];
+  if (stranded.length) fails.push('tasks never reached the review hand-off: ' + stranded.map((t) => `${t.title} (${t.status})`).join(', '));
   if (!tasks.every((t) => t.status === 'done')) fails.push('not all tasks done');
   if (!tasks.some((t) => t.assignee === dev.id)) fails.push('PM never delegated to Dev');
   const runs = store.listRuns();
