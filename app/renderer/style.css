@@ -869,7 +869,8 @@ button, .pchip, .tag, .badge, .pill, .avatar, .cchip summary, .lvchip, .asswitch
 /* Node status states (Overview + Team graphs): idle mutes the disc, working gets a pulsing
    success ring, stuck gets a warning ring; lead agents wear a star on the disc edge. */
 #ov-graph .node .avatar, #graph .node .avatar { transition: opacity var(--dur-base) var(--ease-out); }
-#ov-graph .node:not(.working):not(.stuck) .avatar, #graph .node:not(.working):not(.stuck):not(.sel) .avatar { opacity: .42; }
+#ov-graph .node:not(.working):not(.stuck) .avatar, #graph .node:not(.working):not(.stuck):not(.sel) .avatar { opacity: .5; filter: grayscale(.92); }
+#graph .node.st-idle .avatar { filter: grayscale(.92); }
 #ov-graph .node.stuck .avatar, #graph .node.stuck .avatar { opacity: 1; stroke: var(--warning); stroke-width: 2.5; }
 #ov-graph .node.working .avatar, #graph .node.working .avatar { stroke: var(--success); stroke-width: 2.5; animation: avpulse 2.2s var(--ease-out) infinite; }
 @keyframes avpulse { 0%, 100% { stroke-opacity: 1; } 50% { stroke-opacity: .4; } }
@@ -878,3 +879,25 @@ button, .pchip, .tag, .badge, .pill, .avatar, .cchip summary, .lvchip, .asswitch
 /* Sidebar team rows wear their team hue so the avatar palette is legible at a glance. */
 #teamlist > div { display: flex; align-items: center; gap: 7px; }
 .teamdot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+/* Team graph readability (t_2aaf566c): hierarchy (assign) edges stay solid; message/review edges are ghosts until a node/edge is hovered or selected; edges into working agents flow. */
+#graph .edge.secondary { opacity:.14; stroke-width:1.25; transition:opacity var(--dur-fast); }
+#graph .edge.hl, #graph .edge.secondary.sel { opacity:1; stroke-width:2.5; }
+#graph.focusing .edge.primary:not(.hl) { opacity:.3; }
+#graph .edge.primary { stroke-width:2; }
+#graph .edge.active { stroke:var(--success); stroke-dasharray:8 6; animation:edgeflow .8s linear infinite; }
+@keyframes edgeflow { to { stroke-dashoffset:-14; } }
+@media (prefers-reduced-motion: reduce) { #graph .edge.active { animation:none; } }
+#graph .node.st-working .card { stroke-width:2.5; }
+
+/* Team graph: working vs idle readable without hover; cluster cards */
+#graph .node.st-working .card { fill:var(--success-soft); stroke:var(--success); }
+#graph .node.st-idle:not(.sel) .card { fill:var(--bg-app); stroke-dasharray:none; }
+#graph .node.st-idle .avatar, #graph .node.st-idle .stripe, #graph .node.st-idle .avtext { opacity:.5; }
+#graph .node.st-idle .nname { fill:var(--fg-secondary); }
+#graph .stpill rect { fill:var(--bg-hover); stroke:var(--border-strong); stroke-width:1; } #graph .stpill text { fill:var(--fg-secondary); font-size:11px; font-weight:var(--fw-semibold); }
+#graph .stpill.sp-working rect { fill:var(--success); stroke:none; } #graph .stpill.sp-working text { fill:#fff; }
+#graph .stpill.sp-needs-human rect { fill:var(--warning-strong); stroke:none; } #graph .stpill.sp-needs-human text { fill:#fff; }
+#graph .node.cluster .card { fill:var(--bg-raised); } #graph .node.cluster .stack1, #graph .node.cluster .stack2 { fill:var(--bg-hover); filter:none; }
+#graph .node.cluster.st-working .card:not(.stack1):not(.stack2) { fill:var(--success-soft); }
+#graph .mdot { fill:var(--fg-muted); opacity:.5; } #graph .mdot.s-working { fill:var(--success); opacity:1; } #graph .mdot.s-needs-human { fill:var(--warning-strong); opacity:1; }
+#graph .clsum { fill:var(--fg-secondary); font-size:11px; }

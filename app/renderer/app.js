@@ -800,15 +800,55 @@ function fitView() {
   const z = Math.min(1, Math.max(0.25, Math.min((r.width - pad * 2) / b.w, (r.height - pad * 2) / b.h)));
   VP = { zoom: z, x: (r.width - b.w * z) / 2 - b.x * z, y: (r.height - b.h * z) / 2 - b.y * z }; applyVP(); saveVP();
 }
+// ---------- graph view model: automatic layered tree + team clusters above CLUSTER_MIN agents ----------
+// The stored x/y stay the user's manual layout; while graphAuto is on, the view lays the assign hierarchy
+// out as a tidy top-down tree (lead on top, reports underneath). Past CLUSTER_MIN agents each lead's
+// subtree (>=3 agents) collapses into one cluster card (count + working/idle summary); click expands it.
+const CLUSTER_MIN = 12; let graphAuto = true, GV = null; const expandedClusters = new Set();
+const liveOf = (n) => (n.cluster ? (n.members.some((m) => nodeLive(m) === 'working') ? 'working' : n.members.some((m) => nodeLive(m) === 'needs-human') ? 'needs-human' : 'idle') : nodeLive(n));
+function treeLayout(nodes, edges) {
+  const ids = new Set(nodes.map((n) => n.id)), kids = {}, hasParent = new Set(); const GX = W + 36, GY = H + 64, pos = {};
+  for (const e of edges) if ((e.type || 'assign') === 'assign' && ids.has(e.from) && ids.has(e.to) && e.from !== e.to && !hasParent.has(e.to)) { (kids[e.from] ||= []).push(e.to); hasParent.add(e.to); }
+  const seen = new Set();
+  const place = (id, x0, y) => {
+    seen.add(id); const ks = (kids[id] || []).filter((k) => !seen.has(k));
+    if (!ks.length) { pos[id] = { x: x0, y }; return GX; }
+    if (ks.length > 5 && ks.every((k) => !(kids[k] || []).length)) { // many leaf reports: wrap into a 5-wide block
+      const cols = 5; ks.forEach((k, i) => { seen.add(k); pos[k] = { x: x0 + (i % cols) * GX, y: y + GY + Math.floor(i / cols) * (H + 26) }; });
+      pos[id] = { x: x0 + (Math.min(cols, ks.length) - 1) * GX / 2, y }; return Math.min(cols, ks.length) * GX;
+    }
+    let x = x0; for (const k of ks) if (!seen.has(k)) x += place(k, x, y + GY);
+    const first = pos[ks[0]].x, last = pos[ks[ks.length - 1]].x; pos[id] = { x: (first + last) / 2, y }; return Math.max(GX, x - x0);
+  };
+  const roots = nodes.filter((n) => !hasParent.has(n.id)).sort((p, q) => (q.core ? 1 : 0) - (p.core ? 1 : 0)); let x = 40;
+  for (const r of roots) x += place(r.id, x, 40);
+  for (const n of nodes) if (!pos[n.id]) { pos[n.id] = { x, y: 40 }; x += GX; }
+  return pos;
+}
+function buildView() {
+  const real = S.team.nodes, ids = new Set(real.map((n) => n.id)); let nodes = real; const remap = {};
+  if (real.length > CLUSTER_MIN) {
+    const kids = {}, hasParent = new Set();
+    for (const e of S.team.edges) if ((e.type || 'assign') === 'assign' && ids.has(e.from) && ids.has(e.to) && e.from !== e.to && !hasParent.has(e.to)) { (kids[e.from] ||= []).push(e.to); hasParent.add(e.to); }
+    const byId = Object.fromEntries(real.map((n) => [n.id, n])); const sub = (id, acc = []) => { if (acc.includes(id)) return acc; acc.push(id); (kids[id] || []).forEach((k) => sub(k, acc)); return acc; };
+    const roots = real.filter((n) => !hasParent.has(n.id)); const cl = [];
+    for (const r of roots) for (const c of kids[r.id] || []) { const m = sub(c); if (m.length >= 3 && !expandedClusters.has(c)) { cl.push({ id: 'cl:' + c, cluster: true, head: c, members: m.map((i) => byId[i]), name: (byId[c].name || c) + ' team', role: m.length + ' agents', x: 0, y: 0 }); m.forEach((i) => { remap[i] = 'cl:' + c; }); } }
+    nodes = [...real.filter((n) => !remap[n.id]), ...cl];
+  }
+  const seenE = new Set(); const mapE = (e) => ({ ...e, from: remap[e.from] || e.from, to: remap[e.to] || e.to });
+  const edges = [...S.team.edges, ...(S.cross || []).filter((e) => !S.team.edges.some((x) => x.id === e.id))].map(mapE).filter((e) => e.from !== e.to && !seenE.has(e.from + '|' + e.to + '|' + (e.type || 'assign')) && seenE.add(e.from + '|' + e.to + '|' + (e.type || 'assign')));
+  if (graphAuto && nodes.length) { const p = treeLayout(nodes, edges.filter((e) => nodes.some((n) => n.id === e.from) && nodes.some((n) => n.id === e.to))); for (const n of nodes) { n.x = p[n.id].x; n.y = p[n.id].y; } }
+  GV = { nodes, edges, clustered: nodes.some((n) => n.cluster) };
+}
 // Nodes from other teams linked by cross-team edges, shown as dashed ghosts beside the graph.
 function ghostNodes() {
-  const mine = new Set(S.team.nodes.map((n) => n.id)); const b = graphBox(S.team.nodes); const out = new Map();
+  const vis = GV ? GV.nodes : S.team.nodes; const mine = new Set(S.team.nodes.map((n) => n.id)); const b = graphBox(vis); const out = new Map();
   for (const e of S.team.edges) if (!mine.has(e.to) && !out.has(e.to)) out.set(e.to, { id: e.to, side: 1 });
   for (const e of S.cross || []) if (!mine.has(e.from) && !out.has(e.from)) out.set(e.from, { id: e.from, side: -1 });
   let r = 0, l = 0;
   return [...out.values()].map((g) => ({ ...g, ghost: true, name: nodeName(g.id), role: 'other team', x: g.side > 0 ? b.x + b.w + 120 : b.x - W - 120, y: b.y + (g.side > 0 ? r++ : l++) * (H + 40) }));
 }
-const allGraphNodes = () => [...S.team.nodes, ...ghostNodes()];
+const allGraphNodes = () => [...(GV ? GV.nodes : S.team.nodes), ...ghostNodes()];
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 // ---------- orthogonal edge routing ----------
 // Edges are elbow (right-angle) paths, never diagonals: a horizontally-dominated pair exits through
@@ -879,13 +919,13 @@ function edgeGeom(a, b, off, obs = [], seed = 0) {
 }
 const overlaps = (r, q) => r.x < q.x + q.w && q.x < r.x + r.w && r.y < q.y + q.h && q.y < r.y + r.h;
 function renderGraph() {
-  const svg = $('#graph'); svg.innerHTML = '';
+  const svg = $('#graph'); svg.innerHTML = ''; buildView();
   if (vpTeam !== ctx.t) { vpTeam = ctx.t; vpCount = 0; } // first open always re-fits (once visible, see below) — a persisted viewport can be stale (tiny/panned away)
   const defs = el('defs', {}, svg);
   for (const t of ['assign', 'message', 'review', 'sel']) { const m = el('marker', { id: 'arr-' + t, viewBox: '0 0 10 10', refX: 9, refY: 5, markerWidth: 8, markerHeight: 8, markerUnits: 'userSpaceOnUse', orient: 'auto-start-reverse' }, defs); el('path', { d: 'M0,1 L9,5 L0,9 z', class: 'arrow arrow-' + t }, m); }
   const vp = el('g', { class: 'viewport' }, svg); const eL = el('g', { class: 'edges' }, vp), nL = el('g', { class: 'nodes' }, vp), xL = el('g', { class: 'edges cross-layer' }, vp), lL = el('g', { class: 'labels' }, vp); // cross-team edges draw above nodes so the dashed line into the ghost stays visible
   const nodes = allGraphNodes(); const byId = Object.fromEntries(nodes.map((n) => [n.id, n]));
-  const edges = [...S.team.edges, ...(S.cross || []).filter((e) => !S.team.edges.some((x) => x.id === e.id))];
+  const edges = GV.edges;
   const pairN = {}, pairI = {}; const pk = (e) => [e.from, e.to].sort().join('|'); edges.forEach((e) => { pairN[pk(e)] = (pairN[pk(e)] || 0) + 1; });
   const srcN = {}, srcI = {}; edges.forEach((e) => { srcN[e.from] = (srcN[e.from] || 0) + 1; });
    const blocks = nodes.map((n) => ({ x: n.x - 4, y: n.y - 4, w: W + 8, h: H + 8 })); const pills = [];
@@ -899,12 +939,12 @@ function renderGraph() {
     const type = e.type || 'assign'; const cross = !!(e.crossTeam || a.ghost || b.ghost); const g = edgeGeom(a, b, off, blocks, edgeSeed(e));
     const isSel = sel.edge === e.id;
     const L = cross ? xL : eL; const hit = el('path', { d: g.d, class: 'edgehit' }, L);
-    const ep = el('path', { d: g.d, class: `edge edge-${type}` + (cross ? ' cross' : '') + (isSel ? ' sel' : ''), 'marker-end': `url(#arr-${isSel ? 'sel' : type})`, 'data-id': e.id }, L);
+    const ep = el('path', { d: g.d, class: `edge edge-${type}` + (type === 'assign' ? ' primary' : ' secondary') + (byId[e.to] && !byId[e.to].ghost && liveOf(byId[e.to]) === 'working' ? ' active' : '') + (cross ? ' cross' : '') + (isSel ? ' sel' : ''), 'marker-end': `url(#arr-${isSel ? 'sel' : type})`, 'data-id': e.id }, L);
     // Label pill at the curve midpoint, nudged along the normal until it clears nodes and other pills.
     // At far zoom (lod-far, <0.6) every pill is one more strand in the tangle — the edge colour and the
     // legend already carry the type, so pills drop out unless the edge is selected (t_1c907493).
     const pick = (ev) => { ev.stopPropagation(); hideMenus(); sel = { ...sel, edge: e.id, node: null }; renderGraph(); renderNodeForm(); };
-    const pg = VP.zoom >= 0.6 || isSel ? (() => {
+    const pg = isSel ? (() => { // label pills only for the selected edge: colour + legend carry the type, hover reveals the rest
       const label = type + (cross ? ' · cross-team' : ''); const pw = 10 + label.length * 5.8, ph = 16;
       let [px, py] = g.mid; for (let s = 0, r = { x: px - pw / 2, y: py - ph / 2, w: pw, h: ph }; s < 12 && [...blocks, ...pills].some((q) => overlaps(r, q)); s++) { const d = (s % 2 ? -1 : 1) * Math.ceil((s + 1) / 2) * 12; px = g.mid[0] + g.n[0] * d; py = g.mid[1] + g.n[1] * d; r = { x: px - pw / 2, y: py - ph / 2, w: pw, h: ph }; }
       pills.push({ x: px - pw / 2, y: py - ph / 2, w: pw, h: ph });
@@ -919,7 +959,19 @@ function renderGraph() {
   }
   for (const n of nodes) {
     if (n.ghost) { const g = el('g', { class: 'ghost', transform: `translate(${n.x},${n.y})` }, nL); el('rect', { width: W, height: H, rx: 12 }, g); el('text', { x: 14, y: 28, class: 'nname' }, g).textContent = clipText(n.name, 22); el('text', { x: 14, y: 46, class: 'nrole' }, g).textContent = 'in another team'; continue; }
-    const live = nodeLive(n); const ns = (S.nstat || {})[n.id] || {};
+    if (n.cluster) {
+      const cnt = { working: 0, 'needs-human': 0, idle: 0 }; n.members.forEach((m) => { cnt[nodeLive(m) === 'working' ? 'working' : nodeLive(m) === 'needs-human' ? 'needs-human' : 'idle']++; });
+      const lv = liveOf(n); const g = el('g', { class: 'node cluster st-' + lv, transform: `translate(${n.x},${n.y})`, 'data-id': n.id }, nL);
+      el('rect', { class: 'card stack2', width: W, height: H, rx: 12, x: 8, y: 8 }, g); el('rect', { class: 'card stack1', width: W, height: H, rx: 12, x: 4, y: 4 }, g); el('rect', { class: 'card', width: W, height: H, rx: 12 }, g);
+      const c = agentColor(n.head); el('circle', { class: 'avatar', cx: 30, cy: 26, r: 14, style: `fill:var(--agent-${c})` }, g); el('text', { x: 30, y: 30.5, class: 'avtext', 'text-anchor': 'middle' }, g).textContent = n.members.length;
+      el('text', { x: 52, y: 23, class: 'nname' }, g).textContent = clipText(n.name, 18); el('text', { x: 52, y: 38, class: 'nrole' }, g).textContent = n.role + ' · expand';
+      n.members.slice(0, 16).forEach((m, i) => el('circle', { class: 'mdot s-' + nodeLive(m), cx: 16 + i * 10, cy: 54, r: 3.5 }, g));
+      el('text', { x: 12, y: 72, class: 'clsum' }, g).textContent = [cnt.working && cnt.working + ' working', cnt['needs-human'] && cnt['needs-human'] + ' needs you', cnt.idle && cnt.idle + ' idle'].filter(Boolean).join(' · ');
+      el('title', {}, g).textContent = n.members.map((m) => `${m.name} — ${nodeLive(m)}`).join('\n');
+      g.style.cursor = 'pointer'; g.onclick = (ev) => { ev.stopPropagation(); expandedClusters.add(n.head); renderGraph(); fitView(); };
+      continue;
+    }
+    const live = nodeLive(n); const ns = (S.nstat || {})[n.id] || {}; const c = agentColor(n.id);
     const g = el('g', { class: 'node' + (sel.node === n.id || connectFrom === n.id ? ' sel' : '') + ' st-' + live + (live === 'working' ? ' working' : '') + (rtuFor(n.id) ? ' rtpaused' : ''), transform: `translate(${n.x},${n.y})`, 'data-id': n.id }, nL);
     el('rect', { class: 'card', width: W, height: H, rx: 12 }, g);
     el('rect', { class: 'stripe', width: 4, height: H - 20, x: 0, y: 10, rx: 2, style: `fill:${agentVar(n.id)}` }, g);
@@ -946,6 +998,7 @@ function renderGraph() {
     const cb = el('g', { class: 'capsdot caps-' + capsSt, transform: `translate(7,${H - 8})` }, g); el('circle', { r: 4 }, cb);
     el('title', {}, cb).textContent = capsSt === 'none' ? 'Capabilities not probed yet' : capsSt === 'error' ? 'Capability probe failed' : `Capabilities probed${n.capabilitiesProbedAt ? ' ' + new Date(n.capabilitiesProbedAt).toLocaleString() : ''}`;
     const sg = el('g', { class: 'status s-' + live, transform: `translate(${W - 16},16)` }, g); el('circle', { r: 6 }, sg); el('title', {}, sg).textContent = live;
+    const sp = el('g', { class: 'stpill sp-' + live, transform: `translate(${W - 78},-8)` }, g); el('rect', { width: 70, height: 16, rx: 8 }, sp); el('text', { x: 35, y: 12, 'text-anchor': 'middle' }, sp).textContent = live === 'working' ? '● Working' : live === 'needs-human' ? '● Needs you' : 'Idle';
     const pres = el('g', { class: 'pres ' + presence(n.id), transform: `translate(${W - 16},16)` }, g); el('circle', { r: 8 }, pres);
     const pf = pfState(n);
     const badge = el('g', { class: 'pfbadge pf-' + pf, transform: `translate(${W - 34},16)` }, g);
@@ -989,6 +1042,8 @@ function renderGraph() {
     });
     const h = el('circle', { class: 'handle', cx: W, cy: H / 2, r: 6 }, g); el('title', {}, h).textContent = 'Drag to connect';
     h.onmousedown = (ev) => startLink(ev, n);
+    const hl = (on) => { svg.classList.toggle('focusing', on); for (const it of edgeLayout.per) if (it.a === n || it.b === n) it.path.classList.toggle('hl', on); g.classList.toggle('hl', on); };
+    g.onmouseenter = () => hl(true); g.onmouseleave = () => hl(false);
     g.onmousedown = (ev) => { if (ev.button === 0) startDrag(ev, n, g); else if (ev.button === 2) { ev.stopPropagation(); selectNode(n.id); nodeMenu(ev, n); } };
     g.oncontextmenu = (ev) => { ev.preventDefault(); ev.stopPropagation(); if ($('#ctxmenu').classList.contains('hidden')) { selectNode(n.id); nodeMenu(ev, n); } };
   }
@@ -1070,17 +1125,9 @@ function canvasMenu(ev) {
 async function addAgentAt(x, y) { const k = S.team.nodes.length; const role = k === 0 ? 'PM' : 'Dev'; const n = await call('addNode', { name: `${role} ${k + 1}`, role, x: Math.round(x), y: Math.round(y) }); sel.node = n.id; refresh(); }
 // Layered (Sugiyama-lite) layout: longest-path layers over assign/review edges, barycentre ordering, centred rows.
 async function autoLayout() {
-  const ns = S.team.nodes; if (!ns.length) return; const ids = new Set(ns.map((n) => n.id));
-  const es = S.team.edges.filter((e) => ids.has(e.from) && ids.has(e.to) && e.from !== e.to && (e.type || 'assign') !== 'message');
-  const layer = Object.fromEntries(ns.map((n) => [n.id, 0]));
-  for (let it = 0; it < ns.length; it++) { let ch = false; for (const e of es) if (layer[e.to] < layer[e.from] + 1 && layer[e.from] + 1 < ns.length) { layer[e.to] = layer[e.from] + 1; ch = true; } if (!ch) break; }
-  const layers = []; ns.forEach((n) => (layers[layer[n.id]] ||= []).push(n.id)); const rows = []; layers.filter(Boolean).forEach((l) => { for (let i = 0; i < l.length; i += 4) rows.push(l.slice(i, i + 4)); });
-  const pos = {}; const maxW = Math.max(...rows.filter(Boolean).map((r) => r.length)); const GX = W + 60, GY = H + 80;
-  rows.filter(Boolean).forEach((row, li) => {
-    if (li) { const bc = (id) => { const p = es.filter((e) => e.to === id && pos[e.from]).map((e) => pos[e.from].x); return p.length ? p.reduce((a, b) => a + b, 0) / p.length : Infinity; }; row.sort((a, b) => bc(a) - bc(b)); }
-    const x0 = 40 + (maxW - row.length) * GX / 2; row.forEach((id, i) => { pos[id] = { x: Math.round(x0 + i * GX), y: 40 + li * GY }; });
-  });
-  await call('setPositions', pos); await refresh(); fitView();
+  if (!S.team.nodes.length) return; graphAuto = true; expandedClusters.clear(); renderGraph();
+  if (!GV.clustered) await call('setPositions', Object.fromEntries(S.team.nodes.map((n) => [n.id, { x: n.x, y: n.y }])));
+  fitView();
 }
 // While a node is dragged, re-route every edge against its new position and patch the existing
 // path/pill DOM in place, so connections track the card live instead of jumping on mouseup.
@@ -1104,7 +1151,7 @@ function startDrag(ev, n, g) {
   const mv = (e) => { moved = moved || Math.abs(e.clientX - sx) + Math.abs(e.clientY - sy) > 2; if (!moved) return; n.x = Math.round(ox + (e.clientX - sx) / VP.zoom); n.y = Math.round(oy + (e.clientY - sy) / VP.zoom); g.setAttribute('transform', `translate(${n.x},${n.y})`); dragEdges(n); };
   const up = async () => {
     window.removeEventListener('mousemove', mv); window.removeEventListener('mouseup', up);
-    if (moved) { await call('updateNode', n.id, { x: n.x, y: n.y }); renderGraph(); return; }
+    if (moved) { if (graphAuto) { graphAuto = false; if (!GV.clustered) await call('setPositions', Object.fromEntries(S.team.nodes.map((m) => [m.id, { x: m.x, y: m.y }]))); } await call('updateNode', n.id, { x: n.x, y: n.y }); renderGraph(); return; }
     if (connectMode) {
       if (!connectFrom) { connectFrom = n.id; $('#hint').textContent = `From ${n.name}: now click the target node`; }
       else { const from = connectFrom; connectFrom = null; connectMode = false; $('#connect').classList.remove('on'); $('#hint').textContent = ''; return connect(from, n.id, $('#edgetype').value); }
