@@ -7,6 +7,7 @@
     "start": "electron .",
     "test": "node --test test/*.test.js",
     "e2e": "node cli/e2e.js",
+    "smoke:real": "node cli/smoke-discovery-limits.js",
     "smoke": "AGENTS_SQUAD_SMOKE=1 electron .",
     "gui-e2e": "mkdir -p e2e-shots && AGENTS_SQUAD_PROJECT=$(mktemp -d) AGENTS_SQUAD_GUI_E2E=$PWD/e2e-shots electron .",
     "gui-e2e:overview": "mkdir -p e2e-shots && AGENTS_SQUAD_PROJECT=$(mktemp -d) AGENTS_SQUAD_GUI_E2E=$PWD/e2e-shots AGENTS_SQUAD_GUI_E2E_ONLY=overview electron .",
@@ -20,7 +21,16 @@
     "gui-e2e:conflict": "mkdir -p e2e-shots && AGENTS_SQUAD_PROJECT=$(mktemp -d) AGENTS_SQUAD_GUI_E2E=$PWD/e2e-shots AGENTS_SQUAD_GUI_E2E_ONLY=conflict electron .",
     "gui-e2e:mainlogswiki": "mkdir -p e2e-shots && AGENTS_SQUAD_PROJECT=$(mktemp -d) AGENTS_SQUAD_GUI_E2E=$PWD/e2e-shots AGENTS_SQUAD_GUI_E2E_ONLY=mainlogswiki electron .",
     "gui-e2e:teamfilter": "mkdir -p e2e-shots && AGENTS_SQUAD_PROJECT=$(mktemp -d) AGENTS_SQUAD_GUI_E2E=$PWD/e2e-shots AGENTS_SQUAD_GUI_E2E_ONLY=teamfilter electron .",
-    "gui-e2e:critique": "mkdir -p e2e-shots && AGENTS_SQUAD_PROJECT=$(mktemp -d) AGENTS_SQUAD_GUI_E2E=$PWD/e2e-shots AGENTS_SQUAD_GUI_E2E_ONLY=critique electron ."
+    "gui-e2e:critique": "mkdir -p e2e-shots && AGENTS_SQUAD_PROJECT=$(mktemp -d) AGENTS_SQUAD_GUI_E2E=$PWD/e2e-shots AGENTS_SQUAD_GUI_E2E_ONLY=critique electron .",
+    "gui-e2e:logsdesign": "mkdir -p e2e-shots && AGENTS_SQUAD_PROJECT=$(mktemp -d) AGENTS_SQUAD_GUI_E2E=$PWD/e2e-shots AGENTS_SQUAD_GUI_E2E_ONLY=logsdesign electron .",
+    "gui-e2e:critique": "mkdir -p e2e-shots && AGENTS_SQUAD_PROJECT=$(mktemp -d) AGENTS_SQUAD_GUI_E2E=$PWD/e2e-shots AGENTS_SQUAD_GUI_E2E_ONLY=critique electron .",
+    "gui-e2e:limits": "mkdir -p e2e-shots && AGENTS_SQUAD_PROJECT=$(mktemp -d) AGENTS_SQUAD_GUI_E2E=$PWD/e2e-shots AGENTS_SQUAD_GUI_E2E_ONLY=limits electron .",
+    "gui-e2e:limits-providers": "mkdir -p e2e-shots && AGENTS_SQUAD_PROJECT=$(mktemp -d) AGENTS_SQUAD_GUI_E2E=$PWD/e2e-shots AGENTS_SQUAD_GUI_E2E_ONLY=limits-providers electron .",
+    "gui-e2e:existingdata": "mkdir -p e2e-shots && AGENTS_SQUAD_PROJECT=$(mktemp -d) AGENTS_SQUAD_GUI_E2E=$PWD/e2e-shots AGENTS_SQUAD_GUI_E2E_ONLY=existingdata electron .",
+    "gui-e2e:discovery": "mkdir -p e2e-shots && AGENTS_SQUAD_PROJECT=$(mktemp -d) AGENTS_SQUAD_GUI_E2E=$PWD/e2e-shots AGENTS_SQUAD_GUI_E2E_ONLY=discovery electron .",
+    "gui-e2e:usage": "mkdir -p e2e-shots && AGENTS_SQUAD_PROJECT=$(mktemp -d) AGENTS_SQUAD_GUI_E2E=$PWD/e2e-shots AGENTS_SQUAD_GUI_E2E_ONLY=usage electron .",
+    "gui-e2e:helpycode": "mkdir -p e2e-shots && AGENTS_SQUAD_PROJECT=$(mktemp -d) AGENTS_SQUAD_GUI_E2E=$PWD/e2e-shots AGENTS_SQUAD_GUI_E2E_ONLY=helpycode electron .",
+    "gui-e2e:subagents": "mkdir -p e2e-shots && AGENTS_SQUAD_PROJECT=$(mktemp -d) AGENTS_SQUAD_GUI_E2E=$PWD/e2e-shots AGENTS_SQUAD_GUI_E2E_ONLY=subagents electron ."
   },
   "license": "MIT",
   "dependencies": {

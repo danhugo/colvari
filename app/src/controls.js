@@ -24,6 +24,15 @@ function validateDeps(taskId, deps, tasks) {
   return ids;
 }
 
+// ---- priority ----
+const PRIORITIES = ['P0', 'P1', 'P2', 'P3'];
+const DEFAULT_PRIORITY = 'P2';
+const PRIORITY_RANK = Object.fromEntries(PRIORITIES.map((p, i) => [p, i]));
+function normalizePriority(p) { return PRIORITIES.includes(p) ? p : DEFAULT_PRIORITY; }
+const priorityRank = (t) => PRIORITY_RANK[t && t.priority] ?? PRIORITY_RANK[DEFAULT_PRIORITY];
+// Highest priority first (P0..P3); ties keep original relative order (stable sort).
+const byPriority = (tasks) => [...tasks].sort((a, b) => priorityRank(a) - priorityRank(b));
+
 // ---- budgets ----
 const num = (v) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? n : 0; };
 // Returns null or a reason string. agent: orchestrator counters of one node; totals: {cost, tokens} of this Run.
@@ -49,11 +58,16 @@ function gateStatus(status, node, settings, byHuman = false) {
 
 // ---- persisted logs ----
 const LOG_CAP = 5000;
-const logLine = (l) => JSON.stringify({ at: l.at || Date.now(), nodeId: l.nodeId || null, kind: l.kind, text: String(l.text ?? '').slice(0, 4000), taskId: l.taskId || null, task: l.task || null });
+// Monitor events (plan t_a4ceb629/C) carry structured {reason, taskIds, action} the log UI reads;
+// other kinds keep the whitelist so unknown extras never reach the persisted file.
+const monitorFields = (l) => l.kind === 'monitor'
+  ? { reason: l.reason ?? null, taskIds: Array.isArray(l.taskIds) ? l.taskIds : null, action: l.action ?? null }
+  : {};
+const logLine = (l) => JSON.stringify({ at: l.at || Date.now(), nodeId: l.nodeId || null, kind: l.kind, text: String(l.text ?? '').slice(0, 4000), taskId: l.taskId || null, task: l.task || null, subagentId: l.subagentId || null, ...monitorFields(l) });
 function parseLogs(text, limit = 2000) {
   const out = [];
   for (const line of String(text || '').split('\n')) { if (!line.trim()) continue; try { out.push(JSON.parse(line)); } catch {} }
   return out.slice(-limit);
 }
 
-module.exports = { depIds, openBlockers, isBlocked, validateDeps, budgetExceeded, projectBudgetExceeded, needsApproval, gateStatus, LOG_CAP, logLine, parseLogs };
+module.exports = { depIds, openBlockers, isBlocked, validateDeps, budgetExceeded, projectBudgetExceeded, needsApproval, gateStatus, LOG_CAP, logLine, parseLogs, PRIORITIES, DEFAULT_PRIORITY, normalizePriority, priorityRank, byPriority };

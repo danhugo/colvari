@@ -1,0 +1,16 @@
+Usage: codex [options] [command]
+
+Codex CLI
+
+Commands:
+  exec          Run a task non-interactively (supports --json for structured output)
+  goal          Run until a completion condition is met, checking progress each pass
+  apply         Apply a generated patch
+
+Options:
+  --json                       Emit JSON events on stdout
+  --full-auto                  Run with full automation, no prompts
+
+Slash commands:
+  /diff
+  /explain

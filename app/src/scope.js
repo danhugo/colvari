@@ -35,4 +35,22 @@ function canModifyTask(team, nodeId, task) {
 function canSetStatus(team, nodeId, task, status) {
   return canModifyTask(team, nodeId, task) || (['review', 'done'].includes(status) && canReviewTask(team, nodeId, task));
 }
-module.exports = { outgoing, incoming, canAssign, canMessage, canReviewTask, reviewees, visibleTask, canModifyTask, canSetStatus, typeOf };
+// ---- core-agent team management (recruit_agent / retire_agent / update_agent) ----
+// update_agent may change ONLY these node fields (prompt maps to systemPrompt in board-tools); any
+// other key is refused, so a core can never set core/createdBy/disabledBoardTools/... on a teammate.
+const AGENT_PATCH_FIELDS = ['role', 'prompt', 'runtime', 'model', 'effort'];
+// Permissiveness order used to cap a recruit's permission mode at its core's: a recruit never runs
+// with more power than the agent that created it. plan (read-only) < default < acceptEdits < bypass.
+const PERMISSION_RANK = { plan: 0, default: 1, acceptEdits: 2, bypassPermissions: 3 };
+const capPermissionMode = (coreMode, mode) => ((PERMISSION_RANK[mode] ?? PERMISSION_RANK.default) > (PERMISSION_RANK[coreMode] ?? PERMISSION_RANK.default) ? coreMode : mode);
+// A core may retire/update ANY teammate except cores: never itself, never a core node (human-made
+// teammates included). Nodes of other teams never reach this check — they are not resolvable in the
+// core's team-scoped store.
+const canManageAgent = (core, target) => !!core && !!target && target.id !== core.id && target.core !== true;
+// Retire scope, used by EVERY agent retire path: canManageAgent first (never itself, never a core
+// node), then the target's protected flag. Protected blocks retire only — update_agent keeps using
+// canManageAgent. Only the human may change `protected` (setNodeProtected IPC), so no agent, the
+// core included, can retire a protected teammate.
+const canRetire = (core, target) => canManageAgent(core, target) && target.protected !== true;
+
+module.exports = { outgoing, incoming, canAssign, canMessage, canReviewTask, reviewees, visibleTask, canModifyTask, canSetStatus, typeOf, AGENT_PATCH_FIELDS, PERMISSION_RANK, capPermissionMode, canManageAgent, canRetire };

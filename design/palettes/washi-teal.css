@@ -1,0 +1,38 @@
+/* Palette C — Washi Teal (brand teal kept, warm paper, green ok). Assign = teal, message = indigo, review = amber.
+   Override for tokens.css: paste after the base tokens (light, dark, and OS-dark blocks). */
+:root {
+  --bg-app: #f5f3ee; --bg-sidebar: #ece9e2; --bg-surface: #ffffff; --bg-raised: #ffffff; --bg-hover: #e5e1d8; --bg-active: #d9ece8;
+  --bg-bubble: #ffffff; --bg-bubble-self: #0f6e66; --bg-code: #f0ede6;
+  --fg-primary: #1a1d1c; --fg-secondary: #474c4a; --fg-muted: #5d6260; --fg-on-accent: #ffffff;
+  --border: #e2ded5; --border-strong: #cdc8bd;
+  --accent: #0f6e66; --accent-soft: #dff0ec; --accent-text: #0d625b;
+  --edge: #858880;
+  --success: #1f7a4d; --success-soft: #def2e5; --success-text: #1a6b43;
+  --warning: #c98a00; --warning-soft: #fbefd4; --warning-text: #7f5600; --warning-strong: #a15c00;
+  --danger: #c93a34; --danger-soft: #fbe3e0; --info: #3b56b0;
+  --human: #1a1d1c;
+}
+[data-theme="dark"] {
+  --bg-app: #111514; --bg-sidebar: #0c0f0e; --bg-surface: #171c1b; --bg-raised: #1d2322; --bg-hover: #242b2a; --bg-active: #16362f;
+  --bg-bubble: #1d2322; --bg-bubble-self: #0f6e66; --bg-code: #0e1211;
+  --fg-primary: #ebefed; --fg-secondary: #b3bbb8; --fg-muted: #8a9390; --fg-on-accent: #0c1413;
+  --border: #252c2b; --border-strong: #333c3a;
+  --accent: #3cc9ae; --accent-soft: #133a33; --accent-text: #5fe0c5;
+  --edge: #6c7573;
+  --success: #7fd08a; --success-soft: #16301c; --success-text: #7fd08a;
+  --warning: #f0b44c; --warning-soft: #3a2c10; --warning-text: #f0b44c; --warning-strong: #f0b44c;
+  --danger: #ff7a72; --danger-soft: #3d1a1c; --info: #95abff;
+  --human: #ebefed;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg-app: #111514; --bg-sidebar: #0c0f0e; --bg-surface: #171c1b; --bg-raised: #1d2322; --bg-hover: #242b2a; --bg-active: #16362f;
+  --bg-bubble: #1d2322; --bg-bubble-self: #0f6e66; --bg-code: #0e1211;
+  --fg-primary: #ebefed; --fg-secondary: #b3bbb8; --fg-muted: #8a9390; --fg-on-accent: #0c1413;
+  --border: #252c2b; --border-strong: #333c3a;
+  --accent: #3cc9ae; --accent-soft: #133a33; --accent-text: #5fe0c5;
+  --edge: #6c7573;
+  --success: #7fd08a; --success-soft: #16301c; --success-text: #7fd08a;
+  --warning: #f0b44c; --warning-soft: #3a2c10; --warning-text: #f0b44c; --warning-strong: #f0b44c;
+  --danger: #ff7a72; --danger-soft: #3d1a1c; --info: #95abff;
+  --human: #ebefed;
+} }

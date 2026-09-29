@@ -27,3 +27,36 @@ test('room events: thoughts, tool chips with results, handoffs, questions; linke
   const g = C.group(ev); assert.deepStrictEqual(g.map((x) => [x.who, x.items.length]), [['n1', 1], ['n2', 3], ['n1', 1], ['n2', 1], ['n2', 1]]);
   assert.strictEqual(C.roomEvents(Array.from({ length: 700 }, (_, i) => ({ nodeId: 'n1', kind: 'text', text: 'x', at: i })), [], [], []).length, C.MAX);
 });
+
+test('attachments: fmtSize, fileUrl encoding, messages carry atts into room events', () => {
+  assert.strictEqual(C.fmtSize(0), '0 B'); assert.strictEqual(C.fmtSize(999), '999 B');
+  assert.strictEqual(C.fmtSize(2048), '2.0 KB'); assert.strictEqual(C.fmtSize(5 * 1048576), '5.0 MB'); assert.strictEqual(C.fmtSize(undefined), '');
+  assert.strictEqual(C.fileUrl('/tmp/a b/c.png'), 'file:///tmp/a%20b/c.png');
+  const att = { path: '/store/attachments/1-2-shot.png', name: 'shot.png', mime: 'image/png', size: 12345 };
+  const ev = C.roomEvents([], [], [{ from: 'human', to: 'n1', text: 'see shot', at: 5, attachments: [att] }], []);
+  assert.deepStrictEqual(ev[0].atts, [att]);
+  assert.strictEqual(C.roomEvents([], [], [{ from: 'human', text: 'no atts', at: 5 }], [])[0].atts, null);
+});
+
+test('attachments: attThumbs HTML — lazy file:// img for images, name chip otherwise, escaped; none → empty', () => {
+  const img = { path: '/store/a b/shot.png', name: 'shot.png', mime: 'image/png', size: 2048 };
+  const h = C.attThumbs([img]);
+  assert.match(h, /<img class="att-thumb" src="file:\/\/\/store\/a%20b\/shot\.png" loading="lazy"/);
+  assert.match(h, /title="shot\.png · 2\.0 KB"/);
+  const doc = { path: '/store/x.md', name: '<b>&x</b>.md', mime: 'text/markdown', size: 9 };
+  const hd = C.attThumbs([doc]);
+  assert.match(hd, /📄 &lt;b&gt;&amp;x&lt;\/b&gt;\.md/); assert.doesNotMatch(hd, /<b>/);
+  assert.match(hd, /title="&lt;b&gt;&amp;x&lt;\/b&gt;\.md · 9 B"/);
+  assert.strictEqual(C.attThumbs([]), ''); assert.strictEqual(C.attThumbs(null), '');
+  assert.doesNotMatch(C.attThumbs([{ path: '/p/x.png', name: 'x.png', mime: '', size: 1 }]), /<img/); // empty mime → file chip, not img
+});
+
+test('attachments: identical consecutive messages collapse, but only when neither carries attachments', () => {
+  const a = { path: '/p/1.png', name: '1.png', mime: 'image/png', size: 1 };
+  const plain = [{ from: 'human', to: 'n1', text: 'ping', at: 1 }, { from: 'human', to: 'n1', text: 'ping', at: 2 }];
+  const c1 = C.collapseRepeats(C.roomEvents([], [], plain, []));
+  assert.strictEqual(c1.length, 1); assert.strictEqual(c1[0].count, 2); // collapses
+  const withAtt = [{ from: 'human', to: 'n1', text: 'ping', at: 1, attachments: [a] }, { from: 'human', to: 'n1', text: 'ping', at: 2 }];
+  const c2 = C.collapseRepeats(C.roomEvents([], [], withAtt, []));
+  assert.strictEqual(c2.length, 2); assert.strictEqual(c2[0].count, undefined); // atts keep bubbles apart
+});

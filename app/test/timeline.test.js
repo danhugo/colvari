@@ -13,7 +13,18 @@ test('timeline: keeps only agent runs, maps start/end per agent+task', () => {
   ];
   const tl = TL.timeline(runs);
   assert.equal(tl.length, 1);
-  assert.deepEqual(tl[0], { nodeId: 'n1', agent: 'Dev', taskId: 't1', task: 'Do X', startedAt: '2026-01-01T00:00:00.000Z', endedAt: '2026-01-01T00:01:00.000Z', durationMs: 60000, model: 'claude-x', isError: false });
+  assert.deepEqual(tl[0], { nodeId: 'n1', agent: 'Dev', taskId: 't1', task: 'Do X', startedAt: '2026-01-01T00:00:00.000Z', endedAt: '2026-01-01T00:01:00.000Z', durationMs: 60000, model: 'claude-x', isError: false, teamId: null, teamName: null });
+});
+
+test('timeline: tags entries with teamId/teamName from the nodeTeams map', () => {
+  const runs = [
+    { kind: 'agent', nodeId: 'n1', agent: 'Dev', taskId: 't1', task: 'Do X', startedAt: '2026-01-01T00:00:00.000Z' },
+    { kind: 'agent', nodeId: 'n2', agent: 'Rev', taskId: 't2', task: 'Do Y', startedAt: '2026-01-01T00:00:01.000Z' },
+  ];
+  const nodeTeams = { n1: { teamId: 'team-a', teamName: 'Alpha' } };
+  const tl = TL.timeline(runs, [], nodeTeams);
+  assert.deepEqual(tl.find((e) => e.nodeId === 'n1'), { nodeId: 'n1', agent: 'Dev', taskId: 't1', task: 'Do X', startedAt: '2026-01-01T00:00:00.000Z', endedAt: null, durationMs: 0, model: '', isError: false, teamId: 'team-a', teamName: 'Alpha' });
+  assert.equal(tl.find((e) => e.nodeId === 'n2').teamId, null);
 });
 
 test('logEntries: maps log lines to {ts, agentId, level, text, taskId, task}', () => {
@@ -25,11 +36,17 @@ test('logEntries: maps log lines to {ts, agentId, level, text, taskId, task}', (
   ];
   const es = TL.logEntries(lines);
   assert.deepEqual(es, [
-    { ts: 1000, agentId: 'n1', level: 'info', text: 'started', taskId: null, task: '' },
-    { ts: 1001, agentId: 'n1', level: 'error', text: 'boom', taskId: 't1', task: 'Do X' },
-    { ts: 1002, agentId: 'n2', level: 'warn', text: 'warn text', taskId: null, task: '' },
-    { ts: 1003, agentId: null, level: 'info', text: 'hello', taskId: null, task: '' },
+    { ts: 1000, agentId: 'n1', level: 'info', text: 'started', taskId: null, task: '', subagentId: null, teamId: null, teamName: null },
+    { ts: 1001, agentId: 'n1', level: 'error', text: 'boom', taskId: 't1', task: 'Do X', subagentId: null, teamId: null, teamName: null },
+    { ts: 1002, agentId: 'n2', level: 'warn', text: 'warn text', taskId: null, task: '', subagentId: null, teamId: null, teamName: null },
+    { ts: 1003, agentId: null, level: 'info', text: 'hello', taskId: null, task: '', subagentId: null, teamId: null, teamName: null },
   ]);
+});
+
+test('logEntries: tags entries with teamId/teamName from the nodeTeams map', () => {
+  const lines = [{ at: 1, nodeId: 'n1', kind: 'system', text: 'hi' }];
+  const es = TL.logEntries(lines, { n1: { teamId: 'team-a', teamName: 'Alpha' } });
+  assert.deepEqual(es[0], { ts: 1, agentId: 'n1', level: 'info', text: 'hi', taskId: null, task: '', subagentId: null, teamId: 'team-a', teamName: 'Alpha' });
 });
 
 test('timeline: lanes sorted needs-attention first (waiting_for_human, blocked, error), then normal', () => {
@@ -69,6 +86,25 @@ test('orchestrator snapshot exposes timeline/logs/wiki from the store', () => {
   assert.equal(snap.timeline[0].taskId, 't1');
   assert.ok(snap.logs.some((l) => l.agentId === 'n1' && l.level === 'error' && l.text === 'boom'));
   assert.deepEqual(snap.wiki, [{ title: 'Foo', body: 'body text', updatedAt: store.readWiki('Foo').updatedAt, author: 'human' }]);
+  assert.deepEqual(snap.nodeTeams, {});
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('orchestrator snapshot tags timeline/logs with team info via nodeTeams', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-timeline-teams-'));
+  const store = new Store(dir);
+  fs.writeFileSync(path.join(dir, 'project.json'), JSON.stringify({ id: 'p1', name: 'P', teams: [{ id: 'team-a', name: 'Alpha' }] }));
+  store.write('team-team-a', { nodes: [{ id: 'n1', name: 'Dev', role: 'Dev' }], edges: [] });
+  store.addRun({ kind: 'agent', nodeId: 'n1', agent: 'Dev', taskId: 't1', task: 'Do X', startedAt: '2026-01-01T00:00:00.000Z', endedAt: '2026-01-01T00:01:00.000Z', durationMs: 60000, model: 'claude-x', isError: false, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, reportedCostUsd: 0, billingSource: 'subscription' });
+  store.appendLog({ nodeId: 'n1', kind: 'error', text: 'boom', at: 5 });
+
+  const orch = new Orchestrator(store);
+  const snap = orch.snapshot();
+  assert.deepEqual(snap.nodeTeams, { n1: { teamId: 'team-a', teamName: 'Alpha' } });
+  assert.equal(snap.timeline[0].teamId, 'team-a');
+  assert.equal(snap.timeline[0].teamName, 'Alpha');
+  assert.equal(snap.logs.find((l) => l.text === 'boom').teamId, 'team-a');
 
   fs.rmSync(dir, { recursive: true, force: true });
 });
@@ -82,7 +118,7 @@ test('orchestrator.log attaches the agent\'s current taskId+task to persisted lo
   orch.log(null, 'system', 'no agent');
   const logs = orch.logs();
   const boom = logs.find((l) => l.text === 'boom');
-  assert.deepEqual(boom, { ts: boom.ts, agentId: 'n1', level: 'error', text: 'boom', taskId: 't1', task: 'Do X' });
+  assert.deepEqual(boom, { ts: boom.ts, agentId: 'n1', level: 'error', text: 'boom', taskId: 't1', task: 'Do X', subagentId: null, teamId: null, teamName: null });
   assert.equal(logs.find((l) => l.text === 'no agent').taskId, null);
 
   fs.rmSync(dir, { recursive: true, force: true });

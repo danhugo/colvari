@@ -99,7 +99,10 @@ test('goal mode resumes the session until the checker says met', async () => {
   assert.equal(agentRuns[1][agentRuns[1].indexOf('--resume') + 1], 'sess-1');
   assert.match(agentRuns[1][1], /NOT met yet/);
   const done = s.getTask(t.id);
-  assert.equal(done.status, 'done'); assert.equal(done.iterations, 2); assert.ok(done.sessionId);
+  // t_699b67b7: the checker's "met" ends the run, but the hand-off lands in review —
+  // done requires reviewer/owner verification.
+  assert.equal(done.status, 'review'); assert.equal(done.iterations, 2);
+  assert.ok(done.sessions && done.sessions[`${n.id}:claude`], 'the last run stores its session under the agent+runtime key');
 });
 
 test('goal mode stops at max iterations and sends the task to review', async () => {
@@ -183,4 +186,15 @@ test('buildPrompt keeps node id and lists outgoing teammates', () => {
   const a = s.addNode({ name: 'Pam', role: 'PM' }); const b = s.addNode({ name: 'Dave', role: 'Dev' }); s.addEdge(a.id, b.id);
   const p = buildPrompt(s.getTeam(), s.getTeam().nodes[0], s.createTask({ title: 'x', assignee: a.id }));
   assert.match(p, new RegExp(`node id: ${a.id}`)); assert.match(p, /assign tasks to: Dave/);
+});
+
+test('buildPrompt worktree rule: only when the run actually got a worktree', () => {
+  const { buildPrompt } = require('../src/orchestrator');
+  const s = new Store(fs.mkdtempSync(path.join(os.tmpdir(), 'squad-bp-')));
+  const a = s.addNode({ name: 'Pam', role: 'Dev' });
+  const t = s.createTask({ title: 'x', assignee: a.id });
+  const team = s.getTeam(); const node = team.nodes.find((n) => n.id === a.id);
+  const wt = buildPrompt(team, node, t, { worktree: true });
+  assert.match(wt, /Write code only in your task worktree \(your cwd\)\. Never edit the main checkout; only the merge step changes it\./);
+  assert.ok(!buildPrompt(team, node, t).includes('Never edit the main checkout'), 'no worktree rule for runs in the shared dir');
 });

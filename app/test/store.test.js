@@ -17,6 +17,28 @@ test('team nodes and edges', () => {
   assert.deepEqual(s.getTeam().edges, []);
 });
 
+test('new nodes without coordinates get a free position (no stacking)', () => {
+  const s = tmp();
+  const a = s.addNode({ name: 'Brand Designer', role: 'Dev' });
+  const b = s.addNode({ name: 'UI Dev', role: 'Dev' });
+  assert.notDeepEqual([a.x, a.y], [b.x, b.y]);
+  assert.ok(Math.abs(a.x - b.x) >= 200 || Math.abs(a.y - b.y) >= 110, 'node cards must not overlap');
+  const seed = s.addNode({ name: 'Pinned', role: 'PM', x: 80, y: 360 });
+  assert.deepEqual([seed.x, seed.y], [80, 360]); // explicit x/y with no collision is kept
+  const next = s.addNode({ name: 'Next', role: 'Dev' });
+  assert.ok(Math.abs(next.x - seed.x) >= 200 || Math.abs(next.y - seed.y) >= 110, 'placed nodes are skipped');
+});
+
+test('explicit x/y that overlaps a placed node claims a free spot instead', () => {
+  const s = tmp();
+  const a = s.addNode({ name: 'First', role: 'Dev', x: 420, y: 300 });
+  // toolbar add staggers by (count%3)*20, so back-to-back adds are 20px apart
+  const b = s.addNode({ name: 'Second', role: 'Dev', x: 440, y: 300 });
+  assert.ok(Math.abs(a.x - b.x) >= 200 || Math.abs(a.y - b.y) >= 110, 'back-to-back adds must not overlap');
+  const free = s.addNode({ name: 'Free', role: 'Dev', x: 700, y: 300 });
+  assert.deepEqual([free.x, free.y], [700, 300]); // a collision-free explicit spot is still kept
+});
+
 test('board tasks: create, status, comment, persistence', () => {
   const s = tmp();
   const t = s.createTask({ title: 'Goal', assignee: 'n1' });
@@ -103,6 +125,23 @@ test('changing an agent role to a preset fills its empty prompt, tools and permi
   assert.equal(s.updateNode(n2.id, { role: 'Auditor' }).systemPrompt, 'mine', 'explicit values win');
   s.updateNode(n.id, { systemPrompt: '' });
   assert.equal(s.getTeam().nodes.find((x) => x.id === n.id).systemPrompt, '', 'no refill without a role change');
+});
+
+test('switching a node runtime drops its rate-limit snapshot (readings are runtime-scoped)', () => {
+  const s = tmp();
+  const n = s.addNode({ name: 'A', role: 'Dev', runtime: 'claude' });
+  const rl = { fiveHour: { pct: 0.91, resetsAt: new Date(Date.now() + 3600000).toISOString() }, weekly: { pct: 0.28, resetsAt: new Date(Date.now() + 96 * 3600000).toISOString() }, runtime: 'claude' };
+  s.updateNode(n.id, { rateLimits: rl, rateLimitsAt: new Date().toISOString() });
+  assert.equal(s.getTeam().nodes.find((x) => x.id === n.id).rateLimits.weekly.pct, 0.28);
+  // claude -> helpycode: the claude CLI's windows must not resurface as helpycode quota
+  s.updateNode(n.id, { runtime: 'helpycode' });
+  const after = s.getTeam().nodes.find((x) => x.id === n.id);
+  assert.equal(after.rateLimits, undefined);
+  assert.equal(after.rateLimitsAt, undefined);
+  // an update that doesn't touch runtime keeps the reading
+  s.updateNode(n.id, { rateLimits: rl, rateLimitsAt: new Date().toISOString() });
+  s.updateNode(n.id, { name: 'A2' });
+  assert.equal(s.getTeam().nodes.find((x) => x.id === n.id).rateLimits.weekly.pct, 0.28);
 });
 
 test('human inbox: ask_human blocks until answered, approvals create items', async () => {
