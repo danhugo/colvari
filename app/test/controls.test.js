@@ -9,7 +9,7 @@ const { Orchestrator, humanPrompt } = require('../src/orchestrator');
 const tmp = (p) => fs.mkdtempSync(path.join(os.tmpdir(), p));
 const fakeClaude = (dir, body) => { const f = path.join(dir, 'fake-claude.sh'); fs.writeFileSync(f, '#!/bin/sh\n' + body); fs.chmodSync(f, 0o755); return f; };
 const RESULT = (cost, inTok = 10, outTok = 10) => `echo '{"type":"result","subtype":"success","session_id":"sess1","total_cost_usd":${cost},"num_turns":1,"usage":{"input_tokens":${inTok},"output_tokens":${outTok}}}'\n`;
-const runToDone = (o) => new Promise((res) => { o.once('done', res); o.once('idle', res); o.start(); }); // a drained board idles now (t_b2273507)
+const runToDone = (o) => new Promise((res) => { o.once('done', res); o.start(); });
 const waitFor = async (fn, ms = 5000) => { const t0 = Date.now(); while (!fn()) { if (Date.now() - t0 > ms) throw new Error('timeout'); await new Promise((r) => setTimeout(r, 20)); } };
 
 test('dependencies: openBlockers, cycles and self references', () => {
@@ -86,7 +86,7 @@ test('orchestrator: blocked task waits for its dependency', async () => {
   // Reviewer pickups repeat the task ids; the devs themselves still ran first -> second, in order.
   assert.deepEqual(runs.filter((r) => r.nodeId !== rev.id).map((r) => r.taskId), [first.id, second.id]); // with 2 slots, the second still ran only after the first
   assert.ok(s.listTasks().every((t) => t.status === 'done'));
-  assert.ok(s.readLogs().some((l) => /Board drained — run stays on/.test(l.text)), 'a drained board idles the run (t_b2273507)'); // logs persisted per project
+  assert.ok(s.readLogs().some((l) => /Finished/.test(l.text))); // logs persisted per project
 });
 
 test('orchestrator: blocked-only board stops with a clear reason', async () => {
@@ -98,11 +98,7 @@ test('orchestrator: blocked-only board stops with a clear reason', async () => {
   s.createTask({ title: 'b', assignee: x.id, blockedBy: [a.id] });
   const o = new Orchestrator(s); const notes = []; o.on('notify', (n) => notes.push(n));
   await runToDone(o);
-  // t_b2273507: the board is stuck, not finished — the run goes idle and the notification says why.
-  assert.equal(o.runs, 0);
-  assert.equal(o.runStateView().state, 'idle');
-  assert.match(notes[0].title, /Run idle/);
-  assert.match(notes[0].body, /1 unfinished task/);
+  assert.equal(o.runs, 0); assert.match(notes[0].body, /blocked/);
 });
 
 test('orchestrator: review task with no reviewer edge stays in review and is surfaced, never auto-done', async () => {
@@ -147,7 +143,7 @@ exec sleep 5
   const x = s.addNode({ name: 'X', role: 'Dev' });
   const t = s.createTask({ title: 'job', assignee: x.id });
   const o = new Orchestrator(s);
-  const done = new Promise((res) => { o.once('done', res); o.once('idle', res); }); o.start();
+  const done = new Promise((res) => o.once('done', res)); o.start();
   await waitFor(() => fs.existsSync(argsLog) && s.getTask(t.id).sessionId === undefined && o.agents[x.id].status === 'working');
   await new Promise((r) => setTimeout(r, 200));
   const m = o.sendToAgent(x.id, 'use port 8080');
@@ -162,7 +158,7 @@ exec sleep 5
 
   // stopAgent: the run is killed and the task goes to review (not done).
   const t2 = s.createTask({ title: 'job2', assignee: x.id });
-  const done2 = new Promise((res) => { o.once('done', res); o.once('idle', res); }); o.start();
+  const done2 = new Promise((res) => o.once('done', res)); o.start();
   await waitFor(() => o.agents[x.id].status === 'working' && o.agents[x.id].taskId === t2.id);
   await new Promise((r) => setTimeout(r, 200));
   assert.equal(o.stopAgent(x.id), true);
@@ -199,7 +195,7 @@ test('watchdog: a stale-task nudge wakes the core once, with the monitor event (
   // time, so the same stale set can only ever produce this one nudge — a built-in wake-loop check.
   const real = Date.now; const shifted = Date.now() + 20 * 60000; Date.now = () => shifted;
   let done;
-  try { done = new Promise((res) => { o.once('done', res); o.once('idle', res); }); o.start(); } finally { Date.now = real; }
+  try { done = new Promise((res) => o.once('done', res)); o.start(); } finally { Date.now = real; }
   // RED on current code: the nudge is a Board-only system message nobody wakes for.
   await done;
   // Assert through the PERSISTED logs — the same readLogs path the monitor UI renders

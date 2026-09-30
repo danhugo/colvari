@@ -50,7 +50,7 @@ test('tick() sweeps orphaned in_progress tasks and re-dispatches instead of stop
   const t = s.createTask({ title: 'stranded', assignee: node.id });
   s.updateTask(t.id, { status: 'in_progress' }); // simulate a crashed prior run, no live process
   const o = new Orchestrator(s);
-  const done = new Promise((res) => { o.on('done', res); o.once('idle', res); }); // drain idles now (t_b2273507)
+  const done = new Promise((res) => o.on('done', res));
   o.start();
   await done;
   assert.equal(s.getTask(t.id).status, 'done');

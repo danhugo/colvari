@@ -27,7 +27,7 @@ test('parallel: 3 independent dev tasks across 2 teams overlap; dependent waits 
   const o = new Orchestrator(s);
   let depStartedWhileBlockerOpen = false;
   o.on('state', () => { if (s.getTask(tdep.id).status !== 'todo' && s.getTask(ta.id).status !== 'done') depStartedWhileBlockerOpen = true; });
-  await new Promise((res) => { o.once('done', res); o.once('idle', res); o.start(); }); // drain idles now (t_b2273507)
+  await new Promise((res) => { o.once('done', res); o.start(); });
   assert.ok(s.listTasks().every((t) => t.status === 'done'));
   const run = (tid) => s.listRuns().find((r) => r.taskId === tid && r.kind === 'agent' && r.nodeId !== rev.id); // the dev's run, not the reviewer pickup
   const win = (tid) => { const r = run(tid); return [Date.parse(r.startedAt), Date.parse(r.endedAt)]; };

@@ -49,7 +49,7 @@ test('orchestrator: scheduler dispatches the highest-priority ready task first',
   const high = s.createTask({ title: 'high', assignee: n.id, priority: 'P0' });
   const o = new Orchestrator(s);
   const runs = []; o.on('run', (r) => runs.push(r.taskId));
-  const done = new Promise((res) => { o.on('done', res); o.once('idle', res); }); // drain idles now (t_b2273507); explicit stop still emits done
+  const done = new Promise((res) => o.on('done', res));
   o.start();
   await done;
   assert.equal(runs[0], high.id, 'P0 task must be dispatched before the P3 task');
@@ -78,7 +78,7 @@ test('orchestrator: review task with a reviewer edge is dispatched to the review
   s.updateTask(t.id, { status: 'review' }); // e.g. left in review by a previous, now-dead run
   const dependent = s.createTask({ title: 'depends on review', assignee: dev.id, blockedBy: [t.id] });
   const o = new Orchestrator(s);
-  const done = new Promise((res) => { o.on('done', res); o.once('idle', res); }); // drain idles now (t_b2273507); explicit stop still emits done
+  const done = new Promise((res) => o.on('done', res));
   o.start();
   await done;
   assert.equal(s.getTask(t.id).status, 'done');
@@ -95,7 +95,7 @@ test('orchestrator: review task with no reviewer edge stays in review and is sur
   s.updateTask(t.id, { status: 'review' });
   const dependent = s.createTask({ title: 'waits', assignee: dev.id, blockedBy: [t.id] });
   const o = new Orchestrator(s);
-  const done = new Promise((res) => { o.on('done', res); o.once('idle', res); }); // drain idles now (t_b2273507); explicit stop still emits done
+  const done = new Promise((res) => o.on('done', res));
   o.start();
   await done;
   const after = s.getTask(t.id);
@@ -109,7 +109,7 @@ test('orchestrator: a review task parked for a human (no reviewer role) is left 
   const dev = s.addNode({ name: 'Dev', role: 'Dev' });
   const t = s.createTask({ title: 'will fail', assignee: dev.id });
   const o = new Orchestrator(s);
-  const done = new Promise((res) => { o.on('done', res); o.once('idle', res); }); // drain idles now (t_b2273507); explicit stop still emits done
+  const done = new Promise((res) => o.on('done', res));
   o.start();
   await done;
   const after = s.getTask(t.id);
@@ -139,7 +139,7 @@ test("orchestrator: stop() does not emit 'done' until every agent process has ac
 test("orchestrator: stop() with no running agents emits 'done' right away", async () => {
   const { s } = setup();
   const o = new Orchestrator(s);
-  const done = new Promise((res) => { o.on('done', res); o.once('idle', res); }); // drain idles now (t_b2273507); explicit stop still emits done
+  const done = new Promise((res) => o.on('done', res));
   o.running = true; // nothing dispatched, no procs
   o.stop();
   await done; // must resolve synchronously/immediately, not hang

@@ -81,7 +81,7 @@ echo "{\\"type\\":\\"result\\",\\"subtype\\":\\"success\\",\\"session_id\\":\\"s
   const b = s.addNode({ name: 'Px', role: 'Dev', billingMode: 'proxy', billingBaseUrl: 'http://127.0.0.1:4000' });
   const t1 = s.createTask({ title: 'one', assignee: a.id }); s.createTask({ title: 'two', assignee: b.id });
   const o = new Orchestrator(s);
-  const snap = await new Promise((res) => { o.on('done', res); o.once('idle', res); o.start(); }); // drain idles now (t_b2273507)
+  const snap = await new Promise((res) => { o.on('done', res); o.start(); });
   const runs = s.listRuns();
   assert.equal(runs.length, 2);
   const ra = runs.find((x) => x.nodeId === a.id); const rb = runs.find((x) => x.nodeId === b.id);

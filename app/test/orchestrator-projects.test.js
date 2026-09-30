@@ -19,7 +19,7 @@ test('orchestrators run different projects concurrently and independently', asyn
     s.createTask({ title: 'job ' + pid, assignee: node.id });
     return new Orchestrator(s);
   });
-  const done = orchs.map((o) => new Promise((res) => { o.on('done', res); o.once('idle', res); })); // drain idles now (t_b2273507)
+  const done = orchs.map((o) => new Promise((res) => o.on('done', res)));
   orchs.forEach((o) => o.start());
   assert.ok(orchs.every((o) => o.running));
   const snaps = await Promise.all(done);

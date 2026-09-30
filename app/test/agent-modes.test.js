@@ -83,7 +83,7 @@ if (a.includes('--json-schema')) {
   s.saveSettings({ claudePath: fake, maxRuns: 20 });
   const n = s.addNode({ name: 'D', role: 'Dev', ...node });
   const calls = () => (fs.existsSync(logf) ? fs.readFileSync(logf, 'utf8').trim().split('\n').map((l) => JSON.parse(l)) : []);
-  const run = () => new Promise((res) => { const o = new Orchestrator(s); o.on('done', res); o.once('idle', res); o.start(); }); // single/loop runs idle at drain now (t_b2273507); goal still fires done
+  const run = () => new Promise((res) => { const o = new Orchestrator(s); o.on('done', res); o.start(); });
   return { s, n, calls, run };
 }
 
@@ -144,7 +144,7 @@ test('loop mode: only the final pass asks for done, and an early done does not s
   const orig = l.s.updateTask.bind(l.s); let n = 0;
   const o = new Orchestrator(l.s);
   o.on('run', (r) => { if (r.kind === 'agent') { n++; orig(t.id, { status: 'done' }); } });
-  await new Promise((res) => { o.on('done', res); o.once('idle', res); o.start(); });
+  await new Promise((res) => { o.on('done', res); o.start(); });
   const c = l.calls();
   assert.equal(c.length, 3); assert.equal(n, 3);
   assert.match(c[0][1], /Do NOT call update_task_status with status="done"/); assert.doesNotMatch(c[0][1], /status="done"\.$/m);
@@ -159,7 +159,7 @@ test('goal checker: unreadable answer is retried, then inconclusive (not fed bac
   fs2.writeFileSync(fake, fs2.readFileSync(fake, 'utf8').replace("structured_output: { met: checks >= 2, reason: 'check ' + checks }", "result: 'no json here'"));
   const t = s.createTask({ title: 'job', assignee: n.id });
   const logs = []; const o = new Orchestrator(s); o.on('log', (l) => logs.push(l.text));
-  await new Promise((res) => { o.on('done', res); o.once('idle', res); o.start(); });
+  await new Promise((res) => { o.on('done', res); o.start(); });
   const c = calls();
   assert.equal(c.filter((a) => a.includes('--json-schema')).length, 2, 'one retry');
   assert.equal(c.filter((a) => !a.includes('--json-schema')).length, 1, 'no extra agent iteration');
