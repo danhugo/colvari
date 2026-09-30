@@ -693,6 +693,7 @@ async function guiE2E() {
       const label = await ex(`return $('#runstate').textContent`);
       expect('idle: the run stays alive with the board drained', o.running === true, o.running);
       expect('idle: the pill reads Idle (nothing to do)', /idle/i.test(label) && !/running/i.test(label), label);
+      expect('idle: Stop stays in the bar while the run idles', await ex(`return !$('#stop').classList.contains('hidden') && $('#stop').getBoundingClientRect().width > 0`));
       const runsBefore = s.listRuns().length;
       await new Promise((r) => setTimeout(r, 2500));
       expect('idle: nothing spawns while idle (zero cost waiting)', s.listRuns().length === runsBefore && o.procs.size === 0, { before: runsBefore, after: s.listRuns().length, procs: o.procs.size });
@@ -713,18 +714,22 @@ async function guiE2E() {
     await ex(`await refresh(); await w(300);`);
     const stoppedLabel = await ex(`return $('#runstate').textContent`);
     expect('stopped: the pill reads Stopped, never idle, once the run is off', /stopped/i.test(stoppedLabel) && !/idle/i.test(stoppedLabel) && !/running/i.test(stoppedLabel), stoppedLabel);
+    expect('stopped: Stop leaves the bar once the run is off', await ex(`return $('#stop').classList.contains('hidden')`));
     expect('stopped: the header shows the Run button', await ex(`return !$('#runbtn').classList.contains('hidden') && $('#runbtn').getBoundingClientRect().width > 0`));
     const third = s.createTask({ title: 'Idle: must wait while stopped', assignee: B.id });
     await new Promise((r) => setTimeout(r, 2500));
     expect('stopped: a new todo is not dispatched while stopped', s.getTask(third.id).status === 'todo' && !o.running, { status: s.getTask(third.id).status, running: o.running });
     const stoppedPending = await ex(`await refresh(); return $('#runstate').textContent`);
     expect('stopped: the pill shows the pending todo work', /stopped/i.test(stoppedPending) && /todo/i.test(stoppedPending), stoppedPending);
+    const runLbl = await ex(`return $('#runbtn').textContent`);
+    expect('stopped: the Run button carries the waiting count ("N tasks waiting — Run")', /tasks? waiting — Run/.test(runLbl), runLbl);
     await ex(`$('#tabs button[data-tab=board]').click(); await refresh(); await w(300);`); await shot('31-runidle-stopped-board');
     await ex(`$('#tabs button[data-tab=chat]').click(); await w(300);`); await shot('31-runidle-stopped-chat');
     // The header Run button is the way back: clicking it restarts the run and dispatches the waiter.
     await ex(`$('#runbtn').click(); await w(200);`);
     const resumed = await until(() => s.getTask(third.id).status === 'in_progress') && (await pillRunning(third)).seen;
     expect('stopped: the header Run button restarts the run and dispatches the waiting todo', resumed, s.getTask(third.id).status);
+    expect('stopped: the Run button reverts to plain Run once the run is on', (await ex(`await refresh(); return $('#runbtn').textContent`)) === 'Run', await ex(`return $('#runbtn').textContent`));
     await ex(`$('#tabs button[data-tab=board]').click(); await refresh(); await w(300);`); await shot('31-runidle-resumed-board');
     await ex(`$('#stop').click(); await w(300);`); await until(() => !o.running, 5000);
     await ex(`await refresh(); await w(300);`); await shot('31-runidle-board');

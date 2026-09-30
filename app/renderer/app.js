@@ -528,8 +528,9 @@ function renderHeader() {
   }
   pill.classList.toggle('on', rs.state === 'running');
   pill.classList.toggle('halt', rs.state === 'stopped' && todos > 0);
-  $('#stop').classList.toggle('hidden', !o.running); // Stop only earns a slot in the bar while something runs (⌘. always works)
+  $('#stop').classList.toggle('hidden', rs.state === 'stopped'); // Stop stays in the bar while the run is on — running or idle (⌘. always works)
   $('#runbtn').classList.toggle('hidden', rs.state !== 'stopped'); // the visible way back while the scheduler is off
+  $('#runbtn').textContent = rs.state === 'stopped' && todos ? `${todos} task${todos === 1 ? '' : 's'} waiting — Run` : 'Run'; // the waiting count rides the button (t_bd295f0e)
   // Money pill: the app's single cost total — API-eq over ALL recorded runs, the same per-run ledger
   // sum the Usage tab's grand total shows, so pill and tab can never disagree (t_b1115e48). The
   // billed vs subscription split stays in the tooltip: subscription usage is covered by the plan,
