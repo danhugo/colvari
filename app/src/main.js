@@ -594,7 +594,20 @@ async function guiE2E() {
     expect('runidle: the header Run control starts the run and dispatches the todo', started && dispatched, { started, status: s.getTask(first.id).status, label: await ex(`return $('#runstate').textContent`) });
     // The stub leaves the task in review; the PM's review pickup closes it, then the board drains.
     expect('runidle: first task closes done through the review pickup', await until(() => s.getTask(first.id).status === 'done', 30000), s.getTask(first.id).status);
-    if (o.running) {
+    // The gate must be deterministic: right after done, running is transiently true before the core
+    // drain-stop lands (t_b2273507), so sampling it here raced the stop underneath the idle branch.
+    // Settle first — the run either actually stops, or survives 2s straight with zero procs (core
+    // idle keeps it alive at drain) — then choose the branch on the settled state, never the transient.
+    const idling = await (async () => {
+      const end = Date.now() + 15000;
+      while (Date.now() < end && o.running) {
+        let stableMs = 0;
+        while (Date.now() < end && o.running && stableMs < 2000) { if (o.procs.size > 0) stableMs = 0; else stableMs += 100; await new Promise((r) => setTimeout(r, 100)); }
+        if (o.running && stableMs >= 2000) return true;
+      }
+      return false;
+    })();
+    if (idling) {
       await ex(`await refresh(); await w(300);`);
       const label = await ex(`return $('#runstate').textContent`);
       expect('idle: the run stays alive with the board drained', o.running === true, o.running);
