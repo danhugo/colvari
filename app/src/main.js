@@ -380,6 +380,39 @@ async function guiE2E() {
     await shot('chatmsg-reply');
     console.log('[gui-e2e] chatmsg', JSON.stringify({ pv, msg: !!msg, woken: !!promptArgs, reply }));
   };
+  // Composer clear-on-send (t_ada3fae8): the input empties the moment Send is pressed, before the
+  // bridge answers; a failed send hands the draft back. Success path is real (fake CLI), failure
+  // path patches orch.sendToAgent to throw.
+  const composerClearShots = async () => {
+    await waitFor(`return !!document.querySelector('#tpl-select option')`); await ex(`await refresh();`);
+    const cur = await ex(`return { p: ctx.p, t: S.teamId }`);
+    const ps = pm.store(cur.p || pid(), cur.t);
+    if (!ps.getTeam().nodes.length) { ps.addNode({ name: 'Rhea', role: 'PM', x: 60, y: 60 }); await ex(`await refresh(); await w(300);`); }
+    const coreId = await ex(`return (S.team.nodes.find((n) => isLeadRole(n.role)) || S.team.nodes[0] || {}).id`);
+    const core = ps.getTeam().nodes.find((n) => n.id === coreId);
+    expect('composerclear: a core agent exists for the composer target', !!core, coreId);
+    const d = fs.mkdtempSync(path.join(require('os').tmpdir(), 'squad-ccl-'));
+    const fake = path.join(d, 'fake-claude.sh');
+    fs.writeFileSync(fake, '#!/bin/sh\necho "$*" >> /dev/null\necho \'{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"Idle and ready — nothing to create."}]}}\'\necho \'{"type":"result","subtype":"success","session_id":"sess-ccl","total_cost_usd":0.001,"num_turns":1,"usage":{"input_tokens":10,"output_tokens":10}}\'\n');
+    fs.chmodSync(fake, 0o755);
+    ps.saveSettings({ claudePath: fake });
+    await ex(`$('#tabs button[data-tab=chat]').click(); await w(300); const i = $('#chat-input'); i.value = 'hi'; i.dispatchEvent(new Event('input')); await w(100);`);
+    // The regression itself: the click handler's sync prefix must already have cleared the box —
+    // before the fix the clear ran only after `await call(...)` answered.
+    const cleared = await ex(`$('#chat-send').click(); return $('#chat-input').value`);
+    expect('composerclear: input cleared the moment Send is pressed (not after the bridge answers)', cleared === '', cleared);
+    await new Promise((r) => setTimeout(r, 400));
+    const msg = ps.listMessages({ to: core.id }).find((m) => m.text === 'hi');
+    expect('composerclear: the send still landed main-side after the clear', !!msg && msg.from === 'human', msg || null);
+    await shot('composerclear-sent');
+    const orch2 = orchFor(cur.p || pid()); const origSend = orch2.sendToAgent;
+    orch2.sendToAgent = async () => { throw new Error('boom'); };
+    const kept = await ex(`window.alert = () => {}; const i = $('#chat-input'); i.value = 'keep me'; i.dispatchEvent(new Event('input')); $('#chat-send').click(); await w(400); return i.value`);
+    orch2.sendToAgent = origSend;
+    expect('composerclear: failed send keeps the draft in the composer', kept === 'keep me', kept);
+    await shot('composerclear-kept');
+    console.log('[gui-e2e] composerclear', JSON.stringify({ cleared, sent: !!msg, kept }));
+  };
   // Windowing (t_fb193107): 5k-message fixture, DOM bounded to the latest page, scroll-up prepends
   // older pages with the anchor held, auto-scroll only at the bottom. Injection-only, no real runs.
   const windowingShots = async () => {
@@ -1916,6 +1949,7 @@ async function guiE2E() {
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'dynamicteam') { await dynamicTeamShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'recruitinbox') { await recruitInboxShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'topbar') { await topbarShots(); throw null; }
+    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'composerclear') { await composerClearShots(); throw null; }
     // project/team management through the UI: create a project from the Startup template, then a Solo team, then switch back.
     // Wait until the template select is filled (the first refresh loads the templates) before choosing one.
     await ex(`$('#tabs button[data-tab=team]').click(); await w(300);`); // Chat is the default tab; the flow below clicks the graph
