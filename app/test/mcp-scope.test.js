@@ -65,7 +65,7 @@ test('real stdio MCP server enforces scope', async () => {
   } finally { await cd.close(); await cp.close(); }
 });
 
-test('reassign_task: PM-only, needs assign edge, refuses running/done, keeps comments', () => {
+test('reassign_task: PM-only, needs assign edge, refuses non-todo, keeps comments', () => {
   const { s, pm, dev, qa } = setup();
   s.addEdge(pm.id, qa.id);
   const t = makeTools(s, pm.id);
@@ -76,16 +76,19 @@ test('reassign_task: PM-only, needs assign edge, refuses running/done, keeps com
   const lone = s.addNode({ name: 'Lone', role: 'Dev' });
   assert.throws(() => t.reassign_task({ taskId: tk.id, assignee: lone.id }), /no assign edge/);
   s.updateTask(tk.id, { status: 'in_progress' });
-  assert.throws(() => t.reassign_task({ taskId: tk.id, assignee: dev.id }), /in_progress/);
+  assert.throws(() => t.reassign_task({ taskId: tk.id, assignee: dev.id }), /only todo/);
 });
 
-test('list_tasks dispatch: current + queued by priority per agent', () => {
+test('list_tasks sorts by assignee then priority; read_messages defaults to unread + limit', () => {
   const { s, pm, dev } = setup();
   const t = makeTools(s, pm.id);
-  const a = t.create_task({ title: 'run', assignee: dev.id }); s.updateTask(a.id, { status: 'in_progress' });
   t.create_task({ title: 'low', assignee: dev.id, priority: 'P3' });
   t.create_task({ title: 'urgent', assignee: dev.id, priority: 'P0' });
-  const d = t.list_tasks({ dispatch: true }).find((r) => r.agent === 'Dev');
-  assert.equal(d.current.title, 'run');
-  assert.deepEqual(d.queued.map((q) => q.title), ['urgent', 'low']);
+  assert.deepEqual(t.list_tasks().map((x) => x.title), ['urgent', 'low']);
+  for (let i = 0; i < 3; i++) s.sendMessage({ from: pm.id, to: dev.id, text: 'm' + i });
+  const d = makeTools(s, dev.id);
+  assert.deepEqual(d.read_messages({ limit: 2 }).map((m) => m.text), ['m1', 'm2']);
+  assert.equal(d.read_messages().length, 1); // m0 still unread; m1, m2 were marked read
+  assert.equal(d.read_messages().length, 0);
+  assert.equal(d.read_messages({ unreadOnly: false }).length, 3);
 });
