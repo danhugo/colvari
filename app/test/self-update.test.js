@@ -602,6 +602,80 @@ test('boot reaps a stale locked squad-selfupdate-* registration left by a crashe
   fs.rmSync(repo, { recursive: true, force: true });
 });
 
+// ---- t_203691fa: the 04:35 regression, end to end — a worktree sweep firing WHILE the
+// restart test step runs. Real flow on a real fixture repo (real git), and the real
+// sweepWorktrees entry point every sweeper funnels through (main.js's 10-min interval, the
+// orchestrator's, any sibling app instance's), fired from inside the running test step.
+// 04:35 precondition (t_a91c68ce root cause): the throwaway's best-effort node_modules
+// share-link is absent, leaving the registered squad-selfupdate-* worktree clean — so
+// without the lock the reaper deletes the suite's cwd mid-run, the next node --test
+// per-file child spawn dies with ENOENT (binary present) and the gate aborts, throwing
+// away the whole drain. With the fix the flow holds a git worktree lock while the suite
+// runs: the reaper skips the entry, the child spawn survives, the gate goes green.
+test('a worktree sweep firing while the restart test step runs does not abort the gate (04:35 regression)', async () => {
+  const { execFileSync, spawnSync } = require('child_process');
+  const util = require('util');
+  const WT = require('../src/worktree');
+  const repo = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'su-sweeprepo-')));
+  const g = (...a) => execFileSync('git', a, { cwd: repo, stdio: 'pipe' }).toString();
+  g('init', '-q', '-b', 'main');
+  fs.mkdirSync(path.join(repo, 'app'));
+  fs.writeFileSync(path.join(repo, 'app', 'package.json'), '{"name":"fixture","version":"1.0.0"}\n');
+  fs.writeFileSync(path.join(repo, 'README.md'), 'one\n');
+  g('-c', 'user.email=t@t', '-c', 'user.name=t', 'add', '.');
+  g('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'one');
+  try {
+    // What the test step observed while it was running.
+    const obs = { wt: null, existedAtSweep: null, lockedAtSweep: null, reapedBySweep: null, childOk: null, childErr: '' };
+    const w = new UpdateWatcher({
+      store: fakeStore(), repoDir: repo, npmDir: path.join(repo, 'app'), pollMs: 3.6e6,
+      npm: () => ({ code: 0, out: 'ok' }),
+      relaunch: () => { w.relaunched = (w.relaunched || 0) + 1; },
+      procCount: () => 0,
+      sleep: () => new Promise((r) => setTimeout(r, 1)),
+      // The suite under test: while it "runs", the sweep fires — then, exactly like node --test
+      // spawning its next per-file child, the step spawns a real child process in its cwd.
+      testRun: async (cwd) => {
+        obs.wt = path.resolve(cwd, '..'); // .../squad-selfupdate-*/app -> the throwaway worktree
+        // The 04:35 precondition: the share-link the flow creates best-effort is absent,
+        // leaving the registered worktree clean for the stray reaper (t_a91c68ce).
+        try { fs.unlinkSync(path.join(cwd, 'node_modules')); } catch {}
+        const reg = g('worktree', 'list', '--porcelain').split('\n\n').find((b) => /squad-selfupdate-/.test(b)) || '';
+        obs.wt = (reg.match(/^worktree (.*)$/m) || [])[1] || obs.wt;
+        const report = WT.sweepWorktrees({ repoDir: repo, store: { listTasks: () => [] } });
+        obs.reapedBySweep = report.strays.includes(obs.wt);
+        obs.existedAtSweep = fs.existsSync(path.join(obs.wt, '.git'));
+        obs.lockedAtSweep = g('worktree', 'list', '--porcelain').split('\n\n')
+          .some((b) => b.startsWith('worktree ' + obs.wt) && /(^|\n)locked(\n|$)/.test(b));
+        const st = spawnSync(process.execPath, ['-e', 'process.exit(0)'], { cwd, encoding: 'utf8' });
+        if (st.error) {
+          obs.childOk = false;
+          obs.childErr = util.inspect(st.error);
+          return { code: 1, out: 'node --test child spawn failed\n' + obs.childErr };
+        }
+        obs.childOk = st.status === 0;
+        return { code: obs.childOk ? 0 : 1, out: obs.childOk ? 'child spawn survived the concurrent sweep' : String(st.stderr) };
+      },
+    });
+    await w.tick(); // baseline
+    fs.writeFileSync(path.join(repo, 'README.md'), 'two\n');
+    g('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qam', 'two');
+    await w.tick(); // detects the new commit and runs the flow: drain -> build -> testing
+    while (w._busy) await new Promise((r) => setTimeout(r, 2));
+
+    assert.strictEqual(obs.childOk, true,
+      `the suite's child spawn must survive a concurrent sweep (the 04:35 ENOENT) — observed: ${JSON.stringify(obs)}`);
+    assert.strictEqual(w.phase, 'restarting',
+      `a sweep during the test step must not abort the gate — phase=${w.phase}, lastError=${JSON.stringify(w.status().lastError)}, observed: ${JSON.stringify(obs)}`);
+    assert.strictEqual(obs.reapedBySweep, false, 'the stray reaper must not reap the live test worktree');
+    assert.strictEqual(obs.lockedAtSweep, true, 'the test step holds a git worktree lock while its suite runs');
+    assert.strictEqual(w.relaunched, 1, 'the gate goes green and the restart proceeds');
+    assert.strictEqual(g('worktree', 'list', '--porcelain').includes('squad-selfupdate-'), false, 'the flow cleaned up its throwaway registration');
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
+
 test('request_self_update file is consumed and triggers the flow', async () => {
   const git = fakeGit();
   const w = makeWatcher({ git });
