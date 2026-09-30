@@ -2707,7 +2707,11 @@ app.whenReady().then(() => {
   // Worktree lifecycle sweep (t_9b662983): at boot (before any agent can spawn) and periodically
   // while each project is idle — drops worktrees whose task is done/missing (clean + merged only,
   // never a dirty or unmerged tree, never in-flight tasks) and prunes stale worktree entries.
-  const sweepWorktrees = () => { for (const p of pm.list()) { try { const o = orchs.get(p.id); if (o && o.running) continue; const r = WT.sweepWorktrees({ repoDir: APP_ROOT, store: pm.store(p.id) }); if (r.removed.length || r.retained.length) console.log('[worktrees]', JSON.stringify(r)); } catch {} } };
+  // Harness guard (t_e23df71f): perf/e2e drivers boot the app with a throwaway AGENTS_SQUAD_PROJECT
+  // whose store knows none of this repo's tasks — sweeping APP_ROOT from it deleted live worktrees
+  // (worktree.js also retains unknown ids as the second belt). Only a real install root may sweep.
+  const sweepableRoot = !TEST_MODE && !pm.root.startsWith(require('os').tmpdir());
+  const sweepWorktrees = () => { if (!sweepableRoot) return; for (const p of pm.list()) { try { const o = orchs.get(p.id); if (o && o.running) continue; const r = WT.sweepWorktrees({ repoDir: APP_ROOT, store: pm.store(p.id) }); if (r.removed.length || r.retained.length) console.log('[worktrees]', JSON.stringify(r)); } catch {} } };
   sweepWorktrees();
   setInterval(sweepWorktrees, 10 * 60_000).unref();
   // Self-update: resume a Run interrupted by a safe restart (or roll back a bad update that fails to
