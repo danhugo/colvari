@@ -328,13 +328,57 @@ async function guiE2E() {
     const mention = await ex(`return [...document.querySelectorAll('#chat-mentions div')].map((d) => d.dataset.name)`);
     await ex(`$('#chat-input').dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab' })); $('#chat-input').value += 'add a dark theme toggle'; $('#chat-input').dispatchEvent(new Event('input')); await w(200);`);
     const pv = await ex(`return $('#chat-preview').textContent`); await shot('20-chat-mention');
-    await ex(`$('#chat-send').click(); await w(1200);`); api.run = origRun;
+    // @Name = message to the agent, never a task (t_7c4538d9); read it back so the idle agent's
+    // wake sweep cannot dispatch a real run behind the suite's back.
+    await ex(`$('#chat-send').click(); await w(300);`);
+    const sentMsg = ps.listMessages({ to: b.id }).find((m) => m.text === 'add a dark theme toggle');
+    const noTaskYet = !ps.listTasks().some((x) => x.title === 'add a dark theme toggle');
+    if (sentMsg) ps.markMessagesRead([sentMsg.id]);
+    // @Name! stays the explicit task form.
+    await ex(`const i = $('#chat-input'); i.value = '@${b.name}! add a dark theme toggle'; i.dispatchEvent(new Event('input')); await w(200); $('#chat-send').click(); await w(800);`); api.run = origRun;
     const made = ps.listTasks().find((x) => x.title === 'add a dark theme toggle');
     await ex(`await refresh(); chatSig = null; renderChat(); const b = [...document.querySelectorAll('#chat-room .ch-choice')].find((x) => x.dataset.v === 'dark'); b && b.click(); await w(800);`);
-    const cm = { mention, preview: pv, task: made && { assignee: made.assignee, createdBy: made.createdBy }, answered: ps.getInboxItem(q.id).answer };
+    const cm = { mention, preview: pv, msg: sentMsg && { from: sentMsg.from, to: sentMsg.to }, task: made && { assignee: made.assignee, createdBy: made.createdBy }, answered: ps.getInboxItem(q.id).answer };
     console.log('[gui-e2e] chat', JSON.stringify({ room, thread: th, typing, ...cm }));
-    expect('chat: @mention autocomplete + preview + creates a task for the agent', mention.includes(b.name) && pv.includes('task for ' + b.name) && made && made.assignee === b.id, cm);
+    expect('chat: @mention autocomplete + preview + @Name sends a message (no auto task)', mention.includes(b.name) && pv.includes('message to ' + b.name) && sentMsg && sentMsg.from === 'human' && noTaskYet, cm);
+    expect('chat: @Name! is the explicit task form for the agent', made && made.assignee === b.id, cm);
     expect('chat: inline answer to ask_human', cm.answered === 'dark', cm);
+  };
+  // Plain text in the composer = a chat message to the core agent (t_7c4538d9): 'hi' wakes the idle
+  // core with the humanPrompt wording and its reply lands in the room; no task is created. Runs on
+  // a fake claude so the reply is deterministic and nothing real is spawned.
+  const chatMsgShots = async () => {
+    await waitFor(`return !!document.querySelector('#tpl-select option')`); await ex(`await refresh();`);
+    const cur = await ex(`return { p: ctx.p, t: S.teamId }`);
+    const ps = pm.store(cur.p || pid(), cur.t);
+    let nodes = ps.getTeam().nodes;
+    if (!nodes.length) { ps.addNode({ name: 'Rhea', role: 'PM', x: 60, y: 60 }); await ex(`await refresh(); await w(300);`); }
+    // The composer's "core agent" is the RENDERER's head pick — resolve it there, then look it up main-side.
+    const coreId = await ex(`return (S.team.nodes.find((n) => isLeadRole(n.role)) || S.team.nodes[0] || {}).id`);
+    const core = ps.getTeam().nodes.find((n) => n.id === coreId);
+    expect('chatmsg: a core agent exists for the composer target', !!core, coreId);
+    const d = fs.mkdtempSync(path.join(require('os').tmpdir(), 'squad-chatmsg-'));
+    const argsLog = path.join(d, 'args.txt');
+    const fake = path.join(d, 'fake-claude.sh');
+    fs.writeFileSync(fake, '#!/bin/sh\necho "$*" >> ' + argsLog + '\necho \'{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"Hi! Idle and ready — nothing to create."}]}}\'\necho \'{"type":"result","subtype":"success","session_id":"sess-chatmsg","total_cost_usd":0.001,"num_turns":1,"usage":{"input_tokens":10,"output_tokens":10}}\'\n');
+    fs.chmodSync(fake, 0o755);
+    ps.saveSettings({ claudePath: fake });
+    const tasksBefore = ps.listTasks().length;
+    await ex(`$('#tabs button[data-tab=chat]').click(); await w(300); const i = $('#chat-input'); i.value = 'hi there'; i.dispatchEvent(new Event('input')); await w(200);`);
+    const pv = await ex(`return $('#chat-preview').textContent`);
+    expect('chatmsg: plain text previews as a message to the core agent', pv === 'Will send a message to the core agent', pv);
+    await shot('chatmsg-preview');
+    await ex(`$('#chat-send').click(); await w(400);`);
+    const msg = ps.listMessages({ to: core.id }).find((m) => m.text === 'hi there');
+    expect('chatmsg: message stored from the human', !!msg && msg.from === 'human', msg || null);
+    let promptArgs = null;
+    for (let i = 0; i < 60 && !promptArgs; i++) { await new Promise((r) => setTimeout(r, 500)); if (fs.existsSync(argsLog)) { const c = fs.readFileSync(argsLog, 'utf8'); if (c.includes('human operator')) promptArgs = c; } }
+    expect('chatmsg: idle core woken with the human wording', !!promptArgs && promptArgs.includes('hi there') && promptArgs.includes('human operator') && promptArgs.includes('create_task only for real work'), promptArgs);
+    expect('chatmsg: no task auto-created', ps.listTasks().length === tasksBefore, { before: tasksBefore, now: ps.listTasks().length });
+    const reply = await waitFor(`return !!document.querySelector('#chat-room') && document.querySelector('#chat-room').textContent.includes('Idle and ready')`, 20000);
+    expect('chatmsg: the core reply shows in the chat room', reply);
+    await shot('chatmsg-reply');
+    console.log('[gui-e2e] chatmsg', JSON.stringify({ pv, msg: !!msg, woken: !!promptArgs, reply }));
   };
   // Windowing (t_fb193107): 5k-message fixture, DOM bounded to the latest page, scroll-up prepends
   // older pages with the anchor held, auto-scroll only at the bottom. Injection-only, no real runs.
@@ -1847,6 +1891,7 @@ async function guiE2E() {
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'conflict') { await conflictShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'graph') { await graphShots(); for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`$('#tabs button[data-tab=team]').click(); await w(500);`); await shot(`graph-${t}`); } require('electron').nativeTheme.themeSource = 'system'; throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'chat') { await chatShots(); throw null; }
+    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'chatmsg') { await chatMsgShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'windowing') { await windowingShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'firstrun') { await firstrunInbox(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'overview') { await overviewShots(); throw null; }

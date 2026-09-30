@@ -2601,9 +2601,9 @@ async function chatSend() {
   if (p.kind === 'error') return chatPreview();
   if (chatAtts.some((a) => !a.path)) return; // blocked until every chip saved (a failed chip must be removed first)
   const atts = chatAtts.length ? chatAtts.map(({ path, name, mime, size }) => ({ path, name, mime, size })) : null;
-  if (p.kind === 'task') { await call('createTask', { title: p.text.slice(0, 80), description: p.text, assignee: p.nodeId, ...(atts ? { attachments: atts } : {}) }); if (!S.orch.running) await call('run'); }
-  else if (p.kind === 'message') await call('sendToAgent', p.nodeId, p.text, ...(atts ? [null, { attachments: atts }] : []));
-  else { if (!confirm(`Start a new goal for the team?\n\n“${p.text.slice(0, 200)}”\n\nThis runs your agents (may cost tokens).`)) return; $('#goal').value = p.text; await $('#run').onclick(atts); }
+  const head = () => (S.team.nodes.find((n) => isLeadRole(n.role)) || S.team.nodes[0] || {}).id; // composer's core agent
+  if (p.kind === 'task') { await call('createTask', { title: p.text.slice(0, 80), description: p.text, assignee: p.nodeId || head(), ...(atts ? { attachments: atts } : {}) }); if (!S.orch.running) await call('run'); }
+  else if (p.kind === 'message') await call('sendToAgent', p.nodeId || head(), p.text, ...(atts ? [null, { attachments: atts }] : []));
   for (const a of chatAtts) if (a.url) URL.revokeObjectURL(a.url);
   chatAtts.length = 0; renderChatAtts();
   i.value = ''; chatPreview(); chatSig = null; refresh();

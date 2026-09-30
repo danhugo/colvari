@@ -78,19 +78,23 @@
     return out;
   }
 
-  // Fixed syntax: "@Name text" = task for Name; "@Name? text" = message to Name; anything else = goal for the head.
+  // Fixed syntax: plain text = message to the core agent; "/task text" = task for the core agent;
+  // "@Name text" = message to Name; "@Name? text" = the same message (kept for habit); "@Name! text"
+  // = task for Name. The core agent has nodeId/name null — the renderer resolves the head node.
   function parseComposer(text, nodes) {
     const s = String(text || '').trim(); if (!s) return null;
-    const m = /^@(\S+?)(\?)?(?:\s+([\s\S]*))?$/.exec(s);
+    let m = /^\/task(?:\s+([\s\S]*))?$/.exec(s);
+    if (m) { const body = (m[1] || '').trim(); if (!body) return { kind: 'error', text: 'Say what the task should do' }; return { kind: 'task', nodeId: null, name: null, text: body }; }
+    m = /^@(\S+?)([?!])?(?:\s+([\s\S]*))?$/.exec(s);
     if (m) {
       const n = (nodes || []).find((x) => x.name.toLowerCase() === m[1].toLowerCase());
       if (!n) return { kind: 'error', text: `No agent called @${m[1]}` };
       const body = (m[3] || '').trim(); if (!body) return { kind: 'error', text: `Say what you want from @${n.name}` };
-      return { kind: m[2] ? 'message' : 'task', nodeId: n.id, name: n.name, text: body };
+      return { kind: m[2] === '!' ? 'task' : 'message', nodeId: n.id, name: n.name, text: body };
     }
-    return { kind: 'goal', text: s };
+    return { kind: 'message', nodeId: null, name: null, text: s };
   }
-  const preview = (p) => !p ? '' : p.kind === 'task' ? `Will create a task for ${p.name}` : p.kind === 'message' ? `Will send a message to ${p.name}` : p.kind === 'goal' ? 'Will start a new goal for the team (asks to confirm)' : p.text;
+  const preview = (p) => !p ? '' : p.kind === 'task' ? `Will create a task for ${p.name || 'the core agent'}` : p.kind === 'message' ? `Will send a message to ${p.name || 'the core agent'}` : p.text;
   // @mention autocomplete: the partial "@xx" at the end of the text -> matching nodes.
   function mentionMatches(text, nodes) { const m = /(?:^|\s)@(\w*)$/.exec(String(text)); if (!m) return null; return (nodes || []).filter((n) => n.name.toLowerCase().startsWith(m[1].toLowerCase())); }
 

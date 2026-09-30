@@ -7,13 +7,20 @@ test('avatar colour is stable per id and independent of name', () => {
   assert.strictEqual(C.initials('Devon'), 'D'); assert.strictEqual(C.initials('Rhea Reviewer'), 'RR');
 });
 
-test('composer: @Name = task, @Name? = message, plain = goal, unknown = error', () => {
-  assert.deepStrictEqual(C.parseComposer('@devon build it', nodes), { kind: 'task', nodeId: 'n2', name: 'Devon', text: 'build it' });
-  assert.strictEqual(C.parseComposer('@Devon? how is it going', nodes).kind, 'message');
-  assert.strictEqual(C.parseComposer('hi team', nodes).kind, 'goal');
+test('composer: plain = message to the core agent, @Name = message, /task & @Name! = task, unknown = error', () => {
+  assert.deepStrictEqual(C.parseComposer('hi team', nodes), { kind: 'message', nodeId: null, name: null, text: 'hi team' });
+  assert.deepStrictEqual(C.parseComposer('@devon build it', nodes), { kind: 'message', nodeId: 'n2', name: 'Devon', text: 'build it' });
+  assert.deepStrictEqual(C.parseComposer('@Devon? how is it going', nodes), { kind: 'message', nodeId: 'n2', name: 'Devon', text: 'how is it going' });
+  assert.deepStrictEqual(C.parseComposer('/task build the thing', nodes), { kind: 'task', nodeId: null, name: null, text: 'build the thing' });
+  assert.deepStrictEqual(C.parseComposer('@Devon! build it', nodes), { kind: 'task', nodeId: 'n2', name: 'Devon', text: 'build it' });
+  assert.strictEqual(C.parseComposer('/task', nodes).kind, 'error');
   assert.strictEqual(C.parseComposer('@Zed do x', nodes).kind, 'error');
   assert.strictEqual(C.parseComposer('@Devon', nodes).kind, 'error');
   assert.strictEqual(C.parseComposer('  ', nodes), null);
+  assert.strictEqual(C.preview(C.parseComposer('hi', nodes)), 'Will send a message to the core agent');
+  assert.strictEqual(C.preview(C.parseComposer('/task do it', nodes)), 'Will create a task for the core agent');
+  assert.strictEqual(C.preview(C.parseComposer('@Devon go', nodes)), 'Will send a message to Devon');
+  assert.strictEqual(C.preview(C.parseComposer('@Devon! go', nodes)), 'Will create a task for Devon');
   assert.deepStrictEqual(C.mentionMatches('hey @De', nodes).map((n) => n.id), ['n2']); assert.strictEqual(C.mentionMatches('no mention', nodes), null);
 });
 

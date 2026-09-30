@@ -138,7 +138,7 @@ function attachedFilesLines(atts) {
 
 // Prompt for a resumed run that delivers a human message (base is included when there is no session to resume).
 function humanPrompt(text, base = null, attachments = null) {
-  return [base, `Message from the human operator (answer or act on it, then continue your task):\n${text}`, attachedFilesLines(attachments)].filter(Boolean).join('\n\n');
+  return [base, `Message from the human operator (answer or act on it, then continue your current task, if you have one):\n${text}`, 'Reply via chat; create_task only for real work.', attachedFilesLines(attachments)].filter(Boolean).join('\n\n');
 }
 
 // Short 'continue' prompt for a stalled run resumed in the same session (the session already holds
@@ -457,12 +457,12 @@ class Orchestrator extends EventEmitter {
           continue;
         }
         // Per-agent wake debounce: while an agent runs (task or wake), messages stay queued unread —
-        // never a parallel run. Once idle, unread agent->agent messages wake the agent on every sweep,
-        // burst-coalesced by the debounce timer below: message wakes are never suppressed (t_9e4b4805 —
-        // the old MIN_GAP_MS window delayed teammate messages while the agent sat idle; the pair cap in
-        // dispatchWake is the ping-pong guard). Task dispatch is NOT debounced either (an assigned/
-        // unblocked task reaches the agent right away and its prompt carries the unread count), and
-        // human/system wakes never enter this sweep.
+        // never a parallel run. Once idle, unread teammate and human messages wake the agent on every
+        // sweep, burst-coalesced by the debounce timer below: message wakes are never suppressed
+        // (t_9e4b4805 — the old MIN_GAP_MS window delayed teammate messages while the agent sat idle;
+        // the pair cap in dispatchWake is the ping-pong guard, and human senders are exempt from it).
+        // Task dispatch is NOT debounced either (an assigned/unblocked task reaches the agent right
+        // away and its prompt carries the unread count); system wakes never enter this sweep.
         const prev = a.wakePending;
         if (!prev || prev.count !== unread.length) {
           // nextWakeAt is the armed timer's due time; recomputed only on a transition so an unchanged
@@ -482,10 +482,11 @@ class Orchestrator extends EventEmitter {
       }
     } catch (e) { this.log(null, 'error', 'wake sweep: ' + e.message); }
   }
-  // Unread agent->agent messages for a node (human and system senders have their own delivery paths).
+  // Unread messages for a node from teammates or the human operator (system senders have their own
+  // delivery paths and never wake anyone).
   wakeUnread(nodeId, team = this.store.getTeam()) {
     return this.store.listMessages({ to: nodeId })
-      .filter((m) => !m.read && m.from !== nodeId && m.from !== 'human' && m.from !== 'system' && team.nodes.some((n) => n.id === m.from));
+      .filter((m) => !m.read && m.from !== nodeId && m.from !== 'system' && (m.from === 'human' || team.nodes.some((n) => n.id === m.from)));
   }
   async dispatchWake(nodeId) {
     const team = this.store.getTeam();
@@ -499,9 +500,12 @@ class Orchestrator extends EventEmitter {
     if (!msgs.length) return;
     const now = Date.now();
     const senders = [...new Set(msgs.map((m) => m.from))];
-    const capped = (f) => { const e = this.wakePairs.get(f + '>' + nodeId); return e && now - e.since < WAKE.PAIR_WINDOW_MS && e.count >= WAKE.MAX_PER_PAIR; };
+    // The human operator is never pair-capped (a chat message must always reach an idle agent);
+    // the cap only guards agent->agent ping-pong between two autonomous senders.
+    const capped = (f) => { if (f === 'human') return false; const e = this.wakePairs.get(f + '>' + nodeId); return e && now - e.since < WAKE.PAIR_WINDOW_MS && e.count >= WAKE.MAX_PER_PAIR; };
     if (senders.every(capped)) return; // ping-pong loop: every sender pair is at its cap, stay quiet
     for (const f of senders) {
+      if (f === 'human') continue;
       const k = f + '>' + nodeId; const e = this.wakePairs.get(k);
       if (!e || now - e.since >= WAKE.PAIR_WINDOW_MS) this.wakePairs.set(k, { count: 1, since: now });
       else { e.count++; if (e.count === WAKE.MAX_PER_PAIR) this.log(nodeId, 'system', `wake cap reached for messages from ${f}: no more auto-wakes from this pair for a while`); }
@@ -514,11 +518,11 @@ class Orchestrator extends EventEmitter {
     this.log(nodeId, 'system', `✉ woken by message from ${senders.map(nameOf).join(', ')}: ${msgs[0].text.slice(0, 200)}`);
     await this.wakeRun(node, msgs, team, settings);
   }
-  // Deliver already-stored messages to an IDLE agent as a wake run — the two paths the message sweep
-  // deliberately ignores (human and system senders have their own delivery): the human's answer to an
-  // ask_human (team-answers) and the core nudge (nudgeIdle). This path BYPASSES the per-agent wake
-  // debounce for human messages (an answer must reach the asker immediately); the nudge path defers
-  // to the debounce itself in nudgeIdle, so a watchdog wake never lands inside another wake's gap.
+  // Deliver already-stored messages to an IDLE agent as a wake run — an immediate, debounce-free
+  // lane alongside the sweep (which also delivers human messages since t_7c4538d9, but on the
+  // debounce timer): the human's answer to an ask_human (team-answers) must reach the asker at
+  // once, and the core nudge (nudgeIdle) defers to the per-agent gap itself in nudgeIdle, so a
+  // watchdog wake never lands inside another wake's gap.
   // Guards
   // mirror dispatchWake plus the run gate: nothing auto-starts on a stopped project, a live agent is
   // reached by its own channels, and maxRuns/maxConcurrency still bound auto-dispatch. `why` carries
@@ -576,7 +580,11 @@ class Orchestrator extends EventEmitter {
       // Wake messages can carry attachments (their paths are in wakePrompt): pass the dir like the
       // task-run path does, or the agent gets a path it cannot read.
       const wakeAtts = msgs.flatMap((m) => m.attachments || []);
-      try { args = RT.getRuntime(cfg.runtime).buildArgs(cfg, wakePrompt(team, node, msgs), settings, this.mcpConfig(node), { resume, cwd, env, ...(wakeAtts.length ? { attachDir: this.store.attachmentsDir() } : {}) }); }
+      // Human-only wake (the human's chat message or ask answer reaches an idle agent): the
+      // humanPrompt wording — wakePrompt's "teammate"/send_message framing is wrong for the human
+      // operator. Mixed or teammate-only wakes keep the teammate wording.
+      const prompt = msgs.every((m) => m.from === 'human') ? humanPrompt(msgs.map((m) => m.text).join('\n\n'), null, wakeAtts) : wakePrompt(team, node, msgs);
+      try { args = RT.getRuntime(cfg.runtime).buildArgs(cfg, prompt, settings, this.mcpConfig(node), { resume, cwd, env, ...(wakeAtts.length ? { attachDir: this.store.attachmentsDir() } : {}) }); }
       catch (e) { this.log(node.id, 'error', 'bad agent settings: ' + e.message); }
       const r = await this.spawnRun(node, args, cwd, env, settings, { ...meta, resumedFrom: args && resume ? resume : null });
       a.status = 'idle'; a.iteration = 0; a.activity = null;
