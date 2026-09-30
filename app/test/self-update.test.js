@@ -517,7 +517,12 @@ test('drain cutoff: haltProcs stops a long run, the task stays re-dispatchable a
   const { Orchestrator } = require('../src/orchestrator');
   const d = fs.mkdtempSync(path.join(os.tmpdir(), 'su-cutoff-'));
   const fake = path.join(d, 'fake-claude.sh');
-  fs.writeFileSync(fake, '#!/bin/sh\nsleep 30\n');
+  // exec is load-bearing: a bare `sleep 30` lets /bin/sh choose fork-vs-exec for the last script
+  // line, and when it forks, SIGTERM kills only sh while the orphaned sleep keeps the run's stdio
+  // pipes open — child 'close' (which spawnRun awaits) then waits out the full 30s sleep and the
+  // drain's bounded give-up resolves with the proc slot still held. exec makes the fake ONE process
+  // that dies when signalled, like the real CLI binary.
+  fs.writeFileSync(fake, '#!/bin/sh\nexec sleep 30\n');
   fs.chmodSync(fake, 0o755);
   const s = new Store(path.join(d, 'p'));
   s.saveSettings({ claudePath: fake, maxRuns: 5 });
