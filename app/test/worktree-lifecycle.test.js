@@ -9,13 +9,13 @@ const path = require('path');
 const { execFileSync } = require('child_process');
 const { Store } = require('../src/store');
 const WT = require('../src/worktree');
+const { Orchestrator } = require('../src/orchestrator');
 
 const g = (cwd, ...a) => execFileSync('git', ['-c', 'user.email=a@b', '-c', 'user.name=a', ...a], { cwd, stdio: 'pipe' }).toString().trim();
 
-// Repo (base branch `main`, a 300KB blob in an ignored node_modules/) + a Store whose task
-// carries a worktree on squad/<id> — the auto-merge.test.js setup shape. No package.json in the
-// repo, so the merge gate skips the suite and done-flips stay fast.
-function setup(taskId) {
+// Repo (base branch `main`, a 300KB blob in an ignored node_modules/). No package.json, so the
+// merge gate skips the suite and done-flips stay fast.
+function bareRepo() {
   const repo = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'wlc-repo-')));
   g(repo, 'init', '-q', '-b', 'main');
   fs.writeFileSync(path.join(repo, 'a.txt'), 'base\n');
@@ -23,6 +23,12 @@ function setup(taskId) {
   fs.mkdirSync(path.join(repo, 'node_modules'));
   fs.writeFileSync(path.join(repo, 'node_modules', 'blob.bin'), 'x'.repeat(300 * 1024));
   g(repo, 'add', '.'); g(repo, 'commit', '-q', '-m', 'init');
+  return repo;
+}
+
+// bareRepo + a Store whose task carries a worktree on squad/<id> — the auto-merge.test.js shape.
+function setup(taskId) {
+  const repo = bareRepo();
   const w = WT.ensureWorktree(repo, taskId);
   const s = new Store(fs.mkdtempSync(path.join(os.tmpdir(), 'wlc-store-')));
   let task = s.createTask({ title: 'lifecycle', assignee: 'n_dev' });
@@ -219,3 +225,42 @@ test('diskUsage: worktree count + bytes, symlinked node_modules not counted as a
 
 // Repo root owning a worktree at <root>/.squad/worktrees/<taskId>.
 function repoOf(wtPath) { return path.resolve(wtPath, '..', '..', '..'); }
+
+// ---- QA (t_3344282a): pin the removeWorktree contract store._mergeOnDone leans on ----
+
+test('removeWorktree: absent is a quiet no-op, dirty refuses, unmerged refuses, clean+merged removes and keeps the branch', () => {
+  const { repo, wt } = setup('t_lc13');
+  assert.deepStrictEqual(WT.removeWorktree(null), { removed: false, absent: true });
+  assert.deepStrictEqual(WT.removeWorktree({}), { removed: false, absent: true });
+  assert.deepStrictEqual(WT.removeWorktree({ worktreePath: path.join(repo, '.squad', 'worktrees', 't_missing') }), { removed: false, absent: true });
+  assert.strictEqual(WT.worktreeDirty(path.join(repo, '.squad', 'worktrees', 't_missing')), true, 'unreadable tree counts as dirty: removal never gambles');
+
+  fs.writeFileSync(path.join(wt, 'd.txt'), 'uncommitted\n');
+  assert.throws(() => WT.removeWorktree({ worktreePath: wt, worktreeBranch: 'squad/t_lc13' }), /uncommitted changes/);
+  assert.strictEqual(fs.existsSync(wt), true);
+
+  g(wt, 'add', '.'); g(wt, 'commit', '-q', '-m', 'work'); // clean now, but the branch is unmerged
+  assert.throws(() => WT.removeWorktree({ worktreePath: wt, worktreeBranch: 'squad/t_lc13' }), /unmerged/);
+  assert.strictEqual(fs.existsSync(wt), true);
+
+  g(repo, 'merge', '--no-ff', '-q', '-m', 'm', 'squad/t_lc13'); // the human merge path
+  assert.deepStrictEqual(WT.removeWorktree({ worktreePath: wt, worktreeBranch: 'squad/t_lc13' }), { removed: true });
+  assert.strictEqual(fs.existsSync(wt), false);
+  g(repo, 'rev-parse', '--verify', 'squad/t_lc13'); // throws (test failure) if the branch was dropped
+});
+
+// main.js sweeps at boot + every 10 min and orchestrator.start() sweeps before agents spawn
+// (orchestrator.js); this pins the start() wiring — without it a refactor could silently
+// disconnect startup cleanup while every sweepWorktrees unit test stays green.
+test('startup sweep wiring: Orchestrator.start() sweeps orphan worktrees before agents spawn', () => {
+  const repo = bareRepo();
+  const orphan = path.join(repo, '.squad', 'worktrees', 't_orpwire');
+  g(repo, 'worktree', 'add', '-b', 'squad/t_orpwire', orphan);
+  const s = new Store(fs.mkdtempSync(path.join(os.tmpdir(), 'wlc-wirestore-'))); // empty board: nothing to dispatch
+  const o = new Orchestrator(s, { repoDir: repo });
+  o.spawnFn = () => ({ unref() {} }); // stub the detached red-master health child
+  o.start();
+  try {
+    assert.strictEqual(fs.existsSync(orphan), false, 'orphan swept during start(), before any agent could spawn');
+  } finally { o.stop(); }
+});
