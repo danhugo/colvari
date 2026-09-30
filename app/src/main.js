@@ -586,6 +586,22 @@ async function guiE2E() {
     const stubCaps = { ok: true, probedAt: new Date().toISOString(), source: 'stub', slashCommands: [], commands: [], skills: [], modes: [], categorized: [] };
     team.updateNode(A.id, { capabilities: stubCaps }); team.updateNode(B.id, { capabilities: stubCaps });
     const until = async (fn, ms = 10000) => { for (let t = 0; t < ms; t += 200) { if (fn()) return true; await new Promise((r) => setTimeout(r, 200)); } return false; };
+    // Watch the header pill through a ~1s stub pickup window and report whether it ever read
+    // 'running'. A single sample after in_progress is observed races the proc's exit (poll lag +
+    // refresh round-trip eat the window on a loaded machine), so poll instead: pass on the first
+    // 'running' sighting; once the task left the pickup phase (review/done) without one, the window
+    // is definitively over and the check fails on evidence.
+    const pillRunning = async (task, ms = 10000) => {
+      const end = Date.now() + ms;
+      while (Date.now() < end) {
+        const st = s.getTask(task.id).status;
+        const label = await ex(`await refresh(); return $('#runstate').textContent`);
+        if (/running/.test(label)) return { seen: true, label, status: st };
+        if (st !== 'todo' && st !== 'in_progress') return { seen: false, label, status: st };
+        await new Promise((r) => setTimeout(r, 120));
+      }
+      return { seen: false, label: await ex(`return $('#runstate').textContent`), status: s.getTask(task.id).status };
+    };
     const o = orchFor(p);
     expect('runidle: boot comes up stopped, never silently running', o.running === false, o.running);
     const first = s.createTask({ title: 'Idle: first piece of work', assignee: B.id });
@@ -619,7 +635,7 @@ async function guiE2E() {
       expect('idle: nothing spawns while idle (zero cost waiting)', s.listRuns().length === runsBefore && o.procs.size === 0, { before: runsBefore, after: s.listRuns().length, procs: o.procs.size });
       const second = s.createTask({ title: 'Idle: picked up without a click', assignee: B.id });
       expect('idle: a new todo is picked up on its own', await until(() => s.getTask(second.id).status === 'in_progress', 8000), s.getTask(second.id).status);
-      expect('idle: the pill reads running again during pickup', /running/.test(await ex(`await refresh(); return $('#runstate').textContent`)));
+      expect('idle: the pill reads running again during pickup', (await pillRunning(second)).seen);
       await until(() => s.getTask(second.id).status === 'done', 30000);
       await ex(`$('#stop').click(); await w(400);`); // Stop while idle: the explicit off switch
       expect('idle: Stop turns the run off', await until(() => !o.running, 5000), o.running);
@@ -629,7 +645,7 @@ async function guiE2E() {
       await new Promise((r) => setTimeout(r, 2500));
       expect('stopped: a new todo is not dispatched while stopped', s.getTask(third.id).status === 'todo' && !o.running, { status: s.getTask(third.id).status, running: o.running });
       await ex(`await refresh(); $('#run').click(); await w(200);`);
-      const resumed = await until(() => s.getTask(third.id).status === 'in_progress') && /running/.test(await ex(`await refresh(); return $('#runstate').textContent`));
+      const resumed = await until(() => s.getTask(third.id).status === 'in_progress') && (await pillRunning(third)).seen;
       expect('stopped: Run starts the run again and dispatches the waiting todo', resumed, s.getTask(third.id).status);
       await ex(`$('#stop').click(); await w(300);`); await until(() => !o.running, 5000);
       await ex(`$('#tabs button[data-tab=board]').click(); await refresh(); await w(300);`); await shot('31-runidle-board');
