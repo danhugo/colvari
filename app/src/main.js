@@ -547,8 +547,8 @@ async function guiE2E() {
     await ex(`$('#tabs button[data-tab=usage]').click(); await refresh(); await w(500);`);
     const meterQ = `{ pct: $('#limitmeter .lm-fill')?.style.width, text: $('#limitmeter').textContent, warn: /near limit/.test($('#limitmeter').textContent), pause: /paused/.test($('#limitmeter').textContent) }`;
     const under = await ex(`return ${meterQ}`);
-    expect('usage limits: top-bar #limitmeter shows 60% used, 6 stale-excluded, no warn/pause yet', under.pct === '60%' && !under.warn && !under.pause, under);
-    expect('usage limits: #limitmeter includes a reset countdown', /↻\d+[hm]/.test(under.text), under.text);
+    expect('usage limits: top-bar #limitmeter is quiet at 60% used (warning chip only from 80%, t_ea33cef4)', under.text === '' && !under.warn && !under.pause, under);
+    expect('usage limits: the Usage tab still shows the 60% window with a reset countdown', await ex(`return /60%/.test($('#us-limits').textContent)`));
     // The meter must also honor the CLI's own reported subscription rate-limit % (usage.js parseRateLimits,
     // fed into orch.subscriptionRateLimits off the CLI's init event), not only the local run-derived count —
     // other clients sharing the same subscription window aren't reflected in this project's local runs.
@@ -654,10 +654,9 @@ async function guiE2E() {
       await ex(`await refresh(); await w(500);`);
       const m = await ex(`return ${grab}`);
       const title6 = await ex(`return (document.querySelector('#limitmeter [data-provider]') || {}).title || ''`);
-      expect('limits-providers: Claude-only team shows the CLI-reported 42% (worst window) in the bar, weekly 13% in the detail title, never the higher local 60% count', !m.hidden && m.txt.includes('42%') && !m.txt.includes('60%') && title6.includes('13%'), { m, title6 });
-      expect('limits-providers: Claude-only meter stays calm below the warn line and counts down the reset', !/near limit|paused/.test(m.txt) && /↻/.test(m.txt), m.txt);
-      await shot('limits-providers-claude-only');
-      scenarios.push({ name: 'Claude only', id: pj.id, m, g: await geomCheck('claude-only') });
+      expect('limits-providers: Claude-only team at 42%: top bar stays quiet (chip only from 80%); usageStatus carries the CLI-reported 42%', m.hidden && m.chips === 0 && JSON.stringify(m.st.providers).includes('0.42'), { m, title6 });
+        await shot('limits-providers-claude-only');
+      scenarios.push({ name: 'Claude only', id: pj.id, m });
       // The stubs stay: the contract loop below re-reads each project's meter and asserts the very
       // windows seeded here (clearing them made every provider flip to 'unknown' by then).
     }
@@ -669,10 +668,9 @@ async function guiE2E() {
       s.saveSettings({ codexPath: cx });
       await ex(`await refresh(); await w(500);`);
       const m = await ex(`return ${grab}`);
-      expect('limits-providers: Codex-only team (Codex reports nothing) shows no fabricated percentage', !m.hidden && !/\d+%/.test(m.txt), m.txt);
-      expect('limits-providers: Codex-only meter explains why there is no data, without warn/pause', /no limit data|limits unknown/.test(m.txt) && !/near limit|paused/.test(m.txt), m.txt);
-      await shot('limits-providers-codex-only');
-      scenarios.push({ name: 'Codex only', id: pj.id, m, g: await geomCheck('codex-only') });
+      expect('limits-providers: Codex-only team (Codex reports nothing) shows nothing in the top bar, no fabricated percentage', m.hidden && !/\d+%/.test(m.txt), m.txt);
+        await shot('limits-providers-codex-only');
+      scenarios.push({ name: 'Codex only', id: pj.id, m });
     }
     // Mixed: only the Claude node reports — its numbers surface without being attributed to Codex.
     {
@@ -683,9 +681,9 @@ async function guiE2E() {
       o.subscriptionRateLimits = { [c.id]: { fiveHour: rl(0.42, 1), weekly: rl(0.13, 72) } };
       await ex(`await refresh(); await w(500);`);
       const m = await ex(`return ${grab}`);
-      expect('limits-providers: mixed team surfaces the Claude-reported 42% while Codex stays silent', !m.hidden && m.txt.includes('42%'), m.txt);
+      expect('limits-providers: mixed team at 42%: top bar quiet; Claude-reported 42% is in usageStatus', m.hidden && JSON.stringify(m.st.providers).includes('0.42'), m.txt);
       await shot('limits-providers-mixed');
-      scenarios.push({ name: 'mixed', id: pj.id, m, g: await geomCheck('mixed') });
+      scenarios.push({ name: 'mixed', id: pj.id, m });
     }
     // Feature gate for the chip contract: provider-keyed usageStatus (Devon's model) or [data-provider]
     // chips (Uma's UI). Skipped loudly until then; once active, a mismatch red-lines the case on purpose.
@@ -700,15 +698,9 @@ async function guiE2E() {
         await ex(`await switchTo({ p: '${x.id}' }); await w(500);`);
         const t = (await ex(`return $('#limitmeter').textContent.toLowerCase()`)) || '';
         const provs = provsOf(x.m.st);
-        if (x.name === 'Claude only') {
-          expect('limits-providers[contract]: Claude-only top bar is labeled for the Claude provider', t.includes('claude'), t);
-          expect('limits-providers[contract]: Claude-only usageStatus carries the CLI window under the claude provider', provs.some((p) => JSON.stringify(p).toLowerCase().includes('claude')) && hasPct(provs), provs);
-        } else if (x.name === 'Codex only') {
-          expect('limits-providers[contract]: Codex-only top bar has no Claude wording anywhere (no claude/5h/weekly)', !/claude|5h|weekly/.test(t), t);
-          expect('limits-providers[contract]: Codex-only shows a "limits unknown" state, never a fabricated 0%', /unknown/.test(t) && !/\d+%/.test(t), t);
-        } else {
-          expect('limits-providers[contract]: mixed top bar names ONLY the worst provider (claude) — one fixed chip', t.includes('claude') && !t.includes('codex'), t);
-          expect('limits-providers[contract]: mixed shows the Claude-reported 42% on the summary chip', t.includes('42%'), t);
+        expect(`limits-providers[contract]: ${x.name} — top bar has no chip below 80%`, t === '', t);
+        if (x.name === 'Claude only') expect('limits-providers[contract]: Claude-only usageStatus carries the CLI window under the claude provider', provs.some((p) => JSON.stringify(p).toLowerCase().includes('claude')) && hasPct(provs), provs);
+        else if (x.name === 'mixed') {
           const codex = provs.filter((p) => JSON.stringify(p).toLowerCase().includes('codex'));
           expect('limits-providers[contract]: mixed — Claude numbers never bleed onto the Codex entry', codex.length > 0 && codex.every((p) => !hasPct(p)), codex);
         }
@@ -851,12 +843,16 @@ async function guiE2E() {
     const meterPendingBefore = await ex(`return { hidden: $('#limitmeter').classList.contains('hidden'), pending: $('#limitmeter').textContent }`);
     // The provider-chip era replaced the old "5h – no limit data" pending chips with one honest
     // "Limits: … · limits unknown" summary chip (t_bc19b2f5) — still visible, never a fabricated %.
-    expect('existing-data: limit meter shows pending state (not hidden) with no limits config and no CLI-reported rate limit yet', meterPendingBefore.hidden === false && /limits unknown/.test(meterPendingBefore.pending), meterPendingBefore);
+    expect('existing-data: limit meter is hidden with no limits config and no CLI-reported rate limit yet (warning chip only)', meterPendingBefore.hidden === true, meterPendingBefore);
     o.subscriptionRateLimits = { [pm1.id]: { fiveHour: { pct: 0.42, resetsAt: new Date(Date.now() + 3600000).toISOString() } } };
     await ex(`await refresh(); await w(400);`);
     const meterQ = `{ hidden: $('#limitmeter').classList.contains('hidden'), pct: $('#limitmeter .lm-fill')?.style.width, text: $('#limitmeter').textContent }`;
     const meter = await ex(`return ${meterQ}`);
-    expect('existing-data: limit meter becomes visible from the CLI-reported rate limit alone', meter.hidden === false && meter.pct === '42%', meter);
+    expect('existing-data: limit meter stays hidden at a CLI-reported 42% (quiet below 80%)', meter.hidden === true, meter);
+    o.subscriptionRateLimits = { [pm1.id]: { fiveHour: { pct: 0.92, resetsAt: new Date(Date.now() + 3600000).toISOString() } } };
+    await ex(`await refresh(); await w(400);`);
+    const meter92 = await ex(`return ${meterQ}`);
+    expect('existing-data: limit warning chip appears from the CLI-reported rate limit alone at 92%', meter92.hidden === false && meter92.pct === '92%', meter92);
     o.subscriptionRateLimits = {};
     for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`await w(200);`); await shot(`existingdata-limits-${t}`); }
     // Effort badge: never set on this node, so the node form must fall back to the 'low' default.
@@ -1697,7 +1693,7 @@ async function guiE2E() {
     let nodes = ts.getTeam().nodes;
     if (nodes.length < 2) { ts.addNode({ name: 'Pia', role: 'PM', runtime: 'claude', model: 'opus', x: 60, y: 60 }); ts.addNode({ name: 'Devon', role: 'Dev', runtime: 'codex', model: 'gpt-5.6-terra', x: 320, y: 60 }); nodes = ts.getTeam().nodes; }
     const rl = (pct, hrs) => ({ pct, resetsAt: new Date(Date.now() + hrs * 3600000).toISOString() });
-    o.subscriptionRateLimits = { [nodes[0].id]: { fiveHour: rl(0.42, 1), weekly: rl(0.13, 72) }, [nodes[1].id]: { fiveHour: rl(0.66, 2) } };
+    o.subscriptionRateLimits = { [nodes[0].id]: { fiveHour: rl(0.92, 1), weekly: rl(0.13, 72) }, [nodes[1].id]: { fiveHour: rl(0.66, 2) } };
     // Real usage rows too: an empty #totalcost hides itself, and the human's overflow happens with
     // the pill populated.
     for (let i = 0; i < 3; i++) {
@@ -1708,7 +1704,7 @@ async function guiE2E() {
     // thread pane and prove #chat-thread.hidden still toggles (t_a99ed2c2).
     ts.createTask({ title: 'Thread pane geometry', assignee: nodes[0].id, createdBy: nodes[1].id });
     await ex(`await refresh(); await w(500);`);
-    expect('topbar: exactly ONE limit chip, naming the worst provider (claude 42%)', await ex(`return document.querySelectorAll('#limitmeter [data-provider]').length === 1 && document.querySelector('#limitmeter [data-provider]').dataset.provider === 'claude' && /42%/.test($('#limitmeter').textContent) && !$('#limitmeter').classList.contains('hidden')`));
+    expect('topbar: exactly ONE limit chip, naming the worst provider (claude 92%)', await ex(`return document.querySelectorAll('#limitmeter [data-provider]').length === 1 && document.querySelector('#limitmeter button[data-provider]').getAttribute('aria-label') === 'Claude 5h limit 92%' && document.querySelector('#limitmeter [data-provider]').dataset.provider === 'claude' && /92%/.test($('#limitmeter [data-provider]').getAttribute('aria-label')) && !$('#limitmeter').classList.contains('hidden')`));
     expect('topbar: cost pill populated (tokens pill removed; cost visible)', await ex(`return !$('#totalcost').classList.contains('hidden') && !/no cost yet/.test($('#totalcost').textContent) && !document.querySelector('#totaltokens')`));
     // Regime (t_bc19b2f5, t_57421101 round 3; goal popover in t_db67859d): the meter and the cost
     // pill are FIXED — they may never shrink or clip, at any width. #updst/#runstate ellipsize as
@@ -1728,7 +1724,7 @@ async function guiE2E() {
       expect(`topbar: New goal/Help visible at ${cw}px`, m.newgoal && m.help, m);
       expect(`topbar: cost pill visible at ${cw}px (no breakpoint: the pill stays at every width)`, m.cost, m);
       if (cw >= 1400) expect(`topbar: nothing clipped at ${cw}px — goal absorbs, the summary chip shows full text`, m.clipped.length === 0, m);
-      else expect(`topbar: below 1400px only #updst/#runstate may clip — the chip and the cost pill never do`, m.clipped.every((x) => String(x).includes('updst') || String(x).includes('runstate')), m);
+      else expect(`topbar: below 1400px only #updst/#runstate may clip — the chip and the cost pill never do`, m.clipped.every((x) => /updst|runstate|restartst|watchst/.test(String(x))), m);
       if (cw === 1600 || cw === 1400 || cw === 900) expect(`topbar: chat pane reaches the window's right edge at ${cw}px (chat right ${m.cm} vs window ${m.iw}, thread hidden)`, m.cm !== null && m.cm >= m.iw - 1 && !m.thDisp, m);
       await shot(`topbar-${cw}`);
       if (cw === 1400) { // the composer popover must open focused and sit fully on-screen (t_db67859d)
@@ -1748,6 +1744,20 @@ async function guiE2E() {
         expect(`topbar: chat pane reaches the right edge again after closing the thread at 1400px (chat right ${m2.cm} vs window ${m2.iw})`, m2.cm >= m2.iw - 1 && !m2.thDisp, m2);
       }
     }
+    // Overflow guard (t_ea33cef4): every optional pill forced on (restart pending + core watching + update chip +
+    // limit warning + Stop) must still fit at 1100 and 1400px. Screenshots per width for the Critic.
+    await ex(`rst = { ...rst, pendingCount: 3, stub: false, since: new Date().toISOString() }; watch = { ...watch, active: true, lastWatchAt: new Date().toISOString() }; renderRestartPill(); renderWatchPill(); $('#stop').classList.remove('hidden'); const u = $('#updst'); u.classList.remove('hidden'); u.textContent = 'Update ready · restart to apply';`);
+    await ex(`$('#tabs button[data-tab=board]').click(); await w(300);`);
+    for (const cw of [1100, 1400]) {
+      win.setContentSize(cw, 700); await new Promise((r) => setTimeout(r, 350));
+      const g = await ex(`$('#stop').classList.remove('hidden'); $('#updst').classList.remove('hidden'); const h = document.querySelector('header'); const d = document.documentElement; const inV = (s) => { const r = document.querySelector(s).getBoundingClientRect(); return r.width > 0 && r.left >= 0 && r.right <= window.innerWidth; }; return { hs: h.scrollWidth, hc: h.clientWidth, ds: d.scrollWidth, iw: window.innerWidth, chip: !$('#limitmeter').classList.contains('hidden'), aria: (document.querySelector('#limitmeter button') || {}).ariaLabel, kids: [...h.children].filter((c) => c.getClientRects().length).map((c) => (c.id || c.className) + ':' + Math.round(c.getBoundingClientRect().width)).join(' '), run: inV('#stop'), goal: inV('#newgoal'), theme: inV('#themebtn'), settings: inV('#settingsbtn') };`);
+      expect(`overflow-guard: header fits at ${cw}px with all pills on (${g.hs} <= ${g.hc}, page ${g.ds} <= ${g.iw})`, g.hs <= g.hc + 1 && g.ds <= g.iw + 1, g);
+      expect(`overflow-guard: warning chip, Stop, New goal, theme, settings all inside the window at ${cw}px`, g.chip && g.run && g.goal && g.theme && g.settings, g);
+      for (const th of ['light', 'dark']) { require('electron').nativeTheme.themeSource = th; await ex(`await w(250);`); await shot(`board-topbar-${cw}-${th}`); }
+      require('electron').nativeTheme.themeSource = 'system';
+    }
+    await ex(`rst = { ...rst, pendingCount: 0 }; watch = { ...watch, active: false, lastWatchAt: null }; renderRestartPill(); renderWatchPill(); $('#stop').classList.add('hidden'); $('#updst').classList.add('hidden'); $('#tabs button[data-tab=chat]').click();`);
+    win.setContentSize(1400, Math.max(600, Math.min(prevSize[1], 800))); await new Promise((r) => setTimeout(r, 350));
     // Critic round 3: the chip and the cost pill must be READABLE at 900px, not squashed — assert
     // unclipped (scrollWidth <= clientWidth) and width-stable (the SAME width as at 1400px).
     const kidAt = (cw2, id) => { const s2 = sweep.find((s3) => s3.cw === cw2); return (s2 && s2.kids.find((k2) => k2.id === id)) || null; };
@@ -1768,10 +1778,10 @@ async function guiE2E() {
     const nodes6 = rts.map((rt, i) => s6.addNode({ name: 'Six' + i, role: i ? 'Dev' : 'PM', runtime: rt, model: i ? '' : 'opus', x: 60 + i * 40, y: 60 }));
     for (let i = 0; i < 3; i++) s6.addRun({ id: 'tb6-c' + i, projectId: pj6.id, nodeId: nodes6[0].id, agent: nodes6[0].name, kind: 'agent', runtime: 'claude', billingSource: 'subscription', startedAt: new Date(Date.now() - i * 1000).toISOString(), inputTokens: 5000, outputTokens: 1200, reportedCostUsd: 0.02 });
     o6.subscriptionRateLimits = Object.fromEntries(nodes6.map((n, i) => [n.id, i === 0
-      ? { fiveHour: rl(0.42, 1), weekly: rl(0.13, 72), runtime: 'claude' }
+      ? { fiveHour: rl(0.92, 1), weekly: rl(0.13, 72), runtime: 'claude' }
       : { fiveHour: rl(0.35 - i * 0.06, 1), weekly: rl(0.07, 72), runtime: rts[i] }]));
     await ex(`await refresh(); await w(500);`);
-    expect('topbar-6: exactly one chip despite 6 providers — the worst one (claude 42%), never the others', await ex(`return document.querySelectorAll('#limitmeter [data-provider]').length === 1 && document.querySelector('#limitmeter [data-provider]').dataset.provider === 'claude' && /42%/.test($('#limitmeter').textContent) && !/codex|opencode|helpycode|gemini|droid/i.test($('#limitmeter').textContent) && !$('#limitmeter').classList.contains('hidden')`));
+    expect('topbar-6: exactly one chip despite 6 providers — the worst one (claude 92%), never the others', await ex(`return document.querySelectorAll('#limitmeter [data-provider]').length === 1 && document.querySelector('#limitmeter [data-provider]').dataset.provider === 'claude' && /92%/.test($('#limitmeter [data-provider]').getAttribute('aria-label')) && !/codex|opencode|helpycode|gemini|droid/i.test($('#limitmeter').textContent) && !$('#limitmeter').classList.contains('hidden')`));
     const chipW2 = (cw2) => { const x = sweep.find((s2) => s2.cw === cw2); return x && x.meterKids[0] ? x.meterKids[0].w : null; };
     const six = {};
     for (const cw of [1600, 1400, 900]) {
@@ -1780,7 +1790,7 @@ async function guiE2E() {
       expect(`topbar-6: no overflow at ${cw}px (page ${m.sw} <= ${m.cw}, rightmost ${m.edge} <= ${m.iw})`, m.sw <= m.cw + 1 && m.edge <= m.iw + 1, m);
       expect(`topbar-6: New goal/Help visible at ${cw}px`, m.newgoal && m.help, m);
       if (cw >= 1400) expect(`topbar-6: nothing clipped at ${cw}px`, m.clipped.length === 0, m);
-      else expect(`topbar-6: below 1400px only #updst/#runstate may clip — the chip and the cost pill never do`, m.clipped.every((x) => String(x).includes('updst') || String(x).includes('runstate')), m);
+      else expect(`topbar-6: below 1400px only #updst/#runstate may clip — the chip and the cost pill never do`, m.clipped.every((x) => /updst|runstate|restartst|watchst/.test(String(x))), m);
       expect(`topbar-6: bar same width as the 2-provider header at ${cw}px (${m.meterKids[0] ? m.meterKids[0].w : null}px vs ${chipW2(cw)}px)`, m.meterKids[0] && chipW2(cw) != null && Math.abs(m.meterKids[0].w - chipW2(cw)) <= 1, { six: m.meterKids[0], two: chipW2(cw) });
       await shot(`topbar-6-${cw}`);
     }
@@ -2255,6 +2265,9 @@ const api = {
   // Runtime breaker resume (t_419062e2): clears the unavailable state and re-dispatches the queued
   // tasks. Throws the reason on failure — the renderer shows it inline in the banner.
   resumeRuntime: (c, runtime) => orchFor(c.p).resumeRuntime(runtime),
+  // Stuck-task action (t_0895a580): the renderer's 'Retest + Resume' / 'Rerun fresh' buttons
+  // (t_747e0d1e). Returns {ok, skipped?|resumeFailed?, error?}; resumeFailed flips the button state.
+  retestAndResume: (c, id) => orchFor(c.p).retestAndResume(id), rerunFresh: (c, id) => orchFor(c.p).rerunFresh(id),
   getSelfUpdateStatus: (c) => ({ ...watcherFor(c.p).status(), devMode: DEV_MODE }),
   setAutoRestart: (c, on) => { if (DEV_MODE) ST(c).saveSettings({ autoRestart: !!on }); return { ...watcherFor(c.p).status(), devMode: DEV_MODE }; },
   restartSelfUpdate: (c) => { watcherFor(c.p).restartNow(); return { ...watcherFor(c.p).status(), devMode: DEV_MODE }; },

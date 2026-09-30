@@ -662,7 +662,7 @@ async function renderLimitMeter(st) {
     // The paused/near-limit flag lives INSIDE the chip: its word replaces the % text, so the meter
     // never grows an extra element when the state changes — the exact % stays in the bar and tooltip.
     const state = p.pause ? 'paused' : p.warn ? 'near limit' : `${pct}%`;
-    return `<span class="lm-part lm-chip ${cls}${idle}" data-provider="${esc(p.provider)}" title="${esc(prettyProvider(p.provider))}${p.plan ? ` · ${esc(p.plan)}` : ''} — ${esc(all)}">${head} ${state}<i class="lm-bar"><i class="lm-fill" style="width:${pct}%"></i></i>${ms > 0 ? `<small>↻${fmtCountdown(ms)}</small>` : ''}</span>`;
+    return `<button type="button" class="lm-part lm-chip ${cls}${idle}" data-provider="${esc(p.provider)}" aria-label="${esc(prettyProvider(p.provider))} ${esc(w.label)} limit ${pct}%" title="${esc(prettyProvider(p.provider))}${p.plan ? ` · ${esc(p.plan)}` : ''} — ${esc(all)}">${head} ${state}<i class="lm-bar"><i class="lm-fill" style="width:${pct}%"></i></i>${ms > 0 ? `<small>↻${fmtCountdown(ms)}</small>` : ''}</button>`;
   };
   const provs = limitProviders(st);
   if (provs.length) {
@@ -671,20 +671,12 @@ async function renderLimitMeter(st) {
     const rank = (p) => (p.pause ? 3 : p.warn ? 2 : p.windows.some((w) => w.pct != null) ? 1 : 0);
     const maxPct = (p) => Math.max(-1, ...p.windows.map((w) => (w.pct != null ? w.pct : -1)));
     const worst = provs.slice().sort((a, b) => rank(b) - rank(a) || maxPct(b) - maxPct(a))[0];
-    m.classList.remove('hidden');
-    m.innerHTML = worstChip(worst);
+    // Top bar = warning chip only (t_ea33cef4): quiet under 80% / unknown; the Usage tab has the rest.
+    const hot = worst.pause || worst.warn || maxPct(worst) >= 0.8;
+    m.classList.toggle('hidden', !hot); m.innerHTML = hot ? worstChip(worst) : '';
     return;
   }
-  const isSubscriptionUser = S.team.nodes.some((n) => (n.billingMode || 'auto') !== 'api' && (n.billingMode || 'auto') !== 'proxy');
-  if (!st || (!st.fiveHour.limit && !st.weekly.limit)) {
-    if (!isSubscriptionUser) { m.classList.add('hidden'); m.innerHTML = ''; return; }
-    m.classList.remove('hidden');
-    const reason = await noLimitDataReason();
-    const why = `Subscription 5h/weekly usage appears here once the CLI reports it (after a run) or a limit is set in Usage &amp; limits. (${esc(reason)})`;
-    m.innerHTML = `<span class="lm-part lm-pending" title="${why}"><b>Limits</b> <small>– no limit data: ${esc(reason)}</small></span>`;
-    return;
-  }
-  m.classList.remove('hidden');
+  if (!st || (!st.fiveHour.limit && !st.weekly.limit)) { m.classList.add('hidden'); m.innerHTML = ''; return; }
   const wins = ['5h', 'weekly'].map((label) => { const u = st[label === '5h' ? 'fiveHour' : 'weekly']; return u && u.limit ? { label, pct: Math.min(1, u.pct != null ? u.pct : u.used / u.limit), warn: !!u.warn, pause: !!u.pause, resetsAt: u.resetsAt } : { label, pct: null, warn: false, pause: false, resetsAt: u && u.resetsAt }; });
   const worst = wins.filter((w) => w.pct != null).sort((a, b) => (b.pause - a.pause) || (b.warn - a.warn) || (b.pct - a.pct))[0];
   const pct = Math.min(100, Math.round(worst.pct * 100));
@@ -695,7 +687,9 @@ async function renderLimitMeter(st) {
   // Same in-chip flag as the provider path: the state word replaces the % text, exact numbers stay
   // in the bar and the tooltip.
   const state = worst.pause ? 'paused' : worst.warn ? 'near limit' : `${pct}%`;
-  m.innerHTML = `<span class="lm-part lm-${cls}" title="${esc(title)}">Limits: ${state} <b>${esc(worst.label)}</b><i class="lm-bar"><i class="lm-fill" style="width:${pct}%"></i></i>${ms > 0 ? `<small>↻${fmtCountdown(ms)}</small>` : ''}</span>`;
+  const hot = worst.pause || worst.warn || worst.pct >= 0.8;
+  m.classList.toggle('hidden', !hot);
+  m.innerHTML = hot ? `<button type="button" class="lm-part lm-${cls}" aria-label="Claude ${esc(worst.label)} limit ${pct}%" title="${esc(title)}">Limits: ${state} <b>${esc(worst.label)}</b><i class="lm-bar"><i class="lm-fill" style="width:${pct}%"></i></i>${ms > 0 ? `<small>↻${fmtCountdown(ms)}</small>` : ''}</button>` : '';
 }
 function showTab(name) { document.querySelector(`button[data-tab="${name}"]`)?.click(); }
 // New goal composer (t_db67859d): the goal box lives in a popover off the "New goal" button, so the
@@ -2123,7 +2117,7 @@ async function renderUsageLimits() {
   const money = (v) => '$' + (v || 0).toFixed(2);
   // The top bar names only the worst provider; this tab lists every provider's windows (same chips).
   const provs = limitProviders(st);
-  $('#us-limits').innerHTML = `<h3>Usage limits</h3><p class="muted">The top bar shows only the worst provider as one summary chip; every provider's limit windows are listed here (5h/weekly budgets settable below).</p>${st && st.warn ? `<p class="warn">Approaching a usage limit.</p>` : ''}${st && st.pause ? `<p class="warn">A usage limit has been reached; new runs may be paused.</p>` : ''}
+  $('#us-limits').innerHTML = `<h3>Usage limits</h3><p class="muted">The top bar shows one warning chip only when a limit is at 80% or more; every provider's limit windows are always listed here (5h/weekly budgets settable below).</p>${st && st.warn ? `<p class="warn">Approaching a usage limit.</p>` : ''}${st && st.pause ? `<p class="warn">A usage limit has been reached; new runs may be paused.</p>` : ''}
     ${provs.length ? `<div class="limitmeter us-list">${provs.map((p) => providerChipHtml(p, false)).join('')}</div>` : ''}
     <div class="lim-wrap">
     <div class="cards">
