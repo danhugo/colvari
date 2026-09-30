@@ -224,10 +224,14 @@ const SUMMARY = `
   const secs = (performance.now() - P.t0) / 1000;
   const stat = (a) => ({ n: a.length, p50: +q(a, .5).toFixed(2), p95: +q(a, .95).toFixed(2), max: a.length ? +Math.max(...a).toFixed(2) : 0, sum: +a.reduce((s, x) => s + x, 0).toFixed(1) });
   const renders = {}; for (const [k, v] of Object.entries(P.renders)) renders[k] = stat(v);
-  const bySel = {}; for (const c of P.clicks) (bySel[c.label] ||= []).push(c.ms);
-  const tabMs = P.clicks.filter((c) => c.label.startsWith('tab:')).map((c) => c.ms);
-  const cardMs = P.clicks.filter((c) => c.label.startsWith('card')).map((c) => c.ms);
-  const tabMsLegacy = P.clicks.filter((c) => c.label.startsWith('tab:')).map((c) => c.msLegacy).filter(Number.isFinite);
+  const bySel = {}; for (const c of P.clicks) if (Number.isFinite(c.ms)) (bySel[c.label] ||= []).push(c.ms);
+  // Quiet-paint may not settle inside the poll budget (UI never quiet for 2.5s mid-storm):
+  // those samples stay null for the quiet metric and are counted, never crash the summary.
+  const fin = (a) => a.filter(Number.isFinite);
+  const tabMs = fin(P.clicks.filter((c) => c.label.startsWith('tab:')).map((c) => c.ms));
+  const cardMs = fin(P.clicks.filter((c) => c.label.startsWith('card')).map((c) => c.ms));
+  const tabMsLegacy = fin(P.clicks.filter((c) => c.label.startsWith('tab:')).map((c) => c.msLegacy));
+  const unsettled = P.clicks.filter((c) => !Number.isFinite(c.ms)).length;
   return {
     windowSecs: +secs.toFixed(1),
     metric: 'quiet-paint v2 (t_fd3a15c4): first frame after the click dispatch whose interval starts no render/refresh work and by which all work started since the click has ended; legacy renderAll endpoint kept as statLegacy',
@@ -235,12 +239,13 @@ const SUMMARY = `
     renderAll: renders.renderAll || { n: 0 }, renders,
     refresh: stat(P.refreshMs),
     clicks: {
-      stat: stat(P.clicks.map((c) => c.ms)),
+      stat: stat(fin(P.clicks.map((c) => c.ms))),
+      unsettledQuiet: unsettled,
       tabSwitches: stat(tabMs), cardClicks: stat(cardMs),
-      statLegacy: stat(P.clicks.map((c) => c.msLegacy).filter(Number.isFinite)),
+      statLegacy: stat(fin(P.clicks.map((c) => c.msLegacy))),
       tabSwitchesLegacy: stat(tabMsLegacy),
       byLabel: Object.fromEntries(Object.entries(bySel).map(([k, v]) => [k, stat(v)])),
-      samples: P.clicks.map((c) => ({ label: c.label, ms: +c.ms.toFixed(2), msLegacy: c.msLegacy != null ? +c.msLegacy.toFixed(2) : null, down: Math.round(c.down), renderAllMs: c.renderAllMs, longDuring: (c.long || []).length })),
+      samples: P.clicks.map((c) => ({ label: c.label, ms: Number.isFinite(c.ms) ? +c.ms.toFixed(2) : null, msLegacy: Number.isFinite(c.msLegacy) ? +c.msLegacy.toFixed(2) : null, down: Math.round(c.down), renderAllMs: c.renderAllMs, longDuring: (c.long || []).length })),
     },
     longTasks: { total: P.longs.length, maxMs: P.longs.length ? Math.max(...P.longs.map((l) => l.duration)) : 0, samples: P.longs.slice(-200) },
     logLines: logs.filter((l) => l.projectId === ctx.p).length,
