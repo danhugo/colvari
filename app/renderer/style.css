@@ -229,7 +229,6 @@ header .pill { font-variant-numeric:tabular-nums; } .pill.quiet { color:var(--mu
 .chat-head { display:flex; align-items:center; gap:8px; padding:10px 16px; border-bottom:1px solid var(--border); } .chat .muted { color:var(--fg-muted); }
 #chat-room { flex:1; overflow:auto; padding:8px 0; } .cgroup { display:flex; gap:10px; padding:6px 16px; } .cgroup:hover { background:var(--bg-hover); }
 .avatar { flex:0 0 36px; height:36px; border-radius:50%; display:flex; align-items:center; justify-content:center; color:var(--fg-on-accent); font-weight:700; font-size:13px; position:relative; }
-.avatar.working::after { content:''; position:absolute; right:-1px; bottom:-1px; width:10px; height:10px; border-radius:50%; background:var(--success); border:2px solid var(--bg-surface); }
 .cbody { min-width:0; flex:1; } .cname { font-weight:700; } .role { font-size:10px; padding:0 6px; border-radius:6px; background:var(--bg-hover); color:var(--fg-secondary); margin-left:6px; font-weight:600; } .cname time { color:var(--fg-muted); font-size:11px; font-weight:400; margin-left:6px; }
 .bubble { margin:3px 0; white-space:pre-wrap; word-break:break-word; line-height:1.4; } .bubble.thought { color:var(--fg-secondary); } .bubble.action, .bubble.handoff { color:var(--accent-text); } .bubble.error { color:var(--term-red); }
 .bubble.linked { cursor:pointer; } .bubble.linked:hover .tlink { text-decoration:underline; } .tlink { color:var(--accent-text); font-size:11px; margin-left:6px; }
@@ -336,7 +335,10 @@ button:focus-visible, input:focus, select:focus, textarea:focus { outline:none; 
 .avatar.human::before { content:''; width:10px; height:10px; border-radius:50%; background:var(--human); }
 .cgroup.self .cname { color:var(--fg-primary); }
 /* Presence by shape: working = spinning ring, needs-you = "!" badge. */
-.avatar.working::after { content:''; position:absolute; inset:-4px; width:auto; height:auto; border-radius:calc(var(--radius-sm) + 4px); background:none; border:2px solid transparent; border-top-color:var(--success); border-right-color:var(--success); animation:spin 1s linear infinite; box-shadow:none; }
+@property --sweep { syntax:'<angle>'; inherits:false; initial-value:0deg; }
+.avatar.working::after { content:''; position:absolute; inset:-4px; width:auto; height:auto; border-radius:calc(var(--radius-sm) + 4px); padding:2px; background:conic-gradient(from var(--sweep), transparent 0 60%, var(--success)); -webkit-mask:linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite:xor; mask-composite:exclude; animation:sweep 1.2s linear infinite; box-shadow:none; border:0; }
+@keyframes sweep { to { --sweep:360deg; } }
+@media (prefers-reduced-motion: reduce) { .avatar.working::after { background:var(--success); opacity:.5; box-shadow:0 0 8px var(--success); } }
 .avatar.ask::before { content:'!'; position:absolute; top:-5px; right:-5px; width:14px; height:14px; border-radius:50%; background:var(--warning); color:var(--fg-primary); font:700 10px/14px var(--font-sans); text-align:center; border:2px solid var(--bg-app); }
 @keyframes spin { to { transform:rotate(360deg); } }
 .typing { display:inline-flex; align-items:center; gap:5px; } .typing .spin { width:10px; height:10px; border-radius:50%; border:2px solid var(--success); border-right-color:transparent; animation:spin 1s linear infinite; }
