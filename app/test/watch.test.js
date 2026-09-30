@@ -8,7 +8,14 @@ const { Orchestrator, WAKE } = require('../src/orchestrator');
 
 // The wake gap must pass quickly inside the tests; real timing semantics are unchanged.
 WAKE.MIN_GAP_MS = 80;
-test.after(() => { WAKE.MIN_GAP_MS = 5 * 60 * 1000; });
+// Every orchestrator this file creates: their spawned fake-CLI runs must be dead before the file
+// ends, or procguard's leak check fails the file under full-suite load (the runs exit by
+// themselves, just slowly — the wake sweeps fire right up to the last assertion).
+const orchs = [];
+test.after(async () => {
+  WAKE.MIN_GAP_MS = 5 * 60 * 1000;
+  try { await waitFor(() => orchs.every((o) => [...o.procs.values()].every((p) => !p || !p.pid)), 8000); } catch { /* procguard owns real leaks */ }
+});
 
 const tmp = (p) => fs.mkdtempSync(path.join(os.tmpdir(), p));
 const fakeClaude = (dir, body) => { const f = path.join(dir, 'fake-claude.sh'); fs.writeFileSync(f, '#!/bin/sh\n' + body); fs.chmodSync(f, 0o755); return f; };
@@ -26,6 +33,7 @@ const setup = (d, extra = {}) => {
   s.addEdge(pm.id, a.id);
   const o = new Orchestrator(s);
   clearInterval(o._wakeTimer); clearInterval(o._stallTimer); clearInterval(o._tickTimer);
+  orchs.push(o);
   return { s, o, pm, a };
 };
 // Make "work is active" true without a real CLI: A holds a live slot.
@@ -71,6 +79,7 @@ test('watch: idle-off with no active work; first active tick wakes the core with
   assert.ok(o.watch.lastWatchAt > Date.now() - 60000, 'due tick re-stamps lastWatchAt');
   await sleep(300);
   assert.equal(s.listRuns({ nodeId: pm.id }).length, 1, 'unchanged digest never re-wakes');
+  await waitFor(() => !o.procs.has(pm.id), 8000); // drain the run before the file's procguard after-hook checks
 });
 
 test('watch: unchanged digest does not wake; a state change wakes on the next due tick', async () => {
@@ -96,6 +105,7 @@ test('watch: unchanged digest does not wake; a state change wakes on the next du
   o.sweepWatch();
   await waitFor(() => s.listRuns({ nodeId: pm.id }).length === 2);
   assert.match(o.watchStatus().digest, /awaiting human: t_/);
+  await waitFor(() => !o.procs.has(pm.id), 8000); // drain the run before the file's procguard after-hook checks
 });
 
 test('watch: respects the per-agent wake gap (deferred, not dropped)', async () => {
@@ -116,9 +126,10 @@ test('watch: respects the per-agent wake gap (deferred, not dropped)', async () 
   due(o);
   o.sweepWatch();
   await waitFor(() => s.listRuns({ nodeId: pm.id }).length === 1);
+  await waitFor(() => !o.procs.has(pm.id), 8000); // drain the run before the file's procguard after-hook checks
 });
 
-test('watch: interval gate and digest determinism', () => {
+test('watch: interval gate and digest determinism', async () => {
   const d = tmp('squad-watch-');
   const { s, o, pm, a } = setup(d, { watchIntervalMin: 10 });
   workActive(o, a);
@@ -135,4 +146,5 @@ test('watch: interval gate and digest determinism', () => {
   assert.equal(new Date(st.lastWatchAt).getTime(), t1);
   assert.ok(st.digest.length > 0);
   assert.equal(o.watchDigest(), o.watchDigest(), 'digest text is stable across calls');
+  await waitFor(() => !o.procs.has(pm.id), 8000); // drain the run before the file's procguard after-hook checks
 });
