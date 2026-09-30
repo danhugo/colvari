@@ -135,9 +135,19 @@ function makeTools(store, nodeId) {
     },
     // By default excludes done tasks and trims description/comments, so a full-board listing stays small
     // enough for the 40%-autocompact budget; pass status:'done' (or includeDone) or taskId for full detail.
-    list_tasks({ status, mine, includeDone = false, taskId } = {}) {
+    list_tasks({ status, mine, includeDone = false, taskId, dispatch = false } = {}) {
       const t = me();
       const all = store.listTasks();
+      if (dispatch) {
+        // Per agent: the task it is running + its todo queue, highest priority (P0) first. Visible tasks only.
+        const vis = all.filter((tk) => visibleTask(t, nodeId, tk));
+        const brief = (tk) => ({ id: tk.id, title: tk.title, priority: tk.priority, ...(C.openBlockers(tk, all).length ? { blocked: true } : {}) });
+        return t.nodes.map((n) => {
+          const mine = vis.filter((tk) => tk.assignee === n.id);
+          return { agent: n.name, role: n.role, current: (mine.find((tk) => tk.status === 'in_progress') || null) && brief(mine.find((tk) => tk.status === 'in_progress')),
+            queued: mine.filter((tk) => tk.status === 'todo').sort((a, b) => String(a.priority).localeCompare(String(b.priority)) || String(a.createdAt).localeCompare(String(b.createdAt))).map(brief) };
+        }).filter((r) => r.current || r.queued.length);
+      }
       if (taskId) {
         const tk = all.find((x) => x.id === taskId);
         if (!tk || !visibleTask(t, nodeId, tk)) throw new Error('no visible task ' + taskId);
@@ -155,6 +165,23 @@ function makeTools(store, nodeId) {
       const task = store.createTask({ title, description, assignee: target.id, createdBy: nodeId, parentId, blockedBy, priority });
       const warn = overloadWarning(t, target);
       return warn ? { ...task, warning: warn } : task;
+    },
+    // PM-only: move a task to another teammate (needs an assign edge). Worktree, branch and comments stay.
+    // A running task is refused: its agent would keep working on it.
+    reassign_task({ taskId, assignee }) {
+      const t = me();
+      const n = t.nodes.find((x) => x.id === nodeId);
+      if (!n || String(n.role).toLowerCase() !== 'pm') throw new Error('scope violation: reassign_task is PM-only');
+      const tk = store.getTask(taskId);
+      if (!tk) throw new Error('no task ' + taskId);
+      if (tk.status === 'done') throw new Error('cannot reassign a done task');
+      if (tk.status === 'in_progress') throw new Error('cannot reassign an in_progress task; wait until its agent stops or moves it back to todo');
+      const target = resolve(t, assignee, 'assignee');
+      if (!canAssign(t, nodeId, target.id)) throw new Error(`scope violation: ${n.name} cannot assign tasks to ${target.name} (no assign edge)`);
+      const from = nodeName(t, tk.assignee);
+      const r = store.updateTask(taskId, { assignee: target.id });
+      store.commentTask(taskId, n.name, `Reassigned from ${from} to ${target.name}.`);
+      return r;
     },
     update_task_status({ taskId, status, priority }) {
       const t = me(); let tk = store.getTask(taskId);
