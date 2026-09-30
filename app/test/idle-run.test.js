@@ -1,8 +1,7 @@
-// t_b2273507 — a Run whose board drained stays ON: it goes 'idle' (snapshot.running false +
-// runState {state:'idle', reason}) instead of stopping, auto-dispatches any ready todo task that
-// shows up later (created by chat, the PM, or an agent's board MCP), and only an explicit stop()
-// ends it. A goal-mode session keeps today's semantics: its drain ends the run ('done'). After an
-// app restart nothing auto-runs: a fresh orchestrator boots 'stopped'.
+// Run lifecycle at drain (t_b2273507): when the board empties the run goes IDLE — still on at zero
+// cost — and ready todo work that shows up later (created by the PM, a chat message, or anyone)
+// dispatches with no user action. Only an explicit stop() (header Stop), a project budget cap, or
+// the maxRuns limit ends the run. runState() exposes running|idle|stopped (+reason) for the UI pill.
 const test = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
@@ -11,113 +10,150 @@ const path = require('path');
 const { Store } = require('../src/store');
 const { Orchestrator, SCHED } = require('../src/orchestrator');
 
-SCHED.TICK_MS = 30; // the dispatch sweep drives idle exit and auto-dispatch
-test.after(() => { SCHED.TICK_MS = 1000; });
-
-const tmp = (p) => fs.mkdtempSync(path.join(os.tmpdir(), p));
-const RESULT = `echo '{"type":"result","subtype":"success","total_cost_usd":0,"num_turns":1,"usage":{}}'\n`;
-const waitFor = async (fn, what, ms = 8000) => { const t0 = Date.now(); while (!fn()) { if (Date.now() - t0 > ms) throw new Error('timeout: ' + what); await new Promise((r) => setTimeout(r, 10)); } };
-
-function setup(settings = {}) {
-  const r = tmp('squad-idle-');
-  const fake = path.join(r, 'fake-claude.sh');
-  fs.writeFileSync(fake, '#!/bin/sh\nsleep 0.15\n' + RESULT);
-  fs.chmodSync(fake, 0o755);
-  const s = new Store(path.join(r, 'data'));
-  s.saveSettings({ claudePath: fake, maxConcurrency: 0, ...settings });
-  const a = s.addNode({ name: 'A', role: 'Dev', workdir: path.join(r, 'wA') });
-  const rev = s.addNode({ name: 'Rev', role: 'Reviewer' }); // clean hand-offs complete via reviewer pickup
-  s.addEdge(a.id, rev.id, 'review');
-  return { s, a, r };
+function fakeClaude(dir, script) {
+  const f = path.join(dir, 'fake-claude.sh');
+  fs.writeFileSync(f, '#!/bin/sh\n' + script);
+  fs.chmodSync(f, 0o755);
+  return f;
 }
+const RESULT = (cost = 0) => `echo '{"type":"result","subtype":"success","total_cost_usd":${cost},"num_turns":1,"usage":{}}'\n`;
 
-test('a drained board idles the run instead of stopping it; only an explicit stop ends it', async () => {
-  const { s, a } = setup();
-  s.createTask({ title: 'only task', assignee: a.id });
-  const o = new Orchestrator(s);
-  let doneFired = false; o.on('done', () => { doneFired = true; });
-  const idleOnce = new Promise((r) => o.once('idle', r));
-  o.start();
-  await idleOnce;
-  assert.equal(doneFired, false, "a drained board must not emit 'done'");
-  assert.equal(o.running, true, 'the run session stays on');
-  assert.equal(o.snapshot().running, false, 'snapshot.running is false while idle (the pill leaves "N running")');
-  assert.deepEqual({ state: o.snapshot().runState.state, reason: o.snapshot().runState.reason }, { state: 'idle', reason: 'waiting for todo tasks' });
-  const done = new Promise((r) => o.once('done', r));
-  o.stop();
-  await done;
-  assert.equal(doneFired, true, "an explicit stop emits 'done'");
-  assert.equal(o.running, false);
-  assert.deepEqual(o.snapshot().runState, { state: 'stopped', reason: 'stopped by you' });
-});
+function setup(script = RESULT(), settings = {}) {
+  const r = fs.mkdtempSync(path.join(os.tmpdir(), 'squad-idle-'));
+  const s = new Store(path.join(r, 'data'));
+  s.saveSettings({ claudePath: fakeClaude(r, script), maxConcurrency: 4, ...settings });
+  return { r, s };
+}
+// A dev+reviewer pair: a clean exit hands off to review and the pickup closes it, so a task can
+// actually reach done (t_699b67b7) and the board can drain clean.
+function team(s) {
+  const dev = s.addNode({ name: 'Dev', role: 'Dev' });
+  const rev = s.addNode({ name: 'Rev', role: 'Reviewer' });
+  s.addEdge(dev.id, rev.id, 'review');
+  return { dev, rev };
+}
+const waitFor = async (fn, ms = 8000) => { const t0 = Date.now(); while (!fn()) { if (Date.now() - t0 > ms) return false; await new Promise((r) => setTimeout(r, 40)); } return true; };
+const fastSweep = (body) => async (t) => { const prev = SCHED.TICK_MS; SCHED.TICK_MS = 40; try { await body(t); } finally { SCHED.TICK_MS = prev; } };
 
-test('a todo task created while idle auto-dispatches without a new Run press', async () => {
-  const { s, a } = setup();
-  const o = new Orchestrator(s);
-  o.start();
-  await waitFor(() => o.runStateView().state === 'idle', 'initial idle on an empty board');
-  const t = s.createTask({ title: 'chat-created work', assignee: a.id }); // as if chat/PM created it
-  await waitFor(() => o.procs.size === 1 && o.agent(a.id).taskId === t.id, 'the new todo auto-dispatched');
-  assert.equal(o.runStateView().state, 'running');
-  assert.equal(o.snapshot().running, true);
-  await waitFor(() => o.runStateView().state === 'idle', 'back to idle after it finished');
-  assert.equal(s.getTask(t.id).status, 'done');
-});
-
-test('idle reason reflects ready-task reality; unblocking the work auto-dispatches it', async () => {
-  const { s, a } = setup();
-  const gate = s.createTask({ title: 'gate', assignee: a.id });
-  s.updateTask(gate.id, { status: 'waiting_for_human' }); // never auto-dispatched; waits for the human
-  const blocked = s.createTask({ title: 'blocked', assignee: a.id, blockedBy: [gate.id] });
-  const o = new Orchestrator(s);
-  o.start();
-  await waitFor(() => o.runStateView().state === 'idle', 'idle with nothing dispatchable');
-  assert.match(o.runStateView().reason, /1 unfinished task/, 'the stuck task is the stated reason');
-  s.updateTask(gate.id, { status: 'done' }); // the human approves the gate task
-  await waitFor(() => o.procs.size === 1, 'the unblocked todo auto-dispatched');
-  await waitFor(() => o.runStateView().state === 'idle', 'drained again');
-  assert.equal(s.getTask(blocked.id).status, 'done');
-});
-
-test('a goal-mode session still ends the run at drain (done, not idle)', async () => {
-  const { s, a } = setup();
-  s.createTask({ title: 'goal work', assignee: a.id });
-  const o = new Orchestrator(s);
-  o.start();
-  o._sawGoalRun = true; // set by runTask when a goal-mode agent dispatches (the flow itself is pinned in agent-modes); start() resets it, so set it after
-  const done = new Promise((r) => o.once('done', r));
-  await done;
-  assert.equal(o.running, false, 'the goal run finished for real');
-  assert.equal(o.runStateView().state, 'stopped');
-});
-
-test('a run limit hit with dispatchable work stops instead of idling forever', async () => {
-  const { s, a } = setup({ maxRuns: 1 });
-  const logs = [];
-  s.createTask({ title: 'first', assignee: a.id });
-  s.createTask({ title: 'second', assignee: a.id });
-  const o = new Orchestrator(s);
-  o.on('log', (l) => logs.push(l.text));
-  const done = new Promise((r) => o.once('done', r));
-  o.start();
-  await done;
-  assert.ok(logs.some((l) => /run limit reached/.test(l)), 'the limit is the stated stop reason');
-  assert.equal(o.runStateView().state, 'stopped');
-});
-
-test('a fresh orchestrator boots stopped — a restart never silently runs', () => {
+test('boot state reads stopped, never silently running', () => {
   const { s } = setup();
   const o = new Orchestrator(s);
-  assert.deepEqual(o.runStateView(), { state: 'stopped' });
+  assert.deepEqual(o.runState(), { state: 'stopped', reason: 'not started' });
   assert.equal(o.snapshot().running, false);
 });
 
-test('stopped reasons: the budget cap says so; a bare stop has none', () => {
+test('the run idles at drain: stays on, costs nothing, and a new todo dispatches on its own', fastSweep(async () => {
   const { s } = setup();
+  const { dev } = team(s);
+  const t1 = s.createTask({ title: 'first', assignee: dev.id });
   const o = new Orchestrator(s);
-  assert.deepEqual(o.runStateView(), { state: 'stopped' });
-  o.userStopped = true;
-  assert.deepEqual(o.runStateView(), { state: 'stopped', reason: 'stopped by you' });
-  o.budgetStop = 'per-project budget exhausted';
-  assert.deepEqual(o.runStateView(), { state: 'stopped', reason: 'budget cap reached' });
-});
+  await new Promise((res) => { o.on('done', res); o.start(); });
+  assert.equal(s.getTask(t1.id).status, 'done');
+  assert.equal(o.running, true, 'the run session stays on after the board drains');
+  const rs = o.runState();
+  assert.equal(rs.state, 'idle');
+  assert.equal(rs.reason, 'waiting for todo tasks');
+  assert.ok(rs.since, 'idle carries a since timestamp');
+  assert.deepEqual(o.snapshot().runState.state, 'idle');
+  assert.equal(o.snapshot().running, false, 'the snapshot running flag means agents at work');
+  const runsIdle = o.runs; const costIdle = o.totalCost;
+  await new Promise((r) => setTimeout(r, 300)); // several idle sweeps
+  assert.equal(o.runs, runsIdle, 'nothing dispatches while idle');
+  assert.equal(o.totalCost, costIdle, 'idling is free');
+  // Anyone (the PM via chat, the human, an agent's board tool) creates new todo work:
+  const t2 = s.createTask({ title: 'picked up without a click', assignee: dev.id });
+  assert.ok(await waitFor(() => ['in_progress', 'done'].includes(s.getTask(t2.id).status)), 'the new todo auto-dispatches');
+  assert.ok(await waitFor(() => s.getTask(t2.id).status === 'done'), 'and runs to done');
+  o.stop();
+}));
+
+test('a todo for a missing/retired assignee never dispatches and never wakes the run', fastSweep(async () => {
+  const { s } = setup();
+  const { dev } = team(s);
+  s.createTask({ title: 'real', assignee: dev.id });
+  const o = new Orchestrator(s);
+  await new Promise((res) => { o.on('done', res); o.start(); });
+  const runsIdle = o.runs;
+  const ghost = s.createTask({ title: 'ghost', assignee: 'n_missing' });
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(s.getTask(ghost.id).status, 'todo', 'no assignee means no dispatch');
+  assert.equal(o.runs, runsIdle, 'the ghost task spawns nothing');
+  assert.equal(o.runState().state, 'idle');
+  o.stop();
+}));
+
+test('blocked and human-gated work keeps the run idle (reason says so), and unblocking auto-starts it', fastSweep(async () => {
+  const { s } = setup();
+  const { dev } = team(s);
+  const gate = s.createTask({ title: 'needs human', assignee: dev.id });
+  s.updateTask(gate.id, { status: 'review', parkedForHuman: true }); // undispatchable: waits for a human
+  const dependent = s.createTask({ title: 'blocked work', assignee: dev.id, blockedBy: [gate.id] });
+  const o = new Orchestrator(s);
+  await new Promise((res) => { o.on('done', res); o.start(); });
+  assert.equal(o.runState().state, 'idle');
+  assert.equal(o.runState().reason, 'waiting on review or human');
+  assert.equal(s.getTask(dependent.id).status, 'todo');
+  const runsIdle = o.runs;
+  await new Promise((r) => setTimeout(r, 200));
+  assert.equal(o.runs, runsIdle, 'blocked work does not spin the scheduler');
+  // The human approves the gate: the dependent unblocks and dispatches with no user action.
+  s.updateTask(gate.id, { status: 'done' });
+  assert.ok(await waitFor(() => s.getTask(dependent.id).status === 'done'), 'unblocked todo runs on its own');
+  o.stop();
+}));
+
+test('stop() ends an idle run; work created while stopped waits; Run starts a fresh session', fastSweep(async () => {
+  const { s } = setup();
+  const { dev } = team(s);
+  s.createTask({ title: 'first', assignee: dev.id });
+  const o = new Orchestrator(s);
+  await new Promise((res) => { o.on('done', res); o.start(); });
+  assert.equal(o.runState().state, 'idle');
+  o.stop();
+  assert.equal(o.running, false);
+  assert.deepEqual(o.runState(), { state: 'stopped', reason: 'stopped by you' });
+  const t3 = s.createTask({ title: 'while stopped', assignee: dev.id });
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(s.getTask(t3.id).status, 'todo', 'nothing dispatches while stopped');
+  o.start(); // the header Run press: a fresh session
+  assert.ok(await waitFor(() => s.getTask(t3.id).status === 'done'), 'Run dispatches the waiting todo');
+  await waitFor(() => o.runState().state === 'idle'); // the pickup chain drains too
+  assert.equal(o.runState().state, 'idle');
+  o.stop();
+}));
+
+test('the maxRuns cap terminally stops the run while ready work is refused', fastSweep(async () => {
+  const { s } = setup(RESULT(), { maxRuns: 1 });
+  const { dev } = team(s);
+  s.createTask({ title: 'uses the one run', assignee: dev.id });
+  const o = new Orchestrator(s);
+  await new Promise((res) => { o.on('done', res); o.start(); });
+  assert.equal(o.running, false, 'a spent cap ends the run even with a review pickup waiting');
+  assert.equal(o.runState().state, 'stopped');
+  assert.ok(s.readLogs().some((l) => /run limit reached/.test(l.text)));
+}));
+
+test('a project budget cap reads as stopped — budget cap reached', fastSweep(async () => {
+  const { s } = setup(RESULT(0.01), { budgetUsd: 0.001 });
+  const { dev } = team(s);
+  s.createTask({ title: 'over budget', assignee: dev.id });
+  const o = new Orchestrator(s);
+  await new Promise((res) => { o.on('done', res); o.start(); });
+  assert.equal(o.running, false);
+  assert.deepEqual(o.runState(), { state: 'stopped', reason: 'budget cap reached' });
+}));
+
+test('runState reads running while agents work and idle again at the next drain', fastSweep(async () => {
+  const { s } = setup('sleep 0.4\n' + RESULT());
+  const { dev } = team(s);
+  s.createTask({ title: 'slow-ish', assignee: dev.id });
+  const o = new Orchestrator(s);
+  const done = new Promise((res) => o.on('done', res));
+  o.start();
+  assert.ok(await waitFor(() => o.procs.size > 0), 'the task dispatches');
+  assert.equal(o.runState().state, 'running');
+  assert.equal(o.snapshot().running, true, 'the snapshot running flag tracks agents at work');
+  await done;
+  assert.equal(o.runState().state, 'idle');
+  o.stop();
+}));

@@ -37,11 +37,11 @@ test('orchestrator resets and re-dispatches orphaned in_progress tasks instead o
   const logs = [];
   const o = new Orchestrator(s);
   o.on('log', (l) => logs.push(l.text));
-  const done = new Promise((resolve) => { o.on('done', resolve); o.once('idle', resolve); }); // drain idles now (t_b2273507)
+  const done = new Promise((resolve) => o.on('done', resolve));
   o.start();
   await done;
 
-  const stopReason = logs.find((t) => /Board drained|^Stopped:|^No more todo|orphan|reconcil/i.test(t)) || '';
+  const stopReason = logs.find((t) => /^Stopped:|^No more todo|orphan|reconcil/i.test(t)) || '';
   assert.ok(!/blocked by unfinished dependencies/.test(stopReason), `stop reason must not blame "blocked" deps while orphans exist: "${stopReason}"`);
 
   const finalTasks = s.listTasks();
@@ -52,8 +52,9 @@ test('orchestrator resets and re-dispatches orphaned in_progress tasks instead o
 });
 
 // Regression for t_d79c74fc: a run that ends with an undispatchable task in review (reviewer session
-// died before sign-off) must tell the human why it stopped, never log "Finished." with work still open.
-test('run with a task in review and nothing dispatchable stops with a reason naming the task', async () => {
+// died before sign-off) must tell the human why nothing is running, never log "Finished." with work
+// still open. Since t_b2273507 the run IDLES instead of stopping — the idle log carries the reason.
+test('run with a task in review and nothing dispatchable idles with a reason naming the task', async () => {
   const { s, ns } = setup(2);
   const t = s.createTask({ title: 'open review', assignee: ns[0].id });
   s.updateTask(t.id, { status: 'review', awaitingApproval: true }); // approval-gated review: autoAdvanceReviews must not move it
@@ -61,15 +62,15 @@ test('run with a task in review and nothing dispatchable stops with a reason nam
   const logs = [];
   const o = new Orchestrator(s);
   o.on('log', (l) => logs.push(l.text));
-  const done = new Promise((resolve) => { o.on('done', resolve); o.once('idle', resolve); }); // drain idles now (t_b2273507)
+  const done = new Promise((resolve) => o.on('done', resolve));
   o.start();
   await done;
 
-  // t_b2273507: an undispatchable review no longer STOPS the run — the run goes idle and says why,
-  // naming the stuck task and its state, and never claims Finished with work still open.
-  const drained = logs.find((l) => /Board drained/.test(l)) || '';
-  assert.ok(!/Finished/.test(drained), `run must not claim Finished with a task still in review: "${drained}"`);
-  assert.ok(/run stays on \(1 unfinished task\(s\)/.test(drained) && drained.includes(t.id) && drained.includes('review'), `idle log must name the stuck task and its state: "${drained}"`);
-  assert.equal(o.snapshot().runState.state, 'idle');
-  assert.match(o.snapshot().runState.reason, /1 unfinished task/);
+  const idle = logs.find((l) => /^Run idle:|^Stopped:|^No more todo/.test(l)) || '';
+  assert.ok(!/Finished/.test(idle), `run must not claim Finished with a task still in review: "${idle}"`);
+  assert.ok(/^Run idle: 1 unfinished task/.test(idle) && idle.includes(t.id) && idle.includes('review'), `idle reason must name the stuck task and its state: "${idle}"`);
+  assert.equal(o.running, true, 'the run stays alive while undispatchable review work waits');
+  assert.equal(o.runState().state, 'idle');
+  assert.equal(o.runState().reason, 'waiting on review or human');
+  o.stop();
 });

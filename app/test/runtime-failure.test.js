@@ -335,8 +335,8 @@ test('resume clears the breaker, re-dispatches queued tasks, and a new episode m
   await waitFor(() => tripped(orch) && !orch.procs.has(node.id));
   assert.equal(openQuestions(store).length, 1, 'first episode asked once');
 
-  // the Run has stopped by now (nothing dispatchable while paused); work queued for the
-  // paused runtime must wait, not fail
+  // the Run has idled by now (t_b2273507: nothing dispatchable while the breaker holds — the
+  // session stays on); work queued for the paused runtime must wait, not fail
   const queued = store.createTask({ title: 'queued behind the breaker', assignee: node.id });
   try { orch.tick(); } catch {}
   await new Promise((r) => setTimeout(r, 80));
@@ -344,9 +344,10 @@ test('resume clears the breaker, re-dispatches queued tasks, and a new episode m
   assert.equal(available.length, 0);
 
   await orch.resumeRuntime('claude');
-  // start() re-armed the dispatch sweep, and every run end fires two setImmediate(tick()) that
-  // nudgeIdle() on — either can start idle-nudge wake runs that would inflate orch.runs. The retry
-  // itself is already in flight (start() ticks synchronously), so silencing both here is safe.
+  // The idle run keeps its dispatch sweep and its session counter (resumeRuntime re-kicks tick(),
+  // no fresh start()). Every run end fires two setImmediate(tick()) that nudgeIdle() on — either
+  // can start idle-nudge wake runs that would inflate orch.runs. The retry itself is already in
+  // flight (resume ticks synchronously), so silencing both here is safe.
   clearInterval(orch._tickTimer);
   orch.nudgeIdle = () => {};
   for (const t of orch.wakeTimers.values()) clearTimeout(t.timer); orch.wakeTimers.clear();
@@ -356,7 +357,7 @@ test('resume clears the breaker, re-dispatches queued tasks, and a new episode m
   // resume re-arms dispatch: the crashed task is first in line (crash→todo re-queue), it fails
   // again and re-trips the breaker before the queued task can start — which then stays queued.
   await waitFor(() => tripped(orch), 8000);
-  assert.equal(orch.runs, 1, 'the re-armed dispatch ran the crashed task\'s retry (start() reset the counter)');
+  assert.equal(orch.runs, 2, 'the resumed dispatch ran the crashed task\'s retry (the session counter kept counting)');
   assert.equal(store.getTask(queued.id).status, 'todo', 'the retry re-tripped: queued work waits again');
   assert.equal(unavailable.length, 2);
   assert.equal(openQuestions(store).length, 2, 'one ask per episode, not one forever');
