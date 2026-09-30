@@ -182,3 +182,79 @@ test('overviewKey: subagent record changes produce a new key', () => {
   assert.equal(O.overviewKey(base(sub)), O.overviewKey(base(sub.map((x) => ({ ...x })))));
   assert.notEqual(O.overviewKey(base(sub)), O.overviewKey(base(sub.map((x) => ({ ...x, status: 'done' })))));
 });
+
+// ---- task-file cache (t_8d586961): listTasks must not re-read unchanged task files ----
+const utime = (p, ms) => fs.utimesSync(p, new Date(ms), new Date(ms));
+
+test('task cache: external Store-style writes (tmp+rename) are picked up; failed parses never cached', () => {
+  const s = tmpStore();
+  const a = s.createTask({ title: 'alpha' });
+  s.createTask({ title: 'beta' });
+  assert.deepEqual(s.listTasks().map((t) => t.title).sort(), ['alpha', 'beta']); // populates cache + memo
+  // Another writer (agent's board MCP server, bulk seed) writes the way every Store write does:
+  // tmp file + rename. The rename bumps the dir entry, so the memo must miss and rescan.
+  const file = s.taskFile(a.id);
+  const overwrite = (obj) => { const tmp = file + '.ext.tmp'; fs.writeFileSync(tmp, JSON.stringify(obj, null, 2) + '\n'); fs.renameSync(tmp, file); };
+  overwrite({ ...s.getTask(a.id), title: 'alpha2' });
+  assert.equal(s.listTasks().find((t) => t.id === a.id).title, 'alpha2');
+  // half-swapped file (invalid JSON): skipped, and the failure is not cached — repair shows through
+  const whole = s.getTask(a.id);
+  const broken = file + '.ext.tmp'; fs.writeFileSync(broken, '{broken'); fs.renameSync(broken, file);
+  assert.equal(s.listTasks().find((t) => t.id === a.id), undefined);
+  overwrite({ ...whole, title: 'alpha3' });
+  assert.equal(s.listTasks().find((t) => t.id === a.id).title, 'alpha3');
+});
+
+test('task memo: repeated reads return the same array until something writes, then fresh data', () => {
+  const s = tmpStore();
+  const a = s.createTask({ title: 'one' });
+  const r1 = s.listTasks();
+  const r2 = s.listTasks();
+  assert.equal(r1, r2); // nothing changed: memo serves the build
+  s.updateTask(a.id, { title: 'uno' });
+  const r3 = s.listTasks();
+  assert.notEqual(r3, r1);
+  assert.equal(r3.find((t) => t.id === a.id).title, 'uno');
+  assert.equal(s.listTasks(), r3); // new memo generation
+});
+
+test('task memo: an out-of-contract in-place edit (no rename) stays unseen until the next Store write', () => {
+  const s = tmpStore();
+  const a = s.createTask({ title: 'quiet' });
+  s.listTasks();
+  const file = s.taskFile(a.id);
+  fs.writeFileSync(file, JSON.stringify({ ...s.getTask(a.id), title: 'sneaky' }, null, 2) + '\n'); // cat > file: no dir entry move
+  assert.equal(s.listTasks().find((t) => t.id === a.id).title, 'quiet'); // invisible, as designed
+  const b = s.createTask({ title: 'noise' }); // any Store write renames through the dir -> rescan
+  assert.equal(s.listTasks().find((t) => t.id === a.id).title, 'sneaky'); // and heals
+  assert.ok(s.getTask(b.id));
+});
+
+test('task cache: same-size + same-mtime in-process writes still invalidate (write-through)', () => {
+  const s = tmpStore();
+  const a = s.createTask({ title: 'aaaa' });
+  s.listTasks(); // cache it
+  const st = fs.statSync(s.taskFile(a.id));
+  s.updateTask(a.id, { title: 'bbbb' }); // same byte length -> identical size
+  utime(s.taskFile(a.id), st.mtimeMs); // and force the same mtime tick
+  assert.equal(s.listTasks().find((t) => t.id === a.id).title, 'bbbb');
+});
+
+test('task cache: a throwing _withTasks mutates cached tasks — the cache is dropped, not served', () => {
+  const s = tmpStore();
+  const a = s.createTask({ title: 'keep' });
+  s.listTasks(); // cache
+  assert.throws(() => s._withTasks((ts) => { ts.find((t) => t.id === a.id).title = 'MUTATED'; throw new Error('boom'); }), /boom/);
+  assert.equal(s.listTasks().find((t) => t.id === a.id).title, 'keep');
+});
+
+test('task cache: file removal drops the entry; recreated files show up', () => {
+  const s = tmpStore();
+  const a = s.createTask({ title: 'gone' });
+  const whole = s.getTask(a.id);
+  s.listTasks(); // cache
+  s._unlinkTask(a.id);
+  assert.equal(s.listTasks().length, 0);
+  s._writeTask({ ...whole, title: 'back' });
+  assert.equal(s.listTasks().length, 1);
+});

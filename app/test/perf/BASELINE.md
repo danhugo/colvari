@@ -25,6 +25,39 @@ dominates), 41-57 long tasks >50 ms per ~60-85 s window.
 
 Living scoreboard + per-track verdicts: wiki page **"Perf numbers: click latency"**.
 
+## After track 1: master `115ddd5` (t_8d586961 merged — 2026-10-01, t_4382031b)
+
+Same protocol, 4 back-to-back runs on the merge commit (raw: `results/track1-115ddd5.json`
++ per-run JSONs in `results/track1-115ddd5/r1–r4/`; pooled via `test/perf/pool.js`).
+Ambient loadavg1m per run: 5.9 / 19.7 / 40.8 / 32.9.
+
+| Run | p50 | p95 | p99 | max | long tasks >50 ms |
+|---|---:|---:|---:|---:|---:|
+| r1 | 17.0 | 73.6 | 100.2 | 103.7 | 17 |
+| r2 | 24.5 | 68.6 | 87.0 | 116.7 | 15 |
+| r3 | 25.3 | 102.5 | 157.5 | 197.9 | 20 |
+| r4 | 25.3 | 72.5 | 92.1 | 113.5 | 18 |
+| **Pooled (n=264)** | **24.9** | **83.2** | **116.7** | **197.9** | 70 total |
+
+**Verdict vs targets (p95 < 100 ms, p99 < 200 ms): PASS on both — first green gate.**
+p50 61.6 → 24.9 (2.5×), p95 372.4 → 83.2 (4.5×), p99 765.8 → 116.7 (6.6×). Flux's
+independent spot-check on the same commit (3 runs, 11.5/34.5/43.3) agrees.
+
+What moved (per-run windows, r1 exemplar): `getAll` p50 124 → 3.2 ms (warm Store in
+ProjectManager.store()), renderAll p50 5.6 → 0.3 ms with renderAll fan-out unchanged in
+count but visible-tabs-only in cost, `renderLog` from 1643 calls Σ 11.7 s per window to
+~2 calls Σ 140 ms (incremental tail-append incl. the windowed older-bar path), long tasks
+> 50 ms from 41–57 to 15–20 per window.
+
+Remaining hot spots for the next gate:
+
+- **tab:obs is still the worst single target**: pooled p95 113.5 ms, max 197.9 (chat now
+  p95 37.4). A chat/obs tail-append pass would be the next renderer track.
+- Card clicks #5–#9 stall ~60–100 ms with **zero overlapping renderAll cost** in every
+  run — a frame-stall during the streaming burst (and/or the thread drawer covering the
+  fixed click coordinates), not card render cost. Harness v2 should re-query card rects
+  before each click; tab numbers are unaffected.
+
 ---
 
 ## Historical baseline: `8b44f143f` (2026-09-30, t_f02c2572, single run)

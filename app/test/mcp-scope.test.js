@@ -47,9 +47,11 @@ test('real stdio MCP server enforces scope', async () => {
   const { Client } = require('@modelcontextprotocol/sdk/client/index.js');
   const { StdioClientTransport } = require('@modelcontextprotocol/sdk/client/stdio.js');
   const { s, pm, dev } = setup();
-  const connect = async (node) => {
+  // AGENTS_SQUAD_DEV=1 is what the app exports to its children in dev mode; without it the server
+  // runs as a packaged build would (no restart tools — the t_2e729984 gate).
+  const connect = async (node, env = { ...process.env, AGENTS_SQUAD_DEV: '1' }) => {
     const c = new Client({ name: 't', version: '1' });
-    await c.connect(new StdioClientTransport({ command: process.execPath, args: [path.join(__dirname, '../src/mcp-server.js'), '--project', s.dir, '--node', node] }));
+    await c.connect(new StdioClientTransport({ command: process.execPath, args: [path.join(__dirname, '../src/mcp-server.js'), '--project', s.dir, '--node', node], env }));
     return c;
   };
   const cd = await connect(dev.id);
@@ -63,6 +65,14 @@ test('real stdio MCP server enforces scope', async () => {
     assert.ok(!ok.isError);
     assert.equal(s.listTasks({ assignee: dev.id }).length, 1);
   } finally { await cd.close(); await cp.close(); }
+  // Packaged build: the restart tools are not even registered (never listed to any agent).
+  // NODE_PATH (when the suite runs against an out-of-tree node_modules) is kept: only the dev
+  // marker must be absent, not the module resolution.
+  const cn = await connect(pm.id, { ...(process.env.NODE_PATH ? { NODE_PATH: process.env.NODE_PATH } : {}), PATH: process.env.PATH || '' });
+  try {
+    const names = (await cn.listTools()).tools.map((t) => t.name);
+    assert.ok(!names.includes('schedule_restart') && !names.includes('request_self_update'), 'packaged build: restart tools are not advertised');
+  } finally { await cn.close(); }
 });
 
 test('reassign_task: PM-only, needs assign edge, refuses non-todo, keeps comments', () => {

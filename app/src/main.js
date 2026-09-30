@@ -3,8 +3,11 @@ const path = require('path');
 // Test instances (gui-e2e / smoke) must never leave fake-CLI children behind: install procguard
 // before the orchestrator loads so every spawn it makes is tracked and reaped (t_92c31037).
 const procguard = (process.env.AGENTS_SQUAD_GUI_E2E || process.env.AGENTS_SQUAD_SMOKE) ? require('../test/harness/procguard').install() : null;
-const { Orchestrator, reapRunPids } = require('./orchestrator');
+const { Orchestrator, reapRunPids, interruptedFromReap } = require('./orchestrator');
+const BS = require('./bootstate');
 const { ProjectManager, TEMPLATES, isolateTestRoot } = require('./projects');
+const { BoardCache } = require('./board-cache');
+const { DeltaPump } = require('./delta-pump');
 const { pickChanged } = require('./store');
 const AC = require('./agent-config');
 const WT = require('./worktree');
@@ -64,17 +67,46 @@ if (!appLockHeld) {
 // is spawned as this process tears down and could otherwise see the dying lock, take the
 // "another instance" exit, and leave no window at all — release the lock up front.
 function relaunchApp() {
+  try { markCleanExits(); } catch {} // app.exit() skips 'will-quit': stamp the breadcrumbs clean or the relaunch reads as a silent death
   try { if (!TEST_MODE && appLockHeld) app.releaseSingleInstanceLock(); } catch {}
   app.relaunch();
   app.exit(0);
 }
 
-const pm = new ProjectManager();
+const pm = new ProjectManager(undefined, { devMode: DEV_MODE });
 const orchs = new Map(); // projectId -> Orchestrator (projects run independently / concurrently)
+// Unclean-exit recovery (t_2ca99830): at boot the heartbeat breadcrumb (bootstate.js) tells us
+// whether the previous instance died without notice; its orphaned run groups are reaped by
+// recorded pid (t_3f830e64 — never by name) and the interrupted tasks get a system comment.
+// The result is exposed to the renderer via getLastExit for the recovery banner (Uma, t_6911ba60).
+const lastExits = new Map(); // projectId -> { unclean, lastAliveAt, lastAlivePid, reaped, interruptedTasks }
+function bootRecovery(projectId) {
+  if (lastExits.has(projectId)) return lastExits.get(projectId);
+  const store = pm.store(projectId);
+  let prev = null; try { prev = BS.detectUnclean(store.dir); } catch {}
+  const reapOut = { killed: [], skipped: [] };
+  try { if (appLockHeld) Object.assign(reapOut, reapRunPids(store.dir)); } catch {}
+  let marked = [];
+  try { if (reapOut.killed.length) marked = interruptedFromReap(store, reapOut.killed); } catch {}
+  const info = {
+    unclean: !!prev,
+    lastAliveAt: prev && prev.at,
+    lastAlivePid: prev && prev.pid,
+    reaped: reapOut.killed,
+    interruptedTasks: marked.map((m) => m.taskId),
+  };
+  lastExits.set(projectId, info);
+  if (prev && appLockHeld) {
+    try {
+      store.appendLog({ at: Date.now(), nodeId: null, kind: 'system', text: `previous app instance (pid ${prev.pid}) died without a clean exit — last heartbeat ${new Date(prev.at).toISOString()}; reaped ${reapOut.killed.length} orphan run group(s)${info.interruptedTasks.length ? `; interrupted: ${info.interruptedTasks.join(', ')}` : ''}` });
+    } catch {}
+  }
+  return info;
+}
 function orchFor(pid) {
   let o = orchs.get(pid);
   if (!o) {
-    o = new Orchestrator(pm.store(pid), { repoDir: APP_ROOT });
+    o = new Orchestrator(pm.store(pid), { repoDir: APP_ROOT, devMode: DEV_MODE });
     o.on('log', (l) => send('log', { ...l, projectId: pid }));
     o.on('state', (s) => send('state', { ...s, projectId: pid })); // slim: the renderer refreshes from the store on receipt
     o.on('notify', (n) => { send('notify', { ...n, projectId: pid }); notify(n, pid); });
@@ -90,12 +122,23 @@ function orchFor(pid) {
     // Scheduled restarts fire through the watcher's drain/test/relaunch flow (watcherFor lazily
     // creates it; in non-dev builds it answers the no-op stub and the schedule just stays armed).
     o.updater = watcherFor(pid);
-    // Stale run groups from a crashed instance die here (t_3f830e64): only this single live
-    // instance reaps, and only pidfile-recorded pids whose lstart still matches — never by name.
-    try { if (appLockHeld) reapRunPids(o.store.dir); } catch {}
+    bootRecovery(pid); // heartbeat check + orphan reap + interrupted-task comments (once per project)
     orchs.set(pid, o);
+    pumpFor(pid).attachOrch(o); // the pump's orch deltas feed the same 'state' payload (t_39bf39ac)
   }
   return o;
+}
+// IPC deltas (t_39bf39ac, perf track 2): one pump per project pushes {type,id,patch} batches on the
+// 'delta' channel — board-cache change events for tasks/wiki, the orchestrator 'state' snapshot, and
+// sig-checked messages/inbox/runs — so the renderer stops re-pulling sections on every state event.
+const pumps = new Map(); // projectId -> DeltaPump
+function pumpFor(pid) {
+  let p = pumps.get(pid);
+  if (!p) {
+    p = new DeltaPump({ projectId: pid, store: pm.store(pid), cache: BoardCache.forStore(pm.store(pid)), orch: () => orchs.get(pid) || null, send: (payload) => send('delta', payload) });
+    pumps.set(pid, p);
+  }
+  return p;
 }
 // Self-update: one UpdateWatcher per project (polls the repo, safe restart + resume; see self-update.js).
 const watchers = new Map(); // projectId -> UpdateWatcher
@@ -1604,7 +1647,7 @@ async function guiE2E() {
     const ps = pm.store(cur.p || pid(), cur.t); let nodes = ps.getTeam().nodes;
     if (!nodes.length) { ps.addNode({ name: 'Devon', role: 'Dev', x: 60, y: 60 }); nodes = ps.getTeam().nodes; }
     const n = nodes[0];
-    await ex(`$('#tabs button[data-tab=settings]').click(); await refresh(); await w(300); $('#rt-path').value = 'helpycode'; $('#rt-detect').click(); await w(4000);`);
+    await ex(`document.querySelector('#tabs button[data-tab=settings], #settingsbtn').click(); await refresh(); await w(300); $('#rt-path').value = 'helpycode'; $('#rt-detect').click(); await w(4000);`);
     const draft = await ex(`return { label: $('#rd-label') && $('#rd-label').value, models: $('#rd-models') && $('#rd-models').value, stub: !!document.querySelector('#rt-draft .costnote') }`);
     expect('helpycode: Detect populates a real (non-stub) draft', draft.label === 'helpycode' && !draft.stub, draft);
     // The introspector now parses `models` output into names, but the reviewer still confirms/edits the
@@ -1783,6 +1826,40 @@ async function guiE2E() {
     await ex(`if (alertsOpen) $('#alertbell').click(); await w(100);`);
     console.log('[gui-e2e] alerts', JSON.stringify({ bell0, one, panel, dim, still, bump, red, opened, rst, rt, orph, orph2, openTask }));
   };
+  // Packaged-mode simulation (t_7fbee55f): with an identical stale dev-only state (restart pending,
+  // watcher live, self-update draining, a gated task), a non-dev backend must render none of it —
+  // the dev shot with the same injected state shows exactly what the gate hides.
+  const packagedShots = async () => {
+    await ex(`await refresh(); await w(300);`);
+    const cur = await ex(`return { p: ctx.p, t: S.teamId }`);
+    const ps = pm.store(cur.p || pid(), cur.t); let nodes = ps.getTeam().nodes;
+    if (nodes.length < 2) { ps.addNode({ name: 'Pia', role: 'PM', x: 60, y: 60 }); ps.addNode({ name: 'Devon', role: 'Dev', x: 320, y: 160 }); nodes = ps.getTeam().nodes; }
+    // Assign the gated task: team-scoped board views hide unassigned (teamless) tasks (t_1158f757).
+    const gated = ps.createTask({ title: 'Gated demo task', assignee: nodes[1].id });
+    await ex(`$('#tabs button[data-tab=board]').click(); await refresh(); await w(400);`); // renderBoard only builds cards on the active tab; refresh picks up the gated card
+    const inject = (dev) => ex(`rst = normRestart({ pendingCount: 3, targetSha: 'abcdef123456', since: Date.now() - 60000, gating: ['${gated.id}'], stub: false });
+      watch = { lastWatchAt: Date.now() - 60000, active: true, digest: '3 behind · 1 merge failed', intervalMin: 10, stub: false };
+      upd = normUpd({ phase: 'draining', waitingOn: 2, from: 'aaa1111', to: 'bbb2222', reason: 'packaged simulation', devMode: ${dev} }); upd.stub = false;
+      rstSeen = true; boardSig = null; renderSelfUpdate(); renderHeader(); renderAlerts(); renderBoard(); await w(400);`);
+    await inject(true);
+    await ex(`if (!alertsOpen) { $('#alertbell').click(); await w(300); }`);
+    const dv = await ex(`return { row: [...document.querySelectorAll('#alertpanel .al-what')].some((e) => /Restart pending/.test(e.textContent)),
+      act: !![...document.querySelectorAll('#alertpanel .al-act')].find((b) => b.textContent === 'Restart now'),
+      watch: !$('#watchst').classList.contains('hidden'), upd: !$('#updst').classList.contains('hidden'),
+      veil: !$('#updveil').classList.contains('hidden'), rstwait: document.querySelectorAll('.rstwait').length }`);
+    expect('dev mode (baseline): stale state shows restart row + Restart now, watch pill, update pill + veil, waits-for-restart tag',
+      dv.row && dv.act && dv.watch && dv.upd && dv.veil && dv.rstwait === 1, dv);
+    await shot('packaged-dev-header');
+    await inject(false);
+    const pk = await ex(`const vis = (s) => { const e = document.querySelector(s); return !!e && !e.classList.contains('hidden'); };
+      return { row: [...document.querySelectorAll('#alertpanel .al-what')].some((e) => /Restart pending/.test(e.textContent)),
+        watch: vis('#watchst'), upd: vis('#updst'), veil: vis('#updveil'),
+        rstwait: document.querySelectorAll('.rstwait').length, body: document.body.textContent.includes('Restart pending') }`);
+    expect('packaged: restart row, Restart now, watch pill, update pill + veil, waits-for-restart tag all hidden despite stale state',
+      !pk.row && !pk.watch && !pk.upd && !pk.veil && pk.rstwait === 0 && !pk.body, pk);
+    await shot('packaged-header');
+    console.log('[gui-e2e] packaged', JSON.stringify({ dv, pk }));
+  };
   // Wake run on an agent that ALSO has an in_progress task (t_8af586bc) — the case that used to
   // render bare "working": the backend keeps a.taskId null for the whole wake, so the old
   // wakeRun() veto on any in_progress task hid the wake info everywhere. Same seeded activity
@@ -1908,7 +1985,8 @@ async function guiE2E() {
     await waitFor(`return !!document.querySelector('#graph .node[data-id="${ra.id}"] .chip-recruited') && !!document.querySelector('#graph .node[data-id="${corey.id}"] .corelock')`);
     await shot('36-dynamicteam-graph');
     // Settings: defaults 6/ask, saved values persist and re-render.
-    await ex(`$('#tabs button[data-tab=settings]').click(); await w(300);`);
+    // Settings gear lives outside the #tabs nav (it sits next to the help button), so match either.
+    await ex(`document.querySelector('#tabs button[data-tab=settings], #settingsbtn').click(); await w(300);`);
     const defaults = await ex(`return { maxAgents: $('#st-maxagents') ? $('#st-maxagents').value : null, approval: $('#st-tcappr') ? $('#st-tcappr').value : null }`);
     expect('settings default maxAgents=6 and teamChangeApproval=ask', defaults.maxAgents === '6' && defaults.approval === 'ask', defaults);
     await ex(`$('#st-maxagents').value = '8'; $('#st-tcappr').value = 'auto'; $('#st-save').click(); await w(600);`);
@@ -2163,18 +2241,21 @@ async function guiE2E() {
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'wakebusy') { await wakeBusyShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'monitorlog') { await monitorShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'alerts') { await alertsShots(); throw null; }
+    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'packaged') { await packagedShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'subagents') { await subagentShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'dynamicteam') { await dynamicTeamShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'recruitinbox') { await recruitInboxShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'topbar') { await topbarShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'composerclear') { await composerClearShots(); throw null; }
     // project/team management through the UI: create a project from the Startup template, then a Solo team, then switch back.
-    // Wait until the template select is filled (the first refresh loads the templates) before choosing one.
-    await ex(`$('#tabs button[data-tab=team]').click(); await w(300);`); // Chat is the default tab; the flow below clicks the graph
+    // The template select renders with the Settings view (tab-scoped rendering, t_8d586961), so open
+    // Settings first and wait until the first refresh has filled it before choosing a template.
+    await ex(`$('#settingsbtn').click(); await w(300);`);
     expect('templates loaded', await waitFor(`return !!document.querySelector('#tpl-select option[value=startup]') && !!document.querySelector('#tpl-select option[value=solo]')`));
     const answer = (sel, text) => ex(`$('#tpl-select').value = '${sel[1]}'; if ($('#tpl-select').value !== '${sel[1]}') return false; $('${sel[0]}').click(); await w(200); $('#ask-input').value = '${text}'; $('#ask-ok').click(); await w(800); return true;`);
     expect('startup template selectable', await answer(['#newproject', 'startup'], 'GUI project'));
     expect('solo template selectable', await answer(['#newteam', 'solo'], 'Solo team'));
+    await ex(`$('#tabs button[data-tab=team]').click(); await w(300);`); // the flow below clicks the graph
     await shot('0-projects');
     const mp = pm.list(); const gp = mp.find((p) => p.name === 'GUI project');
     const gpTeams = gp ? pm.get(gp.id).teams : []; const tn = (i) => (gpTeams[i] ? pm.store(gp.id, gpTeams[i].id).getTeam() : { nodes: [], edges: [] });
@@ -2215,7 +2296,7 @@ async function guiE2E() {
     await ex(`const g = [...document.querySelectorAll('#graph .node')][0]; g.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, clientX: 1, clientY: 1 })); window.dispatchEvent(new MouseEvent('mouseup')); await w(500);`);
     await shot('1d-preflight');
     // Badge must not cover the agent name.
-    const overlap = await ex(`return [...document.querySelectorAll('#graph .node')].filter((g) => { const t = g.querySelector('text').getBoundingClientRect(); const b = g.querySelector('.pfbadge rect').getBoundingClientRect(); return !(t.right <= b.left || b.right <= t.left || t.bottom <= b.top || b.bottom <= t.top); }).length`);
+    const overlap = await ex(`return [...document.querySelectorAll('#graph .node')].filter((g) => { const t = g.querySelector('text').getBoundingClientRect(); const b = g.querySelector('.pfbadge circle').getBoundingClientRect(); return !(t.right <= b.left || b.right <= t.left || t.bottom <= b.top || b.bottom <= t.top); }).length`);
     expect('preflight badges do not overlap names', overlap === 0, { overlap });
     const pfNodes = store.getTeam().nodes.map((n) => ({ name: n.name, ok: n.preflight && n.preflight.ok, error: n.preflight && n.preflight.error, apiKeySource: n.preflight && n.preflight.apiKeySource, ms: n.preflight && n.preflight.latencyMs }));
     expect('preflight badges shown', pfNodes.every((n) => typeof n.ok === 'boolean'), pfNodes);
@@ -2425,10 +2506,9 @@ function toDraftProfile(bin, profile, derived = {}) {
   };
 }
 const api = {
-  introspectRuntime: (_c, bin) => { const r = runIntrospectRuntime(bin); return toDraftProfile(bin, r.profile, r); },
-  listProjects: () => ({ projects: pm.list().map((p) => ({ ...p, running: !!(orchs.get(p.id) || {}).running })), templates: Object.fromEntries(Object.entries(TEMPLATES).map(([k, v]) => [k, v.label])) }),
+  introspectRuntime: (_c, bin) => { const r = runIntrospectRuntime(bin); return toDraftProfile(bin, r.profile, r); },  listProjects: () => ({ projects: pm.list().map((p) => ({ ...p, running: !!(orchs.get(p.id) || {}).running })), templates: Object.fromEntries(Object.entries(TEMPLATES).map(([k, v]) => [k, v.label])) }),
   createProject: (_c, name, tpl) => pm.create(name, tpl), renameProject: (_c, pid, name) => pm.rename(pid, name),
-  deleteProject: (_c, pid) => { if ((orchs.get(pid) || {}).running) throw new Error('stop the project first'); orchs.delete(pid); return pm.remove(pid); },
+  deleteProject: (_c, pid) => { if ((orchs.get(pid) || {}).running) throw new Error('stop the project first'); const p = pumps.get(pid); if (p) { p.close(); pumps.delete(pid); } orchs.delete(pid); return pm.remove(pid); },
   createTeam: (c, name, tpl) => pm.createTeam(c.p, name, tpl), renameTeam: (c, tid, name) => pm.renameTeam(c.p, tid, name),
   deleteTeam: (c, tid) => pm.removeTeam(c.p, tid), duplicateTeam: (c, tid) => pm.duplicateTeam(c.p, tid),
   exportTeam: (c, tid) => pm.exportTeam(c.p, tid), importTeam: (c, json) => pm.importTeam(c.p, json),
@@ -2467,6 +2547,10 @@ const api = {
   // back ({error} on rejection) — messages.json never holds base64.
   saveAttachment: (c, input) => ST(c).saveAttachment(input || {}),
   commentTask: (c, id, text) => ST(c).commentTask(id, 'human', text),
+  // Unclean-exit recovery info (t_2ca99830): what the renderer's banner (Uma, t_6911ba60) shows —
+  // whether the previous instance died without a clean exit, when it was last seen alive, and
+  // which orphan runs were reaped (with their interrupted tasks) at this boot.
+  getLastExit: (c) => bootRecovery(c.p) || { unclean: false, reaped: [], interruptedTasks: [] },
   writeWiki: (c, t, x) => ST(c).writeWiki(t, x, 'human'), deleteWiki: (c, t) => ST(c).deleteWiki(t),
   listWikiSummaries: (c) => ST(c).listWikiSummaries(), searchWiki: (c, q) => ST(c).searchWiki(q),
   listSessions: (c, nodeId) => ST(c).listSessions({ nodeId }), getSessionLog: (c, sessionId, opts) => ST(c).getSessionLog(sessionId, opts || {}),
@@ -2607,7 +2691,16 @@ app.whenReady().then(() => {
   if (!appLockHeld) return; // second launch: the running instance stays, this one exits
   createWindow();
   probeUnprobedAgents();
+  for (const p of pm.list()) pumpFor(p.id); // delta pumps stream every project's changes (t_39bf39ac)
   pollInbox(true); setInterval(() => pollInbox(false), 1500);
+  // Unclean-exit detection must see the PREVIOUS instance's heartbeat (t_2ca99830): recover for
+  // every known project before the heartbeat below stamps over the evidence.
+  for (const p of pm.list()) { try { bootRecovery(p.id); } catch {} }
+  // Heartbeat breadcrumb (t_2ca99830): the lock holder stamps each store dir every few seconds;
+  // a boot that finds the stamp without a clean marker knows the last instance died silently.
+  const heartbeat = () => { for (const p of pm.list()) { try { BS.writeAlive(pm.store(p.id).dir); } catch {} } };
+  heartbeat();
+  setInterval(heartbeat, 5000);
   // Worktree lifecycle sweep (t_9b662983): at boot (before any agent can spawn) and periodically
   // while each project is idle — drops worktrees whose task is done/missing (clean + merged only,
   // never a dirty or unmerged tree, never in-flight tasks) and prunes stale worktree entries.
@@ -2629,3 +2722,16 @@ app.whenReady().then(() => {
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });
 app.on('window-all-closed', () => { for (const o of orchs.values()) if (o.running) o.stop(); if (process.platform !== 'darwin') app.quit(); });
+// Any exit we can still act on must stamp the breadcrumbs clean (t_2ca99830), or the next boot
+// shows a false "died silently". app.exit() skips 'will-quit' — relaunchApp marks clean itself.
+function markCleanExits() {
+  if (!appLockHeld) return;
+  for (const p of pm.list()) { try { BS.writeAlive(pm.store(p.id).dir, { cleanExitAt: Date.now() }); } catch {} }
+}
+app.on('will-quit', () => { try { BoardCache.closeAll(); } catch {} }); // no leaked fs.watch handles across project switches/quit
+app.on('will-quit', markCleanExits);
+for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
+  try {
+    process.on(sig, () => { try { markCleanExits(); } catch {} app.exit(0); });
+  } catch {}
+}

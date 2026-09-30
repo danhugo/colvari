@@ -7,6 +7,7 @@ const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
 const { Store } = require('./store');
+const { BoardCache } = require('./board-cache');
 const { normalizeNode, NODE_FIELDS, EDGE_TYPES } = require('./agent-config');
 
 const rid = (p) => `${p}_${crypto.randomBytes(4).toString('hex')}`;
@@ -69,15 +70,36 @@ function instantiate(spec) {
 }
 
 class ProjectManager {
-  constructor(root = defaultRoot()) {
+  // opts.devMode: whether the app can restart itself (main.js DEV_MODE) — threaded into every
+  // Store so merges in packaged builds never count toward a restart (see Store.constructor).
+  constructor(root = defaultRoot(), opts = {}) {
     this.root = root;
+    this.devMode = opts.devMode !== false;
     this.pdir = path.join(root, 'projects');
+    this._stores = new Map(); // (dir|teamId) -> Store — hot path reuse, see store()
     fs.mkdirSync(this.pdir, { recursive: true });
     this.migrate();
     if (!this.list().length) this.create('Default', 'blank');
   }
   dir(pid) { if (!/^[\w-]+$/.test(pid || '')) throw new Error('bad project id'); return path.join(this.pdir, pid); }
-  store(pid, teamId = null) { const d = this.dir(pid); if (!fs.existsSync(path.join(d, 'project.json'))) throw new Error('no project ' + pid); return new Store(d, teamId); }
+  // One Store instance per (project dir, teamId), reused across calls (t_8d586961): the renderer's
+  // getAll builds ST(c)/TS(c) several times a second while agents stream, and every fresh Store
+  // paid cold construction migrations plus — with the task-file cache — a full re-read + re-parse
+  // of every board task file (~110ms of getAll on the 550-task board). Store is disk-backed and
+  // its locks are file-based, so sharing one instance across call sites changes no semantics;
+  // out-of-band writes are still seen (reads hit the disk every call). Entries live as long as
+  // the project; remove() drops them with the directory. Main-process stores also get the board
+  // cache by default (t_479e7290): one shared BoardCache per project dir (registry-keyed), so the
+  // warm instances share its watchers. The board MCP server builds its Store directly and never
+  // caches. Cato (t_adeefa43): watchers must not leak per project — closeDir on remove.
+  store(pid, teamId = null) {
+    const d = this.dir(pid);
+    if (!fs.existsSync(path.join(d, 'project.json'))) throw new Error('no project ' + pid);
+    const key = d + '|' + (teamId || '');
+    let s = this._stores.get(key);
+    if (!s) this._stores.set(key, (s = new Store(d, teamId, { devMode: this.devMode, cache: true })));
+    return s;
+  }
   get(pid) { return this.store(pid).meta(); }
   list() {
     return fs.readdirSync(this.pdir).map((d) => { try { return JSON.parse(fs.readFileSync(path.join(this.pdir, d, 'project.json'), 'utf8')); } catch { return null; } })
@@ -114,7 +136,9 @@ class ProjectManager {
   rename(pid, name) { if (!name) throw new Error('name required'); return this.saveMeta(pid, (m) => { m.name = name; }); }
   remove(pid) {
     if (this.list().length <= 1) throw new Error('cannot delete the last project');
+    BoardCache.closeDir(this.dir(pid)); // close the watchers before the dir tree is removed
     fs.rmSync(this.dir(pid), { recursive: true, force: true });
+    for (const k of [...this._stores.keys()]) if (k.startsWith(this.dir(pid) + '|')) this._stores.delete(k);
   }
 
   // ---- teams ----

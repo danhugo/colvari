@@ -42,6 +42,25 @@ function reapRunPids(storeDir) {
   return out;
 }
 
+// Boot after an unclean death (t_2ca99830): comment on every task whose agent run was reaped as
+// an orphan so the interruption sits on the record next to the work, not only in the log. The
+// status stays in_progress — resuming is a human call (the renderer's lastExit banner points at
+// these tasks). Unknown/deleted task ids are skipped.
+function interruptedFromReap(store, killed) {
+  const out = [];
+  for (const k of killed || []) {
+    const taskId = (/task:(\S+)/.exec(k.cmd || '') || [])[1];
+    const node = (/agent-run (\S+)/.exec(k.cmd || '') || [])[1] || null;
+    if (!taskId) continue;
+    try {
+      if (!store.getTask(taskId)) continue;
+      store.commentTask(taskId, 'system', `⛔ The app died while this task's agent run was live (pid ${k.pid}${node ? `, ${node}` : ''}). The orphaned agents were stopped at the next boot; the task stays in_progress — resume it from the board.`);
+      out.push({ taskId, pid: k.pid, node });
+    } catch {}
+  }
+  return out;
+}
+
 // 'ps -o time=' CPU time, e.g. '12:05.44' (MM:SS.cc) or '1:02:03' (H:MM:SS) -> ms.
 function stimeToMs(s) {
   const seg = String(s || '').trim().split(':');
@@ -113,7 +132,7 @@ function buildPrompt(team, node, task, extra = {}) {
   const msgTo = outgoing(team, node.id, ['assign', 'message']).map(nm);
   const revs = reviewees(team, node.id).map(nm);
   const unread = extra.unread || 0;
-  const tools = enabledTools(node);
+  const tools = enabledTools(node, extra.devMode);
   const roleHints = {
     PM: 'You own the goal. Break it into concrete tasks and assign them to your teammates with create_task. Do not write code yourself if a Dev is available. If a Critic is on the team: first create a plan-review task for the Critic and make every Dev task blockedBy it; finally create a Critic verification task (blockedBy the Dev tasks) that requires evidence such as screenshots before the goal is done.',
     Planner: 'Split work into small, concrete tasks and assign them to the right teammates.',
@@ -247,6 +266,13 @@ class Orchestrator extends EventEmitter {
     this._restartAfter = null;
     this._restartPushed = null;
     this._noUpdaterLogged = false;
+    // Packaged builds (devMode=false, wired from main.js DEV_MODE): there is no UpdateWatcher, so
+    // the whole restart machinery is inert — merges don't count, sweeps never arm or gate, stored
+    // state is wiped at boot (a schedule carried over from a dev run of the same project would
+    // otherwise hold dispatch forever: _fireRestart with no watcher keeps it armed for good).
+    // Default true keeps hand-wired orchestrators (tests) on the dev behavior.
+    this.devMode = opts.devMode !== false;
+    if (!this.devMode) { try { this.store.devMode = false; } catch {} }
     // Always-on restart sweep (t_acae4863): tick() evaluates sweepRestart only while a Run is
     // active (running=true), so a schedule armed while the company is idle — the PM's
     // schedule_restart tool, the cap crossing after the run ended, a pill with lingering procs —
@@ -262,6 +288,12 @@ class Orchestrator extends EventEmitter {
       const n = Number(bootRp.firedCount) || 0;
       store.clearRestartPending();
       this.log(null, 'system', `restart: completed after boot — cleared the consumed schedule (${n} change(s) had landed)`);
+    }
+    // Packaged build: wipe any leftover restart state (armed schedule, pending tally) — nothing
+    // here can ever fire it, and bumpRestartPending is off so the tally would only go stale.
+    if (!this.devMode && store.restartPending()) {
+      store.clearRestartPending();
+      this.log(null, 'system', 'packaged build: restart scheduling is unavailable here — cleared stored restart state');
     }
     // What this RUNNING process was built from (t_7e590e54): the merge path reads it to express
     // restartPending.count as "commits behind". It lives in meta because merges run in whichever
@@ -407,8 +439,14 @@ class Orchestrator extends EventEmitter {
   }
   // Renderer-facing snapshot: the UI reads only agents + run scalars, so the file-backed display parts
   // (modelStats/timeline/logs/wiki/nodeTeams) are pure IPC payload — ~1.4MB per change on a large
-  // project. Kept out of getAll and state pushes; snapshot() stays whole for other consumers.
-  snapshotSlim() { const s = this.snapshot(); for (const k of ['modelStats', 'timeline', 'logs', 'wiki', 'nodeTeams']) delete s[k]; return s; }
+  // project. snapshot() still computes them (other consumers want them), but getAll and the
+  // 'state' push only ever threw them away — and during streaming every memo key is invalidated
+  // per event, so each push re-ran modelStats+timeline (listRuns + full listTasks) for nothing
+  // (~100ms of getAll's p50 on the 550-task board, t_8d586961). Build the slim shape directly.
+  snapshotSlim() {
+    const rs = this.runState(); // renderer `running` mirrors runState, same contract as snapshot()
+    return { runtimeState: this.runtimeState, redMaster: this.redMasterView(), running: rs.state === 'running', runState: rs, totalCost: this.totalCost, billedCost: this.billedCost || 0, subCost: this.subCost || 0, runs: this.runs, active: [...this.procs.keys()].map((id) => ({ nodeId: id, taskId: this.agent(id).taskId, cwd: this.cwds && this.cwds.get(id) || null })), runCost: this.runCost || 0, budgetStop: this.budgetStop || null, agents: Object.fromEntries(Object.entries(this.agents).map(([k, a]) => [k, this.agentView(a)])), ledger: this.ledger(), usageSince: this.usageSince() };
+  }
   // Account one finished run: agent counters, session totals, persisted history.
   record(rec) {
     const a = this.agent(rec.nodeId);
@@ -1033,8 +1071,12 @@ class Orchestrator extends EventEmitter {
     const title = (t) => `"${String(t.title || t.id).slice(0, 40)}"`;
     const list = (arr, fmt) => (arr.length ? arr.slice(0, 4).map(fmt).join(', ') + (arr.length > 4 ? ` +${arr.length - 4} more` : '') : 'none');
     const lines = [];
-    const rp = (this.store.meta() || {}).restartPending || {};
-    lines.push(`restarts pending: ${Number(rp.count || 0)}${rp.afterTaskId ? `, scheduled after ${rp.afterTaskId}` : ''}`);
+    // Packaged build: the restart machinery is inert — the digest must not offer agents a
+    // "restarts pending" fact (or any schedule_restart hint) that has no tool behind it.
+    if (this.devMode !== false) {
+      const rp = (this.store.meta() || {}).restartPending || {};
+      lines.push(`restarts pending: ${Number(rp.count || 0)}${rp.afterTaskId ? `, scheduled after ${rp.afterTaskId}` : ''}`);
+    }
     const working = (team.nodes || []).filter((n) => this.procs.has(n.id));
     lines.push(`working: ${list(working, (n) => { const a = this.agent(n.id); return a.taskId ? `${n.name} (${a.taskId})` : n.name; })}`);
     const stallOf = (n) => { const a = this.agents[n.id]; return (a && (a.stall || (a.currentRun && a.currentRun.stall))) || null; };
@@ -1066,6 +1108,12 @@ class Orchestrator extends EventEmitter {
   // UI state (getRestartState / 'restart-state' push, Uma's contract t_5a1661d5): how many landed
   // changes wait, the armed schedule, and the not-yet-started tasks the gate is holding.
   restartState() {
+    // Packaged build (t_f64a079e): restarts cannot exist here, so the UI state always reads
+    // restartPending=false — boot wipes stored state, but an out-of-band writer could re-add it,
+    // and the 'restart-state' channel must never carry a schedule nothing can ever fire.
+    if (this.devMode === false) {
+      return { pendingCount: 0, since: null, targetSha: null, scheduledAfter: null, scheduledNow: false, gating: [], busyAgents: [], blockedReason: null, waitingReasons: [] };
+    }
     const rp = (this.store.meta() || {}).restartPending || {};
     const scheduled = !!(rp.scheduledNow || rp.afterTaskId);
     const armed = scheduled && !rp.firedAt;
@@ -1122,6 +1170,14 @@ class Orchestrator extends EventEmitter {
   // resume). The gate STAYS on after firing — the one-second tick window before the watcher pauses
   // dispatch must not start new work; boot-clear releases it after the relaunch.
   sweepRestart() {
+    // Packaged build: never arm (no cap valve), never gate, never fire — a schedule cannot exist.
+    if (this.devMode === false) {
+      this._restartGate = false;
+      this._restartAfter = null;
+      this._restartGating = [];
+      this._pushRestartState();
+      return;
+    }
     let rp = (this.store.meta() || {}).restartPending;
     const scheduled = !!rp && !!(rp.scheduledNow || rp.afterTaskId);
     const armed = scheduled && !rp.firedAt;
@@ -1176,6 +1232,10 @@ class Orchestrator extends EventEmitter {
   // finish, then the watcher's flow takes over. Works while stopped too (no tick loop then): an
   // idle board fires immediately; a board with lingering procs fires from the next start()'s tick.
   restartNow() {
+    if (this.devMode === false) {
+      this.log(null, 'system', 'restart: unavailable in a packaged build — request ignored');
+      return;
+    }
     this.store.setRestartPending({ scheduledNow: true });
     this.log(null, 'system', 'restart: manual restart armed — in-flight tasks finish first');
     if (this.running) this.sweepRestart();
@@ -1466,6 +1526,17 @@ class Orchestrator extends EventEmitter {
       const child = args ? spawn(rt.bin(settings), args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'], detached: true })
         : Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter(), kill() {} });
       if (!args) setImmediate(() => child.emit('close', 1));
+      // Die-with-the-app watchdog (t_2ca99830): SIGKILL on the app never reaches this detached
+      // group, so a child process per run watches the app pid and TERMs/KILLs the group seconds
+      // after the app vanishes (2026-10-01 01:47: four runs worked on as orphans for minutes).
+      let wd = null;
+      if (child.pid) {
+        try {
+          wd = spawn(process.execPath, [path.join(__dirname, 'run-watchdog.js'), '--app-pid', String(process.pid), '--app-lstart', MG.pidLstart(process.pid), '--group-pid', String(child.pid), '--interval-ms', '2000'],
+            { cwd: this.store.dir, env: { ...env, ELECTRON_RUN_AS_NODE: '1' }, detached: true, stdio: 'ignore' });
+          if (typeof wd.unref === 'function') wd.unref();
+        } catch { wd = null; }
+      }
       let pidFile = null;
       if (child.pid) {
         const realKill = child.kill.bind(child);
@@ -1473,9 +1544,10 @@ class Orchestrator extends EventEmitter {
         try {
           pidFile = path.join(runPidsDir(this.store.dir), String(child.pid));
           fs.mkdirSync(path.dirname(pidFile), { recursive: true });
-          fs.writeFileSync(pidFile, `${child.pid}\t${MG.pidLstart(child.pid)}\tagent-run ${node.name}\n`);
+          fs.writeFileSync(pidFile, `${child.pid}\t${MG.pidLstart(child.pid)}\tagent-run ${node.name}${meta.taskId ? ' task:' + meta.taskId : ''}\n`);
         } catch { pidFile = null; }
         child.on('exit', () => { // leader gone; orphaned CLI children keep the group (and the pipes) alive
+          try { if (wd && wd.exitCode == null && wd.signalCode == null) wd.kill('SIGKILL'); } catch {} // normal end: the watchdog's job is over (skip if it already left — its pid may be recycled)
           try { process.kill(-child.pid, 'SIGTERM'); } catch {}
           try {
             if (MG.groupAlive(child.pid)) { // TERM-resistant orphan: escalate after a grace
@@ -1491,8 +1563,8 @@ class Orchestrator extends EventEmitter {
       this.procs.set(node.id, child);
       const a = this.agent(node.id);
       // Identity + liveness for the stall watchdog: any stdout/stderr byte refreshes a.lastActivityAt,
-      // and `run` is the handle the watchdog claims (.stalled) to own this run's recovery.
-      const run = { sessionId: null, result: '', usage };
+      // and `run` is the handle the stall watchdog claims (.stalled) to own this run's recovery.
+      const run = { sessionId: null, result: '', usage, watchdog: wd };
       // Subagent (Task/Agent tool) records for this run; reset the live agent-side totals it feeds.
       run.subs = new SubagentTracker(node.id);
       a.subagents = []; a.subagentCount = 0; a.subagentTokens = { inputTokens: 0, outputTokens: 0 };
@@ -1600,9 +1672,9 @@ class Orchestrator extends EventEmitter {
       const unread = this.store.listMessages({ to: node.id }).filter((m) => !m.read).length;
       let cfg; let base = null; let baseDefer = null;
       try {
-        cfg = normalizeNode(applyPreset(node, presets)); base = buildPrompt(team, node, task, { presets, unread, boardDir: this.store.dir, worktree });
+        cfg = normalizeNode(applyPreset(node, presets)); base = buildPrompt(team, node, task, { presets, unread, boardDir: this.store.dir, worktree, devMode: this.devMode });
         const lm = normalizeMode(cfg); // loop mode: every pass but the last is told not to mark the task done
-        baseDefer = lm.mode === 'loop' && lm.loopCount > 1 ? buildPrompt(team, node, task, { presets, unread, boardDir: this.store.dir, deferDone: `${lm.loopCount} passes`, worktree }) : base;
+        baseDefer = lm.mode === 'loop' && lm.loopCount > 1 ? buildPrompt(team, node, task, { presets, unread, boardDir: this.store.dir, deferDone: `${lm.loopCount} passes`, worktree, devMode: this.devMode }) : base;
       } catch (e) { cfg = { env: {}, mode: 'single' }; this.log(node.id, 'error', 'bad agent settings: ' + e.message); }
       const m = normalizeMode(cfg);
       // Workflow mode: only the task text follows the slash command ($ARGUMENTS); the team context goes in --append-system-prompt.
@@ -2130,4 +2202,4 @@ class Orchestrator extends EventEmitter {
     }
   }
 }
-module.exports = { Orchestrator, buildPrompt, humanPrompt, wakePrompt, stallPrompt, attachedFilesLines, WAKE, WATCH, STALL, SCHED, RESTART, autoCompactEnv, runPidsDir, reapRunPids };
+module.exports = { Orchestrator, buildPrompt, humanPrompt, wakePrompt, stallPrompt, attachedFilesLines, WAKE, WATCH, STALL, SCHED, RESTART, autoCompactEnv, runPidsDir, reapRunPids, interruptedFromReap };

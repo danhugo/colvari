@@ -16,6 +16,7 @@ const pick = (o, ks) => Object.fromEntries(ks.map((k) => [k, o[k]]));
 const { normalizeNode, normalizePatch, normalizePreset, applyPreset, EDGE_TYPES, SUGGESTED_ROLES } = require('./agent-config');
 const WT = require('./worktree');
 const MG = require('./merge-gate');
+const { BoardCache } = require('./board-cache');
 
 // Bounce payload for a gate-blocked merge: failing test names + a capped output tail (#8).
 const blockPayload = (r) => `${(r.names || []).length ? (r.names || []).map((n) => '- ' + n).join('\n') : '- (test names unavailable)'}\n\ntail of the test output:\n\`\`\`\n${r.output || '(none)'}\n\`\`\``;
@@ -85,10 +86,20 @@ function sanitizeAttachments(list) {
 class Store {
   // teamId: which team graph this store edits. Without it, getTeam() returns the union of all
   // teams in the project (used by the orchestrator and MCP server: node ids are globally unique).
-  constructor(dir, teamId = null) {
+  // devMode: whether the app this store belongs to can ever restart itself (main.js DEV_MODE —
+  // false in packaged builds). Only merges consult it: they must not count toward a restart that
+  // can never happen. Merges run in whichever process holds the store (the app AND each agent's
+  // board MCP server), so every production entry point threads the flag; default true keeps tests
+  // and hand-wired stores on the dev behavior.
+  constructor(dir, teamId = null, opts = {}) {
     this.dir = dir;
     this.teamId = teamId;
+    this.devMode = opts.devMode !== false;
     fs.mkdirSync(dir, { recursive: true });
+    // Main-process board cache (t_479e7290): opt-in, one shared instance per project dir (the
+    // cache outlives the throwaway Store instances). The board MCP server processes construct
+    // their Store without opts and keep reading disk — the cache must never cross processes.
+    this.cache = opts.cache ? BoardCache.forStore(this, typeof opts.cache === 'object' ? opts.cache : undefined) : null;
     this.migrateUsageLedger();
     this.migrateNodeProtection();
   }
@@ -136,7 +147,7 @@ class Store {
       fs.writeFileSync(marker, new Date().toISOString());
     } catch {}
   }
-  forTeam(teamId) { return new Store(this.dir, teamId); }
+  forTeam(teamId) { return new Store(this.dir, teamId, { devMode: this.devMode }); }
   meta() { return this.read('project', null); }
   teamFile() {
     if (this.teamId) return 'team-' + this.teamId;
@@ -146,9 +157,16 @@ class Store {
   file(name) { return path.join(this.dir, name + '.json'); }
   logFile() { return path.join(this.dir, 'logs.jsonl'); }
   // Cheap change fingerprint for change-driven refreshes: 'size:mtimeMs' (or '' when absent).
-  // 'board' and 'wiki' are directories in the per-file layout; their sig is every file's stat.
+  // 'wiki' is a directory in the per-file layout; its sig is every file's stat. The board dir
+  // would cost a 550+-file stat walk per poll on the real board (t_8d586961), so its sig is one
+  // dir stat plus this instance's write generation: every task write goes through
+  // _writeFileSync, which renames through the dir and bumps its mtime, and same-process writes
+  // additionally bump _tgen (mtime granularity can swallow two writes in one tick).
   sigFile(name) {
-    if (name === 'board' || name === 'wiki') return this._sectionSig(name);
+    if ((name === 'board' || name === 'wiki') && this.cache && !this.cache.closed) return this.cache.sectionSig(name);
+    if (name === 'wiki') return this._sectionSig('wiki');
+    if (name === 'board') { try { const st = fs.statSync(this.tasksDir()); return this._tgen + ':' + st.size + ':' + st.mtimeMs; } catch { return ''; } }
+    try { const st = fs.statSync(this.file(name)); return st.size + ':' + st.mtimeMs; } catch { return ''; }
     try { const st = fs.statSync(this.file(name)); return st.size + ':' + st.mtimeMs; } catch { return ''; }
   }
   _sectionSig(name) {
@@ -207,7 +225,8 @@ class Store {
         if (fs.readFileSync(path.join(lock, 'pid'), 'utf8').trim() === String(process.pid)) break;
       } catch {}
     }
-    try { return fn(); } finally {
+    try { this._lockDepth = (this._lockDepth || 0) + 1; return fn(); } finally {
+      this._lockDepth--;
       // Remove only a lock that is still ours: a stealer that took it over wrote its own pid, and
       // deleting the dir here would pull the live lock out from under it (the old rmdir bug).
       let ours = true;
@@ -314,29 +333,65 @@ class Store {
     h[path.basename(file)] = this._sha256(data);
     this._saveHashes(h);
   }
-  // Callers hold the .lock (all writes happen inside _withTasks/_migrate/withLock).
+  // Callers hold the .lock (all writes happen inside _withTasks/_migrate/withLock). Writes are
+  // tmp+fsync+rename (atomic), serialized by the lock — the per-key write queue Cato asked for is
+  // the lock itself. Write-through: the main-process cache gets the same bytes before the watcher
+  // echo arrives, so the echo is a hash no-op (never a duplicate delta).
   _writeTask(t) {
     const data = JSON.stringify(t, null, 2) + '\n';
     this._writeFileSync(this.taskFile(t.id), data);
     this._recordHash(t.id + '.json', data);
+    if (this._tcache) this._tcache.delete(t.id + '.json'); // same-ms + same-size writes would fool the stat key
+    this._afterTaskWrite();
+    if (this.cache && !this.cache.closed) this.cache.noteTaskPut(t, data);
   }
   _unlinkTask(tid) {
     try { fs.unlinkSync(this.taskFile(tid)); } catch {}
+    if (this._tcache) this._tcache.delete(tid + '.json');
+    this._afterTaskWrite();
     const h = this._readHashes();
     if (h && h[tid + '.json']) { delete h[tid + '.json']; this._saveHashes(h); }
+    if (this.cache && !this.cache.closed) this.cache.noteTaskDelete(tid);
+  }
+  // Board-signature bookkeeping shared by every task write: the generation invalidates sig/memo
+  // holders immediately, and _ownDir snapshots the dir stat AFTER the rename so listTasks can
+  // tell "the dir only moved because I wrote" (fast path) from "someone else wrote" (rescan).
+  _afterTaskWrite() {
+    this._tgen = (this._tgen || 0) + 1;
+    try { const st = fs.statSync(this.tasksDir()); this._ownDir = st.size + ':' + st.mtimeMs; } catch { this._ownDir = ''; }
   }
   _taskFiles() { try { return fs.readdirSync(this.tasksDir()).filter((f) => !f.startsWith('.') && f.endsWith('.json')).sort(); } catch { return []; } }
   // Readers race writers by design (agents cat/jq these files directly), so any single file may
   // be missing or half-swapped: tolerate and skip instead of failing the whole listing.
-  _readTaskFile(f) { try { return JSON.parse(fs.readFileSync(path.join(this.tasksDir(), f), 'utf8')); } catch { return null; } }
+  // Parsed-task cache (t_8d586961): with a 550+ task board, every board change — i.e. most
+  // refreshes while agents stream — re-read and re-parsed all task files in listTasks, the
+  // single biggest main-process IPC cost under load (~100ms per getAll). Entries are keyed by
+  // the file's size:mtime stat pair, so only files whose stat changed are re-read; a read that
+  // raced a writer between stat and read is returned but not cached, and failed parses are
+  // never cached (half-swapped files must stay skippable). Same-process writes drop their
+  // entry in _writeTask/_unlinkTask. Callers treat the returned tasks as read-only snapshots —
+  // every mutation goes through _withTasks, which persists what it changes.
+  _readTaskFile(f) {
+    const p = path.join(this.tasksDir(), f);
+    let st; try { st = fs.statSync(p); } catch { if (this._tcache) this._tcache.delete(f); return null; }
+    const sig = st.size + ':' + st.mtimeMs;
+    const hit = this._tcache && this._tcache.get(f);
+    if (hit && hit.sig === sig) return hit.task;
+    let task; try { task = JSON.parse(fs.readFileSync(p, 'utf8')); } catch { if (this._tcache) this._tcache.delete(f); return null; }
+    try { const st2 = fs.statSync(p); if (st2.size + ':' + st2.mtimeMs === sig) (this._tcache || (this._tcache = new Map())).set(f, { sig, task }); } catch {}
+    return task;
+  }
   // Read-modify-write over the whole task set under ONE lock hold. fn mutates the array in place
   // (push/splice/field edits); tasks whose JSON changed are rewritten, removed ids unlinked.
   _withTasks(fn) {
+    if (this.cache && !this.cache.closed) this.cache.prewarm();
     this._ensureBoard();
     return this.withLock(() => {
       const tasks = this._taskFiles().map((f) => this._readTaskFile(f)).filter(Boolean);
       const before = new Map(tasks.map((t) => [t.id, JSON.stringify(t)]));
-      const r = fn(tasks);
+      let r;
+      try { r = fn(tasks); }
+      catch (e) { this._tcache = this._tlast = null; this._ownDir = undefined; throw e; } // fn may have mutated cached tasks it never wrote
       for (const t of tasks) if (JSON.stringify(t) !== before.get(t.id)) this._writeTask(t);
       const ids = new Set(tasks.map((t) => t.id));
       for (const tid0 of before.keys()) if (!ids.has(tid0)) this._unlinkTask(tid0);
@@ -556,14 +611,51 @@ class Store {
 
   // ---- board ----
   listTasks(filter = {}) {
-    this._ensureBoard();
-    let ts = this._taskFiles().map((f) => this._readTaskFile(f)).filter(Boolean)
-      .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)) || String(a.id).localeCompare(String(b.id)));
-    if (filter.status) ts = ts.filter((t) => t.status === filter.status);
-    if (filter.assignee) ts = ts.filter((t) => t.assignee === filter.assignee);
+    // Cached path (t_479e7290): warm reads are pure memory. The cache loads + migrates once per
+    // project dir; the memo tiers in _tlistWhole are only for uncached (MCP/scripts) Stores.
+    if (this.cache && !this.cache.closed) return this.cache.listTasks(filter);
+    const ts = this._tlistWhole();
+    if (filter.status) return ts.filter((t) => t.status === filter.status);
+    if (filter.assignee) return ts.filter((t) => t.assignee === filter.assignee);
     return ts;
   }
-  getTask(tid) { this._ensureBoard(); return this._readTaskFile(tid + '.json') || undefined; }
+  // The whole board, sorted, memoized (t_8d586961): with a 550+ task board every listing used to
+  // readdir + read + parse all task files, and the orchestrator's per-tick filtered scans kept
+  // that hot from the main process while agents stream — getAll's p50 grew to ~100ms and clicks
+  // queued behind it. Three tiers, cheapest first:
+  //  - generation+dir memo: nothing changed anywhere we can see — return the last build.
+  //  - same-writer fast path: the dir moved but only under our own pen (every task write renames
+  //    through the dir and _afterTaskWrite re-stat'd it): collect the per-file cache, re-reading
+  //    just the entries a write dropped. One readdir + one array build, no stats, no reads.
+  //  - scan: cold, or a dir entry moved that we did not write (another Store instance/process):
+  //    stat-scan every file; the per-file stat cache makes it a stats-only pass, gone files are
+  //    pruned. NB an out-of-contract IN-PLACE write (no rename, no Store) moves no dir entry and
+  //    stays unseen until the next rename in the dir — the board contract routes edits through
+  //    the board tools, which always rename. Callers treat results as read-only snapshots;
+  //    mutations go through _withTasks, which persists what it changes.
+  _tlistWhole() {
+    this._ensureBoard();
+    let dst; try { dst = fs.statSync(this.tasksDir()); } catch { dst = null; }
+    const dirKey = dst ? dst.size + ':' + dst.mtimeMs : '';
+    const key = (this._tgen || 0) + ':' + dirKey;
+    if (this._tlast && this._tlast.key === key) return this._tlast.tasks;
+    const files = this._taskFiles();
+    let ts;
+    if (this._tlast && this._ownDir === dirKey) {
+      ts = files.map((f) => { const hit = this._tcache && this._tcache.get(f); return hit ? hit.task : this._readTaskFile(f); }).filter(Boolean);
+    } else {
+      if (this._tcache) { const live = new Set(files); for (const f of [...this._tcache.keys()]) if (!live.has(f)) this._tcache.delete(f); }
+      ts = files.map((f) => this._readTaskFile(f)).filter(Boolean);
+      this._ownDir = dirKey;
+    }
+    ts = ts.sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)) || String(a.id).localeCompare(String(b.id)));
+    this._tlast = { key, files, tasks: ts };
+    return ts;
+  }
+  getTask(tid) {
+    if (this.cache && !this.cache.closed) return this.cache.getTask(tid);
+    this._ensureBoard(); return this._readTaskFile(tid + '.json') || undefined;
+  }
   createTask({ title, description = '', assignee = null, createdBy = 'human', parentId = null, blockedBy = [], priority, attachments = null }) {
     if (!title) throw new Error('title required');
     const now = new Date().toISOString();
@@ -614,15 +706,20 @@ class Store {
       // commits the running build (meta.buildSha, written by the app at boot) is behind. Without a
       // buildSha — fresh store, or the merge ran where the boot sha was never recorded — the plain
       // merge tally holds, and a failed rev-list falls back the same way.
-      let bump = { sha: r.sha || null };
-      try {
-        const build = (this.meta() || {}).buildSha;
-        if (bump.sha && build && build !== bump.sha) {
-          const n = WT.commitsBehind(r.root, build, bump.sha);
-          if (n > 0) bump.behind = n;
-        }
-      } catch {}
-      this.bumpRestartPending(bump);
+      // Packaged build (devMode=false): nothing can ever restart, so merges count nothing —
+      // otherwise the tally would grow forever and a later dev run of the same project would
+      // inherit a bogus "commits behind".
+      if (this.devMode) {
+        let bump = { sha: r.sha || null };
+        try {
+          const build = (this.meta() || {}).buildSha;
+          if (bump.sha && build && build !== bump.sha) {
+            const n = WT.commitsBehind(r.root, build, bump.sha);
+            if (n > 0) bump.behind = n;
+          }
+        } catch {}
+        this.bumpRestartPending(bump);
+      }
       if (r.reason === 'tree-mismatch') {
         // Landed, but the base tree is not the tree we tested — someone bypassed the lock.
         MG.ensureRedMasterTask(this, { root: r.root, tests: ['(post-merge tree mismatch — base changed outside the gate)'], base: r.base, source: 'post-merge verification', lastMergedTask: t.id, lastMergedBranch: t.worktreeBranch });
@@ -833,6 +930,7 @@ class Store {
     return { slug, author: author || '', updatedAt: updatedAt || new Date().toISOString(), hash: this._sha256(data) };
   }
   listWiki() {
+    if (this.cache && !this.cache.closed) return this.cache.listWiki();
     this._ensureWiki();
     const idx = this._readWikiIndex();
     // .md files with no index entry were dropped there out-of-band: adopt (never silently drop).
@@ -862,15 +960,18 @@ class Store {
   readWiki(title) { return this.listWiki()[title] || null; }
   writeWiki(title, content, author = 'human') {
     if (!title) throw new Error('title required');
+    if (this.cache && !this.cache.closed) this.cache.prewarm();
     this._ensureWiki();
     return this.withLock(() => {
       const idx = this._readWikiIndex();
       idx[title] = this._writeWikiPage(title, content, author, new Date().toISOString());
       this._saveWikiIndex(idx);
+      if (this.cache && !this.cache.closed) this.cache.noteWikiSync(idx[title].slug);
       return { title, content, author, updatedAt: idx[title].updatedAt };
     });
   }
   deleteWiki(title) {
+    if (this.cache && !this.cache.closed) this.cache.prewarm();
     this._ensureWiki();
     this.withLock(() => {
       const idx = this._readWikiIndex();
@@ -878,6 +979,7 @@ class Store {
       delete idx[title];
       this._saveWikiIndex(idx);
       if (e) { try { fs.unlinkSync(path.join(this.wikiDir(), e.slug + '.md')); } catch {} }
+      if (this.cache && !this.cache.closed) this.cache.noteWikiSync(e ? e.slug : null);
     });
   }
   // Page list without body content, newest first: [{title, author, updatedAt}].
