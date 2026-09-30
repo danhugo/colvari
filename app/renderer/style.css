@@ -355,6 +355,14 @@ button:focus-visible, input:focus, select:focus, textarea:focus { outline:none; 
 nav button { padding:3px 8px; font-size:var(--text-sm); }
 nav button.sec { color:var(--fg-muted); padding:3px 7px; } .navsep { width:1px; background:var(--border-strong); margin:3px 4px; }
 header .pill { border:none; background:none; color:var(--fg-muted); font-size:var(--text-xs); padding:2px 4px; } header #runstate { background:var(--bg-hover); color:var(--fg-secondary); padding:2px 8px; } header #runstate.on { background:var(--success-soft); color:var(--success-text); }
+/* Stopped with work left (t_ac25444e): amber like the other "needs you" pills — a parked team with
+   todo tasks is exactly the thing the header exists to surface. Plain Stopped (nothing waiting)
+   keeps the neutral look. */
+header #runstate.halt { background:var(--warning-soft); color:var(--warning-text); }
+/* Tight widths: the button gives way below 1200px — the same breakpoint where the tab labels
+   collapse — because the header's valves need those pixels (the topbar suite sweeps 900/1100px).
+   ⌘⏎ still starts the team, and the pill's tooltip says so. */
+@media (max-width:1199px) { header #runbtn { display:none; } }
 /* Worktree disk pill (t_fe10d3e0): same chip look as #runstate; amber fill above the cap (>20
    worktrees or >2GB) — warn only, the numbers stay in the tooltip. */
 header #wtdisk { background:var(--bg-hover); color:var(--fg-secondary); padding:2px 8px; border-radius:var(--radius-full); font-variant-numeric:tabular-nums; }
