@@ -3,7 +3,8 @@ const path = require('path');
 // Test instances (gui-e2e / smoke) must never leave fake-CLI children behind: install procguard
 // before the orchestrator loads so every spawn it makes is tracked and reaped (t_92c31037).
 const procguard = (process.env.AGENTS_SQUAD_GUI_E2E || process.env.AGENTS_SQUAD_SMOKE) ? require('../test/harness/procguard').install() : null;
-const { Orchestrator, reapRunPids } = require('./orchestrator');
+const { Orchestrator, reapRunPids, interruptedFromReap } = require('./orchestrator');
+const BS = require('./bootstate');
 const { ProjectManager, TEMPLATES, isolateTestRoot } = require('./projects');
 const { BoardCache } = require('./board-cache');
 const { DeltaPump } = require('./delta-pump');
@@ -66,6 +67,7 @@ if (!appLockHeld) {
 // is spawned as this process tears down and could otherwise see the dying lock, take the
 // "another instance" exit, and leave no window at all — release the lock up front.
 function relaunchApp() {
+  try { markCleanExits(); } catch {} // app.exit() skips 'will-quit': stamp the breadcrumbs clean or the relaunch reads as a silent death
   try { if (!TEST_MODE && appLockHeld) app.releaseSingleInstanceLock(); } catch {}
   app.relaunch();
   app.exit(0);
@@ -73,6 +75,34 @@ function relaunchApp() {
 
 const pm = new ProjectManager(undefined, { devMode: DEV_MODE });
 const orchs = new Map(); // projectId -> Orchestrator (projects run independently / concurrently)
+// Unclean-exit recovery (t_2ca99830): at boot the heartbeat breadcrumb (bootstate.js) tells us
+// whether the previous instance died without notice; its orphaned run groups are reaped by
+// recorded pid (t_3f830e64 — never by name) and the interrupted tasks get a system comment.
+// The result is exposed to the renderer via getLastExit for the recovery banner (Uma, t_6911ba60).
+const lastExits = new Map(); // projectId -> { unclean, lastAliveAt, lastAlivePid, reaped, interruptedTasks }
+function bootRecovery(projectId) {
+  if (lastExits.has(projectId)) return lastExits.get(projectId);
+  const store = pm.store(projectId);
+  let prev = null; try { prev = BS.detectUnclean(store.dir); } catch {}
+  const reapOut = { killed: [], skipped: [] };
+  try { if (appLockHeld) Object.assign(reapOut, reapRunPids(store.dir)); } catch {}
+  let marked = [];
+  try { if (reapOut.killed.length) marked = interruptedFromReap(store, reapOut.killed); } catch {}
+  const info = {
+    unclean: !!prev,
+    lastAliveAt: prev && prev.at,
+    lastAlivePid: prev && prev.pid,
+    reaped: reapOut.killed,
+    interruptedTasks: marked.map((m) => m.taskId),
+  };
+  lastExits.set(projectId, info);
+  if (prev && appLockHeld) {
+    try {
+      store.appendLog({ at: Date.now(), nodeId: null, kind: 'system', text: `previous app instance (pid ${prev.pid}) died without a clean exit — last heartbeat ${new Date(prev.at).toISOString()}; reaped ${reapOut.killed.length} orphan run group(s)${info.interruptedTasks.length ? `; interrupted: ${info.interruptedTasks.join(', ')}` : ''}` });
+    } catch {}
+  }
+  return info;
+}
 function orchFor(pid) {
   let o = orchs.get(pid);
   if (!o) {
@@ -92,9 +122,7 @@ function orchFor(pid) {
     // Scheduled restarts fire through the watcher's drain/test/relaunch flow (watcherFor lazily
     // creates it; in non-dev builds it answers the no-op stub and the schedule just stays armed).
     o.updater = watcherFor(pid);
-    // Stale run groups from a crashed instance die here (t_3f830e64): only this single live
-    // instance reaps, and only pidfile-recorded pids whose lstart still matches — never by name.
-    try { if (appLockHeld) reapRunPids(o.store.dir); } catch {}
+    bootRecovery(pid); // heartbeat check + orphan reap + interrupted-task comments (once per project)
     orchs.set(pid, o);
     pumpFor(pid).attachOrch(o); // the pump's orch deltas feed the same 'state' payload (t_39bf39ac)
   }
@@ -2478,8 +2506,7 @@ function toDraftProfile(bin, profile, derived = {}) {
   };
 }
 const api = {
-  introspectRuntime: (_c, bin) => { const r = runIntrospectRuntime(bin); return toDraftProfile(bin, r.profile, r); },
-  listProjects: () => ({ projects: pm.list().map((p) => ({ ...p, running: !!(orchs.get(p.id) || {}).running })), templates: Object.fromEntries(Object.entries(TEMPLATES).map(([k, v]) => [k, v.label])) }),
+  introspectRuntime: (_c, bin) => { const r = runIntrospectRuntime(bin); return toDraftProfile(bin, r.profile, r); },  listProjects: () => ({ projects: pm.list().map((p) => ({ ...p, running: !!(orchs.get(p.id) || {}).running })), templates: Object.fromEntries(Object.entries(TEMPLATES).map(([k, v]) => [k, v.label])) }),
   createProject: (_c, name, tpl) => pm.create(name, tpl), renameProject: (_c, pid, name) => pm.rename(pid, name),
   deleteProject: (_c, pid) => { if ((orchs.get(pid) || {}).running) throw new Error('stop the project first'); const p = pumps.get(pid); if (p) { p.close(); pumps.delete(pid); } orchs.delete(pid); return pm.remove(pid); },
   createTeam: (c, name, tpl) => pm.createTeam(c.p, name, tpl), renameTeam: (c, tid, name) => pm.renameTeam(c.p, tid, name),
@@ -2520,6 +2547,10 @@ const api = {
   // back ({error} on rejection) — messages.json never holds base64.
   saveAttachment: (c, input) => ST(c).saveAttachment(input || {}),
   commentTask: (c, id, text) => ST(c).commentTask(id, 'human', text),
+  // Unclean-exit recovery info (t_2ca99830): what the renderer's banner (Uma, t_6911ba60) shows —
+  // whether the previous instance died without a clean exit, when it was last seen alive, and
+  // which orphan runs were reaped (with their interrupted tasks) at this boot.
+  getLastExit: (c) => bootRecovery(c.p) || { unclean: false, reaped: [], interruptedTasks: [] },
   writeWiki: (c, t, x) => ST(c).writeWiki(t, x, 'human'), deleteWiki: (c, t) => ST(c).deleteWiki(t),
   listWikiSummaries: (c) => ST(c).listWikiSummaries(), searchWiki: (c, q) => ST(c).searchWiki(q),
   listSessions: (c, nodeId) => ST(c).listSessions({ nodeId }), getSessionLog: (c, sessionId, opts) => ST(c).getSessionLog(sessionId, opts || {}),
@@ -2662,6 +2693,14 @@ app.whenReady().then(() => {
   probeUnprobedAgents();
   for (const p of pm.list()) pumpFor(p.id); // delta pumps stream every project's changes (t_39bf39ac)
   pollInbox(true); setInterval(() => pollInbox(false), 1500);
+  // Unclean-exit detection must see the PREVIOUS instance's heartbeat (t_2ca99830): recover for
+  // every known project before the heartbeat below stamps over the evidence.
+  for (const p of pm.list()) { try { bootRecovery(p.id); } catch {} }
+  // Heartbeat breadcrumb (t_2ca99830): the lock holder stamps each store dir every few seconds;
+  // a boot that finds the stamp without a clean marker knows the last instance died silently.
+  const heartbeat = () => { for (const p of pm.list()) { try { BS.writeAlive(pm.store(p.id).dir); } catch {} } };
+  heartbeat();
+  setInterval(heartbeat, 5000);
   // Worktree lifecycle sweep (t_9b662983): at boot (before any agent can spawn) and periodically
   // while each project is idle — drops worktrees whose task is done/missing (clean + merged only,
   // never a dirty or unmerged tree, never in-flight tasks) and prunes stale worktree entries.
@@ -2683,4 +2722,16 @@ app.whenReady().then(() => {
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });
 app.on('window-all-closed', () => { for (const o of orchs.values()) if (o.running) o.stop(); if (process.platform !== 'darwin') app.quit(); });
+// Any exit we can still act on must stamp the breadcrumbs clean (t_2ca99830), or the next boot
+// shows a false "died silently". app.exit() skips 'will-quit' — relaunchApp marks clean itself.
+function markCleanExits() {
+  if (!appLockHeld) return;
+  for (const p of pm.list()) { try { BS.writeAlive(pm.store(p.id).dir, { cleanExitAt: Date.now() }); } catch {} }
+}
 app.on('will-quit', () => { try { BoardCache.closeAll(); } catch {} }); // no leaked fs.watch handles across project switches/quit
+app.on('will-quit', markCleanExits);
+for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
+  try {
+    process.on(sig, () => { try { markCleanExits(); } catch {} app.exit(0); });
+  } catch {}
+}
