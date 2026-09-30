@@ -62,13 +62,15 @@ const TRACE_FNS = ['renderLog', 'renderGraph', 'renderBoard', 'renderChat', 'ren
 const TABS = ['chat', 'team', 'board', 'wiki', 'obs', 'usage', 'settings', 'overview', 'inbox'];
 const WAIT = (ms) => new Promise((r) => setTimeout(r, ms));
 fs.mkdirSync(OUT, { recursive: true });
+const CLICK_BUDGET_MS = (CLICK_REPS * TABS.length + CARD_CLICKS) * 2600; // worst-case poll budget per click
 
 // GUI test mode must be set before main.js loads (isolated root, no single-instance lock,
 // child procguard). The marker is removed again before did-finish-load so the built-in
 // smoke/guiE2E scenarios never run; TEST_MODE itself stays active.
 process.env.AGENTS_SQUAD_SMOKE = '1';
 process.env.AGENTS_SQUAD_PROJECT = fs.mkdtempSync(path.join(os.tmpdir(), 'squad-perf-root-'));
-process.env.AGENTS_SQUAD_TEST_TIMEOUT_MS = String(Math.max(180000, STREAM_SECONDS * 1000 + 90000));
+process.env.AGENTS_SQUAD_TEST_TIMEOUT_MS = String(Math.max(180000,
+  STREAM_SECONDS * 1000 + 90000 + TRACE_MS + CLICK_BUDGET_MS));
 process.env.AGENTS_SQUAD_DEV = '0'; // no UpdateWatcher in a perf instance
 
 // IPC + push counting must wrap BEFORE main.js registers its handlers: the renderer's
@@ -340,40 +342,54 @@ function aggregateProfile(profile, intervalUs) {
   };
 }
 
-async function startTrace(windowMs) {
-  const out = { windowMs, intervalUs: 200 };
+async function startTrace(minMs) {
+  const out = { minMs, intervalUs: 200, startedAt: 0 };
   const inspector = require('inspector');
   const session = new inspector.Session();
   session.connect();
   const post = (m, p) => new Promise((res, rej) => session.post(m, p, (e, r) => (e ? rej(e) : res(r))));
-  let rProf = null, mProf = null;
+  const cmd = (m, p) => new Promise((res, rej) => wc.debugger.sendCommand(m, p, (e, r) => (e ? rej(e) : res(r))));
   try {
     wc.debugger.attach('1.3');
-    const cmd = (m, p) => new Promise((res, rej) => wc.debugger.sendCommand(m, p, (e, r) => (e ? rej(e) : res(r))));
     await cmd('Profiler.enable');
     await cmd('Profiler.setSamplingInterval', { interval: out.intervalUs });
     await post('Profiler.enable');
     await post('Profiler.setSamplingInterval', { interval: out.intervalUs });
     await cmd('Profiler.start');
     await post('Profiler.start');
-    console.log(`[perf] tracing renderer + main for ${windowMs} ms`);
-    await WAIT(windowMs);
-    rProf = (await cmd('Profiler.stop')).profile;
-    mProf = (await post('Profiler.stop')).profile;
+    out.startedAt = Date.now();
   } catch (e) {
     out.error = String((e && e.message) || e);
     try { session.disconnect(); } catch {}
     try { wc.debugger.detach(); } catch {}
     return async () => out;
   }
-  fs.writeFileSync(path.join(OUT, 'trace-renderer.cpuprofile'), JSON.stringify(rProf));
-  fs.writeFileSync(path.join(OUT, 'trace-main.cpuprofile'), JSON.stringify(mProf));
-  out.renderer = aggregateProfile(rProf, out.intervalUs);
-  out.main = aggregateProfile(mProf, out.intervalUs);
-  out.files = ['trace-renderer.cpuprofile', 'trace-main.cpuprofile'];
-  try { session.disconnect(); } catch {}
-  try { wc.debugger.detach(); } catch {}
-  return async () => out;
+  console.log(`[perf] tracing renderer + main (min ${minMs} ms, covers the click campaign)`);
+  // Non-blocking: profilers run across the click campaign; the closer enforces the
+  // minimum window and then stops + splits self time by function.
+  return async () => {
+    const elapsed = Date.now() - out.startedAt;
+    if (elapsed < minMs) await WAIT(minMs - elapsed);
+    let rProf = null, mProf = null;
+    try {
+      rProf = (await cmd('Profiler.stop')).profile;
+      mProf = (await post('Profiler.stop')).profile;
+    } catch (e) {
+      out.error = String((e && e.message) || e);
+      try { session.disconnect(); } catch {}
+      try { wc.debugger.detach(); } catch {}
+      return out;
+    }
+    out.windowMs = Date.now() - out.startedAt;
+    fs.writeFileSync(path.join(OUT, 'trace-renderer.cpuprofile'), JSON.stringify(rProf));
+    fs.writeFileSync(path.join(OUT, 'trace-main.cpuprofile'), JSON.stringify(mProf));
+    out.renderer = aggregateProfile(rProf, out.intervalUs);
+    out.main = aggregateProfile(mProf, out.intervalUs);
+    out.files = ['trace-renderer.cpuprofile', 'trace-main.cpuprofile'];
+    try { session.disconnect(); } catch {}
+    try { wc.debugger.detach(); } catch {}
+    return out;
+  };
 }
 
 async function main() {
@@ -401,8 +417,7 @@ async function main() {
   // One-off function-level trace (PERF_TRACE_MS): profile renderer + main process while the
   // click campaign runs, then split self-time by function. Perturbs the run — never use it
   // inside an A/B comparison.
-  const stopTrace = TRACE_MS > 0 ? await startTrace(TRACE_MS) : null;
-  // Click campaign: every tab, CLICK_REPS rounds, real input events, interleaved so each tab
+  const stopTrace = TRACE_MS > 0 ? await startTrace(TRACE_MS) : null;  // Click campaign: every tab, CLICK_REPS rounds, real input events, interleaved so each tab
   // sees a different streaming phase. Then board card-selection clicks (a heavy non-tab button).
   let attempted = 0, dropped = 0;
   for (let rep = 0; rep < CLICK_REPS; rep++) {

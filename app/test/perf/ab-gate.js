@@ -31,7 +31,10 @@ const REPS = Math.max(1, Number(process.env.PERF_CLICK_REPS || 8));
 const PAIRS = Math.max(0, Number(process.env.PERF_PAIRS || 3));
 const WARM_MS = Number(process.env.PERF_WARM_MS || 4000);
 const SAMPLE_MS = Number(process.env.PERF_SAMPLE_MS || 20000);
-const TIMEOUT_MS = (Math.ceil((WARM_MS + SAMPLE_MS) / 1000) + 25) * 1000 + 240000;
+// Kill backstop, not the happy path: budget the trace window and the worst-case click
+// poll (~2.6 s/click) on top of warm+sample, then generous slack for seed + boot.
+const TRACE_MS = Number(process.env.PERF_TRACE_MS || 0);
+const TIMEOUT_MS = (Math.ceil((WARM_MS + SAMPLE_MS) / 1000) + 25) * 1000 + 240000 + TRACE_MS + (REPS * 9 + 10) * 2600;
 
 // ---- pure stats + gate rule (unit-tested in test/ab-gate.test.js) ----
 function pct(arr, p) {
