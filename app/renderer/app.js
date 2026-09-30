@@ -12,6 +12,7 @@ const EDGE_DESC = { assign: 'can assign tasks to and message', message: 'can sen
 const list = (v) => (Array.isArray(v) ? v : []).join('\n');
 let sel = { node: null, edge: null, task: null, page: null, logTeam: '', chatTeam: '', boardTeam: '' };
 let connectFrom = null, connectMode = false, wikiEdit = false;
+let bootTeam = true; // first fill only: Board/Chat team filters start on the sidebar team (t_ce954427)
 const logs = [];
 const logsLoaded = new Set(); // projects whose persisted logs.jsonl was merged into logs
 async function loadLogs(pid) {
@@ -80,6 +81,7 @@ async function refresh() {
     try { s.nstat = await call('nodeStatus'); s.cross = await call('crossEdges'); }
     catch { s.nstat = S.nstat || {}; s.cross = S.cross || []; }
     ctx.t = s.teamId;
+    if (bootTeam) { bootTeam = false; sel.chatTeam = sel.boardTeam = ctx.t || ''; } // boot: follow the sidebar team (t_ce954427) — boot never goes through switchTo()
     P = p; S = { ...S, ...s };
     lastV = s.v || v; lastVProject = ctx.p;
   } catch (e) {
