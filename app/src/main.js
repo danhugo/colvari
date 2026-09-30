@@ -652,20 +652,27 @@ async function guiE2E() {
       while (Date.now() < end) {
         const st = s.getTask(task.id).status;
         const label = await ex(`await refresh(); return $('#runstate').textContent`);
-        if (/running/.test(label)) return { seen: true, label, status: st };
+        if (/running/i.test(label)) return { seen: true, label, status: st };
         if (st !== 'todo' && st !== 'in_progress') return { seen: false, label, status: st };
         await new Promise((r) => setTimeout(r, 120));
       }
       return { seen: false, label: await ex(`return $('#runstate').textContent`), status: s.getTask(task.id).status };
     };
     const o = orchFor(p);
+    const { nativeTheme } = require('electron'); const prevTheme = nativeTheme.themeSource;
     expect('runidle: boot comes up stopped, never silently running', o.running === false, o.running);
     const first = s.createTask({ title: 'Idle: first piece of work', assignee: B.id });
     // Start through the real UI control (goal popover Run; the preflight confirm is auto-accepted like a human pressing "Run anyway").
     await ex(`await refresh(); window.confirm = () => true; window.alert = () => {}; $('#run').click(); await w(200);`);
-    const started = await waitFor(`await refresh(); return /running/.test($('#runstate').textContent)`);
+    const started = await waitFor(`await refresh(); return /running/i.test($('#runstate').textContent)`);
     const dispatched = await until(() => s.getTask(first.id).status === 'in_progress');
     expect('runidle: the header Run control starts the run and dispatches the todo', started && dispatched, { started, status: s.getTask(first.id).status, label: await ex(`return $('#runstate').textContent`) });
+    // Evidence (t_ac25444e): the three pill states, light mode, on Board and one other view. Running
+    // first — the stub is at work and the pill is stably Running through the review pickup. Light
+    // theme rides the whole evidence block and is restored at the end of the section.
+    nativeTheme.themeSource = 'light'; await ex(`await w(300);`);
+    await ex(`$('#tabs button[data-tab=board]').click(); await refresh(); await w(300);`); await shot('31-runidle-running-board');
+    await ex(`$('#tabs button[data-tab=chat]').click(); await w(300);`); await shot('31-runidle-running-chat');
     // The stub leaves the task in review; the PM's review pickup closes it, then the board drains.
     expect('runidle: first task closes done through the review pickup', await until(() => s.getTask(first.id).status === 'done', 30000), s.getTask(first.id).status);
     // The gate must be deterministic: right after done, running is transiently true before the core
@@ -685,29 +692,43 @@ async function guiE2E() {
       await ex(`await refresh(); await w(300);`);
       const label = await ex(`return $('#runstate').textContent`);
       expect('idle: the run stays alive with the board drained', o.running === true, o.running);
-      expect('idle: the pill reads idle (waiting, zero agents)', /idle/.test(label) && !/running/.test(label), label);
+      expect('idle: the pill reads Idle (nothing to do)', /idle/i.test(label) && !/running/i.test(label), label);
       const runsBefore = s.listRuns().length;
       await new Promise((r) => setTimeout(r, 2500));
       expect('idle: nothing spawns while idle (zero cost waiting)', s.listRuns().length === runsBefore && o.procs.size === 0, { before: runsBefore, after: s.listRuns().length, procs: o.procs.size });
+      await ex(`$('#tabs button[data-tab=board]').click(); await refresh(); await w(300);`); await shot('31-runidle-idle-board');
+      await ex(`$('#tabs button[data-tab=chat]').click(); await w(300);`); await shot('31-runidle-idle-chat');
       const second = s.createTask({ title: 'Idle: picked up without a click', assignee: B.id });
       expect('idle: a new todo is picked up on its own', await until(() => s.getTask(second.id).status === 'in_progress', 8000), s.getTask(second.id).status);
       expect('idle: the pill reads running again during pickup', (await pillRunning(second)).seen);
       await until(() => s.getTask(second.id).status === 'done', 30000);
-      await ex(`$('#stop').click(); await w(400);`); // Stop while idle: the explicit off switch
-      expect('idle: Stop turns the run off', await until(() => !o.running, 5000), o.running);
-      const stoppedLabel = await ex(`await refresh(); return $('#runstate').textContent`);
-      expect('idle: the pill no longer reads running after Stop', !/running/.test(stoppedLabel), stoppedLabel);
-      const third = s.createTask({ title: 'Idle: must wait while stopped', assignee: B.id });
-      await new Promise((r) => setTimeout(r, 2500));
-      expect('stopped: a new todo is not dispatched while stopped', s.getTask(third.id).status === 'todo' && !o.running, { status: s.getTask(third.id).status, running: o.running });
-      await ex(`await refresh(); $('#run').click(); await w(200);`);
-      const resumed = await until(() => s.getTask(third.id).status === 'in_progress') && (await pillRunning(third)).seen;
-      expect('stopped: Run starts the run again and dispatches the waiting todo', resumed, s.getTask(third.id).status);
-      await ex(`$('#stop').click(); await w(300);`); await until(() => !o.running, 5000);
-      await ex(`$('#tabs button[data-tab=board]').click(); await refresh(); await w(300);`); await shot('31-runidle-board');
     } else {
-      console.log('[gui-e2e] runidle: the run still stops when the board drains — idle-waiting, zero-spawn idle, self-pickup and stop/start-while-idle checks activate when t_b2273507 (core idle) and t_7d5834a6 (always-visible toggle) land; header start/stop verified');
+      console.log('[gui-e2e] runidle: the run still stops when the board drains — the idle-waiting and self-pickup checks stay gated on t_b2273507 (core idle); the Stopped pill + header Run checks below run either way');
     }
+    // Stopped state (t_ac25444e), shared by both drain shapes — the run is off by here (explicit
+    // Stop while idle, or the drain-stop): the pill must say Stopped, show the waiting todos, and
+    // the header Run button must be the visible way back.
+    if (o.running) { await ex(`$('#stop').click(); await w(400);`); } // Stop while idle: the explicit off switch
+    expect('stopped: the run is off (Stop works while idle too)', await until(() => !o.running, 5000), o.running);
+    await ex(`await refresh(); await w(300);`);
+    const stoppedLabel = await ex(`return $('#runstate').textContent`);
+    expect('stopped: the pill reads Stopped, never idle, once the run is off', /stopped/i.test(stoppedLabel) && !/idle/i.test(stoppedLabel) && !/running/i.test(stoppedLabel), stoppedLabel);
+    expect('stopped: the header shows the Run button', await ex(`return !$('#runbtn').classList.contains('hidden') && $('#runbtn').getBoundingClientRect().width > 0`));
+    const third = s.createTask({ title: 'Idle: must wait while stopped', assignee: B.id });
+    await new Promise((r) => setTimeout(r, 2500));
+    expect('stopped: a new todo is not dispatched while stopped', s.getTask(third.id).status === 'todo' && !o.running, { status: s.getTask(third.id).status, running: o.running });
+    const stoppedPending = await ex(`await refresh(); return $('#runstate').textContent`);
+    expect('stopped: the pill shows the pending todo work', /stopped/i.test(stoppedPending) && /todo/i.test(stoppedPending), stoppedPending);
+    await ex(`$('#tabs button[data-tab=board]').click(); await refresh(); await w(300);`); await shot('31-runidle-stopped-board');
+    await ex(`$('#tabs button[data-tab=chat]').click(); await w(300);`); await shot('31-runidle-stopped-chat');
+    // The header Run button is the way back: clicking it restarts the run and dispatches the waiter.
+    await ex(`$('#runbtn').click(); await w(200);`);
+    const resumed = await until(() => s.getTask(third.id).status === 'in_progress') && (await pillRunning(third)).seen;
+    expect('stopped: the header Run button restarts the run and dispatches the waiting todo', resumed, s.getTask(third.id).status);
+    await ex(`$('#tabs button[data-tab=board]').click(); await refresh(); await w(300);`); await shot('31-runidle-resumed-board');
+    await ex(`$('#stop').click(); await w(300);`); await until(() => !o.running, 5000);
+    await ex(`await refresh(); await w(300);`); await shot('31-runidle-board');
+    nativeTheme.themeSource = prevTheme;
     s.saveSettings({ claudePath: prev.claudePath, maxConcurrency: prev.maxConcurrency });
     console.log('[gui-e2e] runidle', JSON.stringify({ first: s.getTask(first.id).status, running: o.running }));
   };
