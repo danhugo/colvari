@@ -1604,6 +1604,16 @@ function drawSubBadge(g, a, y = H - 18) {
 // A task stuck in_progress whose assignee has no live agent process: the orchestrator will reset/re-dispatch it,
 // but until then it needs to be visible so a stalled run isn't mistaken for one still working.
 function orphanedTasks() { const r = runningIds(); return S.tasks.filter((t) => t.status === 'in_progress' && t.assignee && !r.includes(t.assignee)); }
+// Stuck task/agent action (t_747e0d1e): 'Retest + Resume'; after a failed resume the button becomes 'Rerun fresh'.
+// IPC: retestAndResume(taskId) -> {ok, resumeFailed?, error?}; rerunFresh(taskId) -> {ok, error?}.
+const rrFailed = new Set(); const rrBusy = new Set();
+const stuckBtn = (taskId) => rrBusy.has(taskId) ? `<button disabled>Working…</button>` : `<button class="primary" data-rerun="${rrFailed.has(taskId) ? 'fresh' : 'resume'}" data-rrtask="${taskId}" title="${rrFailed.has(taskId) ? 'Resume failed. Start a new run with the same task.' : 'Check the CLI, then resume the last session'}">${rrFailed.has(taskId) ? 'Rerun fresh' : 'Retest + Resume'}</button>`;
+function wireStuckBtns() {
+  document.querySelectorAll('[data-rrtask]').forEach((b) => b.onclick = act(async (e) => { e.stopPropagation(); const id = b.dataset.rrtask; rrBusy.add(id); refresh();
+    try { const r = await call(b.dataset.rerun === 'fresh' ? 'rerunFresh' : 'retestAndResume', id);
+      if (r && r.ok === false) { if (r.resumeFailed) rrFailed.add(id); else alert(r.error || 'Failed'); } else rrFailed.delete(id);
+    } finally { rrBusy.delete(id); refresh(); } }));
+}
 // Log a wake-run in the activity feed the first time it becomes visible (same wakeRun selector as the
 // badges, so the feed can't disagree with them); the entry is kept when the wake ends.
 const wakeSeen = new Set();
@@ -1699,6 +1709,7 @@ function renderBoard() {
     ${t.sessionId ? `<p class="muted">Session <code>${esc(t.sessionId)}</code>${t.iterations ? ` · ${t.iterations} iteration(s)` : ''}</p>` : ''}
     <label>Comments</label>${(cmtCut ? `<p class="muted">${cmtCut} earlier comments hidden</p>` : '') + cmts.map((c) => `<div class="comment"><b>${esc(c.author)}</b>: ${esc(c.text)}</div>`).join('') || '<p class="muted">none</p>'}
     <textarea id="td-comment" rows="2" placeholder="Add comment"></textarea>
+    ${orphanedTasks().includes(t) ? `<div class="stuckbar">⚠ Stopped with a problem: no live worker.<span class="spacer"></span>${stuckBtn(t.id)}</div>` : ''}
     <p><button id="td-addc">Comment</button> <button id="td-del">Delete task</button>${t.worktreePath ? ` <button id="td-diff">Diff</button> <button id="td-merge">Merge</button> <button id="td-discard">Discard</button>` : ''}</p><div id="td-diffbox"></div></div>`;
   if ($('#td-diff')) {
     $('#td-diff').onclick = act(async () => { const r = await call('taskDiff', t.id); $('#td-diffbox').innerHTML = `<p class="muted">${esc(r.branch)} vs ${esc(r.base)}</p>${r.files.map((f) => `<div><code>${esc(f.status)}</code> ${esc(f.file)}</div>`).join('') || '<p class="muted">no changes</p>'}<pre>${esc(r.diff)}</pre>`; });
@@ -1711,6 +1722,7 @@ function renderBoard() {
   $('#td-addc').onclick = async () => { const v = $('#td-comment').value.trim(); if (v) { await call('commentTask', t.id, v); refresh(); } };
   document.querySelectorAll('#td-deps input').forEach((x) => x.onchange = act(async () => { await call('updateTask', t.id, { blockedBy: [...document.querySelectorAll('#td-deps input')].filter((y) => y.checked).map((y) => y.value) }); refresh(); }));
   if ($('#td-approve')) { $('#td-approve').onclick = act(async () => { await call('approveTask', t.id, true, $('#td-note').value.trim()); refresh(); }); $('#td-reject').onclick = act(async () => { await call('approveTask', t.id, false, $('#td-note').value.trim()); refresh(); }); }
+  wireStuckBtns();
   if ($('#td-stopagent')) $('#td-stopagent').onclick = act(async () => { await call('stopAgent', t.assignee); refresh(); });
   if ($('#td-send')) { const send = act(async () => { const v = $('#td-msg').value.trim(); if (!v) return; await call('sendToAgent', t.assignee, v, t.id); $('#td-msg').value = ''; refresh(); }); $('#td-send').onclick = send; $('#td-msg').onkeydown = (e) => { if (e.key === 'Enter') send(); }; }
   if (renderBoard.last === t.id) for (const [k, v] of Object.entries(keep)) if (v && $('#' + k)) $('#' + k).value = v;
@@ -1800,11 +1812,12 @@ function renderObs() {
       a.taskId ? `<span class="ltid" title="${esc(ttl || a.taskId)}">${esc(shortTaskId(a.taskId))}</span>` : '',
       ttl ? `<span class="lttl">${esc(ttl)}</span>` : ''].filter(Boolean).join(' · ');
     const model = `${runtimeLabel(n.runtime || 'claude')} · ${n.model || 'default'}`;
-    return `<div class="logagent-row ${cur === n.id ? 'sel' : ''}" data-id="${n.id}"><span class="avatar sm ${a.status === 'working' ? 'working' : ''}" style="background:${w.color}" title="${esc(w.name)}">${esc(w.ini)}</span><span class="lameta"><b>${esc(n.name)}</b><small class="lastat">${stat}</small><small class="lamodel" title="${esc(model)}">${esc(model)}</small></span><span class="lacount" title="${counts[n.id] || 0} log lines">${counts[n.id] || 0}</span><span class="lactions">${a.status === 'working' ? `<button data-stopagent="${n.id}" title="Stop">⏹</button>` : ''}<button data-msgagent="${n.id}" title="Message">✉</button></span></div>`; }).join('');
+    return `<div class="logagent-row ${cur === n.id ? 'sel' : ''}" data-id="${n.id}"><span class="avatar sm ${a.status === 'working' ? 'working' : ''}" style="background:${w.color}" title="${esc(w.name)}">${esc(w.ini)}</span><span class="lameta"><b>${esc(n.name)}</b><small class="lastat">${stat}</small><small class="lamodel" title="${esc(model)}">${esc(model)}</small></span><span class="lacount" title="${counts[n.id] || 0} log lines">${counts[n.id] || 0}</span><span class="lactions">${orphanedTasks().filter((t) => t.assignee === n.id).slice(0, 1).map((t) => stuckBtn(t.id)).join('')}${a.status === 'working' ? `<button data-stopagent="${n.id}" title="Stop">⏹</button>` : ''}<button data-msgagent="${n.id}" title="Message">✉</button></span></div>`; }).join('');
   $('#logagents').innerHTML = `<div class="logagent-row ${!cur ? 'sel' : ''}" data-id=""><span class="avatar sm" style="background:#3a3f4b">∀</span><span class="lameta"><b>All agents</b><small class="lastat">every session</small></span><span class="lacount" title="${total} log lines">${total}</span></div>` +
     (rows || '<p class="muted logempty">No agents in this team.</p>');
   document.querySelectorAll('#logagents [data-idle]').forEach((d) => d.onclick = () => { obsIdleOpen.add(d.dataset.idle); obsSig = ''; renderObs(); });
   document.querySelectorAll('#logagents .logagent-row[data-id]').forEach((d) => d.onclick = (e) => { if (e.target.closest('.lactions')) return; $('#logfilter').value = d.dataset.id; renderLog(); renderObs(); });
+  wireStuckBtns();
   document.querySelectorAll('[data-stopagent]').forEach((b) => b.onclick = act(async (e) => { e.stopPropagation(); await call('stopAgent', b.dataset.stopagent); refresh(); }));
   document.querySelectorAll('[data-msgagent]').forEach((b) => b.onclick = act(async (e) => { e.stopPropagation(); const v = await ask(`Message to ${nodeName(b.dataset.msgagent)} (a running agent is interrupted and resumed with it)`); if (v) { await call('sendToAgent', b.dataset.msgagent, v); refresh(); } }));
   const bs = S.orch.budgetStop ? esc(S.orch.budgetStop) : ''; const st = S.settings; const orphans = orphanedTasks();
