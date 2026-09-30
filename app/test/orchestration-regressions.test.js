@@ -438,6 +438,9 @@ test('(i) P0 stuck sweep: assignee busy on another run -> alert raised even with
   assert.ok(alert, 'a P0 whose assignee is busy raises the alert');
   assert.equal(alert.assignee, null, 'no PM node -> the alert waits unassigned on the board');
   assert.equal(s.getTask(busyTask.id).status, 'in_progress', 'the busy run is on the other task');
+  // The alert is itself an unassigned P0 todo: it must never be swept into "P0 stuck: P0 stuck: …".
+  await sleep(2300);
+  assert.equal(s.listTasks().filter((x) => /^P0 stuck:/.test(x.title)).length, 1, 'alerts never re-alert (runaway recursion)');
   fs.writeFileSync(release, 'go');
   await waitFor(() => o.procs.size === 0);
 });

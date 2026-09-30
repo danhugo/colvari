@@ -1257,7 +1257,8 @@ class Orchestrator extends EventEmitter {
     const pm = team.nodes.find((n) => n.role === 'PM');
     const open = new Set(this.store.listTasks().filter((x) => x.stuckAlertFor && !['done', 'merge_conflict'].includes(x.status)).map((x) => x.stuckAlertFor));
     for (const t of all) {
-      if (t.priority !== 'P0' || t.status !== 'todo' || open.has(t.id)) continue;
+      // An alert is never itself swept: it is P0 for the busy PM too, and re-alerting it recursed.
+      if (t.stuckAlertFor || t.createdBy === 'orchestrator' || t.priority !== 'P0' || t.status !== 'todo' || open.has(t.id)) continue;
       const busy = t.assignee && this.agent(t.assignee).taskId;
       if (t.assignee && !busy) continue;
       const nodeName = t.assignee && (team.nodes.find((n) => n.id === t.assignee) || {}).name;
