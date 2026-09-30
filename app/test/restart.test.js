@@ -349,6 +349,7 @@ test('board tool: schedule_restart is PM-only, validates, and announces', () => 
 
 // ---- watcher integration: the scheduled restart reuses the drain/test/relaunch flow ----
 const SHA1 = 'a'.repeat(40);
+const SHA2 = 'b'.repeat(40); // origin ahead of local: a schedule has real code to restart onto (t_7426095a)
 function fakeGit(opts = {}) {
   const sha = opts.sha || SHA1;
   return (args) => {
@@ -356,7 +357,7 @@ function fakeGit(opts = {}) {
     if (a === 'rev-parse --abbrev-ref HEAD') return { code: 0, out: 'master' };
     if (a === 'rev-parse HEAD') return { code: 0, out: sha };
     if (a.startsWith('fetch')) return { code: 0, out: '' };
-    if (a === 'rev-parse origin/master') return { code: 0, out: sha };
+    if (a === 'rev-parse origin/master') return { code: 0, out: opts.origin || sha };
     if (a === 'status --porcelain') return { code: 0, out: '' };
     if (a.startsWith('diff --name-only')) return { code: 0, out: '' };
     if (a.startsWith('worktree')) return { code: 0, out: '' };
@@ -377,7 +378,7 @@ test('watcher: restartScheduled runs the full flow even with auto-restart off; c
   const relaunches = [];
   const w = new UpdateWatcher({
     store: watcherStore(path.join(d, 'su1')), repoDir: d, pollMs: 3.6e6,
-    git: fakeGit(), npm: fakeNpm(),
+    git: fakeGit({ origin: SHA2 }), npm: fakeNpm(),
     relaunch: () => relaunches.push(1), procCount: () => 0,
     setPaused: () => {}, drainTimeoutMs: 100,
   });
@@ -388,7 +389,7 @@ test('watcher: restartScheduled runs the full flow even with auto-restart off; c
 
   const hangs = new UpdateWatcher({
     store: watcherStore(path.join(d, 'su2')), repoDir: d, pollMs: 3.6e6,
-    git: fakeGit(), npm: fakeNpm(),
+    git: fakeGit({ origin: SHA2 }), npm: fakeNpm(),
     relaunch: () => relaunches.push(1), procCount: () => 1,
     setPaused: () => {}, drainTimeoutMs: 3.6e6,
   });
