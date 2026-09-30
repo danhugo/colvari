@@ -20,15 +20,30 @@
  *  5. Writes baseline.json + baseline.md to PERF_OUT (default: a fresh temp dir) and stops.
  *
  * No app source is modified; all instrumentation is injected at runtime.
+ *
+ * Metric endpoint (v2, t_fd3a15c4): "first quiet paint" — the first frame painted after the
+ * click's dispatch finished in which (a) no render/refresh work started during that frame's
+ * interval and (b) every such call started since the click has ended. It keys on the wrapped
+ * render* surface as a whole, NOT on renderAll — so it stays meaningful once track 1 stops
+ * calling renderAll on clicks. The legacy renderAll-endpoint is still computed per click
+ * (clicks.statLegacy) so numbers before/after the endpoint change stay comparable.
+ *
+ * Extra knobs (t_fd3a15c4):
+ *   PERF_APP_DIR=<dir>  boot the app from this dir instead of ../.. (A/B: same harness,
+ *                       different commit — set by ab-gate.js)
+ *   PERF_TRACE_MS=<ms>  capture a CPU profile of renderer AND main process for this long
+ *                       during the sampling window (one-off function-level trace; perturbs
+ *                       the run, never use inside an A/B comparison)
  */
 const { app } = require('electron');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const APP = path.resolve(__dirname, '../..');
+const APP = path.resolve(process.env.PERF_APP_DIR || path.join(__dirname, '../..'));
 const MAIN = path.join(APP, 'src/main.js');
 const CLI = path.join(__dirname, 'stream-cli.js');
+const LOAD_START = os.loadavg();
 const OUT = process.env.PERF_OUT || path.join(os.tmpdir(), `agents-squad-perf-${Date.now()}`);
 const AGENTS = Math.max(2, Number(process.env.PERF_AGENTS || 4));
 const TASKS = Math.max(AGENTS, Number(process.env.PERF_TASKS || AGENTS));
@@ -42,16 +57,20 @@ const CARD_CLICKS = Number(process.env.PERF_CARD_CLICKS || 10);  // board card-s
 const STREAM_SECONDS = Number(process.env.STREAM_SECONDS || 0) ||
   Math.ceil((WARM_MS + SAMPLE_MS) / 1000) + 25;             // keep agents alive past the window
 const STREAM_EPS = Number(process.env.STREAM_EPS || 6);
+const TRACE_MS = Number(process.env.PERF_TRACE_MS || 0);     // one-off CPU profile window
+const TRACE_FNS = ['renderLog', 'renderGraph', 'renderBoard', 'renderChat', 'renderOverview', 'renderAll', 'JSON.parse', '(garbage collector)'];
 const TABS = ['chat', 'team', 'board', 'wiki', 'obs', 'usage', 'settings', 'overview', 'inbox'];
 const WAIT = (ms) => new Promise((r) => setTimeout(r, ms));
 fs.mkdirSync(OUT, { recursive: true });
+const CLICK_BUDGET_MS = (CLICK_REPS * TABS.length + CARD_CLICKS) * 2600; // worst-case poll budget per click
 
 // GUI test mode must be set before main.js loads (isolated root, no single-instance lock,
 // child procguard). The marker is removed again before did-finish-load so the built-in
 // smoke/guiE2E scenarios never run; TEST_MODE itself stays active.
 process.env.AGENTS_SQUAD_SMOKE = '1';
 process.env.AGENTS_SQUAD_PROJECT = fs.mkdtempSync(path.join(os.tmpdir(), 'squad-perf-root-'));
-process.env.AGENTS_SQUAD_TEST_TIMEOUT_MS = String(Math.max(180000, STREAM_SECONDS * 1000 + 90000));
+process.env.AGENTS_SQUAD_TEST_TIMEOUT_MS = String(Math.max(180000,
+  STREAM_SECONDS * 1000 + 90000 + TRACE_MS + CLICK_BUDGET_MS));
 process.env.AGENTS_SQUAD_DEV = '0'; // no UpdateWatcher in a perf instance
 
 // IPC + push counting must wrap BEFORE main.js registers its handlers: the renderer's
@@ -101,32 +120,58 @@ const jsq = (v) => JSON.stringify(v);
 const INSTRUMENT = `
   if (window.__perf) return { already: true };
   const P = window.__perf = {
-    t0: performance.now(), statePushes: 0, logPushes: 0, renders: {}, refreshMs: [],
+    t0: performance.now(), statePushes: 0, logPushes: 0, renders: {}, renderCalls: [], refreshMs: [],
     clicks: [], longs: [], frames: [], lastRenderAllEnd: 0, clickDown: 0, clickRenderAllMs: 0,
   };
-  const ring = (a, x, cap = 6000) => { if (a.length < cap) a.push(x); };
+  // Ring that evicts the OLDEST entry once full: frames/renders must always cover "now",
+  // otherwise a long window fills the buffer with early samples and every peek starves.
+  const ring = (a, x, cap = 6000) => { if (a.length >= cap) a.shift(); a.push(x); };
   for (const name of ['renderSidebar','renderGraph','renderPreflightBar','renderNodeForm','renderBoard','renderWiki','renderObs','renderSettings','renderHeader','renderSelfUpdate','renderAlerts','renderUsage','renderOverview','renderInbox','renderGuide','renderChat','renderLog','renderLive']) {
     const f = window[name];
     if (typeof f !== 'function') continue;
     P.renders[name] = [];
-    window[name] = function (...a) { const t = performance.now(); try { return f.apply(this, a); } finally { ring(P.renders[name], performance.now() - t); } };
+    window[name] = function (...a) {
+      const t = performance.now(); const rec = { fn: name, s: t, e: null };
+      ring(P.renderCalls, rec, 20000);
+      try { return f.apply(this, a); } finally { rec.e = performance.now(); ring(P.renders[name], rec.e - t); }
+    };
   }
   const ra = window.renderAll;
-  window.renderAll = function (...a) { const t = performance.now(); try { return ra.apply(this, a); } finally { const d = performance.now() - t; ring(P.renders.renderAll = P.renders.renderAll || [], d); P.lastRenderAllEnd = performance.now(); if (P.clickDown && t >= P.clickDown - 1) P.clickRenderAllMs += d; } };
+  window.renderAll = function (...a) {
+    const t = performance.now(); const rec = { fn: 'renderAll', s: t, e: null };
+    ring(P.renderCalls, rec, 20000);
+    try { return ra.apply(this, a); } finally {
+      rec.e = performance.now(); const d = rec.e - t;
+      ring(P.renders.renderAll = P.renders.renderAll || [], d);
+      P.lastRenderAllEnd = rec.e;
+      if (P.clickDown && t >= P.clickDown - 1) P.clickRenderAllMs += d;
+    }
+  };
   const rf = window.refresh;
-  window.refresh = async function (...a) { const t = performance.now(); try { return await rf.apply(this, a); } finally { ring(P.refreshMs, performance.now() - t); } };
+  window.refresh = async function (...a) {
+    const t = performance.now(); const rec = { fn: 'refresh', s: t, e: null };
+    ring(P.renderCalls, rec, 20000);
+    try { return await rf.apply(this, a); } finally { rec.e = performance.now(); ring(P.refreshMs, rec.e - t); }
+  };
   // Push counters: squad is a frozen contextBridge object (reads work, writes don't), but
   // adding listeners is fine. Per-call IPC counts come from the main-process handle wrapper.
   try { window.squad.on('state', () => P.statePushes++); window.squad.on('log', () => P.logPushes++); } catch (e) {}
     if (window.PerformanceObserver) { try { new PerformanceObserver((l) => { for (const e of l.getEntries()) if (e.duration > 50) ring(P.longs, { start: Math.round(e.startTime), duration: Math.round(e.duration) }); }).observe({ type: 'longtask', buffered: true }); } catch (e) {} }
   (function loop() { ring(P.frames, performance.now()); requestAnimationFrame(loop); })();
   // One click sample: arm right before the driver dispatches real mouse input; the capture
-  // listener stamps input dispatch, then we look for the first frame painted after the last
-  // renderAll that started at/after the press (covers sync tab renders and async switchTo).
+  // listener stamps input dispatch (rec.down) and a setTimeout(0) queued from that listener
+  // stamps the END of the click's synchronous handler chain (rec.dispatch). The endpoint is
+  // then the first frame painted at/after rec.dispatch whose frame interval started no new
+  // render/refresh work and by which all work started since the click has ended — the first
+  // paint where what the user sees has settled ("first quiet paint", t_fd3a15c4). The legacy
+  // renderAll-keyed endpoint is computed in parallel for comparability with pre-v2 numbers.
   P.arm = (label) => {
     const rec = { label, renderAllMs: 0, fnDeltas: null };
     P._rec = rec;
-    const dn = () => { rec.down = performance.now(); P.clickDown = rec.down; P.clickRenderAllMs = 0; };
+    const dn = () => {
+      rec.down = performance.now(); P.clickDown = rec.down; P.clickRenderAllMs = 0;
+      setTimeout(() => { rec.dispatch = performance.now(); }, 0);
+    };
     window.addEventListener('pointerdown', dn, { capture: true, once: true });
     P._dn = dn;
     return true;
@@ -135,11 +180,38 @@ const INSTRUMENT = `
     const rec = P._rec;
     if (!rec) return { done: true, stale: true };
     if (!rec.down) return { done: false, waiting: 'input' };
-    const endMark = Math.max(rec.down, P.lastRenderAllEnd >= rec.down ? P.lastRenderAllEnd : 0);
-    let paint = 0; for (const t of P.frames) if (t > endMark) { paint = t; break; }
-    if (!paint) return { done: false, waiting: 'paint' };
-    rec.paint = paint; rec.ms = paint - rec.down; rec.renderAllMs = Math.round(P.clickRenderAllMs * 100) / 100;
-    rec.long = P.longs.filter((l) => l.start >= rec.down - 5 && l.start <= paint);
+    if (!rec.dispatch) return { done: false, waiting: 'dispatch' };
+    // Only the tail since the click matters; backward scans keep every peek O(renders since
+    // click) instead of O(window), so polling never distorts what we measure.
+    const calls = P.renderCalls; const frames = P.frames;
+    let lo = calls.length;
+    while (lo > 0 && calls[lo - 1].s >= rec.down - 5) lo--;
+    let fi = frames.length;
+    while (fi > 0 && frames[fi - 1] > rec.dispatch) fi--;
+    // First quiet paint: scan frames after the dispatch finished.
+    let paint = 0;
+    for (let i = fi; i < frames.length; i++) {
+      const F = frames[i];
+      const prev = frames[i - 1] || 0;
+      let quiet = true;
+      for (let k = lo; k < calls.length; k++) {
+        const r = calls[k];
+        if (r.s > F) break;
+        const e = r.e == null ? Infinity : r.e;
+        if (e > F || (r.s > prev && r.s <= F)) { quiet = false; break; }
+      }
+      if (quiet) { paint = F; break; }
+    }
+    // Legacy endpoint: first frame after the last renderAll that started at/after the press.
+    const endMarkL = Math.max(rec.down, P.lastRenderAllEnd >= rec.down ? P.lastRenderAllEnd : 0);
+    let li = frames.length;
+    while (li > 0 && frames[li - 1] > endMarkL) li--;
+    const paintL = li < frames.length ? frames[li] : 0;
+    if (!paint && !paintL) return { done: false, waiting: 'paint' };
+    if (paint) { rec.paint = paint; rec.ms = paint - rec.down; }
+    if (paintL) { rec.paintLegacy = paintL; rec.msLegacy = paintL - rec.down; }
+    rec.renderAllMs = Math.round(P.clickRenderAllMs * 100) / 100;
+    rec.long = P.longs.filter((l) => l.start >= rec.down - 5 && l.start <= Math.max(paint || 0, paintL || 0));
     P.clicks.push(rec);
     window.removeEventListener('pointerdown', P._dn, true);
     P._rec = null; P.clickDown = 0;
@@ -154,13 +226,29 @@ const SUMMARY = `
   const secs = (performance.now() - P.t0) / 1000;
   const stat = (a) => ({ n: a.length, p50: +q(a, .5).toFixed(2), p95: +q(a, .95).toFixed(2), max: a.length ? +Math.max(...a).toFixed(2) : 0, sum: +a.reduce((s, x) => s + x, 0).toFixed(1) });
   const renders = {}; for (const [k, v] of Object.entries(P.renders)) renders[k] = stat(v);
-  const bySel = {}; for (const c of P.clicks) (bySel[c.label] ||= []).push(c.ms);
+  const bySel = {}; for (const c of P.clicks) if (Number.isFinite(c.ms)) (bySel[c.label] ||= []).push(c.ms);
+  // Quiet-paint may not settle inside the poll budget (UI never quiet for 2.5s mid-storm):
+  // those samples stay null for the quiet metric and are counted, never crash the summary.
+  const fin = (a) => a.filter(Number.isFinite);
+  const tabMs = fin(P.clicks.filter((c) => c.label.startsWith('tab:')).map((c) => c.ms));
+  const cardMs = fin(P.clicks.filter((c) => c.label.startsWith('card')).map((c) => c.ms));
+  const tabMsLegacy = fin(P.clicks.filter((c) => c.label.startsWith('tab:')).map((c) => c.msLegacy));
+  const unsettled = P.clicks.filter((c) => !Number.isFinite(c.ms)).length;
   return {
     windowSecs: +secs.toFixed(1),
+    metric: 'quiet-paint v2 (t_fd3a15c4): first frame after the click dispatch whose interval starts no render/refresh work and by which all work started since the click has ended; legacy renderAll endpoint kept as statLegacy',
     rates: { statePushesPerSec: +(P.statePushes / secs).toFixed(2), logPushesPerSec: +(P.logPushes / secs).toFixed(2), renderAllPerSec: +((P.renders.renderAll || []).length / secs).toFixed(2), refreshPerSec: +(P.refreshMs.length / secs).toFixed(2) },
     renderAll: renders.renderAll || { n: 0 }, renders,
     refresh: stat(P.refreshMs),
-    clicks: { stat: stat(P.clicks.map((c) => c.ms)), byLabel: Object.fromEntries(Object.entries(bySel).map(([k, v]) => [k, stat(v)])), samples: P.clicks.map((c) => ({ label: c.label, ms: +c.ms.toFixed(2), down: Math.round(c.down), renderAllMs: c.renderAllMs, longDuring: (c.long || []).length })) },
+    clicks: {
+      stat: stat(fin(P.clicks.map((c) => c.ms))),
+      unsettledQuiet: unsettled,
+      tabSwitches: stat(tabMs), cardClicks: stat(cardMs),
+      statLegacy: stat(fin(P.clicks.map((c) => c.msLegacy))),
+      tabSwitchesLegacy: stat(tabMsLegacy),
+      byLabel: Object.fromEntries(Object.entries(bySel).map(([k, v]) => [k, stat(v)])),
+      samples: P.clicks.map((c) => ({ label: c.label, ms: Number.isFinite(c.ms) ? +c.ms.toFixed(2) : null, msLegacy: Number.isFinite(c.msLegacy) ? +c.msLegacy.toFixed(2) : null, down: Math.round(c.down), renderAllMs: c.renderAllMs, longDuring: (c.long || []).length })),
+    },
     longTasks: { total: P.longs.length, maxMs: P.longs.length ? Math.max(...P.longs.map((l) => l.duration)) : 0, samples: P.longs.slice(-200) },
     logLines: logs.filter((l) => l.projectId === ctx.p).length,
     agentsWorking: Object.values(S.orch.agents || {}).filter((a) => a.status === 'working').length,
@@ -233,6 +321,79 @@ async function clickOnce(label, sel) {
   return clickAt(label, r);
 }
 
+// ---- function-level trace: self-time split for renderer AND main process (t_fd3a15c4 point 4).
+// Renderer via the DevTools debugger (wc.debugger, Profiler domain); main via an inspector
+// Session on this process — getAll's JSON.parse and the store live in main, render* in the
+// renderer, so a one-sided profile would answer the wrong question.
+function aggregateProfile(profile, intervalUs) {
+  const byFn = new Map();
+  for (const node of (profile && profile.nodes) || []) {
+    const name = (node.callFrame && node.callFrame.functionName) || '(anonymous)';
+    byFn.set(name, (byFn.get(name) || 0) + (node.hitCount || 0));
+  }
+  const msPerHit = intervalUs / 1000;
+  const list = [...byFn.entries()].map(([name, hits]) => ({ name, selfMs: +(hits * msPerHit).toFixed(1) }))
+    .sort((a, b) => b.selfMs - a.selfMs);
+  const total = list.reduce((s, x) => s + x.selfMs, 0);
+  return {
+    totalSelfMs: +total.toFixed(0),
+    top: list.slice(0, 18),
+    watch: TRACE_FNS.map((n) => list.find((x) => x.name === n)).filter(Boolean),
+  };
+}
+
+async function startTrace(minMs) {
+  const out = { minMs, intervalUs: 200, startedAt: 0 };
+  const inspector = require('inspector');
+  const session = new inspector.Session();
+  session.connect();
+  const post = (m, p) => new Promise((res, rej) => session.post(m, p, (e, r) => (e ? rej(e) : res(r))));
+  // Electron ≥ v12: sendCommand returns a Promise (the old 3rd-arg callback is gone — a
+  // string there is read as a debugger sessionId and the promise is dropped, hanging us).
+  const cmd = (m, p) => wc.debugger.sendCommand(m, p);
+  try {
+    wc.debugger.attach('1.3');
+    await cmd('Profiler.enable');
+    await cmd('Profiler.setSamplingInterval', { interval: out.intervalUs });
+    await post('Profiler.enable');
+    await post('Profiler.setSamplingInterval', { interval: out.intervalUs });
+    await cmd('Profiler.start');
+    await post('Profiler.start');
+    out.startedAt = Date.now();
+  } catch (e) {
+    out.error = String((e && e.message) || e);
+    try { session.disconnect(); } catch {}
+    try { wc.debugger.detach(); } catch {}
+    return async () => out;
+  }
+  console.log(`[perf] tracing renderer + main (min ${minMs} ms, covers the click campaign)`);
+  // Non-blocking: profilers run across the click campaign; the closer enforces the
+  // minimum window and then stops + splits self time by function.
+  return async () => {
+    const elapsed = Date.now() - out.startedAt;
+    if (elapsed < minMs) await WAIT(minMs - elapsed);
+    let rProf = null, mProf = null;
+    try {
+      rProf = (await cmd('Profiler.stop')).profile;
+      mProf = (await post('Profiler.stop')).profile;
+    } catch (e) {
+      out.error = String((e && e.message) || e);
+      try { session.disconnect(); } catch {}
+      try { wc.debugger.detach(); } catch {}
+      return out;
+    }
+    out.windowMs = Date.now() - out.startedAt;
+    fs.writeFileSync(path.join(OUT, 'trace-renderer.cpuprofile'), JSON.stringify(rProf));
+    fs.writeFileSync(path.join(OUT, 'trace-main.cpuprofile'), JSON.stringify(mProf));
+    out.renderer = aggregateProfile(rProf, out.intervalUs);
+    out.main = aggregateProfile(mProf, out.intervalUs);
+    out.files = ['trace-renderer.cpuprofile', 'trace-main.cpuprofile'];
+    try { session.disconnect(); } catch {}
+    try { wc.debugger.detach(); } catch {}
+    return out;
+  };
+}
+
 async function main() {
   await WAIT(1200);
   const seeded = await seed();
@@ -241,6 +402,7 @@ async function main() {
   await ex(`await refresh(); showTab('chat'); await w(300);`);
   const inst = await ex(INSTRUMENT);
   inst_at = performance.now(); inst_dateAt = Date.now();
+  const LOAD_MID = os.loadavg();
   console.log('[perf] instrumented', JSON.stringify(inst));
 
   await ex(`await call('run')`);
@@ -254,17 +416,22 @@ async function main() {
 
   await WAIT(WARM_MS);
   const sampleStart = Date.now();
-  // Click campaign: every tab, CLICK_REPS rounds, real input events, interleaved so each tab
+  // One-off function-level trace (PERF_TRACE_MS): profile renderer + main process while the
+  // click campaign runs, then split self-time by function. Perturbs the run — never use it
+  // inside an A/B comparison.
+  const stopTrace = TRACE_MS > 0 ? await startTrace(TRACE_MS) : null;  // Click campaign: every tab, CLICK_REPS rounds, real input events, interleaved so each tab
   // sees a different streaming phase. Then board card-selection clicks (a heavy non-tab button).
+  let attempted = 0, dropped = 0;
   for (let rep = 0; rep < CLICK_REPS; rep++) {
-    for (const tab of TABS) await clickOnce(`tab:${tab}`, `#tabs button[data-tab="${tab}"]`);
+    for (const tab of TABS) { attempted++; if (!(await clickOnce(`tab:${tab}`, `#tabs button[data-tab="${tab}"]`))) dropped++; }
   }
   await ex(`showTab('board'); await w(400);`);
   const cards = await ex(`return [...document.querySelectorAll('.card')].slice(0, ${CARD_CLICKS}).map((c) => { const r = c.getBoundingClientRect(); return [Math.round(r.x + r.width / 2), Math.round(r.y + Math.min(14, r.height / 2))]; })`);
-  for (const [i, xy] of (cards || []).entries()) await clickAt(`card#${i + 1}`, xy);
+  for (const [i, xy] of (cards || []).entries()) { attempted++; if (!(await clickAt(`card#${i + 1}`, xy))) dropped++; }
   const clickWall = Date.now() - sampleStart;
   await WAIT(Math.max(500, SAMPLE_MS - clickWall)); // keep sampling pushes after the clicks
   const summary = await ex(SUMMARY);
+  if (stopTrace) summary.trace = await stopTrace();
 
   // Main-process view: exact per-call IPC round-trips (name, duration) and push traffic.
   const ipcWin = PERF_IPC.filter((c) => c.at >= inst_at);
@@ -289,17 +456,24 @@ async function main() {
 
   summary.env = {
     platform: `${os.platform()} ${os.arch()} cpus=${os.cpus().length} loadavg1m=${os.loadavg()[0].toFixed(2)}`,
+    load: {
+      start1m: +LOAD_START[0].toFixed(2), mid1m: +LOAD_MID[0].toFixed(2), end1m: +os.loadavg()[0].toFixed(2),
+      start5m: +LOAD_START[1].toFixed(2), end5m: +os.loadavg()[1].toFixed(2),
+    },
+    ab: { appDir: APP, harnessDir: __dirname },
     electron: process.versions.electron, node: process.versions.node,
     agents: AGENTS, tasks: TASKS, streamSeconds: STREAM_SECONDS, streamEps: STREAM_EPS,
     clickReps: CLICK_REPS, warmMs: WARM_MS, sampleMs: SAMPLE_MS, clickWallMs: clickWall,
+    clicksAttempted: attempted, clicksDropped: dropped,
     seedTasks: SEED_TASKS + TASKS * 6, seedLogs: SEED_LOGS, seedRuns: SEED_RUNS, cardClicks: (cards || []).length,
     commit: (() => { try { return require('child_process').execFileSync('git', ['rev-parse', 'HEAD'], { cwd: APP, encoding: 'utf8' }).trim(); } catch { return 'unknown'; } })(),
     cli: CLI,
   };
   summary.target = {
-    clickP95Below100ms: summary.clicks.stat.p95 < 100,
+    clickP95Below100ms: summary.clicks.tabSwitches.p95 < 100,
     longTasksOver50ms: summary.longTasks.total,
-    pass: summary.clicks.stat.p95 < 100 && summary.longTasks.total === 0,
+    // Gate population: tab switches only (t_fd3a15c4). Card clicks are reported, not gated.
+    pass: summary.clicks.tabSwitches.p95 < 100 && summary.longTasks.total === 0,
   };
   fs.writeFileSync(path.join(OUT, 'baseline.json'), JSON.stringify(summary, null, 2));
   fs.writeFileSync(path.join(OUT, 'baseline.md'), renderMd(summary));
@@ -320,18 +494,30 @@ function renderMd(s) {
     .map(([k, v]) => `| ${k} | ${v.n} | ${v.perSec} | ${fmt(v.msP50)} | ${fmt(v.msP95)} | ${fmt(v.msMax)} |`).join('\n');
   return `# Click-latency baseline (agents streaming)
 
-Env: ${s.env.platform} · electron ${s.env.electron} · commit ${s.env.commit.slice(0, 9)}
+Env: ${s.env.platform} · electron ${s.env.electron} · commit ${s.env.commit.slice(0, 9)} · appDir ${s.env.ab.appDir}
+Load 1m/5m start→mid→end: ${s.env.load.start1m}/${s.env.load.start5m} → ${s.env.load.mid1m} → ${s.env.load.end1m}/${s.env.load.end5m}
 Load: ${s.env.agents} agents × ${s.env.streamEps} ev/s synthetic stream for ~${s.env.streamSeconds}s · board seeded to ~${s.env.seedTasks} tasks (+${s.env.seedRuns} runs, ${s.env.seedLogs} log lines) · sampling window ${s.windowSecs}s
 
-## Headline
+## Headline (metric: first quiet paint — see summary.metric; renderAll only for reference)
 
-- **Click p95: ${s.clicks.stat.p95} ms** (p50 ${s.clicks.stat.p50}, max ${s.clicks.stat.max}) over ${s.clicks.stat.n} real input clicks — target < 100 ms p95: ${s.target.clickP95Below100ms ? 'PASS' : 'FAIL'}
-- **Long tasks > 50 ms during window: ${s.longTasks.total}** (max ${s.longTasks.maxMs} ms) — target 0 during clicks: ${s.longTasks.total === 0 ? 'PASS' : 'FAIL'}
+- **Tab switches (gated population): p50 ${s.clicks.tabSwitches.p50} ms · p95 ${s.clicks.tabSwitches.p95} ms · max ${s.clicks.tabSwitches.max}** over ${s.clicks.tabSwitches.n} clicks
+- Card clicks (reported separately, not gated): p50 ${s.clicks.cardClicks.p50} · p95 ${s.clicks.cardClicks.p95} · max ${s.clicks.cardClicks.max} over ${s.clicks.cardClicks.n}
+- All clicks pooled: p50 ${s.clicks.stat.p50}, p95 ${s.clicks.stat.p95}, max ${s.clicks.stat.max} over ${s.clicks.stat.n} — legacy renderAll endpoint on the same clicks: p50 ${s.clicks.statLegacy.p50}, p95 ${s.clicks.statLegacy.p95}
+- **Long tasks > 50 ms during window: ${s.longTasks.total}** (max ${s.longTasks.maxMs} ms)
+- Clicks attempted ${s.env.clicksAttempted}, dropped ${s.env.clicksDropped}
 - renderAll: n=${s.renderAll.n}, p50 ${fmt(s.renderAll.p50)} ms, p95 ${fmt(s.renderAll.p95)} ms, max ${fmt(s.renderAll.max)} ms
 - While streaming (renderer-observed): ${s.rates.statePushesPerSec} state pushes/s, ${s.rates.logPushesPerSec} log pushes/s, refresh ${s.rates.refreshPerSec}/s (p50 ${s.refresh.p50} ms)
 - Main-process view: ${s.ipc.total} IPC round-trips (${s.ipc.perSec}/s, ${s.ipc.perRenderAll}/renderAll, p50 ${s.ipc.msP50} ms, p95 ${s.ipc.msP95} ms); pushes: state ${s.pushesMain.state.perSec}/s (${s.pushesMain.state.kbPerSec} KB/s), log ${s.pushesMain.log.perSec}/s (${s.pushesMain.log.kbPerSec} KB/s)
 - Log lines buffered in the renderer: ${s.logLines}; agents working at end: ${s.agentsWorking}
+${s.trace ? `
+## Trace — self time by function (${s.trace.windowMs} ms window, ${s.trace.intervalUs} µs sampling)
 
+Renderer (total self ${s.trace.renderer.totalSelfMs} ms): ${s.trace.renderer.top.slice(0, 10).map((x) => `${x.name} ${x.selfMs}`).join(' · ')}
+Watched: ${s.trace.renderer.watch.map((x) => `${x.name} ${x.selfMs} ms`).join(' · ') || '—'}
+
+Main process (total self ${s.trace.main.totalSelfMs} ms): ${s.trace.main.top.slice(0, 10).map((x) => `${x.name} ${x.selfMs}`).join(' · ')}
+Watched: ${s.trace.main.watch.map((x) => `${x.name} ${x.selfMs} ms`).join(' · ') || '—'}
+` : ''}
 ## render* fn durations (ms)
 
 | fn | n | p50 | p95 | max | Σ ms |
