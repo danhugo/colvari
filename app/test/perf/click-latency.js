@@ -237,6 +237,10 @@ const SUMMARY = `
   const cardMs = fin(P.clicks.filter((c) => c.label.startsWith('card')).map((c) => c.ms));
   const tabMsLegacy = fin(P.clicks.filter((c) => c.label.startsWith('tab:')).map((c) => c.msLegacy));
   const unsettled = P.clicks.filter((c) => !Number.isFinite(c.ms)).length;
+  // Per-label settle visibility (t_f468b3a9): a p95 over 4 settled of 24 attempts is an
+  // anecdote — every label reports settled vs quiet-unsettled next to its stat.
+  const unByLabel = {}; for (const c of P.clicks) if (!Number.isFinite(c.ms)) (unByLabel[c.label] = (unByLabel[c.label] || 0) + 1);
+  const settledByLabel = {}; for (const c of P.clicks) if (Number.isFinite(c.ms)) (settledByLabel[c.label] = (settledByLabel[c.label] || 0) + 1);
   return {
     windowSecs: +secs.toFixed(1),
     metric: 'quiet-paint v2 (t_fd3a15c4): first frame after the click dispatch whose interval starts no render/refresh work and by which all work started since the click has ended; legacy renderAll endpoint kept as statLegacy',
@@ -246,6 +250,7 @@ const SUMMARY = `
     clicks: {
       stat: stat(fin(P.clicks.map((c) => c.ms))),
       unsettledQuiet: unsettled,
+      settledQuietByLabel: settledByLabel, unsettledQuietByLabel: unByLabel,
       tabSwitches: stat(tabMs), cardClicks: stat(cardMs),
       statLegacy: stat(fin(P.clicks.map((c) => c.msLegacy))),
       tabSwitchesLegacy: stat(tabMsLegacy),
@@ -307,16 +312,21 @@ function bulkSeed(dir, nodes) {
 }
 
 // One real input click at [x,y] (webContents coordinates), timed input-dispatch -> paint.
+// Returns {ok, rec?|detail?}: dropped samples carry a reason (t_f468b3a9) — last peek waiting
+// state, whether input ever dispatched, polls spent, wall ms — so a deterministic drop subset
+// (was 16/82 in every run with zero diagnostics) is explainable from the summary alone.
 async function clickAt(label, xy) {
-  if (!xy) return null;
+  if (!xy) return { ok: false, detail: { label, waiting: 'no-target' } };
   await ex(`return window.__perf.arm(${jsq(label)})`);
   for (const type of ['mouseDown', 'mouseUp']) wc.sendInputEvent({ type, x: xy[0], y: xy[1], button: 'left', clickCount: 1 });
+  const t0 = Date.now(); let waiting = 'unpolled';
   for (let t = 0; t < 100; t++) {
     const s = await ex(`return window.__perf.peek()`);
-    if (s && s.done) return s.stale ? null : s.rec;
+    if (s && s.done) return s.stale ? { ok: false, detail: { label, waiting: 'stale' } } : { ok: true, rec: s.rec };
+    if (s && s.waiting) waiting = s.waiting;
     await WAIT(25);
   }
-  return null; // unresolved sample (paint never observed) — counted as dropped
+  return { ok: false, detail: { label, waiting, sawInput: waiting !== 'input', polls: 100, ms: Date.now() - t0 } }; // paint never observed — counted as dropped
 }
 
 async function clickOnce(label, sel) {
@@ -424,13 +434,17 @@ async function main() {
   // inside an A/B comparison.
   const stopTrace = TRACE_MS > 0 ? await startTrace(TRACE_MS) : null;  // Click campaign: every tab, CLICK_REPS rounds, real input events, interleaved so each tab
   // sees a different streaming phase. Then board card-selection clicks (a heavy non-tab button).
-  let attempted = 0, dropped = 0;
+  let attempted = 0, dropped = 0; const droppedDetails = [];
+  const land = (label, r) => { attempted++; if (!r || !r.ok) { dropped++; droppedDetails.push((r && r.detail) || { label, waiting: 'unknown' }); } };
   for (let rep = 0; rep < CLICK_REPS; rep++) {
-    for (const tab of TABS) { attempted++; if (!(await clickOnce(`tab:${tab}`, `#tabs button[data-tab="${tab}"]`))) dropped++; }
+    // No #tabs scope: settings lives in the topbar and inbox in the sidebar — the old scoped
+    // selector never matched them, so 2 tabs × CLICK_REPS clicks were deterministic no-target
+    // drops (the constant 16/82, t_5ab07112). data-tab is document-unique.
+    for (const tab of TABS) land(`tab:${tab}`, await clickOnce(`tab:${tab}`, `button[data-tab="${tab}"]`));
   }
   await ex(`showTab('board'); await w(400);`);
   const cards = await ex(`return [...document.querySelectorAll('.card')].slice(0, ${CARD_CLICKS}).map((c) => { const r = c.getBoundingClientRect(); return [Math.round(r.x + r.width / 2), Math.round(r.y + Math.min(14, r.height / 2))]; })`);
-  for (const [i, xy] of (cards || []).entries()) { attempted++; if (!(await clickAt(`card#${i + 1}`, xy))) dropped++; }
+  for (const [i, xy] of (cards || []).entries()) land(`card#${i + 1}`, await clickAt(`card#${i + 1}`, xy));
   const clickWall = Date.now() - sampleStart;
   await WAIT(Math.max(500, SAMPLE_MS - clickWall)); // keep sampling pushes after the clicks
   const summary = await ex(SUMMARY);
@@ -468,6 +482,10 @@ async function main() {
     agents: AGENTS, tasks: TASKS, streamSeconds: STREAM_SECONDS, streamEps: STREAM_EPS,
     clickReps: CLICK_REPS, warmMs: WARM_MS, sampleMs: SAMPLE_MS, clickWallMs: clickWall,
     clicksAttempted: attempted, clicksDropped: dropped,
+    // Drop forensics (t_f468b3a9): why each dropped click never resolved. The once-deterministic
+    // 16/82 subset should be attributable from these fields alone.
+    clicksDroppedByReason: droppedDetails.reduce((m, d) => { const k = `${d.waiting}`; m[k] = (m[k] || 0) + 1; return m; }, {}),
+    clicksDroppedDetails: droppedDetails.slice(-60),
     seedTasks: SEED_TASKS + TASKS * 6, seedLogs: SEED_LOGS, seedRuns: SEED_RUNS, cardClicks: (cards || []).length,
     commit: (() => { try { return require('child_process').execFileSync('git', ['rev-parse', 'HEAD'], { cwd: APP, encoding: 'utf8' }).trim(); } catch { return 'unknown'; } })(),
     cli: CLI,
