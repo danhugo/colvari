@@ -1079,8 +1079,9 @@ async function guiE2E() {
   // Gamma. Seeded tasks/messages prove each view shows only the selected team's items, "All teams"
   // lifts the scope with no badges, cross-team items (counterparty in another team) show that team's
   // name as a badge, a sidebar switch resets the filter to the new team, the Team graph still renders
-  // every team, and an empty team shows team-scoped empty states. The #boardteam/#chatteam selects are
-  // feature-detected (Dev A t_1158f757) — logged as pending until then, like teamfilter above.
+  // the selected team's roster, and an empty team shows team-scoped empty states. Select contract
+  // (Critic, final): #boardteam / #chatteam exactly — a missing select FAILS the run, never passes
+  // vacuously; badges are data-testid="team-badge" elements naming the other team.
   const teamScopeShots = async () => {
     await waitFor(`return !!document.querySelector('#tpl-select option')`); await ex(`await refresh();`); const cur = await ex(`return { p: ctx.p, t: S.teamId }`);
     const gp = cur.p || pid();
@@ -1101,41 +1102,48 @@ async function guiE2E() {
     ps.sendMessage({ from: pmB.id, to: devB.id, text: 'Beta standup notes for Bea' });
     ps.sendMessage({ from: pmA.id, to: devB.id, text: 'Please prioritise the spec review' }); // cross-team: badge on both sides
     await ex(`await refresh(); await w(300);`);
-    const has = (sels) => ex(`return ${JSON.stringify(sels)}.find((s) => document.querySelector(s)) || null`);
-    const bsel = await has(['#boardteam', '#board-team', '[data-board=team]']);
-    const csel = await has(['#chatteam', '#chat-team', '[data-chat=team]']);
-    if (!bsel || !csel) { console.log('[gui-e2e] teamscope: chat/board team filter UI pending (Dev A t_1158f757)'); await shot('teamscope-pending'); return; }
+    // Critic contract, final (t_38c2a918): the selects ARE #boardteam / #chatteam (same shape as
+    // #logteam — "All teams" first with value '', other options value = team id). A missing select
+    // must FAIL the run; there is no pending pass-through.
+    const bsel = '#boardteam'; const csel = '#chatteam';
+    await ex(`$('#tabs button[data-tab=chat]').click(); await w(300); $('#tabs button[data-tab=board]').click(); await w(400);`);
+    const present = await ex(`return { b: !!$('${bsel}'), c: !!$('${csel}') }`);
+    expect('teamscope: #boardteam and #chatteam selects exist (Critic contract)', present.b && present.c, present);
+    if (!(present.b && present.c)) return;
+    const opt0 = await ex(`const f = (id) => { const o = ($(id).options || [])[0] || {}; return { t: o.textContent, v: o.value }; }; return { b: f('${bsel}'), c: f('${csel}') }`);
+    expect('teamscope: both selects list All teams first with an empty value', /all/i.test(opt0.b.t || '') && opt0.b.v === '' && /all/i.test(opt0.c.t || '') && opt0.c.v === '', opt0);
     // Read through the DOM only — the suite must pass via the real sidebar/select event path, never a forced re-render.
-    const leafs = `const leaf = (r) => [...r.querySelectorAll('*')].filter((e) => !e.children.length).map((e) => e.textContent.trim());`;
-    const boardState = () => ex(`${leafs} const s = $('${bsel}');
+    const badgeSel = '[data-testid="team-badge"]';
+    const boardState = () => ex(`const s = $('${bsel}');
       return { opt: ([...s.options].find((o) => o.selected) || {}).textContent, tab: $('#tab-board').textContent,
         titles: [...document.querySelectorAll('#columns .card > b')].map((b) => b.textContent),
-        cards: [...document.querySelectorAll('#columns .card')].map((c) => ({ t: (c.querySelector('b') || {}).textContent, leaf: leaf(c) })) }`);
-    const chatState = () => ex(`${leafs} const s = $('${csel}');
+        cards: [...document.querySelectorAll('#columns .card')].map((c) => ({ t: (c.querySelector('b') || {}).textContent, badge: (c.querySelector('${badgeSel}') || {}).textContent || null })),
+        badges: document.querySelectorAll('#columns ${badgeSel}').length }`);
+    const chatState = () => ex(`const s = $('${csel}');
       return { opt: ([...s.options].find((o) => o.selected) || {}).textContent, tab: $('#tab-chat').textContent,
         text: $('#chat-room').textContent,
-        bubbles: [...document.querySelectorAll('#chat-room .bubble')].map((b) => ({ text: b.textContent.slice(0, 120), leaf: leaf(b) })) }`);
+        bubbles: [...document.querySelectorAll('#chat-room .bubble')].map((b) => ({ text: b.textContent.slice(0, 120), badge: (b.querySelector('${badgeSel}') || {}).textContent || null })),
+        badges: document.querySelectorAll('#chat-room ${badgeSel}').length }`);
     const pickTeam = (sel, name) => ex(`const s = $('${sel}'); const o = [...s.options].find((x) => new RegExp('${name}', 'i').test(x.textContent)); if (o) { s.value = o.value; s.dispatchEvent(new Event('change')); } await w(300); return o ? o.textContent.trim() : null`);
     const sideTeam = (tid) => ex(`document.querySelector('#teamlist [data-tid="${tid}"]').click(); await w(700); await refresh(); await w(300);`);
     // Board: default = sidebar team (Alpha), only Alpha-assignee tasks, badge on the cross-team card.
-    await ex(`$('#tabs button[data-tab=board]').click(); await w(400);`);
     let B = await boardState();
     expect('teamscope: board filter defaults to the sidebar team (Alpha)', /alpha/i.test(B.opt || ''), B.opt);
     expect('teamscope: Alpha board shows only Alpha-assignee tasks', B.titles.includes('Scope Alpha deliverable') && B.titles.includes('Scope cross handoff AB') && !B.titles.includes('Scope Beta deliverable') && !B.titles.includes('Scope cross handoff BA'), B.titles);
     const xCard = B.cards.find((c) => c.t === 'Scope cross handoff AB'); const aCard = B.cards.find((c) => c.t === 'Scope Alpha deliverable');
-    expect('teamscope: cross-team card (created by Beta) shows a Beta badge', !!xCard && xCard.leaf.includes('Beta'), xCard && xCard.leaf);
-    expect('teamscope: in-team card shows no team badge', !!aCard && !aCard.leaf.includes('Beta') && !aCard.leaf.includes('Alpha'), aCard && aCard.leaf);
+    expect('teamscope: cross-team card (created by Beta) shows a Beta badge', !!xCard && xCard.badge === 'Beta', xCard && xCard.badge);
+    expect('teamscope: in-team card shows no team badge', !!aCard && aCard.badge == null, aCard && aCard.badge);
     await shot('teamscope-board-alpha');
     await pickTeam(bsel, 'beta');
     B = await boardState();
     expect('teamscope: board filter Beta shows only Beta-assignee tasks', B.titles.includes('Scope Beta deliverable') && B.titles.includes('Scope cross handoff BA') && !B.titles.includes('Scope Alpha deliverable') && !B.titles.includes('Scope cross handoff AB'), B.titles);
     const yCard = B.cards.find((c) => c.t === 'Scope cross handoff BA');
-    expect('teamscope: Beta-side cross-team card shows an Alpha badge', !!yCard && yCard.leaf.includes('Alpha'), yCard && yCard.leaf);
+    expect('teamscope: Beta-side cross-team card shows an Alpha badge', !!yCard && yCard.badge === 'Alpha', yCard && yCard.badge);
     await shot('teamscope-board-beta');
     await pickTeam(bsel, 'all');
     B = await boardState();
     expect('teamscope: board All teams shows every task', ['Scope Alpha deliverable', 'Scope Beta deliverable', 'Scope cross handoff AB', 'Scope cross handoff BA'].every((t) => B.titles.includes(t)), B.titles);
-    expect('teamscope: All teams board shows no team badges', B.cards.every((c) => !c.leaf.includes('Alpha') && !c.leaf.includes('Beta')), B.cards.map((c) => c.leaf));
+    expect('teamscope: All teams board shows no team badges', B.badges === 0, B.badges);
     await shot('teamscope-board-all');
     // Sidebar switch: the filter follows the team (Beta), board re-scopes without touching the select.
     await sideTeam(betaId);
@@ -1148,25 +1156,25 @@ async function guiE2E() {
     expect('teamscope: chat filter defaults to the sidebar team (Beta)', /beta/i.test(C.opt || ''), C.opt);
     expect('teamscope: Beta chat shows only Beta conversations', C.text.includes('Beta standup notes') && C.text.includes('Please prioritise the spec review') && !C.text.includes('Alpha standup notes'), C.text.slice(0, 400));
     const xB = C.bubbles.find((b) => b.text.includes('spec review'));
-    expect('teamscope: cross-team message in Beta shows an Alpha badge', !!xB && xB.leaf.includes('Alpha'), xB && xB.leaf);
+    expect('teamscope: cross-team message in Beta shows an Alpha badge', !!xB && xB.badge === 'Alpha', xB && xB.badge);
     await shot('teamscope-chat-beta');
     await sideTeam(alphaId);
     await ex(`$('#tabs button[data-tab=chat]').click(); await w(400);`);
     C = await chatState();
     expect('teamscope: Alpha chat shows only Alpha conversations', C.text.includes('Alpha standup notes') && C.text.includes('Please prioritise the spec review') && !C.text.includes('Beta standup notes'), C.text.slice(0, 400));
     const xA = C.bubbles.find((b) => b.text.includes('spec review'));
-    expect('teamscope: cross-team message in Alpha shows a Beta badge', !!xA && xA.leaf.includes('Beta'), xA && xA.leaf);
+    expect('teamscope: cross-team message in Alpha shows a Beta badge', !!xA && xA.badge === 'Beta', xA && xA.badge);
     await shot('teamscope-chat-alpha');
     await pickTeam(csel, 'all');
     C = await chatState();
     expect('teamscope: chat All teams shows every conversation', C.text.includes('Alpha standup notes') && C.text.includes('Beta standup notes') && C.text.includes('Please prioritise the spec review'), null);
-    expect('teamscope: All teams chat shows no team badges', C.bubbles.every((b) => !b.leaf.includes('Alpha') && !b.leaf.includes('Beta')), C.bubbles.map((b) => b.leaf));
+    expect('teamscope: All teams chat shows no team badges', C.badges === 0, C.badges);
     await shot('teamscope-chat-all');
-    // Team graph unchanged: still the selected team's own graph (Alpha: Ann + Ari), no scoping side effects.
+    // Team graph unchanged: it still renders exactly the selected team's roster, whatever the filters say.
     await ex(`$('#tabs button[data-tab=team]').click(); await w(700);`);
-    const g = await ex(`return { n: document.querySelectorAll('#graph .node').length, names: [...document.querySelectorAll('#graph .node')].map((x) => x.textContent) }`);
-    expect('teamscope: team graph still renders the selected team (2 Alpha nodes)', g.n === 2, g);
-    expect('teamscope: team graph shows Alpha\'s agents', ['Ann', 'Ari'].every((nm) => g.names.join(' ').includes(nm)), g.names);
+    const roster = alpha.getTeam().nodes.map((n) => n.name);
+    const g = await ex(`return [...document.querySelectorAll('#graph .node')].map((x) => x.textContent)`);
+    expect('teamscope: team graph unchanged (renders the selected team\'s roster)', g.length === roster.length && roster.every((nm) => g.join(' ').includes(nm)), { g, roster });
     await shot('teamscope-graph');
     // Empty team last: no cards, team-scoped empty state in both views.
     await sideTeam(gammaId);
