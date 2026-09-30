@@ -101,6 +101,37 @@ test('with a worktree the done flip still runs the auto-merge instead of refusin
   assert.ok(fs.existsSync(path.join(repo, 'w.txt')), 'branch work landed on the base branch');
 });
 
+test('done re-links a lost worktree link and runs the merge gate when squad/<id> is unmerged (t_f1939f6d)', async () => {
+  const { repo, g, s, pm, dev } = setup();
+  const tk = makeTools(s, pm.id).create_task({ title: 'lost link', assignee: dev.id });
+  const w = ensureWorktree(repo, tk.id);
+  fs.writeFileSync(path.join(w.worktreePath, 'l.txt'), 'lost\n');
+  g(w.worktreePath, 'add', '.'); g(w.worktreePath, 'commit', '-q', '-m', 'lost work');
+  // The incident state: work exists on squad/<id>, but the record lost both link fields
+  // (useWorktrees off + a manually created worktree), so done would silently skip the gate.
+  s._updateTask(tk.id, { status: 'in_progress', worktreePath: null, worktreeBranch: null });
+  const from = (s.getTask(tk.id).comments || []).length;
+  makeTools(s, dev.id).update_task_status({ taskId: tk.id, status: 'done' });
+  assert.ok(fs.existsSync(path.join(repo, 'l.txt')), 'gate ran on done: branch work must land on the base');
+  const final = await settle(s, tk.id, from);
+  assert.strictEqual(final.status, 'done');
+  assert.strictEqual(final.worktreePath, w.worktreePath, 'link restored before the gate ran');
+  assert.strictEqual(final.worktreeBranch, `squad/${tk.id}`);
+  assert.ok(final.comments.some((c) => /auto-merged/.test(c.text)));
+});
+
+test('done with a null link and no squad branch just completes — no worktree is created', () => {
+  const { repo, s, pm, dev } = setup();
+  const tk = makeTools(s, pm.id).create_task({ title: 'plain', assignee: dev.id });
+  s._updateTask(tk.id, { status: 'in_progress', worktreePath: null, worktreeBranch: null });
+  makeTools(s, dev.id).update_task_status({ taskId: tk.id, status: 'done' });
+  const after = s.getTask(tk.id);
+  assert.strictEqual(after.status, 'done');
+  assert.strictEqual(after.worktreePath, null);
+  assert.strictEqual(after.worktreeBranch, null);
+  assert.strictEqual(fs.existsSync(path.join(repo, '.squad', 'worktrees', tk.id)), false, 'no worktree side effect');
+});
+
 // ---- create_task: overload warning ----
 
 test('create_task warns when the assignee reaches 2 open tasks while a same-role teammate is idle', () => {

@@ -5,6 +5,10 @@ const fs = require('fs');
 
 function git(cwd, args) { return execFileSync('git', args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] }).toString().trim(); }
 
+// True when a local branch exists in repoDir — the same check ensureWorktree uses, but side-effect
+// free (ensureWorktree would CREATE a missing branch).
+function branchExists(repoDir, branch) { try { git(repoDir, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`]); return true; } catch { return false; } }
+
 // Returns { cwd, worktreePath, worktreeBranch } or { cwd, warning } on fallback to the shared repo.
 function ensureWorktree(repoDir, taskId) {
   let root;
@@ -14,7 +18,7 @@ function ensureWorktree(repoDir, taskId) {
   try {
     if (fs.existsSync(path.join(dir, '.git'))) return { cwd: dir, worktreePath: dir, worktreeBranch: branch };
     fs.mkdirSync(path.dirname(dir), { recursive: true });
-    let exists = true; try { git(root, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`]); } catch { exists = false; }
+    const exists = branchExists(root, branch);
     git(root, exists ? ['worktree', 'add', dir, branch] : ['worktree', 'add', '-b', branch, dir]);
     return { cwd: dir, worktreePath: dir, worktreeBranch: branch };
   } catch (e) { return { cwd: repoDir, warning: `worktree creation failed (${String(e.stderr || e.message).trim()}), using shared dir` }; }
@@ -98,4 +102,4 @@ function headSha(dir) { try { return git(dir, ['rev-parse', 'HEAD']); } catch { 
 // Commits on `to` that `from` lacks, or null when the range does not resolve.
 function commitsBehind(root, from, to) { try { return Number(git(root, ['rev-list', '--count', `${from}..${to}`])); } catch { return null; } }
 
-module.exports = { ensureWorktree, worktreeDiff, worktreeMerge, worktreeDiscard, unmergedSquadBranches, branchMergeState, dirtyMergeMessage, dirtyMainFiles, headSha, commitsBehind };
+module.exports = { ensureWorktree, branchExists, worktreeDiff, worktreeMerge, worktreeDiscard, unmergedSquadBranches, branchMergeState, dirtyMergeMessage, dirtyMainFiles, headSha, commitsBehind };
