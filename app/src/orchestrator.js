@@ -1523,9 +1523,10 @@ class Orchestrator extends EventEmitter {
       // detached (t_3f830e64): the run leads its own process group, so kill paths below reach
       // backgrounded CLI children too (child.kill is wrapped to signal -pgid). One pidfile per run
       // at spawn; removed once the group is gone — a crashed app's leftovers die at the next boot.
-      const child = args ? spawn(rt.bin(settings), args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'], detached: true })
+      const child = args ? spawn(rt.bin(settings), args, { cwd, env, stdio: [args.stdin != null ? 'pipe' : 'ignore', 'pipe', 'pipe'], detached: true })
         : Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter(), kill() {} });
       if (!args) setImmediate(() => child.emit('close', 1));
+      if (args && args.stdin != null && child.stdin) { child.stdin.on('error', () => {}); child.stdin.end(args.stdin); }
       // Die-with-the-app watchdog (t_2ca99830): SIGKILL on the app never reaches this detached
       // group, so a child process per run watches the app pid and TERMs/KILLs the group seconds
       // after the app vanishes (2026-10-01 01:47: four runs worked on as orphans for minutes).
