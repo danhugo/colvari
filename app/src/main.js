@@ -1,5 +1,8 @@
 const { app, BrowserWindow, ipcMain, Notification, nativeTheme } = require('electron');
 const path = require('path');
+// Test instances (gui-e2e / smoke) must never leave fake-CLI children behind: install procguard
+// before the orchestrator loads so every spawn it makes is tracked and reaped (t_92c31037).
+const procguard = (process.env.AGENTS_SQUAD_GUI_E2E || process.env.AGENTS_SQUAD_SMOKE) ? require('../test/harness/procguard').install() : null;
 const { Orchestrator } = require('./orchestrator');
 const { ProjectManager, TEMPLATES, isolateTestRoot } = require('./projects');
 const { pickChanged } = require('./store');
@@ -32,7 +35,7 @@ if (TEST_MODE) {
   const testRoot = isolateTestRoot();
   console.log(`[agents-squad] test instance pid=${process.pid} data root=${testRoot}`);
   const timeoutMs = Number(process.env.AGENTS_SQUAD_TEST_TIMEOUT_MS) || 30 * 60 * 1000;
-  setTimeout(() => { console.error(`[agents-squad] test instance exceeded ${timeoutMs} ms — force exit (pid ${process.pid}, data root ${testRoot})`); app.exit(1); }, timeoutMs);
+  setTimeout(() => { console.error(`[agents-squad] test instance exceeded ${timeoutMs} ms — force exit (pid ${process.pid}, data root ${testRoot})`); procguard.reapAll(); app.exit(1); }, timeoutMs);
 }
 
 const pm = new ProjectManager();
@@ -183,6 +186,7 @@ function createWindow() {
       document.querySelector('#nt-title').value = 'Smoke goal'; document.querySelector('#nt-add').click(); await w(400);
       return { nodes: document.querySelectorAll('#graph .node').length, cards: document.querySelectorAll('.card').length, agentsRows: document.querySelectorAll('#agenttable tr').length }; })()`;
     try { console.log('[smoke]', JSON.stringify(await win.webContents.executeJavaScript(js))); } catch (e) { console.error('[smoke] failed', e); }
+    if (procguard) procguard.reapAll();
     app.exit(0);
   });
   // A killed renderer (e.g. a stray pkill hitting helper processes) must not leave a dead window:
@@ -1946,6 +1950,7 @@ async function guiE2E() {
     console.log('[gui-e2e]', JSON.stringify({ edges: store.getTeam().edges.length, tasks: tasks.map((t) => [t.title, t.status, t.iterations || 0, !!t.sessions]), cost: orch.snapshot().totalCost }));
   } catch (e) { if (e !== null) { console.error('[gui-e2e] failed', e); failures.push('exception: ' + e.message); } }
   console.log(failures.length ? `[gui-e2e] FAIL (${failures.length}): ${failures.join('; ')}` : '[gui-e2e] PASS');
+  if (procguard) procguard.reapAll();
   app.exit(failures.length ? 1 : 0);
 }
 function send(ch, data) { if (win && !win.isDestroyed()) win.webContents.send(ch, data); }

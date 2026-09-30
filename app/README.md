@@ -28,6 +28,11 @@ from a script (Electron driver, demo, ad-hoc check), set `AGENTS_SQUAD_GUI_E2E=1
 in its environment so `src/main.js` isolates the data root — a driver that requires `src/main.js` with
 the ambient env otherwise creates projects in the user's real list (that is how a "Red demo" once leaked in).
 
+**Child-process hygiene.** Every test process tracks the children it spawns (fake CLIs, e2e helpers)
+and reaps them at suite end, on process exit and — via a persisted pidfile — after a crashed run, by
+the next run's sweep. A tracked child that survives the suite fails the file (leak check, t_92c31037);
+see `docs/testing.md`.
+
 ## Projects and teams
 
 The left sidebar manages **projects**. Each project has its own board, wiki, settings and one or more **teams**, and each team is its own graph. You can create, rename, switch and delete projects and teams there. **+ Project** and **+ Team** use the selected template: Blank, Startup (PM -> Dev -> Reviewer), Solo or Research. Teams can also be duplicated and exported or imported as JSON (`format: "agents-squad-team"`).
