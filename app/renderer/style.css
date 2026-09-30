@@ -153,8 +153,7 @@ header { flex-wrap:nowrap; min-width:0; } header > strong, header .pill, header 
    stay readable at every width. Below 1200px the brand text hides and the tab labels collapse to
    their icons instead (media rule below) rather than the pills squashing. */
 header #updst, header #runstate, header #watchst { min-width:0; overflow:hidden; text-overflow:ellipsis; flex-shrink:1; }
-/* Restart chip: label is the elastic part, the Restart now / Cancel buttons never shrink (t_ea33cef4). */
-header #restartst { display:flex; align-items:center; min-width:0; flex-shrink:1; } header #restartst.hidden { display:none; } header #restartst .rstlbl { min-width:0; overflow:hidden; text-overflow:ellipsis; } header #restartst .rstact, header #restartst .rsterr { flex-shrink:0; }
+
 /* The spacer carries ALL the slack (the goal input used to absorb it): the status cluster hugs the
    right edge at every width. */
 header .spacer { flex:1 1 12px; }
@@ -362,9 +361,16 @@ header .pill { border:none; background:none; color:var(--fg-muted); font-size:va
 /* At working window widths the tab icons are pure padding — labels carry the tabs, and every
    freed pixel goes to the meter chips. Below 1200px there is no longer room for the fixed chip,
    the cost pill AND 450px of tab labels (the pills may no longer squash), so the labels collapse
-   back to their icons and the brand text hides — nothing is lost (icons + tooltips remain). */
+   back to their icons — nothing is lost (icons + tooltips remain); only under 1000px does the
+   brand text hide too. The re-show rule MUST repeat the `header #tabs` prefix of the hide rule:
+   at lower specificity the max-1500 hide wins the cascade and the tabs render as empty buttons
+   (the blank 1100px header the Critic caught, t_8d8ec5f8). */
 @media (max-width:1500px) { header #tabs .navicon { display:none; } }
-@media (max-width:1200px) { header .navicon { display:inline-block; } header #tabs button .lbl { display:none; } }
+@media (max-width:1200px) { header #tabs .navicon { display:inline-block; } header #tabs button .lbl { display:none; } header #tabs button { padding:3px 5px; } header #tabs button.sec { padding:3px 4px; } header #tabs .navsep { margin:3px 2px; } }
+/* Under 1000px even the icon strip no longer fits next to the fixed chip + cost pill (topbar suite
+   overflow at 900px): the secondary tabs (Wiki/Logs/Usage) and the separator give way first; the
+   four primary tabs stay as icons. */
+@media (max-width:1000px) { header #tabs button.sec, header #tabs .navsep { display:none; } }
 .limitmeter.hidden { display:none; }
 /* Chips never shrink: a shrunken chip keeps its nowrap text at full width but paints it over the
    neighbouring chip (the "42%Codex" garble) and ellipsises its small into "U…" — so the meter is
@@ -687,7 +693,7 @@ rect.usb-rep, i.usb-rep { fill:var(--accent); background:var(--accent); } rect.u
 
 /* Colvari brand */
 header > strong.brand { display:flex; align-items:center; gap:6px; font-weight:700; letter-spacing:-.02em; color:var(--fg-primary); }
-@media (max-width:1200px) { header > strong.brand { display:none; } }
+@media (max-width:1000px) { header > strong.brand { display:none; } }
 /* macOS hiddenInset draws the traffic lights over the page's top-left (~x 12-70) — inset the
    header content clear of them so the brand never collides with the window controls
    (Vex audit t_9399168c → t_56896946). Other platforms have no overlay controls there. */
