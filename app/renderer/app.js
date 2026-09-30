@@ -2953,7 +2953,26 @@ document.addEventListener('keydown', (e) => {
   else if (!typing && !mod && e.key === 'n' && document.querySelector('#tab-board.active')) { e.preventDefault(); $('#nt-title').focus(); }
   else if (!typing && !mod && e.key === '/') { e.preventDefault(); openGoalPop(); }
 });
-squad.on('state', (st) => { if (st.projectId && st.projectId !== ctx.p) { clearTimeout(pendingP); pendingP = setTimeout(async () => { P = await call('listProjects'); renderSidebar(); }, 200); return; } clearTimeout(pending); pending = setTimeout(refresh, 100); });
+// IPC deltas (t_39bf39ac, track 2): the main process pushes {type,id,patch} batches — one send per
+// tick, seq-chained — covering tasks/wiki (board-cache change events), the orch snapshot (state
+// events) and messages/inbox/runs (sig-checked per flush). The renderer patches its local store and
+// re-renders the visible views; a seq gap or resync marker falls back to a full getAll pull (wiki
+// rule 5). The 2s tick below stays as the backstop for the sections deltas do not cover.
+let lastDeltaSeq = null, lastDeltaProject = null, deltaRaf = 0;
+squad.on('delta', (b) => {
+  if (!b || !Array.isArray(b.deltas) || (b.projectId && b.projectId !== ctx.p)) return;
+  if (lastDeltaProject !== ctx.p) { lastDeltaProject = ctx.p; lastDeltaSeq = null; } // fresh chain after a project switch
+  if (DeltaClient.plan(lastDeltaSeq, b).op === 'resync') { lastDeltaSeq = null; lastV = null; refresh(); return; }
+  lastDeltaSeq = b.seq;
+  for (const d of b.deltas) {
+    if (d.type === 'runs') { RUNS = d.set; continue; } // module binding, not an S section
+    if (d.type === 'resync') { lastDeltaSeq = null; lastV = null; refresh(); return; }
+    DeltaClient.patch(S, d);
+  }
+  if (b.v && lastV) Object.assign(lastV, b.v); // keep the version poll quiet about what we already applied
+  if (!deltaRaf) deltaRaf = requestAnimationFrame(() => { deltaRaf = 0; renderAll(); });
+});
+squad.on('state', (st) => { if (st.projectId && st.projectId !== ctx.p) { clearTimeout(pendingP); pendingP = setTimeout(async () => { P = await call('listProjects'); renderSidebar(); }, 200); return; } clearTimeout(pending); }); // same-project state arrives as deltas now; cancel a pending pull instead of scheduling one
 setInterval(() => { if (S.orch.running) refresh(); }, 2000); // pick up board changes made by agents
 refresh();
 $('#help').onclick = () => $('#helpdlg').showModal();
