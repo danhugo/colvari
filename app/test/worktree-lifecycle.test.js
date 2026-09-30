@@ -270,10 +270,24 @@ test('same for the app/ layout: wt/app/node_modules link does not block removal'
   assert.ok(fs.lstatSync(path.join(w.worktreePath, 'app', 'node_modules')).isSymbolicLink());
   assert.strictEqual(g(w.worktreePath, 'status', '--porcelain'), '?? app/node_modules', 'exactly the evidence comment');
   assert.strictEqual(WT.worktreeDirty(w.worktreePath), false);
-  const r = WT.sweepWorktrees({ repoDir: repo, store: { listTasks: () => [], getTask: () => null } }); // no board entry: orphan path
+  const r = WT.sweepWorktrees({ repoDir: repo, store: { listTasks: () => [], getTask: () => ({ id: 't_lc16', status: 'done' }) } }); // store knows the task as done: removable
   assert.deepStrictEqual(r.removed, ['t_lc16'], JSON.stringify(r));
   assert.strictEqual(fs.existsSync(w.worktreePath), false);
   g(repo, 'rev-parse', '--verify', 'squad/t_lc16'); // branch kept
+});
+
+test('a store that cannot see a worktree id retains it when work is at stake (t_e23df71f)', () => {
+  const repo = oldBranchRepo(true);
+  const w = WT.ensureWorktree(repo, 't_lc18');
+  // Perf/e2e harness store: knows no tasks at all — the old orphan path deleted every real
+  // worktree on such boots (Quinn's t_4382031b scratchpad, 2026-09-30). Uncommitted scratch in
+  // an unknown-id dir must survive; only clean+merged dirs are safe to recycle.
+  fs.writeFileSync(path.join(w.worktreePath, 'scratch.txt'), 'gate outputs\n');
+  const r = WT.sweepWorktrees({ repoDir: repo, store: { listTasks: () => [], getTask: () => null } });
+  assert.deepStrictEqual(r.removed, [], JSON.stringify(r));
+  assert.ok(r.retained.some((e) => e.dir === 't_lc18' && /unknown to this store/.test(e.reason)), JSON.stringify(r.retained));
+  assert.strictEqual(fs.existsSync(w.worktreePath), true);
+  assert.strictEqual(fs.readFileSync(path.join(w.worktreePath, 'scratch.txt'), 'utf8'), 'gate outputs\n');
 });
 
 // ---- t_1ff80eba: stray gate/tmp registrations outside .squad/worktrees ----

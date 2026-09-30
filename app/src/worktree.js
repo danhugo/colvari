@@ -251,7 +251,17 @@ function sweepWorktrees(opts = {}) {
     let owners = (refs.get(path.resolve(dir)) || []).slice();
     if (!owners.length) {
       let t; try { t = store.getTask(name); } catch { report.retained.push({ dir: name, reason: 'task lookup failed' }); continue; }
-      if (t) owners = [t]; // no board entry at all -> orphan, removable below
+      // An id this store cannot resolve is NOT automatically an orphan (t_e23df71f): harness
+      // instances sweep with a throwaway store that sees none of the real tasks, and a sibling
+      // project's store may not know the id either. Removal needs git-level proof that nothing
+      // unique is lost — clean tree AND squad branch fully merged; anything else is retained.
+      if (t) owners = [t];
+      else {
+        let merged = false;
+        try { git(root, ['merge-base', '--is-ancestor', `squad/${name}`, 'HEAD']); merged = true; } catch {}
+        if (merged && !worktreeDirty(dir)) owners = [{ id: name, status: 'done' }]; // synthetic: removable below
+        else { report.retained.push({ dir: name, reason: merged ? `task unknown to this store and worktree dirty — not proof of orphan` : `task unknown to this store and squad/${name} unmerged — not proof of orphan` }); continue; }
+      }
     }
     let reason = null;
     for (const t of owners) {
