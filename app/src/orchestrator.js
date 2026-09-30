@@ -42,6 +42,25 @@ function reapRunPids(storeDir) {
   return out;
 }
 
+// Boot after an unclean death (t_2ca99830): comment on every task whose agent run was reaped as
+// an orphan so the interruption sits on the record next to the work, not only in the log. The
+// status stays in_progress — resuming is a human call (the renderer's lastExit banner points at
+// these tasks). Unknown/deleted task ids are skipped.
+function interruptedFromReap(store, killed) {
+  const out = [];
+  for (const k of killed || []) {
+    const taskId = (/task:(\S+)/.exec(k.cmd || '') || [])[1];
+    const node = (/agent-run (\S+)/.exec(k.cmd || '') || [])[1] || null;
+    if (!taskId) continue;
+    try {
+      if (!store.getTask(taskId)) continue;
+      store.commentTask(taskId, 'system', `⛔ The app died while this task's agent run was live (pid ${k.pid}${node ? `, ${node}` : ''}). The orphaned agents were stopped at the next boot; the task stays in_progress — resume it from the board.`);
+      out.push({ taskId, pid: k.pid, node });
+    } catch {}
+  }
+  return out;
+}
+
 // 'ps -o time=' CPU time, e.g. '12:05.44' (MM:SS.cc) or '1:02:03' (H:MM:SS) -> ms.
 function stimeToMs(s) {
   const seg = String(s || '').trim().split(':');
@@ -1497,6 +1516,17 @@ class Orchestrator extends EventEmitter {
       const child = args ? spawn(rt.bin(settings), args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'], detached: true })
         : Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter(), kill() {} });
       if (!args) setImmediate(() => child.emit('close', 1));
+      // Die-with-the-app watchdog (t_2ca99830): SIGKILL on the app never reaches this detached
+      // group, so a child process per run watches the app pid and TERMs/KILLs the group seconds
+      // after the app vanishes (2026-10-01 01:47: four runs worked on as orphans for minutes).
+      let wd = null;
+      if (child.pid) {
+        try {
+          wd = spawn(process.execPath, [path.join(__dirname, 'run-watchdog.js'), '--app-pid', String(process.pid), '--app-lstart', MG.pidLstart(process.pid), '--group-pid', String(child.pid), '--interval-ms', '2000'],
+            { cwd: this.store.dir, env: { ...env, ELECTRON_RUN_AS_NODE: '1' }, detached: true, stdio: 'ignore' });
+          if (typeof wd.unref === 'function') wd.unref();
+        } catch { wd = null; }
+      }
       let pidFile = null;
       if (child.pid) {
         const realKill = child.kill.bind(child);
@@ -1504,9 +1534,10 @@ class Orchestrator extends EventEmitter {
         try {
           pidFile = path.join(runPidsDir(this.store.dir), String(child.pid));
           fs.mkdirSync(path.dirname(pidFile), { recursive: true });
-          fs.writeFileSync(pidFile, `${child.pid}\t${MG.pidLstart(child.pid)}\tagent-run ${node.name}\n`);
+          fs.writeFileSync(pidFile, `${child.pid}\t${MG.pidLstart(child.pid)}\tagent-run ${node.name}${meta.taskId ? ' task:' + meta.taskId : ''}\n`);
         } catch { pidFile = null; }
         child.on('exit', () => { // leader gone; orphaned CLI children keep the group (and the pipes) alive
+          try { if (wd && wd.exitCode == null && wd.signalCode == null) wd.kill('SIGKILL'); } catch {} // normal end: the watchdog's job is over (skip if it already left — its pid may be recycled)
           try { process.kill(-child.pid, 'SIGTERM'); } catch {}
           try {
             if (MG.groupAlive(child.pid)) { // TERM-resistant orphan: escalate after a grace
@@ -1522,8 +1553,8 @@ class Orchestrator extends EventEmitter {
       this.procs.set(node.id, child);
       const a = this.agent(node.id);
       // Identity + liveness for the stall watchdog: any stdout/stderr byte refreshes a.lastActivityAt,
-      // and `run` is the handle the watchdog claims (.stalled) to own this run's recovery.
-      const run = { sessionId: null, result: '', usage };
+      // and `run` is the handle the stall watchdog claims (.stalled) to own this run's recovery.
+      const run = { sessionId: null, result: '', usage, watchdog: wd };
       // Subagent (Task/Agent tool) records for this run; reset the live agent-side totals it feeds.
       run.subs = new SubagentTracker(node.id);
       a.subagents = []; a.subagentCount = 0; a.subagentTokens = { inputTokens: 0, outputTokens: 0 };
@@ -2161,4 +2192,4 @@ class Orchestrator extends EventEmitter {
     }
   }
 }
-module.exports = { Orchestrator, buildPrompt, humanPrompt, wakePrompt, stallPrompt, attachedFilesLines, WAKE, WATCH, STALL, SCHED, RESTART, autoCompactEnv, runPidsDir, reapRunPids };
+module.exports = { Orchestrator, buildPrompt, humanPrompt, wakePrompt, stallPrompt, attachedFilesLines, WAKE, WATCH, STALL, SCHED, RESTART, autoCompactEnv, runPidsDir, reapRunPids, interruptedFromReap };
