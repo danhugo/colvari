@@ -7,6 +7,7 @@ const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
 const { Store } = require('./store');
+const { BoardCache } = require('./board-cache');
 const { normalizeNode, NODE_FIELDS, EDGE_TYPES } = require('./agent-config');
 
 const rid = (p) => `${p}_${crypto.randomBytes(4).toString('hex')}`;
@@ -87,13 +88,16 @@ class ProjectManager {
   // of every board task file (~110ms of getAll on the 550-task board). Store is disk-backed and
   // its locks are file-based, so sharing one instance across call sites changes no semantics;
   // out-of-band writes are still seen (reads hit the disk every call). Entries live as long as
-  // the project; remove() drops them with the directory.
+  // the project; remove() drops them with the directory. Main-process stores also get the board
+  // cache by default (t_479e7290): one shared BoardCache per project dir (registry-keyed), so the
+  // warm instances share its watchers. The board MCP server builds its Store directly and never
+  // caches. Cato (t_adeefa43): watchers must not leak per project — closeDir on remove.
   store(pid, teamId = null) {
     const d = this.dir(pid);
     if (!fs.existsSync(path.join(d, 'project.json'))) throw new Error('no project ' + pid);
     const key = d + '|' + (teamId || '');
     let s = this._stores.get(key);
-    if (!s) this._stores.set(key, (s = new Store(d, teamId, { devMode: this.devMode })));
+    if (!s) this._stores.set(key, (s = new Store(d, teamId, { devMode: this.devMode, cache: true })));
     return s;
   }
   get(pid) { return this.store(pid).meta(); }
@@ -132,6 +136,7 @@ class ProjectManager {
   rename(pid, name) { if (!name) throw new Error('name required'); return this.saveMeta(pid, (m) => { m.name = name; }); }
   remove(pid) {
     if (this.list().length <= 1) throw new Error('cannot delete the last project');
+    BoardCache.closeDir(this.dir(pid)); // close the watchers before the dir tree is removed
     fs.rmSync(this.dir(pid), { recursive: true, force: true });
     for (const k of [...this._stores.keys()]) if (k.startsWith(this.dir(pid) + '|')) this._stores.delete(k);
   }

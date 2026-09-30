@@ -5,6 +5,8 @@ const path = require('path');
 const procguard = (process.env.AGENTS_SQUAD_GUI_E2E || process.env.AGENTS_SQUAD_SMOKE) ? require('../test/harness/procguard').install() : null;
 const { Orchestrator, reapRunPids } = require('./orchestrator');
 const { ProjectManager, TEMPLATES, isolateTestRoot } = require('./projects');
+const { BoardCache } = require('./board-cache');
+const { DeltaPump } = require('./delta-pump');
 const { pickChanged } = require('./store');
 const AC = require('./agent-config');
 const WT = require('./worktree');
@@ -94,8 +96,21 @@ function orchFor(pid) {
     // instance reaps, and only pidfile-recorded pids whose lstart still matches — never by name.
     try { if (appLockHeld) reapRunPids(o.store.dir); } catch {}
     orchs.set(pid, o);
+    pumpFor(pid).attachOrch(o); // the pump's orch deltas feed the same 'state' payload (t_39bf39ac)
   }
   return o;
+}
+// IPC deltas (t_39bf39ac, perf track 2): one pump per project pushes {type,id,patch} batches on the
+// 'delta' channel — board-cache change events for tasks/wiki, the orchestrator 'state' snapshot, and
+// sig-checked messages/inbox/runs — so the renderer stops re-pulling sections on every state event.
+const pumps = new Map(); // projectId -> DeltaPump
+function pumpFor(pid) {
+  let p = pumps.get(pid);
+  if (!p) {
+    p = new DeltaPump({ projectId: pid, store: pm.store(pid), cache: BoardCache.forStore(pm.store(pid)), orch: () => orchs.get(pid) || null, send: (payload) => send('delta', payload) });
+    pumps.set(pid, p);
+  }
+  return p;
 }
 // Self-update: one UpdateWatcher per project (polls the repo, safe restart + resume; see self-update.js).
 const watchers = new Map(); // projectId -> UpdateWatcher
@@ -2466,7 +2481,7 @@ const api = {
   introspectRuntime: (_c, bin) => { const r = runIntrospectRuntime(bin); return toDraftProfile(bin, r.profile, r); },
   listProjects: () => ({ projects: pm.list().map((p) => ({ ...p, running: !!(orchs.get(p.id) || {}).running })), templates: Object.fromEntries(Object.entries(TEMPLATES).map(([k, v]) => [k, v.label])) }),
   createProject: (_c, name, tpl) => pm.create(name, tpl), renameProject: (_c, pid, name) => pm.rename(pid, name),
-  deleteProject: (_c, pid) => { if ((orchs.get(pid) || {}).running) throw new Error('stop the project first'); orchs.delete(pid); return pm.remove(pid); },
+  deleteProject: (_c, pid) => { if ((orchs.get(pid) || {}).running) throw new Error('stop the project first'); const p = pumps.get(pid); if (p) { p.close(); pumps.delete(pid); } orchs.delete(pid); return pm.remove(pid); },
   createTeam: (c, name, tpl) => pm.createTeam(c.p, name, tpl), renameTeam: (c, tid, name) => pm.renameTeam(c.p, tid, name),
   deleteTeam: (c, tid) => pm.removeTeam(c.p, tid), duplicateTeam: (c, tid) => pm.duplicateTeam(c.p, tid),
   exportTeam: (c, tid) => pm.exportTeam(c.p, tid), importTeam: (c, json) => pm.importTeam(c.p, json),
@@ -2645,6 +2660,7 @@ app.whenReady().then(() => {
   if (!appLockHeld) return; // second launch: the running instance stays, this one exits
   createWindow();
   probeUnprobedAgents();
+  for (const p of pm.list()) pumpFor(p.id); // delta pumps stream every project's changes (t_39bf39ac)
   pollInbox(true); setInterval(() => pollInbox(false), 1500);
   // Worktree lifecycle sweep (t_9b662983): at boot (before any agent can spawn) and periodically
   // while each project is idle — drops worktrees whose task is done/missing (clean + merged only,
@@ -2667,3 +2683,4 @@ app.whenReady().then(() => {
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });
 app.on('window-all-closed', () => { for (const o of orchs.values()) if (o.running) o.stop(); if (process.platform !== 'darwin') app.quit(); });
+app.on('will-quit', () => { try { BoardCache.closeAll(); } catch {} }); // no leaked fs.watch handles across project switches/quit
