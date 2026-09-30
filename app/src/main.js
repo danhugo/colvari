@@ -566,6 +566,64 @@ async function guiE2E() {
     expect('parallel: dependent starts after blocker ends', D[0] >= A[1], { A, D });
     s.saveSettings({ claudePath: prev.claudePath, maxConcurrency: prev.maxConcurrency });
   };
+  // Run lifecycle (t_e3e2e397): a stub agent run (no real model) drives the header Run/Stop toggle
+  // and the state pill, then the idle loop: the run stays alive when the board drains, spawns
+  // nothing while idle, and a new todo task is picked up on its own; only an explicit Stop ends it.
+  // The idle half is feature-gated like limits-providers: until the run idles at drain instead of
+  // stopping (t_b2273507 core idle, t_7d5834a6 always-visible toggle), those checks log a pending
+  // line instead of failing — the suite defines the target behavior, it doesn't enshrine drain-stops.
+  const runIdleShots = async () => {
+    const p = pid(); const s = pm.store(p); const team = pm.store(p, pm.get(p).teams[0].id);
+    // Fast fake claude: one clean second, then the success result the run parser records.
+    const fake = path.join(require('os').tmpdir(), 'squad-runidle-claude.sh');
+    fs.writeFileSync(fake, `#!/bin/sh\nsleep 1\necho '{"type":"result","subtype":"success","session_id":"ri","total_cost_usd":0,"num_turns":1,"usage":{"input_tokens":1,"output_tokens":1}}'\n`); fs.chmodSync(fake, 0o755);
+    const prev = s.getSettings(); s.saveSettings({ claudePath: fake, maxConcurrency: 4 });
+    const A = team.addNode({ name: 'IdlePM', role: 'PM' }); const B = team.addNode({ name: 'IdleDev', role: 'Dev' });
+    team.addEdge(A.id, B.id, 'assign');
+    // Stub capabilities like parallelShots: fresh nodes would otherwise trigger a blocking --help auto-probe.
+    const stubCaps = { ok: true, probedAt: new Date().toISOString(), source: 'stub', slashCommands: [], commands: [], skills: [], modes: [], categorized: [] };
+    team.updateNode(A.id, { capabilities: stubCaps }); team.updateNode(B.id, { capabilities: stubCaps });
+    const until = async (fn, ms = 10000) => { for (let t = 0; t < ms; t += 200) { if (fn()) return true; await new Promise((r) => setTimeout(r, 200)); } return false; };
+    const o = orchFor(p);
+    expect('runidle: boot comes up stopped, never silently running', o.running === false, o.running);
+    const first = s.createTask({ title: 'Idle: first piece of work', assignee: B.id });
+    // Start through the real UI control (goal popover Run; the preflight confirm is auto-accepted like a human pressing "Run anyway").
+    await ex(`await refresh(); window.confirm = () => true; window.alert = () => {}; $('#run').click(); await w(200);`);
+    const started = await waitFor(`await refresh(); return /running/.test($('#runstate').textContent)`);
+    const dispatched = await until(() => s.getTask(first.id).status === 'in_progress');
+    expect('runidle: the header Run control starts the run and dispatches the todo', started && dispatched, { started, status: s.getTask(first.id).status, label: await ex(`return $('#runstate').textContent`) });
+    // The stub leaves the task in review; the PM's review pickup closes it, then the board drains.
+    expect('runidle: first task closes done through the review pickup', await until(() => s.getTask(first.id).status === 'done', 30000), s.getTask(first.id).status);
+    if (o.running) {
+      await ex(`await refresh(); await w(300);`);
+      const label = await ex(`return $('#runstate').textContent`);
+      expect('idle: the run stays alive with the board drained', o.running === true, o.running);
+      expect('idle: the pill reads idle (waiting, zero agents)', /idle/.test(label) && !/running/.test(label), label);
+      const runsBefore = s.listRuns().length;
+      await new Promise((r) => setTimeout(r, 2500));
+      expect('idle: nothing spawns while idle (zero cost waiting)', s.listRuns().length === runsBefore && o.procs.size === 0, { before: runsBefore, after: s.listRuns().length, procs: o.procs.size });
+      const second = s.createTask({ title: 'Idle: picked up without a click', assignee: B.id });
+      expect('idle: a new todo is picked up on its own', await until(() => s.getTask(second.id).status === 'in_progress', 8000), s.getTask(second.id).status);
+      expect('idle: the pill reads running again during pickup', /running/.test(await ex(`await refresh(); return $('#runstate').textContent`)));
+      await until(() => s.getTask(second.id).status === 'done', 30000);
+      await ex(`$('#stop').click(); await w(400);`); // Stop while idle: the explicit off switch
+      expect('idle: Stop turns the run off', await until(() => !o.running, 5000), o.running);
+      const stoppedLabel = await ex(`await refresh(); return $('#runstate').textContent`);
+      expect('idle: the pill no longer reads running after Stop', !/running/.test(stoppedLabel), stoppedLabel);
+      const third = s.createTask({ title: 'Idle: must wait while stopped', assignee: B.id });
+      await new Promise((r) => setTimeout(r, 2500));
+      expect('stopped: a new todo is not dispatched while stopped', s.getTask(third.id).status === 'todo' && !o.running, { status: s.getTask(third.id).status, running: o.running });
+      await ex(`await refresh(); $('#run').click(); await w(200);`);
+      const resumed = await until(() => s.getTask(third.id).status === 'in_progress') && /running/.test(await ex(`await refresh(); return $('#runstate').textContent`));
+      expect('stopped: Run starts the run again and dispatches the waiting todo', resumed, s.getTask(third.id).status);
+      await ex(`$('#stop').click(); await w(300);`); await until(() => !o.running, 5000);
+      await ex(`$('#tabs button[data-tab=board]').click(); await refresh(); await w(300);`); await shot('31-runidle-board');
+    } else {
+      console.log('[gui-e2e] runidle: the run still stops when the board drains — idle-waiting, zero-spawn idle, self-pickup and stop/start-while-idle checks activate when t_b2273507 (core idle) and t_7d5834a6 (always-visible toggle) land; header start/stop verified');
+    }
+    s.saveSettings({ claudePath: prev.claudePath, maxConcurrency: prev.maxConcurrency });
+    console.log('[gui-e2e] runidle', JSON.stringify({ first: s.getTask(first.id).status, running: o.running }));
+  };
   // Mixed vendors: Claude/Opus PM -> Codex Dev -> Claude/Haiku Reviewer finish a chain through the board (fake bins); graph runtime/model chips + overview.
   const mixedShots = async () => {
     await waitFor(`return !!document.querySelector('#tpl-select option')`); await ex(`await refresh();`); const cur = await ex(`return { p: ctx.p, t: S.teamId }`);
@@ -2047,6 +2105,7 @@ async function guiE2E() {
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'overview') { await overviewShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'teamscope') { await teamScopeShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'parallel') { await parallelShots(); throw null; }
+    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'runidle') { await runIdleShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'mixed') { await mixedShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'limits') { await limitsShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'limits-providers') { await limitsProvidersShots(); throw null; }
@@ -2261,6 +2320,7 @@ async function guiE2E() {
     if (!process.env.SKIP_WIKILOGS) await mainLogsWikiShots();
     if (!process.env.SKIP_TEAMFILTER) await teamFilterShots();
     if (!process.env.SKIP_CRITIQUE) await critiqueShots();
+    if (!process.env.SKIP_RUNIDLE) await runIdleShots();
     if (!process.env.SKIP_LIMITS) await limitsShots();
     if (!process.env.SKIP_LIMITS_PROVIDERS) await limitsProvidersShots();
     if (!process.env.SKIP_DISCOVERY) await discoveryPanelShots();
