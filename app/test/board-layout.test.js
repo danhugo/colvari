@@ -8,7 +8,7 @@ const test = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs'); const os = require('os'); const path = require('path');
 const { spawn } = require('child_process');
-const { Store } = require('../src/store');
+const { Store, LOCK, lockHolderDead } = require('../src/store');
 const { buildPrompt } = require('../src/orchestrator');
 
 const tmp = () => new Store(fs.mkdtempSync(path.join(os.tmpdir(), 'squad-board-')));
@@ -108,6 +108,96 @@ test('parallel writers from separate processes lose nothing and leave valid JSON
     assert.equal(onDisk.id, t.id);
     assert.equal(onDisk.title, t.title);
     assert.match(raw, /\n\s+"id"/, 'files stay pretty-printed (cat/grep/jq friendly)');
+  }
+});
+
+// t_1857d0d5: the .lock is steal-proof. A waiter may take the lock over only from a provably
+// dead holder (pid gone, or a pid-less lock old enough that its holder crashed before writing
+// the pid) — never from a live one: the old 5s force-steal ripped the lock out of a holder mid
+// read-modify-write and lost its update (the flaky "parallel writers" failure).
+test('withLock never steals from a live holder, reclaims dead and pid-less stale locks', async () => {
+  const saved = { ...LOCK };
+  const nap = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  const flagOf = (f) => { try { return fs.readFileSync(f, 'utf8'); } catch { return ''; } };
+  const waitForFlag = (f, want) => {
+    for (let until = Date.now() + 90000; flagOf(f) !== want; ) {
+      assert.ok(Date.now() < until, `waiter never reached "${want}"`);
+      nap(20);
+    }
+  };
+  LOCK.waitMs = 100; LOCK.pidlessMs = 300; LOCK.lastResortMs = 2000;
+  const childLock = { waitMs: 100, pidlessMs: 30000, lastResortMs: 60000 }; // the waiter must have NO timing reason to steal, whatever the machine speed
+  try {
+    const s = tmp();
+    const shared = s.createTask({ title: 'shared' });
+    const storeSrc = require.resolve('../src/store');
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'squad-lockwaiter-'));
+    const waiter = path.join(d, 'waiter.js');
+    const flag = path.join(d, 'flag');
+    fs.writeFileSync(waiter, `
+      const fs = require('fs');
+      const nap = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+      const { Store, LOCK } = require(process.argv[2]);
+      LOCK.waitMs = +process.argv[3]; LOCK.pidlessMs = +process.argv[4]; LOCK.lastResortMs = +process.argv[5];
+      fs.writeFileSync(process.argv[7], 'contending');
+      for (;;) { try { if (fs.readFileSync(process.argv[9], 'utf8') === 'go') break; } catch {} nap(10); } // wait for the holder
+      const s = new Store(process.argv[6]);
+      s.commentTask(process.argv[8], 'waiter', 'from waiter');
+      fs.writeFileSync(process.argv[7], 'done');
+    `);
+    const go = path.join(d, 'go');
+    const child = spawn(process.execPath, [waiter, storeSrc, String(childLock.waitMs), String(childLock.pidlessMs), String(childLock.lastResortMs), s.dir, flag, shared.id, go], { stdio: 'ignore' });
+    try {
+      // (1) live holder: the waiter boots and idles, the parent takes the lock the real way, only
+      // then tells the waiter to contend — past its steal patience it must have waited, not stolen.
+      waitForFlag(flag, 'contending');
+      s.withLock(() => {
+        fs.writeFileSync(go, 'go'); // waiter starts contending with the lock already held
+        nap(800);
+        assert.equal(flagOf(flag), 'contending', 'waiter must not finish while the holder is alive');
+        assert.equal(fs.readFileSync(path.join(s.dir, '.lock', 'pid'), 'utf8'), String(process.pid), 'lock still ours');
+        assert.equal(s.getTask(shared.id).comments.length, 0, 'no stolen write while the holder is alive');
+      });
+      waitForFlag(flag, 'done'); // released: only now does the waiter get through
+      assert.deepEqual(s.getTask(shared.id).comments.map((c) => c.author), ['waiter']);
+      s.commentTask(shared.id, 'parent', 'from parent'); // both updates survive
+      assert.equal(s.getTask(shared.id).comments.length, 2);
+
+      // (2) dead holder: the pid names an exited process — the lock is reclaimed (fast in real
+      // terms; the generous cap only fails a total refusal to steal, not machine speed).
+      const corpse = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
+      await new Promise((res) => corpse.on('close', res));
+      fs.mkdirSync(path.join(s.dir, '.lock'));
+      fs.writeFileSync(path.join(s.dir, '.lock', 'pid'), String(corpse.pid));
+      let t0 = Date.now();
+      s.withLock(() => {});
+      assert.ok(Date.now() - t0 < 60000, `dead-pid lock must be reclaimed, took ${Date.now() - t0}ms`);
+
+      // (3) pid-less stale lock (holder crashed between mkdir and the pid write): reclaimed
+      // once it is old enough; a fresh pid-less lock is left alone.
+      fs.mkdirSync(path.join(s.dir, '.lock'));
+      assert.equal(lockHolderDead(path.join(s.dir, '.lock')), false, 'fresh pid-less lock is not stealable');
+      const old = new Date(Date.now() - 10 * LOCK.pidlessMs);
+      fs.utimesSync(path.join(s.dir, '.lock'), old, old);
+      t0 = Date.now();
+      s.withLock(() => {});
+      assert.ok(Date.now() - t0 < 60000, `aged pid-less lock must be reclaimed, took ${Date.now() - t0}ms`);
+    } finally {
+      child.kill();
+    }
+
+    // decision table, directly — explicit `now` values keep the age math deterministic no matter
+    // how slow the machine is between asserts
+    fs.mkdirSync(path.join(s.dir, '.lock'));
+    fs.writeFileSync(path.join(s.dir, '.lock', 'pid'), String(process.pid)); // our own live pid
+    const mtime = () => fs.statSync(path.join(s.dir, '.lock')).mtimeMs;
+    assert.equal(lockHolderDead(path.join(s.dir, '.lock'), mtime() + 100), false, 'live pid, young lock: not dead');
+    assert.equal(lockHolderDead(path.join(s.dir, '.lock'), mtime() + 10 * LOCK.lastResortMs), true, 'live pid past last resort: steal anyway (pid reuse / wedged holder)');
+    fs.writeFileSync(path.join(s.dir, '.lock', 'pid'), 'not-a-pid');
+    assert.equal(lockHolderDead(path.join(s.dir, '.lock'), mtime() + 100), false, 'corrupt pid counts as pid-less: fresh lock stays');
+    assert.equal(lockHolderDead(path.join(s.dir, '.lock'), mtime() + 10 * LOCK.pidlessMs), true, 'pid-less past pidlessMs: steal');
+  } finally {
+    Object.assign(LOCK, saved);
   }
 });
 

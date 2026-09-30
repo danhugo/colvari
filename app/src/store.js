@@ -37,6 +37,36 @@ function defaultProjectDir(name = 'default') {
 const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 const id = (p) => `${p}_${crypto.randomBytes(4).toString('hex')}`;
 
+// Lock-steal policy (t_1857d0d5: the 5s "stale" steal could rip the lock out of a live holder
+// mid read-modify-write and lose its update). A waiter may take an existing .lock over only when
+// the holder is provably gone: the holder records its pid in .lock/pid right after mkdir (written
+// via tmp+rename, so the file is never seen half-written), and kill(pid, 0) tells dead (ESRCH)
+// from alive (success, or EPERM = alive under another user). A pid-less lock (holder crashed
+// between mkdir and the pid rename) is stolen only once older than pidlessMs, and a live-pid lock
+// only once older than lastResortMs (pid reuse / wedged holder — a real hold is a handful of file
+// ops, seconds at worst on a loaded machine, so a 5-minute-old lock with a living pid is not a
+// holder anymore). One object so tests can shrink the waits instead of sleeping minutes; not
+// runtime configuration.
+const LOCK = { waitMs: 5000, pidlessMs: 30000, lastResortMs: 300000 };
+// Decision table for taking the lock at <dir> over. Ages come from the dir mtime (≈ acquisition
+// time). An unreadable or corrupt pid counts as pid-less. Never throws; a lock that just vanished
+// is not stealable (poll again and race mkdir).
+function lockHolderDead(dir, now = Date.now()) {
+  let age = 0;
+  try { age = now - fs.statSync(dir).mtimeMs; } catch { return false; }
+  let pid = null;
+  try {
+    pid = parseInt(fs.readFileSync(path.join(dir, 'pid'), 'utf8').trim(), 10);
+    if (!Number.isInteger(pid) || pid <= 0) pid = null;
+  } catch { pid = null; }
+  if (pid !== null) {
+    let alive = true;
+    try { process.kill(pid, 0); } catch (e) { alive = e.code !== 'ESRCH'; }
+    return alive ? age > LOCK.lastResortMs : true;
+  }
+  return age > LOCK.pidlessMs;
+}
+
 // Chat attachments: the renderer uploads bytes once, the file lands under <dir>/attachments/ and
 // only its {path,name,mime,size} travels through messages/tasks — never the bytes (no base64).
 const ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024;
@@ -151,18 +181,40 @@ class Store {
     fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
     fs.renameSync(tmp, this.file(name));
   }
-  // cross-process mutex (mkdir is atomic)
+  // cross-process mutex (mkdir is atomic; steal policy: LOCK / lockHolderDead above)
   withLock(fn) {
     const lock = path.join(this.dir, '.lock');
     const start = Date.now();
     for (;;) {
-      try { fs.mkdirSync(lock); break; } catch (e) {
+      try { fs.mkdirSync(lock); } catch (e) {
         if (e.code !== 'EEXIST') throw e;
-        if (Date.now() - start > 5000) { try { fs.rmdirSync(lock); } catch {} continue; } // stale
+        if (Date.now() - start > LOCK.waitMs && lockHolderDead(lock)) {
+          // Take the lock over with a RENAME: atomic, so of two simultaneous stealers exactly
+          // one wins (rmSync would let the second delete the first's fresh lock instead).
+          const stolen = lock + '.stolen.' + process.pid;
+          try { fs.rmSync(stolen, { recursive: true, force: true }); fs.renameSync(lock, stolen); fs.rmSync(stolen, { recursive: true, force: true }); } catch {}
+          continue;
+        }
         sleepSync(10);
+        continue;
       }
+      try {
+        const tmp = path.join(lock, 'pid.' + process.pid + '.tmp');
+        fs.writeFileSync(tmp, String(process.pid));
+        fs.renameSync(tmp, path.join(lock, 'pid'));
+        // The dir can vanish under us (a steal raced the pid write): only a read-back that says
+        // OUR pid makes us the holder; anything else goes back to contending.
+        if (fs.readFileSync(path.join(lock, 'pid'), 'utf8').trim() === String(process.pid)) break;
+      } catch {}
     }
-    try { return fn(); } finally { try { fs.rmdirSync(lock); } catch {} }
+    try { return fn(); } finally {
+      // Remove only a lock that is still ours: a stealer that took it over wrote its own pid, and
+      // deleting the dir here would pull the live lock out from under it (the old rmdir bug).
+      let ours = true;
+      try { ours = fs.readFileSync(path.join(lock, 'pid'), 'utf8').trim() === String(process.pid); }
+      catch (e) { ours = e.code === 'ENOENT'; } // no pid file: ours only if our pid write never landed
+      if (ours) { try { fs.rmSync(lock, { recursive: true, force: true }); } catch {} }
+    }
   }
   update(name, dflt, fn) {
     return this.withLock(() => { const d = this.read(name, dflt); const r = fn(d); this.write(name, d); return r; });
@@ -922,4 +974,4 @@ class Store {
   deletePreset(name) { return this.saveSettings({ rolePresets: this.getSettings().rolePresets.filter((x) => x.name !== name) }).rolePresets; }
 }
 
-module.exports = { Store, ROLES, STATUSES, PRIORITIES: C.PRIORITIES, defaultProjectDir, pickChanged };
+module.exports = { Store, ROLES, STATUSES, PRIORITIES: C.PRIORITIES, defaultProjectDir, pickChanged, LOCK, lockHolderDead };
