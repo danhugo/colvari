@@ -1162,7 +1162,13 @@ async function guiE2E() {
     expect('teamscope: chat All teams shows every conversation', C.text.includes('Alpha standup notes') && C.text.includes('Beta standup notes') && C.text.includes('Please prioritise the spec review'), null);
     expect('teamscope: All teams chat shows no team badges', C.bubbles.every((b) => !b.leaf.includes('Alpha') && !b.leaf.includes('Beta')), C.bubbles.map((b) => b.leaf));
     await shot('teamscope-chat-all');
-    // Empty team: no cards, team-scoped empty state in both views.
+    // Team graph unchanged: still the selected team's own graph (Alpha: Ann + Ari), no scoping side effects.
+    await ex(`$('#tabs button[data-tab=team]').click(); await w(700);`);
+    const g = await ex(`return { n: document.querySelectorAll('#graph .node').length, names: [...document.querySelectorAll('#graph .node')].map((x) => x.textContent) }`);
+    expect('teamscope: team graph still renders the selected team (2 Alpha nodes)', g.n === 2, g);
+    expect('teamscope: team graph shows Alpha\'s agents', ['Ann', 'Ari'].every((nm) => g.names.join(' ').includes(nm)), g.names);
+    await shot('teamscope-graph');
+    // Empty team last: no cards, team-scoped empty state in both views.
     await sideTeam(gammaId);
     await ex(`$('#tabs button[data-tab=board]').click(); await w(400);`);
     B = await boardState();
@@ -1172,12 +1178,6 @@ async function guiE2E() {
     C = await chatState();
     expect('teamscope: empty team chat shows the team empty state', /no messages for this team/i.test(C.tab), (C.tab.match(/no messages[^.]*\./i) || [])[0] || C.tab.slice(0, 200));
     await shot('teamscope-chat-empty');
-    // Team graph unchanged: while Gamma is selected every node from both teams still renders.
-    await ex(`$('#tabs button[data-tab=team]').click(); await w(700);`);
-    const g = await ex(`return { n: document.querySelectorAll('#graph .node').length, names: [...document.querySelectorAll('#graph .node')].map((x) => x.textContent) }`);
-    expect('teamscope: team graph still renders every team (4 nodes)', g.n === 4, g);
-    expect('teamscope: team graph includes the Beta agents', ['Bea', 'Ben'].every((nm) => g.names.join(' ').includes(nm)), g.names);
-    await shot('teamscope-graph');
     await sideTeam(alphaId);
     console.log('[gui-e2e] teamscope', JSON.stringify({ alpha: alphaId, beta: betaId, gamma: gammaId }));
   };
