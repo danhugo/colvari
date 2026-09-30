@@ -21,6 +21,22 @@ const FQ = require('./failures');
 
 const MCP_SERVER = path.join(__dirname, 'mcp-server.js');
 
+// Per-run pidfiles (t_3f830e64): each run records .squad/run-pids/<pid> under the store dir (one
+// file per run — parallel runs never share one) so a crashed/killed app leaves a trail the next
+// boot reaps via MG.reapGatePidFile — pid + lstart verified, never by name.
+const runPidsDir = (storeDir) => path.join(storeDir, '.squad', 'run-pids');
+function reapRunPids(storeDir) {
+  const out = { killed: [], skipped: [] };
+  let files = []; try { files = fs.readdirSync(runPidsDir(storeDir)); } catch { return out; }
+  for (const f of files) {
+    const fp = path.join(runPidsDir(storeDir), f);
+    try { if (!fs.statSync(fp).isFile()) continue; } catch { continue; }
+    const r = MG.reapGatePidFile(fp); // wrong lstart (recycled pid) is skipped and kept for a later retry
+    out.killed.push(...r.killed); out.skipped.push(...r.skipped);
+  }
+  return out;
+}
+
 // 'ps -o time=' CPU time, e.g. '12:05.44' (MM:SS.cc) or '1:02:03' (H:MM:SS) -> ms.
 function stimeToMs(s) {
   const seg = String(s || '').trim().split(':');
@@ -1316,9 +1332,34 @@ class Orchestrator extends EventEmitter {
       if (!usage.model && node.model) usage.model = node.model; // non-claude runtimes report no model in events; the node's config is the best known value
       if (usage.resumedFrom) usage.baseline = this.sessionBaseline(usage.resumedFrom);
       let rt; try { rt = RT.getRuntime(meta.runtime); } catch (e) { this.log(node.id, 'error', e.message + ' (run failed, no fallback)'); rt = { id: String(meta.runtime), label: String(meta.runtime), bin: () => '' }; args = null; }
-      const child = args ? spawn(rt.bin(settings), args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] })
+      // detached (t_3f830e64): the run leads its own process group, so kill paths below reach
+      // backgrounded CLI children too (child.kill is wrapped to signal -pgid). One pidfile per run
+      // at spawn; removed once the group is gone — a crashed app's leftovers die at the next boot.
+      const child = args ? spawn(rt.bin(settings), args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'], detached: true })
         : Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter(), kill() {} });
       if (!args) setImmediate(() => child.emit('close', 1));
+      let pidFile = null;
+      if (child.pid) {
+        const realKill = child.kill.bind(child);
+        child.kill = (sig) => { try { process.kill(-child.pid, sig || 'SIGTERM'); } catch {} return realKill(sig || 'SIGTERM'); };
+        try {
+          pidFile = path.join(runPidsDir(this.store.dir), String(child.pid));
+          fs.mkdirSync(path.dirname(pidFile), { recursive: true });
+          fs.writeFileSync(pidFile, `${child.pid}\t${MG.pidLstart(child.pid)}\tagent-run ${node.name}\n`);
+        } catch { pidFile = null; }
+        child.on('exit', () => { // leader gone; orphaned CLI children keep the group (and the pipes) alive
+          try { process.kill(-child.pid, 'SIGTERM'); } catch {}
+          try {
+            if (MG.groupAlive(child.pid)) { // TERM-resistant orphan: escalate after a grace
+              const t = setTimeout(() => {
+                if (MG.groupAlive(child.pid)) { try { process.kill(-child.pid, 'SIGKILL'); } catch {} }
+                try { if (pidFile) fs.rmSync(pidFile, { force: true }); } catch {}
+              }, 2000);
+              if (t.unref) t.unref();
+            } else if (pidFile) fs.rmSync(pidFile, { force: true });
+          } catch {}
+        });
+      }
       this.procs.set(node.id, child);
       const a = this.agent(node.id);
       // Identity + liveness for the stall watchdog: any stdout/stderr byte refreshes a.lastActivityAt,
@@ -1955,4 +1996,4 @@ class Orchestrator extends EventEmitter {
     }
   }
 }
-module.exports = { Orchestrator, buildPrompt, humanPrompt, wakePrompt, stallPrompt, attachedFilesLines, WAKE, WATCH, STALL, SCHED, RESTART, autoCompactEnv };
+module.exports = { Orchestrator, buildPrompt, humanPrompt, wakePrompt, stallPrompt, attachedFilesLines, WAKE, WATCH, STALL, SCHED, RESTART, autoCompactEnv, runPidsDir, reapRunPids };
