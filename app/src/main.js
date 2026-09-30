@@ -69,12 +69,12 @@ function relaunchApp() {
   app.exit(0);
 }
 
-const pm = new ProjectManager();
+const pm = new ProjectManager(undefined, { devMode: DEV_MODE });
 const orchs = new Map(); // projectId -> Orchestrator (projects run independently / concurrently)
 function orchFor(pid) {
   let o = orchs.get(pid);
   if (!o) {
-    o = new Orchestrator(pm.store(pid), { repoDir: APP_ROOT });
+    o = new Orchestrator(pm.store(pid), { repoDir: APP_ROOT, devMode: DEV_MODE });
     o.on('log', (l) => send('log', { ...l, projectId: pid }));
     o.on('state', (s) => send('state', { ...s, projectId: pid })); // slim: the renderer refreshes from the store on receipt
     o.on('notify', (n) => { send('notify', { ...n, projectId: pid }); notify(n, pid); });
