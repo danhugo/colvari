@@ -146,6 +146,7 @@ function makeTools(store, nodeId) {
       const showDone = includeDone || status === 'done';
       return all
         .filter((tk) => (!status || tk.status === status) && (showDone || tk.status !== 'done') && (mine ? tk.assignee === nodeId : visibleTask(t, nodeId, tk)))
+        .sort((a, b) => String(a.assignee).localeCompare(String(b.assignee)) || String(a.priority).localeCompare(String(b.priority)))
         .map((tk) => fmtTask(t, tk, all, { brief: true }));
     },
     create_task({ title, description = '', assignee, parentId = null, blockedBy = [], priority }) {
@@ -155,6 +156,22 @@ function makeTools(store, nodeId) {
       const task = store.createTask({ title, description, assignee: target.id, createdBy: nodeId, parentId, blockedBy, priority });
       const warn = overloadWarning(t, target);
       return warn ? { ...task, warning: warn } : task;
+    },
+    // PM-only: move a task to another teammate (needs an assign edge). Worktree, branch and comments stay.
+    // Only todo tasks: a running/finished task still belongs to its agent.
+    reassign_task({ taskId, assignee }) {
+      const t = me();
+      const n = t.nodes.find((x) => x.id === nodeId);
+      if (!n || String(n.role).toLowerCase() !== 'pm') throw new Error('scope violation: reassign_task is PM-only');
+      const tk = store.getTask(taskId);
+      if (!tk) throw new Error('no task ' + taskId);
+      if (tk.status !== 'todo') throw new Error(`cannot reassign a ${tk.status} task; only todo tasks can be reassigned`);
+      const target = resolve(t, assignee, 'assignee');
+      if (!canAssign(t, nodeId, target.id)) throw new Error(`scope violation: ${n.name} cannot assign tasks to ${target.name} (no assign edge)`);
+      const from = nodeName(t, tk.assignee);
+      const r = store.updateTask(taskId, { assignee: target.id });
+      store.commentTask(taskId, n.name, `Reassigned from ${from} to ${target.name}.`);
+      return r;
     },
     update_task_status({ taskId, status, priority }) {
       const t = me(); let tk = store.getTask(taskId);
@@ -201,11 +218,12 @@ function makeTools(store, nodeId) {
       return store.sendMessage({ from: nodeId, to: target.id, text, taskId });
     },
     // Inbox: messages to me from nodes that (still) have a message/assign edge to me. Marks them read.
-    read_messages({ unreadOnly = false, from } = {}) {
+    read_messages({ unreadOnly = true, from, limit = 20 } = {}) {
       const t = me();
       let ms = store.listMessages({ to: nodeId }).filter((m) => m.from === 'human' || canMessage(t, m.from, nodeId));
       if (from) { const f = resolve(t, from, 'sender'); ms = ms.filter((m) => m.from === f.id); }
       if (unreadOnly) ms = ms.filter((m) => !m.read);
+      ms = ms.slice(-limit); // newest `limit`; only the returned unread ones are marked read
       store.markMessagesRead(ms.filter((m) => !m.read).map((m) => m.id));
       return ms.map((m) => ({ ...m, fromName: m.from === 'human' ? 'human' : nodeName(t, m.from) }));
     },

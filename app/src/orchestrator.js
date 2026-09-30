@@ -166,6 +166,7 @@ class Orchestrator extends EventEmitter {
     super();
     this.store = store;
     this.running = false;
+    this.spawnFn = spawn; // injectable for tests (health-check spawn assertions)
     this.procs = new Map(); // nodeId -> child
     this.agents = {}; // nodeId -> {status, cost, inputTokens, outputTokens, runs, taskId}
     this.totalCost = 0;
@@ -189,7 +190,7 @@ class Orchestrator extends EventEmitter {
     this.drainCutNodes = new Set();
     // Runtime breaker (t_419062e2): per-runtime unavailability + failure streak state.
     this.runtimeState = {};
-    this._rtFailures = new Map(); // runtime -> { signature, count }
+    this._rtFailures = new Map(); // runtime -> { signature, count, taskIds }
     this.wakeTimers = new Map(); // nodeId -> { timer, dueAt } — at most one pending wake per agent
     this.wakePairs = new Map(); // 'from>to' -> {count, since}
     this.wakeLastAt = new Map(); // nodeId -> ts of the agent's last agent->agent wake dispatch (nudge throttle anchor)
@@ -723,7 +724,9 @@ class Orchestrator extends EventEmitter {
     try {
       if (this.store && this.store.dir) {
         const script = `try{const MG=require(${JSON.stringify(require.resolve('./merge-gate'))});const {Store}=require(${JSON.stringify(require.resolve('./store'))});MG.checkMasterHealth(new Store(${JSON.stringify(this.store.dir)}));}catch(e){}process.exit(0)`;
-        spawn(process.execPath, ['-e', script], { detached: true, stdio: 'ignore' }).unref();
+        // ELECTRON_RUN_AS_NODE: process.execPath is the Electron binary in the app; without it the
+        // '-e' child opens the 'Error launching app' dialog and the check never runs (t_1f379c6c).
+        this.spawnFn(process.execPath, ['-e', script], { detached: true, stdio: 'ignore', env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' } }).unref();
       }
     } catch {}
   }
@@ -1188,6 +1191,26 @@ class Orchestrator extends EventEmitter {
     this.notify('Approval needed', `${t.id}: ${t.title}`, { taskId: t.id });
   }
 
+  // P0 stuck sweep (t_829d0220, wiki dispatch-monitoring-decision final): the ONE alert rule — a P0
+  // sitting in todo while nobody can take it (no assignee, or its agent is mid-run on another task)
+  // surfaces as a PM task so it stays visible on the board (never an inbox message). At most one
+  // OPEN alert per stuck task (stuckAlertFor backlink, deduped across ticks and restarts); the PM
+  // closes alerts by hand, and a closed alert may be re-raised if the P0 is still stuck.
+  sweepStuckP0(team, all) {
+    const pm = team.nodes.find((n) => n.role === 'PM');
+    const open = new Set(this.store.listTasks().filter((x) => x.stuckAlertFor && !['done', 'merge_conflict'].includes(x.status)).map((x) => x.stuckAlertFor));
+    for (const t of all) {
+      if (t.priority !== 'P0' || t.status !== 'todo' || open.has(t.id)) continue;
+      const busy = t.assignee && this.agent(t.assignee).taskId;
+      if (t.assignee && !busy) continue;
+      const nodeName = t.assignee && (team.nodes.find((n) => n.id === t.assignee) || {}).name;
+      const why = t.assignee ? `${nodeName || 'its assignee'} is busy on another run` : 'no assignee';
+      const alert = this.store.createTask({ title: `P0 stuck: ${t.title}`, description: `Task ${t.id} is P0 and todo but ${why}. Reassign it or run it yourself.`, priority: 'P0', assignee: pm ? pm.id : null, createdBy: 'orchestrator' });
+      this.store.updateTask(alert.id, { stuckAlertFor: t.id });
+      this.log(pm ? pm.id : null, 'system', `⚠ P0 stuck: "${t.title}" (${t.id}) — ${why}`);
+    }
+  }
+
   tick() {
     if (!this.running) {
       // Draining after stop(): report done exactly once every agent has actually exited.
@@ -1199,6 +1222,7 @@ class Orchestrator extends EventEmitter {
     // Sweep + write auto-advances first so a task's own dependents see it done within this same tick.
     const reviewReady = this.autoAdvanceReviews(team).map(({ task, node }) => ({ task: this.store.getTask(task.id), node }));
     const all = this.store.listTasks();
+    try { this.sweepStuckP0(team, all); } catch (e) { this.log(null, 'error', 'stuck P0 sweep: ' + e.message); }
     const todo = all.filter((t) => t.status === 'todo' && team.nodes.some((n) => n.id === t.assignee));
     // The subscription usage pause is about the Claude subscription: agents on other runtimes keep working.
     // dispatchPaused (UpdateWatcher) pauses every runtime: the restart waits for agents to finish.
@@ -1448,7 +1472,7 @@ class Orchestrator extends EventEmitter {
         const usedResume = !!(args && resume);
         const r = await this.spawnRun(node, args, cwd, env, settings, { ...meta, iteration: i + 1, resumedFrom: usedResume ? resume : null });
         code = r.code; i++; human = null; recover = false; humanAtts = [];
-        if (code !== 0) this.noteRuntimeFailure(node.id, meta.runtime, r);
+        if (code !== 0) this.noteRuntimeFailure(node.id, meta.runtime, r, task.id);
         else this._rtFailures.delete(meta.runtime); // real progress resets the streak
         if (r.sessionId) {
           resume = r.sessionId;
@@ -1541,10 +1565,28 @@ class Orchestrator extends EventEmitter {
         // (A run killed by the self-update drain cutoff skips this: its task stays in_progress so the
         // post-restart reconcile re-dispatches it instead of parking it for a human.)
         const ok = code === 0 && this.running && !stoppedWhy && !(m.mode === 'goal' && !(judge && judge.met));
-        const g = gate(ok && a.reviewPickup ? 'done' : 'review');
-        if (!ok) g.parkedForHuman = true;
-        this.store.updateTask(task.id, g);
-        this.store.commentTask(task.id, 'orchestrator', stoppedWhy ? `Agent stopped (${stoppedWhy}) after ${i} iteration(s); moved to review.` : `Agent exited (code ${code}) without setting status after ${i} iteration(s) (${reason}); moved to review.`);
+        // A crashed run (t_829d0220): a nonzero EXIT that never set a status is a crash, not a review
+        // hand-off — bounce the task back to todo so the board shows re-runnable work. Crashes are
+        // counted from the task's "crashed:" comments; from the third crash on, re-queuing would loop
+        // forever: park it for a human instead. Signal kills (SIGTERM/SIGKILL: stall watchdog, human
+        // stop, drain) are deliberate stops, not crashes — they keep the old park path.
+        const crashed = !ok && typeof code === 'number' && code !== 0 && this.running && !stoppedWhy;
+        if (crashed) {
+          const priorCrashes = t.comments.filter((c) => /^crashed: exit code/.test(c.text)).length;
+          if (priorCrashes >= 2) {
+            const g = gate('review'); g.parkedForHuman = true;
+            this.store.updateTask(task.id, g);
+            this.store.commentTask(task.id, 'orchestrator', `crashed: exit code ${code} after ${i} iteration(s) (${reason}); ${priorCrashes + 1} crashes — parked for a human instead of re-queuing.`);
+          } else {
+            this.store.updateTask(task.id, { status: 'todo' });
+            this.store.commentTask(task.id, 'orchestrator', `crashed: exit code ${code} after ${i} iteration(s) (${reason}); back to todo.`);
+          }
+        } else {
+          const g = gate(ok && a.reviewPickup ? 'done' : 'review');
+          if (!ok) g.parkedForHuman = true;
+          this.store.updateTask(task.id, g);
+          this.store.commentTask(task.id, 'orchestrator', stoppedWhy ? `Agent stopped (${stoppedWhy}) after ${i} iteration(s); moved to review.` : `Agent exited (code ${code}) without setting status after ${i} iteration(s) (${reason}); moved to review.`);
+        }
       } else if (t && t.status === 'review' && !t.parkedForHuman && code !== 0 && this.running && !stoppedWhy && !this.drainCutNodes.has(node.id)) {
         // The agent itself moved this to 'review' (clearing parkedForHuman) but the process then crashed
         // (nonzero exit). A crashed run must never look like a clean hand-off eligible for silent
@@ -1576,9 +1618,12 @@ class Orchestrator extends EventEmitter {
   }
 
   // A run on `runtime` exited non-zero: log the real (redacted) error tail, classify, and maybe
-  // trip the breaker: one classified auth/model failure, or FAIL_STREAK fast consecutive failures
-  // with the same signature. Fails open otherwise. One ask_human + one event per episode.
-  noteRuntimeFailure(nodeId, rt, r) {
+  // trip the breaker: one classified auth/model failure, or FAIL_STREAK fast failures with the same
+  // signature across DISTINCT tasks. Fails open otherwise. One ask_human + one event per episode.
+  // failedTaskId (t_829d0220, option B): the streak counts tasks, not runs — re-crashes of the SAME
+  // task (the crash→todo re-queue, however interleaved) never advance it, so one bad task must be
+  // able to retry-and-park without pausing the runtime for everyone.
+  noteRuntimeFailure(nodeId, rt, r, failedTaskId) {
     if (!rt || rt === 'unknown' || r.stalled) return;
     const a = this.agents[nodeId];
     if (a && (a.stopRequested || this.drainCutNodes.has(nodeId))) return;
@@ -1587,17 +1632,19 @@ class Orchestrator extends EventEmitter {
     this.log(nodeId, 'error', `runtime ${rt} run failed (exit ${r.code}): ${text.slice(0, 500)}`);
     const kind = FQ.classifyFailure(raw);
     const dur = r.usage && r.usage.durationMs;
-    const f = this._rtFailures.get(rt) || { signature: null, count: 0 };
+    const f = this._rtFailures.get(rt) || { signature: null, count: 0, taskIds: new Set() };
     this._rtFailures.set(rt, f);
     if (!kind) {
       if (!(Number.isFinite(dur) && dur < FQ.FAIL.FAST_MS)) return;
       const sig = text.split('\n')[0].slice(0, 200);
-      if (f.signature !== sig) { f.signature = sig; f.count = 0; }
+      if (f.signature !== sig) { f.signature = sig; f.count = 0; f.taskIds = new Set(); }
+      if (failedTaskId && f.taskIds.has(failedTaskId)) return;
+      if (failedTaskId) f.taskIds.add(failedTaskId);
       f.count++;
       if (f.count < FQ.FAIL.STREAK_MAX) return;
     }
     if (this.runtimeState[rt] && this.runtimeState[rt].state === 'unavailable') return; // episode active
-    f.signature = null; f.count = 0;
+    f.signature = null; f.count = 0; f.taskIds = new Set();
     const agents = this.store.getTeam().nodes.filter((n) => ((n.runtime || 'claude') === rt)).map((n) => n.id);
     this.runtimeState[rt] = { state: 'unavailable', error: text, agents, since: Date.now() };
     this.log(nodeId, 'error', `runtime ${rt} unavailable (${kind || 'repeated fast failures'}): dispatch paused; tasks stay queued`);

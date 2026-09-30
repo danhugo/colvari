@@ -67,6 +67,7 @@ function setup({ cli = {} } = {}) {
   const mk = (name, i) => store.addNode({ name, role: 'Dev', workdir: path.join(root, 'w' + i) });
   const orch = new Orchestrator(store);
   clearInterval(orch._stallTimer); clearInterval(orch._wakeTimer); // fake clock: no background sweeps
+  orch.nudgeIdle = () => {}; // every tick nudges; idle-nudge wake runs would steal runs from the counts under test
   const startManual = () => { orch.start(); clearInterval(orch._tickTimer); }; // dispatch driven by run ends + explicit tick()
   return { root, store, orch, mk, startManual };
 }
@@ -208,14 +209,28 @@ test('one fast unclassified failure fails open: no breaker, no ask, dispatch con
   const t1 = store.createTask({ title: 'fails 1', assignee: node.id });
   const t2 = store.createTask({ title: 'fails 2', assignee: node.id });
   startManual();
-  await waitFor(() => !orch.procs.has(node.id) && store.getTask(t2.id).status !== 'todo');
+  // crash→todo (t_829d0220): each task retries twice more, then parks; the re-crashes of ONE task
+  // must not advance the streak (distinct-task rule), so the breaker still never opens here.
+  await waitFor(() => [t1, t2].every((t) => { const x = store.getTask(t.id); return x.parkedForHuman && x.status === 'review'; }), 20000);
   await new Promise((r) => setTimeout(r, 50));
-  assert.equal(tripped(orch), false, 'a normal task failure must not trip the breaker');
+  assert.equal(tripped(orch), false, 'a normal task failure must not trip the breaker, not even via its retries');
   assert.equal(openQuestions(store).length, 0);
-  assert.equal(orch.runs, 2, 'both tasks were dispatched');
+  assert.equal(orch.runs, 6, 'both tasks were dispatched and retried to the 3-crash park');
   assert.ok(store.readLogs(Infinity).some((l) => l.kind === 'error' && /EACCES/.test(l.text)), 'real error text still captured for plain failures');
   assert.ok(store.getTask(t1.id).comments.length > 0);
 });
+
+test('the same task crashing 3 times parks it without ever tripping the breaker (distinct-task streak, t_829d0220)', () => withFastMs(10000, async () => {
+  const { store, orch, mk, startManual } = setup({ cli: { stderr: GENERIC_B, code: 1 } });
+  const node = mk('Dev', 1);
+  const t1 = store.createTask({ title: 'solo crasher', assignee: node.id });
+  startManual();
+  await waitFor(() => { const x = store.getTask(t1.id); return x.parkedForHuman && x.status === 'review'; }, 20000);
+  assert.equal(store.getTask(t1.id).comments.filter((c) => /^crashed: exit code 1/.test(c.text)).length, 3, 'three crashes, then the crash cap parks the task');
+  assert.equal(tripped(orch), false, 'one bad task re-crashing never opens the breaker');
+  assert.equal(orch.runs, 3, 'exactly the three crash runs happened');
+  assert.equal(openQuestions(store).length, 0, 'no human ask for a single misbehaving task');
+}));
 
 test('three fast unclassified failures with the same signature trip the breaker (streak rule)', () => withFastMs(10000, async () => {
   const { store, orch, mk, startManual } = setup({ cli: { stderr: GENERIC_A, code: 1 } });
@@ -224,9 +239,11 @@ test('three fast unclassified failures with the same signature trip the breaker 
   const unavailable = [];
   orch.on('runtime.unavailable', (e) => unavailable.push(e));
   startManual();
-  await waitFor(() => tripped(orch));
-  await waitFor(() => !orch.procs.has(node.id));
-  assert.equal(orch.runs, 3, 'the breaker tripped at the third failure');
+  await waitFor(() => tripped(orch), 20000);
+  await waitFor(() => !orch.procs.has(node.id), 20000);
+  // distinct-task streak (t_829d0220): tasks 1 and 2 retry to the 3-crash park first (6 runs),
+  // the THIRD distinct failing task trips the breaker on its first crash.
+  assert.equal(orch.runs, 7, 'the breaker tripped at the third distinct task\'s first failure');
   assert.equal(store.getTask(tasks[3].id).status, 'todo', 'the 4th task stays queued, not failed');
   assert.equal(unavailable.length, 1);
   assert.equal(openQuestions(store).length, 1, 'streak trips also ask the human once');
@@ -239,11 +256,12 @@ test('the streak needs the third failure: dispatch continues through two', () =>
   const node = mk('Dev', 1);
   const t3 = [1, 2, 3].map((i) => store.createTask({ title: 'flaky ' + i, assignee: node.id }))[2];
   startManual();
-  await waitFor(() => !orch.procs.has(node.id) && store.getTask(t3.id).status !== 'todo');
-  assert.equal(orch.runs, 3, 'the third task dispatched — two failures had not tripped yet');
-  // the third failure is the one that trips (STREAK_MAX=3)
-  await waitFor(() => tripped(orch));
+  // the first two tasks retry to the 3-crash park WITHOUT tripping; the third distinct task's
+  // first crash is the one that trips (STREAK_MAX=3).
+  await waitFor(() => tripped(orch) && !orch.procs.has(node.id), 20000);
+  assert.equal(orch.runs, 7, 'two full retry cycles (6 runs) before the third task trips it');
   assert.equal(openQuestions(store).length, 1);
+  assert.equal(store.getTask(t3.id).status, 'todo', 'the third task stays queued behind the open breaker');
 }));
 
 test('fast failures with different signatures do not accumulate into a streak', () => withFastMs(1000, async () => {
@@ -251,10 +269,10 @@ test('fast failures with different signatures do not accumulate into a streak', 
   const node = mk('Dev', 1);
   const ts = ['A 1', 'B 1', 'A 2', 'B 2'].map((s, i) => store.createTask({ title: `RTSIG-${s} task`, assignee: node.id }));
   startManual();
-  await waitFor(() => !orch.procs.has(node.id) && ts.every((t) => store.getTask(t.id).status !== 'todo'), 8000);
+  await waitFor(() => !orch.procs.has(node.id) && ts.every((t) => { const x = store.getTask(t.id); return x.parkedForHuman && x.status === 'review'; }), 30000);
   await new Promise((r) => setTimeout(r, 60));
   assert.equal(tripped(orch), false, 'alternating errors must never reach STREAK_MAX');
-  assert.equal(orch.runs, 4, 'all four tasks ran');
+  assert.equal(orch.runs, 12, 'all four tasks ran and retried to the 3-crash park');
   assert.equal(openQuestions(store).length, 0);
 }));
 
@@ -263,10 +281,10 @@ test('slow failures never trip via the streak rule, even with the same signature
   const node = mk('Dev', 1);
   const ts = [1, 2, 3].map((i) => store.createTask({ title: 'slow fail ' + i, assignee: node.id }));
   startManual();
-  await waitFor(() => !orch.procs.has(node.id) && ts.every((t) => store.getTask(t.id).status !== 'todo'), 15000);
+  await waitFor(() => !orch.procs.has(node.id) && ts.every((t) => { const x = store.getTask(t.id); return x.parkedForHuman && x.status === 'review'; }), 45000);
   await new Promise((r) => setTimeout(r, 60));
   assert.equal(tripped(orch), false, 'slow failures at STREAK_MAX with the same signature still fail open');
-  assert.equal(orch.runs, 3);
+  assert.equal(orch.runs, 9, 'each slow-failing task retried to the 3-crash park');
   assert.equal(openQuestions(store).length, 0);
 }));
 
@@ -275,10 +293,10 @@ test('a success resets the failure streak', () => withFastMs(1000, async () => {
   const node = mk('Dev', 1);
   const ts = ['A', 'OK', 'B', 'C'].map((m, i) => store.createTask({ title: `RTSIG-${m} reset ${i}`, assignee: node.id }));
   startManual();
-  await waitFor(() => !orch.procs.has(node.id) && ts.every((t) => store.getTask(t.id).status !== 'todo'), 8000);
+  await waitFor(() => !orch.procs.has(node.id) && ts.every((t) => { const x = store.getTask(t.id); return x.status !== 'todo' && (t.title.includes('OK') || x.parkedForHuman); }), 30000);
   await new Promise((r) => setTimeout(r, 60));
-  assert.equal(tripped(orch), false, 'f, success, f, f = streak 2, not 3');
-  assert.equal(orch.runs, 4);
+  assert.equal(tripped(orch), false, 'f, success, f, f = the success resets; retries never stack the streak past 2');
+  assert.equal(orch.runs, 10, '3 failing tasks retried to the park, the OK task ran once');
   assert.equal(openQuestions(store).length, 0);
 }));
 
@@ -326,14 +344,20 @@ test('resume clears the breaker, re-dispatches queued tasks, and a new episode m
   assert.equal(available.length, 0);
 
   await orch.resumeRuntime('claude');
+  // start() re-armed the dispatch sweep, and every run end fires two setImmediate(tick()) that
+  // nudgeIdle() on — either can start idle-nudge wake runs that would inflate orch.runs. The retry
+  // itself is already in flight (start() ticks synchronously), so silencing both here is safe.
+  clearInterval(orch._tickTimer);
+  orch.nudgeIdle = () => {};
+  for (const t of orch.wakeTimers.values()) clearTimeout(t.timer); orch.wakeTimers.clear();
   assert.equal(available.length, 1, 'runtime.available emitted on resume');
   assert.equal(available[0].runtime, 'claude');
   assert.equal(tripped(orch), false, 'breaker cleared');
-  // queued work flows again even though the Run had stopped: resume re-arms dispatch
-  await waitFor(() => store.getTask(queued.id).status !== 'todo');
-
-  // same auth failure again = a NEW unavailable episode: it trips and asks AGAIN
+  // resume re-arms dispatch: the crashed task is first in line (crash→todo re-queue), it fails
+  // again and re-trips the breaker before the queued task can start — which then stays queued.
   await waitFor(() => tripped(orch), 8000);
+  assert.equal(orch.runs, 1, 'the re-armed dispatch ran the crashed task\'s retry (start() reset the counter)');
+  assert.equal(store.getTask(queued.id).status, 'todo', 'the retry re-tripped: queued work waits again');
   assert.equal(unavailable.length, 2);
   assert.equal(openQuestions(store).length, 2, 'one ask per episode, not one forever');
 });

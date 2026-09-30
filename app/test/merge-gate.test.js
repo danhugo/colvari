@@ -189,3 +189,46 @@ test('red master: auto-created P0 fix task is deduped while open', { skip: SKIP 
   const c = MG.ensureRedMasterTask(s, info);
   assert.notStrictEqual(c.id, a.id, 'a closed P0 does not dedupe the next red master');
 });
+
+// The startup sweep (orchestrator start() spawns checkMasterHealth in a detached child, t_1f379c6c):
+// it must actually run the suite on base and land the result — it used to pass a TREE sha to
+// runSuiteOnBase ('git worktree add --detach' needs a commit), fail as infra and silently no-op.
+const GREEN_TEST = { name: 'gate', version: '1.0.0', scripts: { test: `node -e "console.log('ℹ tests 1');console.log('ℹ suites 0');console.log('ℹ pass 1');console.log('ℹ fail 0')"` } };
+const RED_TEST = { name: 'gate', version: '1.0.0', scripts: { test: `node -e "console.log('ℹ tests 1');console.log('ℹ suites 0');console.log('ℹ pass 0');console.log('ℹ fail 1');console.log('✖ broken.test.js — boom (1ms)')"` } };
+function repoWithSuite(pkg, health) {
+  const d = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'mgate-hc-')));
+  fs.writeFileSync(path.join(d, '.gitignore'), '.squad/\n');
+  g(d, 'init', '-q', '-b', 'master');
+  fs.mkdirSync(path.join(d, 'app'));
+  fs.writeFileSync(path.join(d, 'app', 'package.json'), JSON.stringify(pkg));
+  g(d, 'add', '.'); g(d, 'commit', '-q', '-m', 'suite');
+  fs.mkdirSync(path.join(d, '.squad'), { recursive: true });
+  fs.writeFileSync(path.join(d, '.squad', 'merge-gate.json'), JSON.stringify({ state: health, failing: health === 'red' ? ['seeded-red'] : [] }));
+  return d;
+}
+
+test('master health sweep: startup check runs the suite on base and lands the result (t_1f379c6c)', { skip: SKIP }, () => {
+  const d = repoWithSuite(GREEN_TEST, 'red');
+  const s = new S(fs.mkdtempSync(path.join(os.tmpdir(), 'mgate-hc-store-')));
+  const t = s.createTask({ title: 'anchors the sweep to this repo' });
+  const wt = ensureWorktree(d, 't_hc1');
+  s._updateTask(t.id, { worktreePath: wt.worktreePath, worktreeBranch: wt.worktreeBranch });
+  MG.checkMasterHealth(s);
+  const h = MG.readHealth(d);
+  assert.strictEqual(h.state, 'green', JSON.stringify(h).slice(0, 300));
+  assert.ok(h.lastGreenTree, 'green tree recorded');
+  const logs = s.readLogs(Infinity).filter((l) => l.kind === 'master.green');
+  assert.strictEqual(logs.length, 1, 'master.green logged exactly once');
+  assert.match(logs[0].text, /startup check/);
+
+  // red base: the sweep surfaces a deduped P0 fix task (same sweep, failing suite)
+  const d2 = repoWithSuite(RED_TEST, 'unknown');
+  const s2 = new S(fs.mkdtempSync(path.join(os.tmpdir(), 'mgate-hc-store-')));
+  const t2 = s2.createTask({ title: 'anchors the sweep to this repo' });
+  const wt2 = ensureWorktree(d2, 't_hc2');
+  s2._updateTask(t2.id, { worktreePath: wt2.worktreePath, worktreeBranch: wt2.worktreeBranch });
+  MG.checkMasterHealth(s2);
+  const p0 = s2.listTasks().find((x) => x.redMaster);
+  assert.ok(p0 && p0.priority === 'P0', 'failing base creates the P0 fix task');
+  assert.strictEqual(MG.readHealth(d2).state, 'red', 'red recorded');
+});
