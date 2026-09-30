@@ -348,7 +348,9 @@ async function startTrace(minMs) {
   const session = new inspector.Session();
   session.connect();
   const post = (m, p) => new Promise((res, rej) => session.post(m, p, (e, r) => (e ? rej(e) : res(r))));
-  const cmd = (m, p) => new Promise((res, rej) => wc.debugger.sendCommand(m, p, (e, r) => (e ? rej(e) : res(r))));
+  // Electron ≥ v12: sendCommand returns a Promise (the old 3rd-arg callback is gone — a
+  // string there is read as a debugger sessionId and the promise is dropped, hanging us).
+  const cmd = (m, p) => wc.debugger.sendCommand(m, p);
   try {
     wc.debugger.attach('1.3');
     await cmd('Profiler.enable');
