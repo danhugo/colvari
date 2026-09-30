@@ -166,6 +166,7 @@ class Orchestrator extends EventEmitter {
     super();
     this.store = store;
     this.running = false;
+    this.spawnFn = spawn; // injectable for tests (health-check spawn assertions)
     this.procs = new Map(); // nodeId -> child
     this.agents = {}; // nodeId -> {status, cost, inputTokens, outputTokens, runs, taskId}
     this.totalCost = 0;
@@ -715,7 +716,9 @@ class Orchestrator extends EventEmitter {
     try {
       if (this.store && this.store.dir) {
         const script = `try{const MG=require(${JSON.stringify(require.resolve('./merge-gate'))});const {Store}=require(${JSON.stringify(require.resolve('./store'))});MG.checkMasterHealth(new Store(${JSON.stringify(this.store.dir)}));}catch(e){}process.exit(0)`;
-        spawn(process.execPath, ['-e', script], { detached: true, stdio: 'ignore' }).unref();
+        // ELECTRON_RUN_AS_NODE: process.execPath is the Electron binary in the app; without it the
+        // '-e' child opens the 'Error launching app' dialog and the check never runs (t_1f379c6c).
+        this.spawnFn(process.execPath, ['-e', script], { detached: true, stdio: 'ignore', env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' } }).unref();
       }
     } catch {}
   }

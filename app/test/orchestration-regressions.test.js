@@ -328,3 +328,20 @@ test('(d) a guard-skipped restart leaves dispatch unpaused: the todo is picked u
   assert.equal(skips.length, 1, 'the skip is logged once, not on every poll');
   o.stop(); w.stop();
 });
+
+test('(e) startup master-health spawn runs Electron as plain node: ELECTRON_RUN_AS_NODE=1 with the env inherited (t_1f379c6c)', () => {
+  const d = tmp('squad-reg-e1-');
+  const s = new Store(path.join(d, 'p'));
+  const o = new Orchestrator(s);
+  let captured = null;
+  o.spawnFn = (cmd, args, opts) => { captured = { cmd, args, opts }; return { unref() {} }; };
+  o.start();
+  o.stop();
+  assert.ok(captured, 'start() spawns the detached master-health check');
+  assert.equal(captured.opts.env.ELECTRON_RUN_AS_NODE, '1', 'the child is forced to run-as-node (otherwise the Electron binary opens the Error launching app dialog)');
+  assert.equal(captured.opts.env.PATH, process.env.PATH, 'the inherited env survives (PATH reaches the child)');
+  assert.equal(captured.opts.detached, true, 'the health check stays detached');
+  assert.deepEqual(captured.args[0], '-e');
+  assert.match(String(captured.args[1]), /checkMasterHealth/, 'the child script runs checkMasterHealth against the store');
+  assert.match(String(captured.args[1]).replace(/\\/g, '/'), /merge-gate/, 'the child script loads the real merge-gate module');
+});
