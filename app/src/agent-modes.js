@@ -7,6 +7,7 @@
 //   workflow : the prompt starts with a user-chosen slash command / skill string (e.g. "/review"), followed by the task prompt.
 // Session: every run's session_id is recorded on the task; continueSession resumes the agent's previous session for its next task.
 
+const U = require('./usage');
 const RUN_MODES = ['single', 'goal', 'loop', 'workflow'];
 const MODE_DEFAULTS = { mode: 'single', goalCondition: '', maxIterations: 5, loopCount: 3, slashCommand: '', checkModel: 'haiku', continueSession: false };
 const MAX_ITER_CAP = 50;
@@ -102,17 +103,19 @@ function jsonIn(text) {
   const m = s.match(/\{[\s\S]*\}/); if (!m) return null;
   try { return JSON.parse(m[0]); } catch { return null; }
 }
-function parseJudge(stdout) {
+function parseJudge(stdout, ctx = {}) {
   let ev = null;
   const s = String(stdout || '').trim();
   try { ev = JSON.parse(s); } catch { const line = s.split('\n').reverse().find((l) => l.trim().startsWith('{')); try { ev = line && JSON.parse(line); } catch {} }
   if (!ev) return { met: false, unreadable: true, reason: 'checker produced no JSON', cost: 0 };
-  const cost = Number(ev.total_cost_usd) || 0;
+  const rc = U.reportedCostOf(ev, ctx); // absent ≠ $0; a $0 behind a proxy is 'model unpriced there'
+  const cost = rc.costUsd ?? 0;
+  const flags = { costKnown: rc.reported, proxyUnpriced: rc.proxyUnpriced };
   let so = ev.structured_output;
   if (!so && typeof ev.result === 'string') so = jsonIn(ev.result);
   if (so && typeof so.met === 'string' && /^(true|false)$/i.test(so.met)) so = { ...so, met: /^true$/i.test(so.met) };
-  if (!so || typeof so.met !== 'boolean') return withRaw({ met: false, unreadable: true, reason: ev.is_error ? `checker error: ${String(ev.result || ev.subtype || '').slice(0, 200)}` : 'checker answer unreadable', cost }, ev);
-  return withRaw({ met: so.met, reason: String(so.reason || ''), cost }, ev);
+  if (!so || typeof so.met !== 'boolean') return withRaw({ met: false, unreadable: true, reason: ev.is_error ? `checker error: ${String(ev.result || ev.subtype || '').slice(0, 200)}` : 'checker answer unreadable', cost, ...flags }, ev);
+  return withRaw({ met: so.met, reason: String(so.reason || ''), cost, ...flags }, ev);
 }
 
 module.exports = { taskText, workflowPrompt, isLastLoop, RUN_MODES, MODE_DEFAULTS, normalizeMode, slashPrefix, iterationPrompt, nextStep, judgeArgs, parseJudge, JUDGE_SCHEMA };

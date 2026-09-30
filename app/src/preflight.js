@@ -77,7 +77,7 @@ function evaluate(input) {
     ok, checks, error: first ? `${first.label}: ${first.detail}` : '',
     version: input.version || '', model: (init && init.model) || '', apiKeySource: init ? (init.apiKeySource ?? null) : null,
     billing: U.detectBilling(input.env || {}, init ? init.apiKeySource : undefined).source,
-    latencyMs, tokens, costUsd: result ? Number(result.total_cost_usd) || 0 : 0, turns: result ? result.num_turns || 0 : 0, exitCode: code,
+    latencyMs, tokens, costUsd: result ? (U.reportedCostOf(result, { env: input.env }).costUsd ?? 0) : 0, turns: result ? result.num_turns || 0 : 0, exitCode: code,
     at: new Date().toISOString(),
   };
 }

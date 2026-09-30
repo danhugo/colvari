@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs'); const os = require('os'); const path = require('path');
 const U = require('../src/usage');
+const L = require('../src/litellm');
 const { Store } = require('../src/store');
 const { ProjectManager } = require('../src/projects');
 const { Orchestrator } = require('../src/orchestrator');
@@ -41,8 +42,15 @@ test('canonical model aliases collapse and unknown cache/cost stay explicit', ()
   const l = U.usageLedger([a]);
   assert.equal(l.rows[0].model, 'claude-haiku-4-5');
   assert.equal(l.rows[0].cacheReadTokens, null);
-  assert.equal(l.rows[0].costSource, 'estimated');
-  assert.ok(l.rows[0].costUsd > 0);
+  assert.equal(l.rows[0].costSource, 'unknown'); // no price book: unknown, never a guessed $0
+  assert.equal(l.rows[0].costUsd, null);
+  // pre-ledger stragglers synthesize an entry at aggregate time and CAN resolve through a book
+  const book = new L.PriceBook({ overrides: { 'claude-haiku-4-5': { input_cost_per_token: 1e-6, output_cost_per_token: 5e-6 } } });
+  const straggler = { ...U.newRun({ runtime: 'claude', model: 'claude-haiku-4-5-20251001', billingSource: 'api' }), inputTokens: 1000, outputTokens: 1000 };
+  const l2 = U.usageLedger([straggler], { priceBook: book });
+  assert.equal(l2.rows[0].model, 'claude-haiku-4-5');
+  assert.equal(l2.rows[0].costSource, 'estimated');
+  assert.ok(l2.rows[0].costUsd > 0);
 });
 
 test('modelUsage result builds one ledger entry per provider/model', () => {
@@ -52,7 +60,8 @@ test('modelUsage result builds one ledger entry per provider/model', () => {
     'claude-sonnet-4-5-20250929': { inputTokens: 100, outputTokens: 20, cacheReadInputTokens: 3, cacheCreationInputTokens: 1, costUSD: 0.2, provider: 'firstParty', canonicalModel: 'claude-sonnet-4-5' },
     'claude-haiku-4-5-20251001': { inputTokens: 50, outputTokens: 10, provider: 'firstParty', canonicalModel: 'claude-haiku-4-5' },
   }, usage: { input_tokens: 150, output_tokens: 30 }, num_turns: 1 });
-  const x = U.finishRun(r, { code: 0, env: { ANTHROPIC_API_KEY: 'x' }, billingMode: 'api' });
+  const book = new L.PriceBook({ overrides: { 'claude-haiku-4-5': { input_cost_per_token: 1e-6, output_cost_per_token: 5e-6 } } });
+  const x = U.finishRun(r, { code: 0, env: { ANTHROPIC_API_KEY: 'x' }, billingMode: 'api', priceBook: book });
   assert.equal(x.ledger.length, 2);
   assert.equal(x.ledger.find((e) => e.model === 'claude-sonnet-4-5').costSource, 'reported');
   assert.equal(x.ledger.find((e) => e.model === 'claude-haiku-4-5').costSource, 'estimated');

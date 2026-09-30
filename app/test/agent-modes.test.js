@@ -45,7 +45,8 @@ test('judge args and parsing', () => {
   const a = M.judgeArgs(M.normalizeMode({ mode: 'goal', goalCondition: 'file exists' }), { title: 'T' }, 'did it');
   assert.ok(a.includes('--json-schema')); assert.ok(a.includes('--no-session-persistence'));
   assert.equal(a[a.indexOf('--model') + 1], 'haiku'); assert.match(a[1], /file exists/);
-  assert.deepStrictEqual(M.parseJudge('{"structured_output":{"met":true,"reason":"ok"},"total_cost_usd":0.002}'), { met: true, reason: 'ok', cost: 0.002 });
+  assert.deepStrictEqual(M.parseJudge('{"structured_output":{"met":true,"reason":"ok"},"total_cost_usd":0.002}'), { met: true, reason: 'ok', cost: 0.002, costKnown: true, proxyUnpriced: false });
+  assert.equal(M.parseJudge('{"structured_output":{"met":true},"total_cost_usd":0}', { env: { ANTHROPIC_BASE_URL: 'http://p/v1' } }).proxyUnpriced, true); // $0 behind a proxy: unpriced, not free
   assert.equal(M.parseJudge('{"result":"{\\"met\\":false,\\"reason\\":\\"no\\"}"}').reason, 'no');
   assert.equal(M.parseJudge('garbage').met, false); assert.equal(M.parseJudge('garbage').unreadable, true);
   const fenced = M.parseJudge(JSON.stringify({ type: 'result', result: 'Here you go:\n```json\n{"met": true, "reason": "file ok"}\n```' }));
