@@ -60,6 +60,16 @@ function pfDetail(n) {
 // into S). Same data as before — whole-project fetches and full re-renders only happen on real change.
 let lastV = null, lastVProject = null, runsChanged = true;
 const sameVersion = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+// usageStatus feeds the top-bar limits chip, the alert bell and (on the Usage tab) the discovery
+// and limits panels — one state event used to pay for it up to three times. All callers share one
+// result per second instead (t_8d586961).
+let usCache = null, usAt = 0;
+const usageStatusOnce = async () => {
+  if (usCache && Date.now() - usAt < 1000) return usCache;
+  usAt = Date.now();
+  try { usCache = await call('usageStatus'); } catch { usCache = null; }
+  return usCache;
+};
 async function refresh() {
   // Store-touching update phases in flight (see updFrozen near the self-update code): keep the last
   // known-good snapshot on screen — fetch and swap nothing; just keep the veil/chip current (status
@@ -75,26 +85,52 @@ async function refresh() {
     const p = await call('listProjects');
     if (!p.projects.some((pr) => pr.id === ctx.p)) ctx = { p: p.projects[0].id }; // must land on global ctx before the calls below, which read it
     const since = v && lastVProject === ctx.p ? lastV : null;
-    const runsChanged = !since || since.runs !== v.runs;
-    const s = await call('getAll', since);
-    s.inbox = await call('listInbox');
-    try { s.nstat = await call('nodeStatus'); s.cross = await call('crossEdges'); }
-    catch { s.nstat = S.nstat || {}; s.cross = S.cross || []; }
+    // One batched round per state event (t_8d586961): these four snapshot calls used to run
+    // back-to-back, each a full IPC round-trip on the hot path. nodeStatus/crossEdges keep the
+    // old all-or-nothing fallback (either fails -> both keep the previous values).
+    const [s, inbox, nstat, cross] = await Promise.all([
+      call('getAll', since), call('listInbox'),
+      call('nodeStatus').catch(() => null), call('crossEdges').catch(() => null),
+    ]);
+    s.inbox = inbox;
+    s.nstat = nstat && cross ? nstat : (S.nstat || {});
+    s.cross = nstat && cross ? cross : (S.cross || []);
     ctx.t = s.teamId;
     if (bootTeam && ctx.t) { bootTeam = false; sel.chatTeam = sel.boardTeam = ctx.t; } // boot: follow the sidebar team (t_ce954427) — boot never goes through switchTo(); empty ctx.t keeps the flag for a later refresh
     P = p; S = { ...S, ...s };
     lastV = s.v || v; lastVProject = ctx.p;
+    runsChanged = !since || since.runs !== v.runs; // (assigns the module flag — a shadowing const here made every refresh reload runs.json)
   } catch (e) {
     ctx = prevCtx; console.warn('refresh failed, keeping previous data', e); return;
   }
   if (runsChanged) await loadRuns(); // runs.json (796KB) is re-read only when its file actually changed
-  await loadLogs(ctx.p); await loadSelfUpdate(); await loadCoreState();
+  await Promise.all([loadLogs(ctx.p), loadSelfUpdate(), loadCoreState()]); // three independent round-trips, overlapped
   syncRtu(); // banner follows the snapshot across reloads / missed pushes
   try { localStorage.setItem('ctx', JSON.stringify(ctx)); } catch {}
   renderAll();
 }
 const nodeName = (id) => (S.allNodes.find((n) => n.id === id) || {}).name || (id ? id : 'unassigned');
-function renderAll() { renderSidebar(); renderGraph(); renderPreflightBar(); renderNodeForm(); renderBoard(); renderWiki(); renderObs(); renderSettings(); renderHeader(); renderSelfUpdate(); renderAlerts(); renderUsage(); renderOverview(); renderInbox(); renderGuide(); renderChat(); }
+// Tab-scoped rendering (t_8d586961): renderAll draws the always-visible chrome plus ONLY the
+// active tab's heavy view. Hidden tabs stay stale and are redrawn when activated — the team /
+// wiki / settings / inbox views simply rebuild, while board / obs / usage / overview / chat have
+// their render signature reset by the activation click (TAB_RESIG below). Same pixels on screen;
+// state events stop paying for the tabs you cannot see.
+const TAB_VIEW = {
+  team: () => { renderGraph(); renderNodeForm(); },
+  board: renderBoard,
+  wiki: renderWiki,
+  obs: () => { renderObs(); renderLog(); },
+  usage: renderUsage,
+  overview: renderOverview,
+  settings: renderSettings,
+  inbox: renderInbox,
+  chat: renderChat,
+};
+function renderAll() {
+  renderSidebar(); renderPreflightBar(); renderHeader(); renderSelfUpdate(); renderAlerts(); renderGuide();
+  const view = TAB_VIEW[((document.querySelector('.tab.active') || {}).id || '').slice(4)];
+  if (view) view();
+}
 const fmtTok = (n) => { n = n || 0; return n >= 1e6 ? (n / 1e6).toFixed(2) + 'M' : n >= 1e4 ? (n / 1e3).toFixed(1) + 'k' : String(n); };
 const COST_NOTE = { subscription: 'Covered by subscription — not billed per token', other: 'API-equivalent (reported by Claude CLI)' };
 const VENDOR = { claude: 'Claude', codex: 'Codex', opencode: 'OpenCode' };
@@ -432,14 +468,21 @@ $('#importfile').onchange = act(async (e) => {
 // ---------- tabs ----------
 // Every element with data-tab switches tabs — the header nav, the sidebar Inbox row and the
 // Settings gear all share the one active-state treatment (t_db67859d).
+// A freshly shown heavy section must draw once even if nothing changed while it was hidden:
+// activation resets its render signature (t_9315f18a; extended to every tab, t_8d586961). The
+// team/wiki/settings/inbox views have no signature — renderAll rebuilds them whenever shown.
+const TAB_RESIG = {
+  board: () => { boardSig = null; },
+  obs: () => { logSig = null; obsSig = null; },
+  usage: () => { usageSig = null; },
+  overview: () => { ovSig = null; },
+  chat: () => { chatSig = null; },
+};
 document.querySelectorAll('button[data-tab]').forEach((b) => b.onclick = () => {
   document.querySelectorAll('button[data-tab]').forEach((x) => x.classList.toggle('active', x === b));
   document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.id === 'tab-' + b.dataset.tab));
-  // Hidden heavy sections skip rendering (t_9315f18a); a freshly shown one must draw once even
-  // if nothing changed since it was last hidden. renderLog is not part of renderAll — call it here.
-  if (b.dataset.tab === 'board') boardSig = null; else if (b.dataset.tab === 'obs') { logSig = null; obsSig = null; } else if (b.dataset.tab === 'usage') usageSig = null;
+  (TAB_RESIG[b.dataset.tab] || (() => {}))();
   renderAll();
-  if (b.dataset.tab === 'obs') renderLog();
 });
 
 // ---------- header ----------
@@ -929,6 +972,7 @@ function edgeGeom(a, b, off, obs = [], seed = 0) {
 }
 const overlaps = (r, q) => r.x < q.x + q.w && q.x < r.x + r.w && r.y < q.y + q.h && q.y < r.y + r.h;
 function renderGraph() {
+  if (!$('#tab-team').classList.contains('active')) return; // hidden tab: redrawn on activation (renderAll / TAB_RESIG)
   const svg = $('#graph'); svg.innerHTML = ''; buildView();
   if (vpTeam !== ctx.t) { vpTeam = ctx.t; vpCount = 0; } // first open always re-fits (once visible, see below) — a persisted viewport can be stale (tiny/panned away)
   const defs = el('defs', {}, svg);
@@ -1182,6 +1226,7 @@ $('#delsel').onclick = async () => {
   sel.node = sel.edge = null; refresh();
 };
 function renderNodeForm() {
+  if (!$('#tab-team').classList.contains('active')) return; // hidden tab: redrawn on activation (renderAll)
   const f = $('#nodeform'); const n = S.team.nodes.find((x) => x.id === sel.node);
   f.classList.toggle('hidden', !n && !S.team.edges.some((x) => x.id === sel.edge)); // collapse the help panel when nothing is selected
   if (!n) {
@@ -1457,7 +1502,7 @@ const fakeAlerts = (n) => Array.from({ length: n }, (_, i) => {
     action: t.id ? { label: 'Open task', op: 'open-task', arg: t.id } : null };
 });
 async function renderAlerts() {
-  let limits = null; try { limits = await call('usageStatus'); } catch {}
+  const limits = await usageStatusOnce(); // shared per-second fetch (see usageStatusOnce)
   const stalls = S.allNodes.map((n) => ({ id: n.id, st: stallState(n.id) })).filter((x) => x.st && x.st.state === 'recovery_failed');
   const paused = rtu ? (rtu.agents ? rtu.agents.length : S.team.nodes.filter((n) => rtuFor(n.id)).length) : 0;
   const all = Alerts.collect({
@@ -1835,12 +1880,18 @@ renderLogLevelChips();
 // (the live tail) shrinks the window again so streaming keeps the DOM bounded.
 const LOG_PAGE = 200;
 let logWin = LOG_PAGE;
+// Monotonic sequence for streamed lines + cursor of what the log DOM already shows: appendLogTail
+// (below) fast-appends lines with _seq past the cursor instead of rebuilding the window.
+let logSeq = 0, logTailSeq = 0, logTailAt = 0;
 $('#log').addEventListener('scroll', () => { const box = $('#log');
   if (box.scrollTop < 80 && renderLog.total > logWin) { logWin += LOG_PAGE; renderLog(); }
   else if (box.scrollTop + box.clientHeight >= box.scrollHeight - 20 && logWin > LOG_PAGE) { logWin = LOG_PAGE; renderLog(); } });
+// Signature of exactly what the log DOM shows — shared by the full render and the fast-append
+// path, so a redundant renderLog after an append early-returns.
+const logKey = () => [ctx.p, logs.length, (logs[logs.length - 1] || {}).at, logWin, $('#logfilter').value, $('#logsearch').value, [...logLevels].join(), sel.logTeam, logsLoaded.has(ctx.p)].join('|');
 function renderLog() {
   if (!$('#tab-obs').classList.contains('active')) return;
-  const lkey = [ctx.p, logs.length, (logs[logs.length - 1] || {}).at, logWin, $('#logfilter').value, $('#logsearch').value, [...logLevels].join(), sel.logTeam, logsLoaded.has(ctx.p)].join('|');
+  const lkey = logKey();
   if (lkey === logSig) return; logSig = lkey;
   const f = $('#logfilter').value; const q = ($('#logsearch').value || '').trim().toLowerCase();
   const teamIds = sel.logTeam ? new Set(logTeamNodes().map((n) => n.id)) : null;
@@ -1857,6 +1908,9 @@ function renderLog() {
   }
   renderLog.total = rows.length;
   const page = Chat.pageOf(rows, logWin);
+  renderLog.winItems = page.items.length;
+  logTailAt = rows.length ? rows[rows.length - 1].at : 0;
+  logTailSeq = logSeq;
   const empty = teamIds && !all.length ? 'No messages for this team.' : (all.length ? 'No log lines match your filter.' : 'No activity yet — run the team to see agent logs here.');
   const older = page.hidden ? `<button id="log-older" class="olderbar linklike">↑ ${page.hidden} earlier line${page.hidden === 1 ? '' : 's'} — scroll up or click to load</button>` : '';
   box.innerHTML = rows.length ? (hiddenInfo ? `<p class="muted logempty">${hiddenInfo} info line(s) hidden by the level filter — showing all. <button id="log-showall" class="linklike">Show all</button></p>` : '') + older +
@@ -2112,7 +2166,7 @@ function discoverySnapshot() {
 async function renderDiscovery() {
   const box = $('#us-discovery'); if (!box) return;
   const snap = discoverySnapshot();
-  let st; try { st = await call('usageStatus'); } catch { st = null; }
+  const st = await usageStatusOnce();
   const cnt = (n) => n > 0 ? String(n) : '—';
   const reason = (!st || (!st.fiveHour.limit && !st.weekly.limit)) ? await noLimitDataReason() : null;
   const limPart = (label, u) => {
@@ -2145,8 +2199,7 @@ function usageLimitBar(label, u, fmt) {
     <small class="${cls === 'ok' ? 'muted' : 'warn'}">${pct}% used${u.pause ? ' — limit reached' : u.warn ? ' — approaching limit' : ''}</small></div>`;
 }
 async function renderUsageLimits() {
-  const lim = S.settings.usageLimits || {}; let st;
-  try { st = await call('usageStatus'); } catch { st = null; }
+  const lim = S.settings.usageLimits || {}; const st = await usageStatusOnce();
   const money = (v) => '$' + (v || 0).toFixed(2);
   // The top bar names only the worst provider; this tab lists every provider's windows (same chips).
   const provs = limitProviders(st);
@@ -2518,7 +2571,7 @@ $('#ov-task').onchange = renderOverview;
   w.addEventListener('pointerdown', (ev) => { if (ev.button !== 0 || ev.target.closest('.node')) return; d = { x: ev.clientX, y: ev.clientY, l: w.scrollLeft, t: w.scrollTop }; w.classList.add('panning'); w.setPointerCapture(ev.pointerId); });
   w.addEventListener('pointermove', (ev) => { if (d) { w.scrollLeft = d.l - (ev.clientX - d.x); w.scrollTop = d.t - (ev.clientY - d.y); } });
   const end = () => { d = null; w.classList.remove('panning'); }; w.addEventListener('pointerup', end); w.addEventListener('pointercancel', end); }
-document.querySelector('#tabs button[data-tab=overview]').addEventListener('click', () => setTimeout(() => { ovSig = null; renderOverview(); }));
+// Overview activation (sig reset + first draw) goes through the shared tab-click handler (TAB_RESIG).
 setInterval(renderOverview, 1000);
 
 // ---------- chat: #company room, task threads, working indicator, composer ----------
@@ -2671,7 +2724,7 @@ $('#chat-input').addEventListener('keydown', (e) => {
   else if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); act(chatSend)(); }
 });
 $('#chat-send').onclick = act(chatSend);
-document.querySelector('#tabs button[data-tab=chat]').addEventListener('click', () => setTimeout(() => { chatSig = null; renderChat(); }));
+// Chat activation (sig reset + first draw) goes through the shared tab-click handler (TAB_RESIG).
 // Chat team scope (t_1158f757): one select in the header, left of the typing indicator; index.html
 // is out of scope for this task so the control is injected here.
 document.querySelector('#tab-chat .chat-head .spacer').insertAdjacentHTML('beforebegin', '<select id="chatteam" title="Scope #company to one team, or show all teams"></select>');
@@ -2767,7 +2820,45 @@ const onRtuPush = (d) => { if (d && d.projectId && d.projectId !== ctx.p) return
 const onRtaPush = (d) => { if (d && d.projectId && d.projectId !== ctx.p) return; clearRtu(d && d.runtime); };
 squad.on('runtime-unavailable', onRtuPush); squad.on('runtimeUnavailable', onRtuPush);
 squad.on('runtime-available', onRtaPush); squad.on('runtimeAvailable', onRtaPush);
-squad.on('log', (l) => { logs.push(l); if (logs.length > 8000) logs.splice(0, 1000); renderLog(); renderLive(); });
+// Streamed log lines (t_8d586961): pushes arrive one per tool event; a full renderLog per line
+// rebuilt the whole window each time (~56ms at profile sizes). Coalesce to one flush per frame
+// and, while the view is pinned to the live tail with trivial filters, append only the new rows.
+let logFlushQueued = false;
+function scheduleLogRender() {
+  if (logFlushQueued) return; logFlushQueued = true;
+  let fired = false; const flush = () => { if (fired) return; fired = true; logFlushQueued = false; flushLogTail(); };
+  requestAnimationFrame(flush);
+  setTimeout(flush, 150); // rAF can starve in occluded windows; never let the tail stall
+}
+function flushLogTail() {
+  if ($('#tab-obs').classList.contains('active') && !appendLogTail()) renderLog();
+  renderLive(); // board task-detail pane follows the stream even while Obs is hidden
+}
+// Fast append path: only when the DOM is the plain live tail (no search, all levels on, no paging,
+// no subagent blocks, pinned to bottom with auto-scroll) do the new rows equal what a full render
+// would draw — append them and refresh the signature. Anything else returns false (full render).
+function appendLogTail() {
+  const box = $('#log');
+  if (!box || !renderLog.winItems) return false;
+  if ($('#logsearch').value || !['info', 'warn', 'error'].every((l) => logLevels.has(l))) return false;
+  if (box.querySelector('.logempty, .subblock, #log-older, #log-showall')) return false;
+  if (box.scrollTop + box.clientHeight < box.scrollHeight - 20 || !$('#logauto').checked) return false;
+  const f = $('#logfilter').value;
+  const teamIds = sel.logTeam ? new Set(logTeamNodes().map((n) => n.id)) : null;
+  const added = logs.filter((l) => l._seq > logTailSeq && l.projectId === ctx.p && (!teamIds || teamIds.has(l.nodeId)) && (!f || l.nodeId === f) && !l.subagentId);
+  logTailSeq = logSeq;
+  if (!added.length) { logSig = logKey(); return true; } // only filtered-out lines arrived
+  added.sort((a, b) => (a.at || 0) - (b.at || 0));
+  if (added[0].at < logTailAt) return false; // straggler older than the tail: let renderLog re-sort
+  if (renderLog.winItems + added.length > logWin) return false; // the page window would slide
+  box.insertAdjacentHTML('beforeend', added.map((l) => logRow(l)).join(''));
+  renderLog.total += added.length; renderLog.winItems += added.length;
+  logTailAt = added[added.length - 1].at;
+  logSig = logKey();
+  box.scrollTop = box.scrollHeight;
+  return true;
+}
+squad.on('log', (l) => { l._seq = ++logSeq; logs.push(l); if (logs.length > 8000) logs.splice(0, 1000); scheduleLogRender(); });
 // In-app toast for orchestrator notifications (desktop notifications are shown by the main process).
 squad.on('notify', (n) => {
   if (n.projectId && n.projectId !== ctx.p) return;
