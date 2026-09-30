@@ -252,6 +252,7 @@ class Orchestrator extends EventEmitter {
     // What this RUNNING process was built from (t_7e590e54): the merge path reads it to express
     // restartPending.count as "commits behind". It lives in meta because merges run in whichever
     // process holds the store (an agent's board server flips tasks done), not just the app.
+    this.repoDir = opts.repoDir || null; // the worktree lifecycle sweep (t_9b662983) needs it too
     if (opts.repoDir) {
       try {
         const sha = WT.headSha(opts.repoDir);
@@ -759,6 +760,12 @@ class Orchestrator extends EventEmitter {
     this._idleSince = null; this._idleReason = null;
     for (const a of Object.values(this.agents)) { a.runCost = 0; a.runTokens = 0; a.budgetStop = null; }
     this.reconcileOrphanedTasks();
+    // Worktree lifecycle sweep (t_9b662983): before any agent spawns — worktrees whose task is
+    // done/missing go away (clean + merged only; in-flight tasks are never touched) and stale
+    // git worktree entries are pruned. A busy task id list is not needed here: nothing is running.
+    try {
+      if (this.repoDir) WT.sweepWorktrees({ repoDir: this.repoDir, store: this.store, log: (r) => this.log(null, 'system', `worktree sweep: removed ${r.removed.length}, retained ${r.retained.length}`) });
+    } catch {}
     this.log(null, 'system', 'Orchestrator started');
     this.changed();
     this.tick();

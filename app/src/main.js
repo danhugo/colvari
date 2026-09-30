@@ -2530,6 +2530,8 @@ const api = {
   taskMerge: (c, id, opts) => ST(c).mergeTask(id, opts),
   taskDiscard: (c, id) => { const r = WT.worktreeDiscard(wtTask(c, id)); ST(c).updateTask(id, { worktreePath: null, worktreeBranch: null }); return r; },
   unmergedBranches: (c) => ST(c).listUnmergedBranches(),
+  // Worktree lifecycle (t_9b662983): cached worktree count + bytes for the header/settings UI.
+  getDiskUsage: (c) => WT.diskUsage(APP_ROOT),
   pickDir: async () => { const { dialog } = require('electron'); const r = await dialog.showOpenDialog(win, { properties: ['openDirectory', 'createDirectory'] }); return r.canceled ? null : r.filePaths[0]; },
   agentStates: (c) => orchFor(c.p).agentStates(),
   // Live per-node data for the graph: runtime, model, status (working|idle|needs-human).
@@ -2580,6 +2582,12 @@ app.whenReady().then(() => {
   createWindow();
   probeUnprobedAgents();
   pollInbox(true); setInterval(() => pollInbox(false), 1500);
+  // Worktree lifecycle sweep (t_9b662983): at boot (before any agent can spawn) and periodically
+  // while each project is idle — drops worktrees whose task is done/missing (clean + merged only,
+  // never a dirty or unmerged tree, never in-flight tasks) and prunes stale worktree entries.
+  const sweepWorktrees = () => { for (const p of pm.list()) { try { const o = orchs.get(p.id); if (o && o.running) continue; const r = WT.sweepWorktrees({ repoDir: APP_ROOT, store: pm.store(p.id) }); if (r.removed.length || r.retained.length) console.log('[worktrees]', JSON.stringify(r)); } catch {} } };
+  sweepWorktrees();
+  setInterval(sweepWorktrees, 10 * 60_000).unref();
   // Self-update: resume a Run interrupted by a safe restart (or roll back a bad update that fails to
   // boot). markBootOk ~15s in proves the new code booted, so a later crash is not a boot failure.
   for (const p of pm.list()) {
