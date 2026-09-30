@@ -5,6 +5,7 @@ const path = require('path');
 const procguard = (process.env.AGENTS_SQUAD_GUI_E2E || process.env.AGENTS_SQUAD_SMOKE) ? require('../test/harness/procguard').install() : null;
 const { Orchestrator, reapRunPids } = require('./orchestrator');
 const { ProjectManager, TEMPLATES, isolateTestRoot } = require('./projects');
+const { BoardCache } = require('./board-cache');
 const { pickChanged } = require('./store');
 const AC = require('./agent-config');
 const WT = require('./worktree');
@@ -2619,3 +2620,4 @@ app.whenReady().then(() => {
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });
 app.on('window-all-closed', () => { for (const o of orchs.values()) if (o.running) o.stop(); if (process.platform !== 'darwin') app.quit(); });
+app.on('will-quit', () => { try { BoardCache.closeAll(); } catch {} }); // no leaked fs.watch handles across project switches/quit

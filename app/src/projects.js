@@ -7,6 +7,7 @@ const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
 const { Store } = require('./store');
+const { BoardCache } = require('./board-cache');
 const { normalizeNode, NODE_FIELDS, EDGE_TYPES } = require('./agent-config');
 
 const rid = (p) => `${p}_${crypto.randomBytes(4).toString('hex')}`;
@@ -77,7 +78,11 @@ class ProjectManager {
     if (!this.list().length) this.create('Default', 'blank');
   }
   dir(pid) { if (!/^[\w-]+$/.test(pid || '')) throw new Error('bad project id'); return path.join(this.pdir, pid); }
-  store(pid, teamId = null) { const d = this.dir(pid); if (!fs.existsSync(path.join(d, 'project.json'))) throw new Error('no project ' + pid); return new Store(d, teamId); }
+  // Main-process Stores get the board cache by default (t_479e7290): one shared BoardCache per
+  // project dir (registry-keyed), so the throwaway-per-call Stores share its watchers. Pass
+  // {cache: false} for a plain disk Store. The board MCP server builds its Store directly and
+  // never caches. Cato (t_adeefa43): watchers must not leak per project — closeDir on remove.
+  store(pid, teamId = null, opts = {}) { const d = this.dir(pid); if (!fs.existsSync(path.join(d, 'project.json'))) throw new Error('no project ' + pid); return new Store(d, teamId, { cache: true, ...opts }); }
   get(pid) { return this.store(pid).meta(); }
   list() {
     return fs.readdirSync(this.pdir).map((d) => { try { return JSON.parse(fs.readFileSync(path.join(this.pdir, d, 'project.json'), 'utf8')); } catch { return null; } })
@@ -114,6 +119,7 @@ class ProjectManager {
   rename(pid, name) { if (!name) throw new Error('name required'); return this.saveMeta(pid, (m) => { m.name = name; }); }
   remove(pid) {
     if (this.list().length <= 1) throw new Error('cannot delete the last project');
+    BoardCache.closeDir(this.dir(pid)); // close the watchers before the dir tree is removed
     fs.rmSync(this.dir(pid), { recursive: true, force: true });
   }
 

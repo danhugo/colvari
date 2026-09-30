@@ -16,6 +16,7 @@ const pick = (o, ks) => Object.fromEntries(ks.map((k) => [k, o[k]]));
 const { normalizeNode, normalizePatch, normalizePreset, applyPreset, EDGE_TYPES, SUGGESTED_ROLES } = require('./agent-config');
 const WT = require('./worktree');
 const MG = require('./merge-gate');
+const { BoardCache } = require('./board-cache');
 
 // Bounce payload for a gate-blocked merge: failing test names + a capped output tail (#8).
 const blockPayload = (r) => `${(r.names || []).length ? (r.names || []).map((n) => '- ' + n).join('\n') : '- (test names unavailable)'}\n\ntail of the test output:\n\`\`\`\n${r.output || '(none)'}\n\`\`\``;
@@ -85,10 +86,14 @@ function sanitizeAttachments(list) {
 class Store {
   // teamId: which team graph this store edits. Without it, getTeam() returns the union of all
   // teams in the project (used by the orchestrator and MCP server: node ids are globally unique).
-  constructor(dir, teamId = null) {
+  constructor(dir, teamId = null, opts = {}) {
     this.dir = dir;
     this.teamId = teamId;
     fs.mkdirSync(dir, { recursive: true });
+    // Main-process board cache (t_479e7290): opt-in, one shared instance per project dir (the
+    // cache outlives the throwaway Store instances). The board MCP server processes construct
+    // their Store without opts and keep reading disk — the cache must never cross processes.
+    this.cache = opts.cache ? BoardCache.forStore(this, typeof opts.cache === 'object' ? opts.cache : undefined) : null;
     this.migrateUsageLedger();
     this.migrateNodeProtection();
   }
@@ -148,6 +153,7 @@ class Store {
   // Cheap change fingerprint for change-driven refreshes: 'size:mtimeMs' (or '' when absent).
   // 'board' and 'wiki' are directories in the per-file layout; their sig is every file's stat.
   sigFile(name) {
+    if ((name === 'board' || name === 'wiki') && this.cache && !this.cache.closed) return this.cache.sectionSig(name);
     if (name === 'board' || name === 'wiki') return this._sectionSig(name);
     try { const st = fs.statSync(this.file(name)); return st.size + ':' + st.mtimeMs; } catch { return ''; }
   }
@@ -207,7 +213,8 @@ class Store {
         if (fs.readFileSync(path.join(lock, 'pid'), 'utf8').trim() === String(process.pid)) break;
       } catch {}
     }
-    try { return fn(); } finally {
+    try { this._lockDepth = (this._lockDepth || 0) + 1; return fn(); } finally {
+      this._lockDepth--;
       // Remove only a lock that is still ours: a stealer that took it over wrote its own pid, and
       // deleting the dir here would pull the live lock out from under it (the old rmdir bug).
       let ours = true;
@@ -314,16 +321,21 @@ class Store {
     h[path.basename(file)] = this._sha256(data);
     this._saveHashes(h);
   }
-  // Callers hold the .lock (all writes happen inside _withTasks/_migrate/withLock).
+  // Callers hold the .lock (all writes happen inside _withTasks/_migrate/withLock). Writes are
+  // tmp+fsync+rename (atomic), serialized by the lock — the per-key write queue Cato asked for is
+  // the lock itself. Write-through: the main-process cache gets the same bytes before the watcher
+  // echo arrives, so the echo is a hash no-op (never a duplicate delta).
   _writeTask(t) {
     const data = JSON.stringify(t, null, 2) + '\n';
     this._writeFileSync(this.taskFile(t.id), data);
     this._recordHash(t.id + '.json', data);
+    if (this.cache && !this.cache.closed) this.cache.noteTaskPut(t, data);
   }
   _unlinkTask(tid) {
     try { fs.unlinkSync(this.taskFile(tid)); } catch {}
     const h = this._readHashes();
     if (h && h[tid + '.json']) { delete h[tid + '.json']; this._saveHashes(h); }
+    if (this.cache && !this.cache.closed) this.cache.noteTaskDelete(tid);
   }
   _taskFiles() { try { return fs.readdirSync(this.tasksDir()).filter((f) => !f.startsWith('.') && f.endsWith('.json')).sort(); } catch { return []; } }
   // Readers race writers by design (agents cat/jq these files directly), so any single file may
@@ -332,6 +344,7 @@ class Store {
   // Read-modify-write over the whole task set under ONE lock hold. fn mutates the array in place
   // (push/splice/field edits); tasks whose JSON changed are rewritten, removed ids unlinked.
   _withTasks(fn) {
+    if (this.cache && !this.cache.closed) this.cache.prewarm();
     this._ensureBoard();
     return this.withLock(() => {
       const tasks = this._taskFiles().map((f) => this._readTaskFile(f)).filter(Boolean);
@@ -556,6 +569,9 @@ class Store {
 
   // ---- board ----
   listTasks(filter = {}) {
+    // Cached path (t_479e7290): warm reads are pure memory. The cache loads + migrates once per
+    // project dir; this per-call _ensureBoard is only for uncached (MCP/scripts) Stores.
+    if (this.cache && !this.cache.closed) return this.cache.listTasks(filter);
     this._ensureBoard();
     let ts = this._taskFiles().map((f) => this._readTaskFile(f)).filter(Boolean)
       .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)) || String(a.id).localeCompare(String(b.id)));
@@ -563,7 +579,10 @@ class Store {
     if (filter.assignee) ts = ts.filter((t) => t.assignee === filter.assignee);
     return ts;
   }
-  getTask(tid) { this._ensureBoard(); return this._readTaskFile(tid + '.json') || undefined; }
+  getTask(tid) {
+    if (this.cache && !this.cache.closed) return this.cache.getTask(tid);
+    this._ensureBoard(); return this._readTaskFile(tid + '.json') || undefined;
+  }
   createTask({ title, description = '', assignee = null, createdBy = 'human', parentId = null, blockedBy = [], priority, attachments = null }) {
     if (!title) throw new Error('title required');
     const now = new Date().toISOString();
@@ -833,6 +852,7 @@ class Store {
     return { slug, author: author || '', updatedAt: updatedAt || new Date().toISOString(), hash: this._sha256(data) };
   }
   listWiki() {
+    if (this.cache && !this.cache.closed) return this.cache.listWiki();
     this._ensureWiki();
     const idx = this._readWikiIndex();
     // .md files with no index entry were dropped there out-of-band: adopt (never silently drop).
@@ -862,15 +882,18 @@ class Store {
   readWiki(title) { return this.listWiki()[title] || null; }
   writeWiki(title, content, author = 'human') {
     if (!title) throw new Error('title required');
+    if (this.cache && !this.cache.closed) this.cache.prewarm();
     this._ensureWiki();
     return this.withLock(() => {
       const idx = this._readWikiIndex();
       idx[title] = this._writeWikiPage(title, content, author, new Date().toISOString());
       this._saveWikiIndex(idx);
+      if (this.cache && !this.cache.closed) this.cache.noteWikiSync(idx[title].slug);
       return { title, content, author, updatedAt: idx[title].updatedAt };
     });
   }
   deleteWiki(title) {
+    if (this.cache && !this.cache.closed) this.cache.prewarm();
     this._ensureWiki();
     this.withLock(() => {
       const idx = this._readWikiIndex();
@@ -878,6 +901,7 @@ class Store {
       delete idx[title];
       this._saveWikiIndex(idx);
       if (e) { try { fs.unlinkSync(path.join(this.wikiDir(), e.slug + '.md')); } catch {} }
+      if (this.cache && !this.cache.closed) this.cache.noteWikiSync(e ? e.slug : null);
     });
   }
   // Page list without body content, newest first: [{title, author, updatedAt}].
