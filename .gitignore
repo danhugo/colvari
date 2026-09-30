@@ -1,4 +1,6 @@
-node_modules/
+# node_modules: no trailing slash on purpose — a worktree's shared node_modules is a SYMLINK,
+# and the slash form only matches directories, so the link would show as untracked dirt.
+node_modules
 app/e2e-shots/
 .squad/
 helpycode.json
