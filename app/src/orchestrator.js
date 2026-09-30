@@ -432,6 +432,10 @@ class Orchestrator extends EventEmitter {
     if (live) { a.pendingHuman.push(m); this.log(nodeId, 'system', `✉ human message queued; interrupting to deliver: ${m.text.slice(0, 200)}`); this.procs.get(nodeId).kill('SIGTERM'); }
     else this.log(nodeId, 'system', `✉ human message stored in inbox: ${m.text.slice(0, 200)}`);
     this.changed();
+    // Free signal (plan t_76da3303 C): a human message/answer to the agent also triggers ONE auto
+    // retest+resume of a stuck task (team-answers delivers ask answers through here, so both count).
+    // Fire-and-forget: this call must not wait on the preflight.
+    try { this.autoResumeStuck((this.store.getTeam().nodes.find((n) => n.id === nodeId) || {}).runtime || 'claude', 'human message', taskId || null); } catch {}
     return { ...m, delivered: live ? 'interrupt' : 'inbox' };
   }
 
@@ -1355,10 +1359,14 @@ class Orchestrator extends EventEmitter {
     // if a caller raced past its own guard.
     if (this.procs.has(node.id)) { this.log(node.id, 'error', `dispatch refused: ${node.name} already has a live run (single run per agent)`); return; }
     this.runs++;
+    // A run for this task started (dispatch, manual button, or auto resume): new stuck episode — the
+    // previous episode's one-try flag and human-stop stamp are void.
+    if (task.autoResumeTried || task.noAutoResume) this.store.updateTask(task.id, { autoResumeTried: null, noAutoResume: null });
     const reviewPickup = task.status === 'review'; // dispatched to review a hand-off: ending clean approves it
     this.store.updateTask(task.id, { status: 'in_progress' });
     const a = this.agent(node.id); a.status = 'working'; a.lastError = null; a.taskId = task.id; a.task = task.title; a.runs++; a.iteration = 1; a.reviewPickup = reviewPickup; a.wakePending = null; // the prompt carries the unread count
     this.procs.set(node.id, { kill() {} }); // reserve the slot synchronously
+    let okRuntime = null; // set when the run finishes OK: free-signal auto resume (plan t_76da3303 C)
     try {
       this.changed();
       const mcp = this.mcpConfig(node);
@@ -1501,6 +1509,10 @@ class Orchestrator extends EventEmitter {
         if (t && t.status !== 'in_progress') this.store.updateTask(task.id, { status: 'in_progress' });
       }
       const stoppedWhy = a.stopRequested; a.stopRequested = false;
+      // A human stop (stopAgent; budget stops excluded — a.budgetStop is set for those) stamps the
+      // task so the free-signal auto resume never brings it back (plan t_76da3303 C). The manual
+      // button still works: only the auto path consults the stamp.
+      if (stoppedWhy && !a.budgetStop) this.store.updateTask(task.id, { noAutoResume: true });
       a.status = 'idle'; a.taskId = null; a.task = null; a.iteration = 0; a.stall = null;
       const t = this.store.getTask(task.id);
       const gate = (st) => C.gateStatus(st, node, this.store.getSettings());
@@ -1531,6 +1543,7 @@ class Orchestrator extends EventEmitter {
       if (t2 && t2.awaitingApproval) { this.log(node.id, 'system', `⏸ "${task.title}" waits for human approval`); this.notify('Approval needed', `${node.name}: ${task.title}`, { taskId: task.id }); }
       this.log(node.id, 'system', `■ ${node.name} finished (exit ${code}, ${i} iteration(s), ${reason})`);
       this.changed();
+      if (code === 0) okRuntime = meta.runtime; // free signal below fires after the slot is released
     } catch (e) {
       a.status = 'idle'; a.taskId = null; a.task = null; a.iteration = 0; a.stall = null; a.stopRequested = false;
       this.log(node.id, 'error', `agent run crashed: ${e.message}`);
@@ -1540,6 +1553,11 @@ class Orchestrator extends EventEmitter {
       // drain waiting forever for an agent that already exited.
       this.procs.delete(node.id); this.cwds.delete(node.id);
     }
+    // Free signal (plan t_76da3303 C): a run on this runtime just finished OK — its CLI proved
+    // healthy, so ONE stuck task on the same runtime gets its single auto retest+resume try. Fired
+    // after the finally so the released slot counts in the maxConcurrency guard, and before the
+    // ticks below so the dispatched task holds its own slot before any reconcile runs.
+    if (okRuntime && this.running && !this.userStopped) { try { this.autoResumeStuck(okRuntime, 'run finished ok'); } catch {} }
     setImmediate(() => this.tick());
     setImmediate(() => this.tick());
   }
@@ -1591,6 +1609,91 @@ class Orchestrator extends EventEmitter {
   runtimeUnavailableFor(node) {
     const rt = (node && node.runtime) || 'claude';
     return !!(this.runtimeState && this.runtimeState[rt] && this.runtimeState[rt].state === 'unavailable');
+  }
+
+  // ---- stuck-task 'Retest + Resume' (t_0895a580, plan t_76da3303 B/C): one action the UI's button
+  // calls, plus the two timer-free auto triggers. A stuck task is in_progress with no live run for
+  // its assignee — the shape the UI shows as "stopped with a problem". ----
+
+  // Shared guard for both actions: validate the target, refuse anything that is not stuck-shaped.
+  _stuckTarget(taskId) {
+    const task = this.store.getTask(taskId);
+    if (!task) return { error: `no task ${taskId}` };
+    if (task.status !== 'in_progress') return { error: `task is ${task.status}, not stuck in_progress` };
+    const node = this.store.getTeam().nodes.find((n) => n.id === task.assignee);
+    if (!node) return { error: 'assignee is not on the team' };
+    return { task, node };
+  }
+
+  // 'Retest + Resume': quick CLI check (the assignee's exact config through the standard preflight),
+  // then re-dispatch the task. runTask resumes the task's own session (task.sessions) and its
+  // stale-session branch already retries ONCE from a fresh session on "Session not found" — the
+  // full base prompt and all comments are kept, so the fallback loses no context.
+  async retestAndResume(taskId) {
+    const g = this._stuckTarget(taskId);
+    if (g.error) return { ok: false, error: g.error };
+    if (this.procs.has(g.node.id)) return { ok: true, skipped: 'a run for this agent is already live' }; // never a double run
+    const pf = await this.preflight(g.node);
+    if (!pf.ok) return { ok: false, error: 'retest failed: ' + (pf.error || 'CLI check failed') };
+    return this._dispatchStuck(g.task, g.node);
+  }
+
+  // 'Rerun fresh' (the button state after a failed resume): same dispatch, but the task's stored
+  // session key is dropped first so runTask cannot resume the dead session. Prompt and comments stay.
+  rerunFresh(taskId) {
+    const g = this._stuckTarget(taskId);
+    if (g.error) return { ok: false, error: g.error };
+    if (this.procs.has(g.node.id)) return { ok: true, skipped: 'a run for this agent is already live' };
+    const sessKey = `${g.node.id}:${g.node.runtime || 'claude'}`;
+    if (g.task.sessions && g.task.sessions[sessKey]) {
+      const sessions = { ...g.task.sessions };
+      delete sessions[sessKey];
+      this.store.updateTask(taskId, { sessions });
+    }
+    this.store.commentTask(taskId, 'orchestrator', 'Manual rerun from a fresh session (resume failed). Task prompt and comments are kept.');
+    return this._dispatchStuck(this.store.getTask(taskId), g.node);
+  }
+
+  // Fire-and-forget dispatch of the stuck task + bring the Run back up if it is stopped (the same
+  // shape the runtime banner's resume uses). runTask's synchronous prefix reserves the agent slot,
+  // so the started check below is reliable. resumeFailed:true means the CLI was fine but no run
+  // could start — the UI flips its button to 'Rerun fresh' on exactly that shape.
+  _dispatchStuck(task, node) {
+    this.runTask(node, task, this.store.getTeam(), this.store.getSettings())
+      .catch((e) => this.log(node.id, 'error', 'retest resume: ' + e.message));
+    if (!this.running) this.start(); else this.tick();
+    return this.procs.has(node.id) ? { ok: true } : { ok: false, resumeFailed: true, error: 'run could not start' };
+  }
+
+  // Free-signal auto resume (plan t_76da3303 C): NO polling, NO timers — called only from
+  // sendToAgent (human message/answer to the agent) and runTask's code-0 tail (another run on the
+  // same runtime finished OK). At most ONE task per call, so a burst trigger cannot spawn a burst
+  // of CLIs. One try per stuck episode: the flag is persisted on the task BEFORE trying (a crash
+  // mid-try also counts, so an app restart cannot mint new tries) and clears when a run for the
+  // task starts or the human acts via the button. Human-stopped work never auto-resumes: the
+  // noAutoResume stamp from a human stopAgent is skipped, and so is a Run stopped by the human.
+  autoResumeStuck(runtime, why, preferTaskId = null) {
+    if (this.userStopped || this.dispatchPaused || this.budgetStop) return 0;
+    const s = this.store.getSettings();
+    if (s.maxRuns > 0 && this.runs >= s.maxRuns) return 0;
+    if (s.maxConcurrency > 0 && this.procs.size >= s.maxConcurrency) return 0;
+    const team = this.store.getTeam();
+    const stuck = this.store.listTasks()
+      .filter((t) => t.status === 'in_progress' && !t.autoResumeTried && !t.noAutoResume)
+      .filter((t) => {
+        const n = team.nodes.find((x) => x.id === t.assignee);
+        if (!n || (n.runtime || 'claude') !== runtime || this.runtimeUnavailableFor(n)) return false;
+        const a = this.agents[t.assignee];
+        return !this.procs.has(t.assignee) && !(a && (a.taskId === t.id || a.stopRequested || a.budgetStop));
+      })
+      .sort((x, y) => ((y.id === preferTaskId) ? 1 : 0) - ((x.id === preferTaskId) ? 1 : 0));
+    const t = stuck[0];
+    if (!t) return 0;
+    const node = team.nodes.find((n) => n.id === t.assignee);
+    this.store.updateTask(t.id, { autoResumeTried: new Date().toISOString() });
+    this.log(node.id, 'system', `↻ auto retest+resume for "${t.title}" (${why}); one try per stuck episode`);
+    this.retestAndResume(t.id).catch((e) => this.log(node.id, 'error', 'auto resume: ' + e.message));
+    return 1;
   }
 
   mcpConfig(node) { return { mcpServers: { board: { type: 'stdio', command: process.execPath, args: [MCP_SERVER, '--project', this.store.dir, '--node', node.id], env: { ELECTRON_RUN_AS_NODE: '1' } } } }; }

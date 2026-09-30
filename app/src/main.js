@@ -2190,6 +2190,9 @@ const api = {
   // Runtime breaker resume (t_419062e2): clears the unavailable state and re-dispatches the queued
   // tasks. Throws the reason on failure — the renderer shows it inline in the banner.
   resumeRuntime: (c, runtime) => orchFor(c.p).resumeRuntime(runtime),
+  // Stuck-task action (t_0895a580): the renderer's 'Retest + Resume' / 'Rerun fresh' buttons
+  // (t_747e0d1e). Returns {ok, skipped?|resumeFailed?, error?}; resumeFailed flips the button state.
+  retestAndResume: (c, id) => orchFor(c.p).retestAndResume(id), rerunFresh: (c, id) => orchFor(c.p).rerunFresh(id),
   getSelfUpdateStatus: (c) => ({ ...watcherFor(c.p).status(), devMode: DEV_MODE }),
   setAutoRestart: (c, on) => { if (DEV_MODE) ST(c).saveSettings({ autoRestart: !!on }); return { ...watcherFor(c.p).status(), devMode: DEV_MODE }; },
   restartSelfUpdate: (c) => { watcherFor(c.p).restartNow(); return { ...watcherFor(c.p).status(), devMode: DEV_MODE }; },
