@@ -2602,11 +2602,14 @@ async function chatSend() {
   if (chatAtts.some((a) => !a.path)) return; // blocked until every chip saved (a failed chip must be removed first)
   const atts = chatAtts.length ? chatAtts.map(({ path, name, mime, size }) => ({ path, name, mime, size })) : null;
   const head = () => (S.team.nodes.find((n) => isLeadRole(n.role)) || S.team.nodes[0] || {}).id; // composer's core agent
-  if (p.kind === 'task') { await call('createTask', { title: p.text.slice(0, 80), description: p.text, assignee: p.nodeId || head(), ...(atts ? { attachments: atts } : {}) }); if (!S.orch.running) await call('run'); }
-  else if (p.kind === 'message') await call('sendToAgent', p.nodeId || head(), p.text, ...(atts ? [null, { attachments: atts }] : []));
+  const draft = i.value; i.value = ''; chatPreview(); // clear on press, not after the bridge answers (t_ada3fae8)
+  try {
+    if (p.kind === 'task') { await call('createTask', { title: p.text.slice(0, 80), description: p.text, assignee: p.nodeId || head(), ...(atts ? { attachments: atts } : {}) }); if (!S.orch.running) await call('run'); }
+    else if (p.kind === 'message') await call('sendToAgent', p.nodeId || head(), p.text, ...(atts ? [null, { attachments: atts }] : []));
+  } catch (err) { i.value = draft; chatPreview(); throw err; } // send failed: hand the draft back
   for (const a of chatAtts) if (a.url) URL.revokeObjectURL(a.url);
   chatAtts.length = 0; renderChatAtts();
-  i.value = ''; chatPreview(); chatSig = null; refresh();
+  chatSig = null; refresh();
 }
 $('#chat-input').addEventListener('input', chatPreview);
 $('#chat-input').addEventListener('keydown', (e) => {
