@@ -273,9 +273,12 @@ test('orchestrator: an unrelated failed run with a stale resume is not retried f
   s.updateTask(t.id, { sessions: { [`${n.id}:claude`]: 'stale-1' } });
   const o = new Orchestrator(s); o.running = true;
   await o.runTask(s.getTeam().nodes.find((x) => x.id === n.id), s.getTask(t.id), s.getTeam(), s.getSettings());
-  assert.equal(readCalls(argsLog).length, 1, 'no fresh retry for unrelated failures');
+  assert.equal(readCalls(argsLog).length, 1, 'no fresh retry within the run for unrelated failures');
   const after = s.getTask(t.id);
-  assert.equal(after.status, 'review');
-  assert.equal(after.parkedForHuman, true);
+  // crash→todo (t_829d0220): the failed run bounces the task back to the queue for a fresh
+  // dispatch (a NEW run, not an in-run resume retry) instead of parking it as reviewable work.
+  assert.equal(after.status, 'todo');
+  assert.ok(!after.parkedForHuman);
+  assert.ok(after.comments.some((c) => /crashed: exit code 1/.test(c.text)), 'the crash is commented');
   assert.equal(after.sessions[`${n.id}:claude`], 'stale-1', 'the stored key survives for a same-session stall recovery');
 });

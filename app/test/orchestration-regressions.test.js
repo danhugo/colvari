@@ -345,3 +345,99 @@ test('(e) startup master-health spawn runs Electron as plain node: ELECTRON_RUN_
   assert.match(String(captured.args[1]), /checkMasterHealth/, 'the child script runs checkMasterHealth against the store');
   assert.match(String(captured.args[1]).replace(/\\/g, '/'), /merge-gate/, 'the child script loads the real merge-gate module');
 });
+
+// A runtime that exits nonzero without ever printing a result (a crash): the task must go back to
+// todo so the board shows it as re-runnable work, not a fake review hand-off (t_829d0220).
+const crashClaude = (dir) => {
+  const f = path.join(dir, 'fake-claude.sh');
+  fs.writeFileSync(f, '#!/bin/sh\nexit 1\n');
+  fs.chmodSync(f, 0o755); return f;
+};
+
+test('(f) crashed run: agent exits nonzero without setting status -> task back to todo with a crashed comment (t_829d0220)', async (tt) => {
+  const d = tmp('squad-reg-f1-');
+  const fake = crashClaude(d);
+  const s = new Store(path.join(d, 'p')); s.saveSettings({ claudePath: fake, maxConcurrency: 1, maxRuns: 1 });
+  const a = s.addNode({ name: 'A', role: 'Dev' });
+  const task = s.createTask({ title: 'will crash', assignee: a.id });
+  const o = new Orchestrator(s);
+  tt.after(() => o.stop());
+  o.start();
+  await waitFor(() => ['review', 'todo', 'done'].includes(s.getTask(task.id).status) && s.getTask(task.id).comments.some((c) => /crashed: exit code 1/.test(c.text)) || s.readLogs(Infinity).some((l) => /maxRuns/.test(l.text)));
+  await sleep(100); // let the end-of-run bookkeeping settle
+  const t = s.getTask(task.id);
+  assert.equal(t.status, 'todo', 'a crashed run bounces the task back to todo (was: review with parkedForHuman)');
+  assert.ok(t.comments.some((c) => /crashed: exit code 1/.test(c.text)), 'the crash is commented on the task: ' + JSON.stringify(t.comments.map((c) => c.text)));
+  assert.ok(!t.parkedForHuman, 'a first crash does not park the task');
+});
+
+test('(g) crash loop capped: third crash parks the task for a human instead of re-queuing forever (t_829d0220)', async (tt) => {
+  const d = tmp('squad-reg-g2-');
+  const fake = crashClaude(d);
+  const s = new Store(path.join(d, 'p')); s.saveSettings({ claudePath: fake, maxConcurrency: 1, maxRuns: 3 });
+  const a = s.addNode({ name: 'A', role: 'Dev' });
+  const task = s.createTask({ title: 'crashes every time', assignee: a.id });
+  const o = new Orchestrator(s);
+  o.nudgeIdle = () => {}; // an idle-nudge wake run would steal one of the 3 runs the cap needs
+  tt.after(() => o.stop());
+  o.start();
+  await waitFor(() => s.getTask(task.id).status === 'review' && s.getTask(task.id).parkedForHuman, 20000);
+  const t = s.getTask(task.id);
+  assert.equal(t.status, 'review', 'after the crash limit the task parks in review');
+  assert.ok(t.parkedForHuman, 'the parked task waits for a human, never auto-dispatched');
+  assert.equal(t.comments.filter((c) => /crashed: exit code 1/.test(c.text)).length, 3, 'each crash left its comment');
+});
+
+// P0 stuck sweep (t_829d0220): the ONE alert rule — a P0 in todo that nobody can take (no assignee,
+// or its agent mid-run elsewhere) surfaces as a PM task, at most one OPEN alert per stuck P0.
+test('(h) P0 stuck sweep: one PM task per stuck P0, re-raised after the PM closes it (t_829d0220)', async (tt) => {
+  const d = tmp('squad-reg-h1-');
+  const fake = quickClaude(d);
+  const s = new Store(path.join(d, 'p')); s.saveSettings({ claudePath: fake, maxConcurrency: 0, maxRuns: 5 });
+  const pm = s.addNode({ name: 'PM', role: 'PM' });
+  const dev = s.addNode({ name: 'Dev', role: 'Dev' });
+  const p0 = s.createTask({ title: 'unassigned P0', priority: 'P0' });
+  const p3 = s.createTask({ title: 'low prio', assignee: dev.id });
+  const o = new Orchestrator(s);
+  tt.after(() => o.stop());
+  o.start();
+  o.dispatchPaused = true; // nothing dispatchable here would end the run after one tick; a pause keeps the sweeps alive
+  await waitFor(() => s.listTasks().some((x) => x.stuckAlertFor === p0.id));
+  await sleep(2300); // at least two more ticks: no duplicate while the alert is open
+  let alerts = s.listTasks().filter((x) => x.stuckAlertFor === p0.id);
+  assert.equal(alerts.length, 1, 'exactly one open alert per stuck P0');
+  assert.equal(alerts[0].assignee, pm.id, 'the alert is a PM task');
+  assert.equal(alerts[0].priority, 'P0', 'the alert is P0');
+  assert.ok(!s.listTasks().some((x) => x.stuckAlertFor === p3.id), 'a non-P0 task never alerts');
+
+  const free = s.createTask({ title: 'assigned but free', assignee: dev.id, priority: 'P0' });
+  await sleep(2300);
+  assert.ok(!s.listTasks().some((x) => x.stuckAlertFor === free.id), 'a P0 whose assignee is idle does not alert');
+
+  // PM closes the alert by hand; the P0 is still stuck -> the next tick raises exactly one new alert.
+  s.updateTask(alerts[0].id, { status: 'done' });
+  await waitFor(() => s.listTasks().filter((x) => x.stuckAlertFor === p0.id && x.status !== 'done').length === 1);
+  alerts = s.listTasks().filter((x) => x.stuckAlertFor === p0.id);
+  assert.equal(alerts.length, 2, 'one closed alert + exactly one new open alert');
+});
+
+test('(i) P0 stuck sweep: assignee busy on another run -> alert raised even with no PM node (t_829d0220)', async (tt) => {
+  const d = tmp('squad-reg-i1-');
+  const release = path.join(d, 'release');
+  const fake = heldClaude(d, release);
+  const s = new Store(path.join(d, 'p')); s.saveSettings({ claudePath: fake, maxConcurrency: 1 });
+  const dev = s.addNode({ name: 'Dev', role: 'Dev' });
+  const busyTask = s.createTask({ title: 'long task', assignee: dev.id });
+  const o = new Orchestrator(s);
+  tt.after(() => { try { fs.writeFileSync(release, 'go'); } catch {} o.stop(); });
+  o.start();
+  await waitFor(() => o.procs.size === 1); // dev is mid-run on the long task
+  const p0 = s.createTask({ title: 'stuck behind busy dev', assignee: dev.id, priority: 'P0' });
+  await waitFor(() => s.listTasks().some((x) => x.stuckAlertFor === p0.id), 15000);
+  const alert = s.listTasks().find((x) => x.stuckAlertFor === p0.id);
+  assert.ok(alert, 'a P0 whose assignee is busy raises the alert');
+  assert.equal(alert.assignee, null, 'no PM node -> the alert waits unassigned on the board');
+  assert.equal(s.getTask(busyTask.id).status, 'in_progress', 'the busy run is on the other task');
+  fs.writeFileSync(release, 'go');
+  await waitFor(() => o.procs.size === 0);
+});
