@@ -13,6 +13,20 @@ function branchExists(repoDir, branch) { try { git(repoDir, ['rev-parse', '--ver
 // an existing dir or symlink is never touched, so a deliberate local copy survives). Keeps new
 // worktrees hundreds of MB smaller, and the merge gate's ensureDeps already tolerates a symlink
 // (lstat). Falls back to a copy only when the symlink cannot be created (e.g. cross-device).
+// One exception (t_0fd83668): a worktree whose package.json / package-lock.json differs from the
+// main checkout (its branch adds or changes deps) must NOT share node_modules — `npm install` in
+// the worktree would write through the link into the live app's tree. Leave node_modules absent:
+// installs then land in a real local dir (the agent's own npm install, or the merge gate's
+// ensureDeps, which installs locally when the package files differ).
+function pkgDiffers(wtFile, mainFile) {
+  let a, b;
+  try { a = fs.readFileSync(wtFile); } catch { a = null; }
+  try { b = fs.readFileSync(mainFile); } catch { b = null; }
+  if (!a && !b) return false; // missing on both sides: nothing to disagree about
+  if (!a || !b) return true;
+  return !a.equals(b);
+}
+
 function linkNodeModules(repoDir, root, dir) {
   const rel = path.relative(root, repoDir);
   const pkgDir = rel ? path.join(dir, rel) : dir;
@@ -20,6 +34,8 @@ function linkNodeModules(repoDir, root, dir) {
   let st; try { st = fs.lstatSync(link); if (st) return; } catch {}
   const src = path.join(repoDir, 'node_modules');
   let dst; try { dst = fs.realpathSync(src); } catch { return; } // main checkout has none: nothing to share
+  if (pkgDiffers(path.join(pkgDir, 'package.json'), path.join(repoDir, 'package.json'))
+    || pkgDiffers(path.join(pkgDir, 'package-lock.json'), path.join(repoDir, 'package-lock.json'))) return;
   try { fs.symlinkSync(path.relative(pkgDir, dst), link, 'dir'); }
   catch (e) { if (e.code === 'EXDEV') { try { fs.cpSync(src, link, { recursive: true }); } catch {} } }
 }
@@ -214,4 +230,4 @@ async function diskUsage(repoDir, opts = {}) {
   return val;
 }
 
-module.exports = { ensureWorktree, branchExists, worktreeDiff, worktreeMerge, worktreeDiscard, unmergedSquadBranches, branchMergeState, dirtyMergeMessage, dirtyMainFiles, headSha, commitsBehind, removeWorktree, sweepWorktrees, pruneWorktrees, diskUsage, worktreeDirty };
+module.exports = { ensureWorktree, branchExists, linkNodeModules, worktreeDiff, worktreeMerge, worktreeDiscard, unmergedSquadBranches, branchMergeState, dirtyMergeMessage, dirtyMainFiles, headSha, commitsBehind, removeWorktree, sweepWorktrees, pruneWorktrees, diskUsage, worktreeDirty };
