@@ -997,3 +997,4 @@ button, .pchip, .tag, .badge, .pill, .avatar, .cchip summary, .lvchip, .asswitch
 .idlebanner.hidden { display:none; }
 .card .ctags .tag { min-width:0; max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .card b { overflow-wrap:anywhere; }
+.stuckbar button { white-space:nowrap; }
