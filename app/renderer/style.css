@@ -152,7 +152,9 @@ header { flex-wrap:nowrap; min-width:0; } header > strong, header .pill, header 
    chip and the cost pill NEVER shrink: that is the point of the fixed-size regime (t_57421101), both
    stay readable at every width. Below 1200px the brand text hides and the tab labels collapse to
    their icons instead (media rule below) rather than the pills squashing. */
-header #updst, header #runstate { min-width:0; overflow:hidden; text-overflow:ellipsis; flex-shrink:1; }
+header #updst, header #runstate, header #watchst { min-width:0; overflow:hidden; text-overflow:ellipsis; flex-shrink:1; }
+/* Restart chip: label is the elastic part, the Restart now / Cancel buttons never shrink (t_ea33cef4). */
+header #restartst { display:flex; align-items:center; min-width:0; flex-shrink:1; } header #restartst.hidden { display:none; } header #restartst .rstlbl { min-width:0; overflow:hidden; text-overflow:ellipsis; } header #restartst .rstact, header #restartst .rsterr { flex-shrink:0; }
 /* The spacer carries ALL the slack (the goal input used to absorb it): the status cluster hugs the
    right edge at every width. */
 header .spacer { flex:1 1 12px; }
@@ -368,6 +370,7 @@ header .pill { border:none; background:none; color:var(--fg-muted); font-size:va
    neighbouring chip (the "42%Codex" garble) and ellipsises its small into "U…" — so the meter is
    flex-shrink:0 and the header never squeezes it; the tab strip and brand give way instead. */
 .limitmeter .lm-part { display:flex; align-items:center; gap:5px; padding:2px 7px; border-radius:var(--radius-full); background:var(--bg-hover); color:var(--fg-secondary); white-space:nowrap; flex:0 0 auto; }
+.limitmeter button.lm-part { border:0; font:inherit; cursor:pointer; }
 .limitmeter .lm-part b { font-weight:var(--fw-semibold); }
 .limitmeter .lm-part.lm-warn { background:var(--warning-soft); color:var(--warning-text); } .limitmeter .lm-part.lm-danger { background:var(--danger-soft); color:var(--danger); }
 .limitmeter .lm-bar { width:22px; height:5px; border-radius:3px; background:var(--line); overflow:hidden; display:inline-block; flex-shrink:0; }
