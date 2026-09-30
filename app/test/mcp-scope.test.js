@@ -56,11 +56,39 @@ test('real stdio MCP server enforces scope', async () => {
   const cp = await connect(pm.id);
   try {
     const names = (await cd.listTools()).tools.map((t) => t.name).sort();
-    assert.deepEqual(names, ['ask_human', 'comment_task', 'create_task', 'list_tasks', 'list_team', 'read_messages', 'read_wiki', 'request_self_update', 'schedule_restart', 'send_message', 'update_task_status', 'write_wiki']);
+    assert.deepEqual(names, ['ask_human', 'comment_task', 'create_task', 'list_tasks', 'list_team', 'read_messages', 'read_wiki', 'reassign_task', 'request_self_update', 'schedule_restart', 'send_message', 'update_task_status', 'write_wiki']);
     const bad = await cd.callTool({ name: 'create_task', arguments: { title: 'x', assignee: pm.id } });
     assert.equal(bad.isError, true);
     const ok = await cp.callTool({ name: 'create_task', arguments: { title: 'x', assignee: dev.id } });
     assert.ok(!ok.isError);
     assert.equal(s.listTasks({ assignee: dev.id }).length, 1);
   } finally { await cd.close(); await cp.close(); }
+});
+
+test('reassign_task: PM-only, needs assign edge, refuses non-todo, keeps comments', () => {
+  const { s, pm, dev, qa } = setup();
+  s.addEdge(pm.id, qa.id);
+  const t = makeTools(s, pm.id);
+  const tk = t.create_task({ title: 'x', assignee: dev.id });
+  assert.equal(t.reassign_task({ taskId: tk.id, assignee: 'QA' }).assignee, qa.id);
+  assert.match(s.getTask(tk.id).comments.at(-1).text, /Reassigned from Dev to QA/);
+  assert.throws(() => makeTools(s, dev.id).reassign_task({ taskId: tk.id, assignee: dev.id }), /PM-only/);
+  const lone = s.addNode({ name: 'Lone', role: 'Dev' });
+  assert.throws(() => t.reassign_task({ taskId: tk.id, assignee: lone.id }), /no assign edge/);
+  s.updateTask(tk.id, { status: 'in_progress' });
+  assert.throws(() => t.reassign_task({ taskId: tk.id, assignee: dev.id }), /only todo/);
+});
+
+test('list_tasks sorts by assignee then priority; read_messages defaults to unread + limit', () => {
+  const { s, pm, dev } = setup();
+  const t = makeTools(s, pm.id);
+  t.create_task({ title: 'low', assignee: dev.id, priority: 'P3' });
+  t.create_task({ title: 'urgent', assignee: dev.id, priority: 'P0' });
+  assert.deepEqual(t.list_tasks().map((x) => x.title), ['urgent', 'low']);
+  for (let i = 0; i < 3; i++) s.sendMessage({ from: pm.id, to: dev.id, text: 'm' + i });
+  const d = makeTools(s, dev.id);
+  assert.deepEqual(d.read_messages({ limit: 2 }).map((m) => m.text), ['m1', 'm2']);
+  assert.equal(d.read_messages().length, 1); // m0 still unread; m1, m2 were marked read
+  assert.equal(d.read_messages().length, 0);
+  assert.equal(d.read_messages({ unreadOnly: false }).length, 3);
 });
