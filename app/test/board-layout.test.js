@@ -161,3 +161,11 @@ test('agent prompt tells the agent where board and wiki files live', () => {
   assert.match(p, /\.squad\/board\/tasks/, 'prompt must mention the per-task file dir');
   assert.match(p, /\.squad\/wiki/, 'prompt must mention the wiki dir');
 });
+
+// t_95f4c836: long tag chips must clip with an ellipsis and carry a title tooltip.
+test('tag chips ellipsize and have title tooltips', () => {
+  const css = fs.readFileSync(path.join(__dirname, '../renderer/style.css'), 'utf8');
+  assert.match(css, /\.ctags \.tag \{[^}]*text-overflow:ellipsis/);
+  const js = fs.readFileSync(path.join(__dirname, '../renderer/app.js'), 'utf8');
+  assert.equal(/<span class="tag (live|ready|approval|elsewhere|noworker|blocked|rstwait)"(?! title)/.test(js), false);
+});

@@ -1668,13 +1668,13 @@ function renderBoard() {
       const busyOther = ip && busy && !live;
       const noWorker = ip && t.assignee && !busy;
       const ready = !bl.length && ['todo', 'backlog'].includes(t.status);
-      const tags = [live ? '<span class="tag live">live</span>' : '',
+      const tags = [live ? '<span class="tag live" title="live">live</span>' : '',
         busyOther ? `<span class="tag elsewhere" title="${esc(nodeName(t.assignee))} is working on ${esc(taskTitle(w.taskId))}">working elsewhere</span>` : '',
         noWorker ? `<span class="tag noworker" title="in_progress but no live agent process for ${esc(nodeName(t.assignee))}">No worker</span>` : '',
         stallTag(t),
         rstGated(t) ? `<span class="tag rstwait" title="held back by the restart gate${rst.scheduledAfter ? ` — starts after the core restart (after ${esc(shortTaskId(rst.scheduledAfter))})` : ' — starts after the core restarts'}">waits for restart</span>` : '',
-        bl.length ? `<span class="tag blocked" title="waits for: ${esc(bl.map(taskTitle).join(', '))}">Blocked by ${esc(taskTitle(bl[0]).slice(0, 28))}${bl.length > 1 ? ` +${bl.length - 1}` : ''}</span>` : ready ? '<span class="tag ready">Ready</span>' : '',
-        t.awaitingApproval ? '<span class="tag approval">needs approval</span>' : ''].join('');
+        bl.length ? `<span class="tag blocked" title="waits for: ${esc(bl.map(taskTitle).join(', '))}">Blocked by ${esc(taskTitle(bl[0]).slice(0, 28))}${bl.length > 1 ? ` +${bl.length - 1}` : ''}</span>` : ready ? '<span class="tag ready" title="Ready">Ready</span>' : '',
+        t.awaitingApproval ? '<span class="tag approval" title="needs approval">needs approval</span>' : ''].join('');
       const snippet = String(t.description || '').replace(/\s+/g, ' ').trim();
       return `<div class="card ${sel.task === t.id ? 'sel' : ''}${t.awaitingApproval ? ' approval' : ''}" data-id="${t.id}"><b>${esc(t.title)}</b>${snippet && snippet !== t.title ? `<span class="cdesc" title="${esc(snippet)}">${esc(clipText(snippet, 100))}</span>` : ''}${tags ? `<span class="ctags">${tags}</span>` : ''}<small class="cmeta">${priorityBadge(t)}${t.assignee ? `<span class="avatar sm" style="background:${who(t.assignee).color}" title="${esc(nodeName(t.assignee))}">${esc(who(t.assignee).ini)}</span><span class="cname">${esc(nodeName(t.assignee))}</span>` : '<span class="muted">unassigned</span>'}<span class="cago" title="last updated">${ago(t.updatedAt) || '—'}</span>${t.comments.length ? `<span class="ccount" title="${t.comments.length} comment${t.comments.length === 1 ? '' : 's'}">💬 ${t.comments.length}</span>` : ''}</small></div>`; }).join('')}${st === 'done' && !fold && total > 20 ? `<button class="ghost" id="toggle-done">${showAllDone ? 'Show recent only' : 'Show all done'}</button>` : ''}</div>`; }).join('');
   if ($('#done-h')) $('#done-h').onclick = () => { doneOpen = !doneOpen; boardSig = ''; renderBoard(); };

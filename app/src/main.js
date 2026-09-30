@@ -1265,6 +1265,20 @@ async function guiE2E() {
   // Merge-conflict guard: a task with a real worktree branch that conflicts with base. Marking it
   // done must abort the auto-merge, park the task as merge_conflict (visible on the Board, not hidden), and
   // spawn a "Resolve merge conflict" follow-up.
+  // Board layout shots (t_95f4c836): 34 done tasks + a long blocked tag, light/dark, narrow/wide.
+  const boardShots = async () => {
+    await waitFor(`return !!document.querySelector('#tpl-select option')`); await ex(`await refresh();`); const cur = await ex(`return { p: ctx.p, t: S.teamId }`);
+    const s = pm.store(cur.p || pid()); let nodes = s.getTeam().nodes; if (!nodes.length) { s.addNode({ name: 'Devon', role: 'Dev', x: 60, y: 60 }); nodes = s.getTeam().nodes; }
+    const dev = nodes[0]; const blocker = s.createTask({ title: 'Blocker with a very long unbreakable title_' + 'x'.repeat(40), assignee: dev.id });
+    s.createTask({ title: 'Blocked demo', assignee: dev.id, blockedBy: [blocker.id] });
+    for (let i = 0; i < 34; i++) { const t = s.createTask({ title: 'Done task ' + i, assignee: dev.id }); s.updateTask(t.id, { status: 'done' }); }
+    await ex(`$('#tabs button[data-tab=board]').click(); await refresh(); await w(300);`);
+    expect('board: done column shows 20 of 34', await ex(`return /20\\/34/.test($('#done-h').textContent)`));
+    expect('board: no tag chip spills out of its card', await ex(`return [...document.querySelectorAll('.ctags .tag')].every((t) => t.scrollWidth <= t.clientWidth + 1 || getComputedStyle(t).textOverflow === 'ellipsis')`));
+    const size = win.getSize();
+    for (const [w, h, tag] of [[900, 800, 'narrow'], [1900, 900, 'wide']]) for (const th of ['light', 'dark']) { win.setSize(w, h); require('electron').nativeTheme.themeSource = th; await ex(`await w(500);`); await shot(`board-${tag}-${th}`); }
+    require('electron').nativeTheme.themeSource = 'system'; win.setSize(...size);
+  };
   const conflictShots = async () => {
     await waitFor(`return !!document.querySelector('#tpl-select option')`); await ex(`await refresh();`); const cur = await ex(`return { p: ctx.p, t: S.teamId }`);
     const p = cur.p || pid(); const s = pm.store(p);
@@ -1745,6 +1759,7 @@ async function guiE2E() {
   try {
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'helpycode') { await helpycodeShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'wikilogs') { await wikiLogsShots(); throw null; }
+    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'board') { await boardShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'conflict') { await conflictShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'graph') { await graphShots(); for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`$('#tabs button[data-tab=team]').click(); await w(500);`); await shot(`graph-${t}`); } require('electron').nativeTheme.themeSource = 'system'; throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'chat') { await chatShots(); throw null; }

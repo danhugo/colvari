@@ -995,3 +995,5 @@ button, .pchip, .tag, .badge, .pill, .avatar, .cchip summary, .lvchip, .asswitch
 .cgroup .cname { overflow-wrap:anywhere; }
 .yt-item { flex-wrap:wrap; } .yt-item > span:not(.spacer) { min-width:0; overflow-wrap:anywhere; }
 .idlebanner.hidden { display:none; }
+.card .ctags .tag { min-width:0; max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.card b { overflow-wrap:anywhere; }
