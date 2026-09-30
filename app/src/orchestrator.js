@@ -1052,8 +1052,12 @@ class Orchestrator extends EventEmitter {
     const title = (t) => `"${String(t.title || t.id).slice(0, 40)}"`;
     const list = (arr, fmt) => (arr.length ? arr.slice(0, 4).map(fmt).join(', ') + (arr.length > 4 ? ` +${arr.length - 4} more` : '') : 'none');
     const lines = [];
-    const rp = (this.store.meta() || {}).restartPending || {};
-    lines.push(`restarts pending: ${Number(rp.count || 0)}${rp.afterTaskId ? `, scheduled after ${rp.afterTaskId}` : ''}`);
+    // Packaged build: the restart machinery is inert — the digest must not offer agents a
+    // "restarts pending" fact (or any schedule_restart hint) that has no tool behind it.
+    if (this.devMode !== false) {
+      const rp = (this.store.meta() || {}).restartPending || {};
+      lines.push(`restarts pending: ${Number(rp.count || 0)}${rp.afterTaskId ? `, scheduled after ${rp.afterTaskId}` : ''}`);
+    }
     const working = (team.nodes || []).filter((n) => this.procs.has(n.id));
     lines.push(`working: ${list(working, (n) => { const a = this.agent(n.id); return a.taskId ? `${n.name} (${a.taskId})` : n.name; })}`);
     const stallOf = (n) => { const a = this.agents[n.id]; return (a && (a.stall || (a.currentRun && a.currentRun.stall))) || null; };
@@ -1085,6 +1089,12 @@ class Orchestrator extends EventEmitter {
   // UI state (getRestartState / 'restart-state' push, Uma's contract t_5a1661d5): how many landed
   // changes wait, the armed schedule, and the not-yet-started tasks the gate is holding.
   restartState() {
+    // Packaged build (t_f64a079e): restarts cannot exist here, so the UI state always reads
+    // restartPending=false — boot wipes stored state, but an out-of-band writer could re-add it,
+    // and the 'restart-state' channel must never carry a schedule nothing can ever fire.
+    if (this.devMode === false) {
+      return { pendingCount: 0, since: null, targetSha: null, scheduledAfter: null, scheduledNow: false, gating: [], busyAgents: [], blockedReason: null, waitingReasons: [] };
+    }
     const rp = (this.store.meta() || {}).restartPending || {};
     const scheduled = !!(rp.scheduledNow || rp.afterTaskId);
     const armed = scheduled && !rp.firedAt;
