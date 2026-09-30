@@ -81,7 +81,7 @@ async function refresh() {
     try { s.nstat = await call('nodeStatus'); s.cross = await call('crossEdges'); }
     catch { s.nstat = S.nstat || {}; s.cross = S.cross || []; }
     ctx.t = s.teamId;
-    if (bootTeam) { bootTeam = false; sel.chatTeam = sel.boardTeam = ctx.t || ''; } // boot: follow the sidebar team (t_ce954427) — boot never goes through switchTo()
+    if (bootTeam && ctx.t) { bootTeam = false; sel.chatTeam = sel.boardTeam = ctx.t; } // boot: follow the sidebar team (t_ce954427) — boot never goes through switchTo(); empty ctx.t keeps the flag for a later refresh
     P = p; S = { ...S, ...s };
     lastV = s.v || v; lastVProject = ctx.p;
   } catch (e) {
