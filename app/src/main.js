@@ -3,7 +3,7 @@ const path = require('path');
 // Test instances (gui-e2e / smoke) must never leave fake-CLI children behind: install procguard
 // before the orchestrator loads so every spawn it makes is tracked and reaped (t_92c31037).
 const procguard = (process.env.AGENTS_SQUAD_GUI_E2E || process.env.AGENTS_SQUAD_SMOKE) ? require('../test/harness/procguard').install() : null;
-const { Orchestrator } = require('./orchestrator');
+const { Orchestrator, reapRunPids } = require('./orchestrator');
 const { ProjectManager, TEMPLATES, isolateTestRoot } = require('./projects');
 const { pickChanged } = require('./store');
 const AC = require('./agent-config');
@@ -81,6 +81,9 @@ function orchFor(pid) {
     // Scheduled restarts fire through the watcher's drain/test/relaunch flow (watcherFor lazily
     // creates it; in non-dev builds it answers the no-op stub and the schedule just stays armed).
     o.updater = watcherFor(pid);
+    // Stale run groups from a crashed instance die here (t_3f830e64): only this single live
+    // instance reaps, and only pidfile-recorded pids whose lstart still matches — never by name.
+    try { if (appLockHeld) reapRunPids(o.store.dir); } catch {}
     orchs.set(pid, o);
   }
   return o;
