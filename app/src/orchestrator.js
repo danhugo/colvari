@@ -816,12 +816,16 @@ class Orchestrator extends EventEmitter {
     // staleMin reuses the stall timeout (no new setting); <=0 disables the watchdog condition.
     const staleMin = Number(this.store.getSettings().stallTimeoutMin ?? 10);
     const now = Date.now();
-    const opts = staleMin > 0 ? { staleMin, now } : {};
+    // liveNodeIds (plan t_76da3303 D): an agent state claiming 'working' over a dead run is a
+    // zombie, not progress — the stale nudge must see through it.
+    const opts = staleMin > 0 ? { staleMin, now, liveNodeIds: new Set(this.procs.keys()) } : {};
     const team = this.store.getTeam();
     const tasks = this.store.listTasks();
     // Company wake (t_8df2cab6): every agent idle while open work remains — each stuck task's owner
-    // (or their lead) is woken, debounced like the nudges below.
-    const entries = [...IDLE.idleNudges(team, tasks, this.agents, opts), ...IDLE.idleCompanyWakes(team, tasks, this.agents)];
+    // (or their lead) is woken, debounced like the nudges below. boardGapNudges (same plan) pushes
+    // board shapes no process observation can see: a review stranded without any reviewer, and a
+    // parent in review whose children are all done.
+    const entries = [...IDLE.idleNudges(team, tasks, this.agents, opts), ...IDLE.idleCompanyWakes(team, tasks, this.agents), ...IDLE.boardGapNudges(team, tasks, this.agents, opts)];
     for (const n of entries) {
       // Debounce per kind, keyed by recipient+kind so the conditions never clobber each other: idle
       // nudges by their (already distinct) text, stale/company nudges by the sorted taskIds — a core
@@ -852,8 +856,9 @@ class Orchestrator extends EventEmitter {
       this.nudged.set(mk, key);
       const m = this.store.sendMessage({ from: 'system', to: rid, text: n.text });
       this.log(rid, 'system', 'nudge: ' + n.text);
+      const WHY = { stale: 'stale tasks', company: 'idle company with open work', 'review-stranded': 'review stranded', 'review-closeable': 'review closeable' };
       this.wakeForHuman(rid, [m], {
-        reason: kind === 'stale' ? 'stale tasks' : kind === 'company' ? 'idle company with open work' : 'idle reports',
+        reason: WHY[kind] || 'idle reports',
         taskIds: n.taskIds || [],
         action: kind === 'company' ? 'wake owner' : 'wake core',
       })
