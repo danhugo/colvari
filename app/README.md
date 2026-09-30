@@ -45,9 +45,11 @@ Each project has its own orchestrator, so different projects can run at the same
 
 1. **Team tab**: add agents with **+ Agent**. Click a node to set its name, role (free text; PM, Planner, Dev, Reviewer and QA are suggested), system prompt, optional model (any alias or full model ID, with suggestions) and working directory. Drag nodes to move them. Use **Connect** and click A, then B, to add a directed edge A → B, meaning A can assign tasks to and message B.
 2. **Board tab**: create a goal task and assign it, usually to the PM. Tasks move through todo → in_progress → review → done, and you can comment on them.
-3. Press **Run**. The scheduler picks up `todo` tasks, running at most 2 agents at a time and one run per agent at a time. It sets each task to `in_progress` and spawns
+3. Press **Run** (header → **＋ New goal** → Run, or Ctrl/Cmd+Enter). The scheduler picks up `todo` tasks, running at most 2 agents at a time and one run per agent at a time. It sets each task to `in_progress` and spawns
    `claude -p <prompt> --output-format stream-json --verbose --mcp-config <board server> --strict-mcp-config --permission-mode <setting> [--model m]`
    in the node's working directory. It keeps going until no `todo` tasks are left, you press **Stop**, or the run cap (`maxRuns`) is hit. If an agent exits without setting a status, its task goes to `done` on exit code 0, or to `review` otherwise.
+
+   **Starting and stopping**: the header pill shows the run state — `N running` while the scheduler dispatches, `idle` otherwise. **Stop** (⌘. / Ctrl/Cmd+.) appears in the header while a run is active; it kills the live agent processes (their tasks move to `review`) and no new work is dispatched until you press Run again. While a run is active you don't need to press anything for follow-up work: a `todo` task created while it runs (Board, chat, or an agent) is picked up automatically within a second or two. When the board has no ready work left the run ends on its own — press Run again for the next batch (a follow-up change keeps the run alive instead, idle at zero cost, so new todos start on their own).
 4. **Wiki tab**: markdown pages. Both you and the agents can edit them.
 5. **Observability tab**: status of each agent, its current task, measured token usage (in, out, cache read, cache write), billing source, and the reported cost (`total_cost_usd` of the `result` event) shown only as an API-equivalent, or as "Covered by subscription" for subscription runs. The header shows a $ figure only for runs billed per token (API key / proxy / cloud); a subscription-only session shows a muted "subscription" pill, and a live log you can filter by agent. **Settings tab**: claude path, concurrency, run cap and permission mode.
 
@@ -141,6 +143,8 @@ cli/e2e.js          headless end-to-end run
 Team tab: drag nodes to move them (positions persist), **Connect** then click source and target to add an edge of the chosen type. Edges may point into another team of the same project (cross-team edge; the target team sees it as incoming). Node positions are saved in bulk (auto-layout) and each team keeps its own viewport (pan/zoom).
 
 `npm run gui-e2e:graph` checks a 12-node team, connect by mouse, drag, cross-team edge and position/viewport persistence, and takes `21-graph-team`, `22-graph-connected`, `graph-light`, `graph-dark` shots. Zoom/fit, the node context menu and auto-layout are feature-detected (logged as "pending" until the UI ships them, then asserted, with `23-graph-layout` / `24-graph-menu` shots).
+
+`npm run gui-e2e:runidle` (also run as part of the full `npm run gui-e2e`) drives a real run with a stub CLI (sleep 1s, no model): the header Run control starts the scheduler and dispatches a `todo` task, the stub's clean exit hands the task to the PM's review pickup which closes it `done`. Then the idle contract (feature-gated like `gui-e2e:graph`'s pending checks, activating when the run idles at drain instead of stopping): the run stays alive with an empty board at zero spawns, the state pill reads `idle`, a new `todo` task is picked up without any user action, Stop while idle turns the run off, a todo created while stopped stays put, and Run starts the run again. Shot: `31-runidle-board`.
 
 ## Preflight test
 
