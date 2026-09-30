@@ -1604,7 +1604,7 @@ async function guiE2E() {
     const ps = pm.store(cur.p || pid(), cur.t); let nodes = ps.getTeam().nodes;
     if (!nodes.length) { ps.addNode({ name: 'Devon', role: 'Dev', x: 60, y: 60 }); nodes = ps.getTeam().nodes; }
     const n = nodes[0];
-    await ex(`$('#tabs button[data-tab=settings]').click(); await refresh(); await w(300); $('#rt-path').value = 'helpycode'; $('#rt-detect').click(); await w(4000);`);
+    await ex(`document.querySelector('#tabs button[data-tab=settings], #settingsbtn').click(); await refresh(); await w(300); $('#rt-path').value = 'helpycode'; $('#rt-detect').click(); await w(4000);`);
     const draft = await ex(`return { label: $('#rd-label') && $('#rd-label').value, models: $('#rd-models') && $('#rd-models').value, stub: !!document.querySelector('#rt-draft .costnote') }`);
     expect('helpycode: Detect populates a real (non-stub) draft', draft.label === 'helpycode' && !draft.stub, draft);
     // The introspector now parses `models` output into names, but the reviewer still confirms/edits the
@@ -1942,7 +1942,8 @@ async function guiE2E() {
     await waitFor(`return !!document.querySelector('#graph .node[data-id="${ra.id}"] .chip-recruited') && !!document.querySelector('#graph .node[data-id="${corey.id}"] .corelock')`);
     await shot('36-dynamicteam-graph');
     // Settings: defaults 6/ask, saved values persist and re-render.
-    await ex(`$('#tabs button[data-tab=settings]').click(); await w(300);`);
+    // Settings gear lives outside the #tabs nav (it sits next to the help button), so match either.
+    await ex(`document.querySelector('#tabs button[data-tab=settings], #settingsbtn').click(); await w(300);`);
     const defaults = await ex(`return { maxAgents: $('#st-maxagents') ? $('#st-maxagents').value : null, approval: $('#st-tcappr') ? $('#st-tcappr').value : null }`);
     expect('settings default maxAgents=6 and teamChangeApproval=ask', defaults.maxAgents === '6' && defaults.approval === 'ask', defaults);
     await ex(`$('#st-maxagents').value = '8'; $('#st-tcappr').value = 'auto'; $('#st-save').click(); await w(600);`);
@@ -2204,12 +2205,14 @@ async function guiE2E() {
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'topbar') { await topbarShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'composerclear') { await composerClearShots(); throw null; }
     // project/team management through the UI: create a project from the Startup template, then a Solo team, then switch back.
-    // Wait until the template select is filled (the first refresh loads the templates) before choosing one.
-    await ex(`$('#tabs button[data-tab=team]').click(); await w(300);`); // Chat is the default tab; the flow below clicks the graph
+    // The template select renders with the Settings view (tab-scoped rendering, t_8d586961), so open
+    // Settings first and wait until the first refresh has filled it before choosing a template.
+    await ex(`$('#settingsbtn').click(); await w(300);`);
     expect('templates loaded', await waitFor(`return !!document.querySelector('#tpl-select option[value=startup]') && !!document.querySelector('#tpl-select option[value=solo]')`));
     const answer = (sel, text) => ex(`$('#tpl-select').value = '${sel[1]}'; if ($('#tpl-select').value !== '${sel[1]}') return false; $('${sel[0]}').click(); await w(200); $('#ask-input').value = '${text}'; $('#ask-ok').click(); await w(800); return true;`);
     expect('startup template selectable', await answer(['#newproject', 'startup'], 'GUI project'));
     expect('solo template selectable', await answer(['#newteam', 'solo'], 'Solo team'));
+    await ex(`$('#tabs button[data-tab=team]').click(); await w(300);`); // the flow below clicks the graph
     await shot('0-projects');
     const mp = pm.list(); const gp = mp.find((p) => p.name === 'GUI project');
     const gpTeams = gp ? pm.get(gp.id).teams : []; const tn = (i) => (gpTeams[i] ? pm.store(gp.id, gpTeams[i].id).getTeam() : { nodes: [], edges: [] });
@@ -2250,7 +2253,7 @@ async function guiE2E() {
     await ex(`const g = [...document.querySelectorAll('#graph .node')][0]; g.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, clientX: 1, clientY: 1 })); window.dispatchEvent(new MouseEvent('mouseup')); await w(500);`);
     await shot('1d-preflight');
     // Badge must not cover the agent name.
-    const overlap = await ex(`return [...document.querySelectorAll('#graph .node')].filter((g) => { const t = g.querySelector('text').getBoundingClientRect(); const b = g.querySelector('.pfbadge rect').getBoundingClientRect(); return !(t.right <= b.left || b.right <= t.left || t.bottom <= b.top || b.bottom <= t.top); }).length`);
+    const overlap = await ex(`return [...document.querySelectorAll('#graph .node')].filter((g) => { const t = g.querySelector('text').getBoundingClientRect(); const b = g.querySelector('.pfbadge circle').getBoundingClientRect(); return !(t.right <= b.left || b.right <= t.left || t.bottom <= b.top || b.bottom <= t.top); }).length`);
     expect('preflight badges do not overlap names', overlap === 0, { overlap });
     const pfNodes = store.getTeam().nodes.map((n) => ({ name: n.name, ok: n.preflight && n.preflight.ok, error: n.preflight && n.preflight.error, apiKeySource: n.preflight && n.preflight.apiKeySource, ms: n.preflight && n.preflight.latencyMs }));
     expect('preflight badges shown', pfNodes.every((n) => typeof n.ok === 'boolean'), pfNodes);

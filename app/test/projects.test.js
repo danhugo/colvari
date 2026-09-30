@@ -108,3 +108,18 @@ test('duplicate / export / import team with fresh ids', () => {
   assert.equal(pm.store(other.id, imp.id).getTeam().nodes.length, 4);
   assert.throws(() => pm.importTeam(other.id, '{"x":1}'), /not an agents-squad/);
 });
+
+test('pm.store reuses one Store instance per (project, team); remove drops the entry (t_8d586961)', () => {
+  const pm = new ProjectManager(root());
+  const pid = pm.list()[0].id;
+  const t = pm.createTeam(pid, 'C', 'solo').id;
+  assert.equal(pm.store(pid), pm.store(pid)); // getAll's ST/TS calls stay warm — no cold re-scan per call
+  assert.equal(pm.store(pid, t), pm.store(pid, t));
+  assert.notEqual(pm.store(pid), pm.store(pid, t)); // merged view and team view are distinct instances
+  const warm = pm.store(pid);
+  const p2 = pm.create('Other'); // remove() refuses the last project
+  pm.remove(pid);
+  assert.ok(![...pm._stores.values()].includes(warm));
+  assert.throws(() => pm.store(pid), /no project/);
+  assert.equal(pm.store(p2.id).listTasks().length, 0);
+});

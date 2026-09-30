@@ -420,8 +420,14 @@ class Orchestrator extends EventEmitter {
   }
   // Renderer-facing snapshot: the UI reads only agents + run scalars, so the file-backed display parts
   // (modelStats/timeline/logs/wiki/nodeTeams) are pure IPC payload — ~1.4MB per change on a large
-  // project. Kept out of getAll and state pushes; snapshot() stays whole for other consumers.
-  snapshotSlim() { const s = this.snapshot(); for (const k of ['modelStats', 'timeline', 'logs', 'wiki', 'nodeTeams']) delete s[k]; return s; }
+  // project. snapshot() still computes them (other consumers want them), but getAll and the
+  // 'state' push only ever threw them away — and during streaming every memo key is invalidated
+  // per event, so each push re-ran modelStats+timeline (listRuns + full listTasks) for nothing
+  // (~100ms of getAll's p50 on the 550-task board, t_8d586961). Build the slim shape directly.
+  snapshotSlim() {
+    const rs = this.runState(); // renderer `running` mirrors runState, same contract as snapshot()
+    return { runtimeState: this.runtimeState, redMaster: this.redMasterView(), running: rs.state === 'running', runState: rs, totalCost: this.totalCost, billedCost: this.billedCost || 0, subCost: this.subCost || 0, runs: this.runs, active: [...this.procs.keys()].map((id) => ({ nodeId: id, taskId: this.agent(id).taskId, cwd: this.cwds && this.cwds.get(id) || null })), runCost: this.runCost || 0, budgetStop: this.budgetStop || null, agents: Object.fromEntries(Object.entries(this.agents).map(([k, a]) => [k, this.agentView(a)])), ledger: this.ledger(), usageSince: this.usageSince() };
+  }
   // Account one finished run: agent counters, session totals, persisted history.
   record(rec) {
     const a = this.agent(rec.nodeId);
