@@ -355,6 +355,10 @@ button:focus-visible, input:focus, select:focus, textarea:focus { outline:none; 
 nav button { padding:3px 8px; font-size:var(--text-sm); }
 nav button.sec { color:var(--fg-muted); padding:3px 7px; } .navsep { width:1px; background:var(--border-strong); margin:3px 4px; }
 header .pill { border:none; background:none; color:var(--fg-muted); font-size:var(--text-xs); padding:2px 4px; } header #runstate { background:var(--bg-hover); color:var(--fg-secondary); padding:2px 8px; } header #runstate.on { background:var(--success-soft); color:var(--success-text); }
+/* Worktree disk pill (t_fe10d3e0): same chip look as #runstate; amber fill above the cap (>20
+   worktrees or >2GB) — warn only, the numbers stay in the tooltip. */
+header #wtdisk { background:var(--bg-hover); color:var(--fg-secondary); padding:2px 8px; border-radius:var(--radius-full); font-variant-numeric:tabular-nums; }
+header #wtdisk.wtwarn { background:var(--warning-soft); color:var(--warning-text); }
 /* One line tall, always: the meter sits in the header, and a wrapping "no limit data: …" reason
    would grow the header mid-session, shifting the whole layout and eating in-flight clicks.
    The full reason stays reachable via the part's title tooltip. Clicking it opens the Usage

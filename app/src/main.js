@@ -287,7 +287,9 @@ async function guiE2E() {
     ib.clicked = await ex(`const b = [...document.querySelectorAll('.ib-choice')].find((x) => x.dataset.v === 'blue'); if (!b) return false; b.click(); await w(800); return true;`);
     ib.statusAfterAnswer = q && q.taskId && fstore.getTask(q.taskId).status; ib.answer = q && fstore.getInboxItem(q.id).answer;
     await shot('15-inbox-answered');
-    for (let i = 0; i < 150; i++) { await new Promise((r) => setTimeout(r, 2000)); if (!forch.running) break; }
+    // The run idles at drain now (t_b2273507) — "not running" is no longer an end marker; wait for
+    // the artifact the resumed run was asked to write.
+    for (let i = 0; i < 150; i++) { if (fs.existsSync(path.join(work, 'color.txt'))) break; await new Promise((r) => setTimeout(r, 2000)); }
     ib.color = fs.existsSync(path.join(work, 'color.txt')) ? fs.readFileSync(path.join(work, 'color.txt'), 'utf8').trim() : null;
     ib.badgeAfter = await ex(`await refresh(); return $('#inbox-tab-badge').textContent`);
     // (c) an approval request (requireApproval puts finished tasks in review + awaitingApproval) shows in the Inbox.
@@ -2195,7 +2197,7 @@ async function guiE2E() {
     await ex(`window.__confirms = []; window.confirm = (m) => { window.__confirms.push(m); return true; };`);
     await ex(`$('#goal').value = 'Create a file hello.txt containing exactly: hello world. PM should delegate the implementation to the Dev.'; $('#newgoal').click(); await w(150);`);
     await click('#run');
-    for (let i = 0; i < 180; i++) { await new Promise((r) => setTimeout(r, 2000)); if (!orch.running && orch.runs > 0) break; }
+    for (let i = 0; i < 180; i++) { await new Promise((r) => setTimeout(r, 2000)); if (orch.runState().state === 'idle' && orch.runs > 0) break; }
     await new Promise((r) => setTimeout(r, 1500)); await shot('2-observability');
     // Header stays on one row once tokens and costs are filled in.
     const hdr = await ex(`const h = $('header'); const s = $('header strong'); return { h: h.getBoundingClientRect().height, title: s.getBoundingClientRect().height, cost: $('#totalcost').textContent }`);
@@ -2277,7 +2279,7 @@ async function guiE2E() {
       gstore.createTask({ title: 'ARGTEXT', assignee: byName('Flow').id });
       await ex(`window.confirm = () => true; window.__alerts = []; window.alert = (m) => window.__alerts.push(m); $('#goal').value = ''; $('#newgoal').click(); await refresh(); await w(300);`);
       await click('#run');
-      for (let i = 0; i < 240; i++) { await new Promise((r) => setTimeout(r, 2000)); if (!gorch.running && gorch.runs > 0) break; }
+      for (let i = 0; i < 240; i++) { await new Promise((r) => setTimeout(r, 2000)); if (gorch.runState().state === 'idle' && gorch.runs > 0) break; }
       await new Promise((r) => setTimeout(r, 1500)); await shot('10-second-project');
       const gRuns = gstore.listRuns({ kind: 'agent' });
       const goalRuns = gRuns.filter((r) => r.nodeId === byName('Goaler').id); const loopRuns = gRuns.filter((r) => r.nodeId === byName('Looper').id);
@@ -2528,6 +2530,8 @@ const api = {
   taskMerge: (c, id, opts) => ST(c).mergeTask(id, opts),
   taskDiscard: (c, id) => { const r = WT.worktreeDiscard(wtTask(c, id)); ST(c).updateTask(id, { worktreePath: null, worktreeBranch: null }); return r; },
   unmergedBranches: (c) => ST(c).listUnmergedBranches(),
+  // Worktree lifecycle (t_9b662983): cached worktree count + bytes for the header/settings UI.
+  getDiskUsage: (c) => WT.diskUsage(APP_ROOT),
   pickDir: async () => { const { dialog } = require('electron'); const r = await dialog.showOpenDialog(win, { properties: ['openDirectory', 'createDirectory'] }); return r.canceled ? null : r.filePaths[0]; },
   agentStates: (c) => orchFor(c.p).agentStates(),
   // Live per-node data for the graph: runtime, model, status (working|idle|needs-human).
@@ -2578,6 +2582,12 @@ app.whenReady().then(() => {
   createWindow();
   probeUnprobedAgents();
   pollInbox(true); setInterval(() => pollInbox(false), 1500);
+  // Worktree lifecycle sweep (t_9b662983): at boot (before any agent can spawn) and periodically
+  // while each project is idle — drops worktrees whose task is done/missing (clean + merged only,
+  // never a dirty or unmerged tree, never in-flight tasks) and prunes stale worktree entries.
+  const sweepWorktrees = () => { for (const p of pm.list()) { try { const o = orchs.get(p.id); if (o && o.running) continue; const r = WT.sweepWorktrees({ repoDir: APP_ROOT, store: pm.store(p.id) }); if (r.removed.length || r.retained.length) console.log('[worktrees]', JSON.stringify(r)); } catch {} } };
+  sweepWorktrees();
+  setInterval(sweepWorktrees, 10 * 60_000).unref();
   // Self-update: resume a Run interrupted by a safe restart (or roll back a bad update that fails to
   // boot). markBootOk ~15s in proves the new code booted, so a later crash is not a boot failure.
   for (const p of pm.list()) {

@@ -514,6 +514,30 @@ function renderHeader() {
     : 'No recorded usage yet.';
   renderWatchPill();
 }
+// ---------- worktree disk pill (t_fe10d3e0; IPC by Devon, t_9b662983) ----------
+// getDiskUsage -> { count, bytes } over <repo>/.squad/worktrees (du -sk, never follows symlinks,
+// 30s cache server-side — so a 30s poll here is as fresh as the number gets). Amber above the cap
+// (>20 worktrees or >2GB, warn only — no auto-delete). A core without the handler leaves the pill
+// hidden instead of showing a wrong "0": bounded-disk visibility must not pretend on old cores.
+const WT_DISK_CAP = { count: 20, bytes: 2 * 1024 ** 3 };
+let wtDisk = null;
+const fmtWtBytes = (n) => !(n > 0) ? '0 B'
+  : n < 1048576 ? `${Math.max(1, Math.round(n / 1024))} KB`
+  : n < 1073741824 ? `${Math.round(n / 1048576)} MB`
+  : `${(n / 1073741824).toFixed(1)} GB`;
+function renderWtDisk() {
+  const c = $('#wtdisk'); if (!c) return;
+  if (!wtDisk) { c.classList.add('hidden'); return; }
+  const over = wtDisk.count > WT_DISK_CAP.count || wtDisk.bytes > WT_DISK_CAP.bytes;
+  c.classList.remove('hidden');
+  c.classList.toggle('wtwarn', over);
+  c.textContent = `${over ? '⚠ ' : ''}${wtDisk.count} wt · ${fmtWtBytes(wtDisk.bytes)}`;
+  c.title = over
+    ? `Worktrees above cap (>20 or >2GB): ${wtDisk.count} worktrees, ${fmtWtBytes(wtDisk.bytes)} in .squad/worktrees. Done+merged tasks are removed on merge; retained ones are flagged on their task.`
+    : `.squad/worktrees: ${wtDisk.count} worktree${wtDisk.count === 1 ? '' : 's'}, ${fmtWtBytes(wtDisk.bytes)} of disk.`;
+}
+async function pollWtDisk() { try { const d = await call('getDiskUsage'); if (d && typeof d === 'object') { wtDisk = d; renderWtDisk(); } } catch {} }
+pollWtDisk(); setInterval(pollWtDisk, 30e3);
 // ---------- core: restart-pending pill + "Core watching" indicator (plan t_42f310cf item 3, t_5a1661d5) ----------
 // IPC contract (Devon, t_20d5a23c / t_74f1f65d): pull getRestartState / getWatchStatus + pushes on
 // 'restart-state' / 'watch-status' (watch digests also arrive as kind:'watch' log lines). Until the

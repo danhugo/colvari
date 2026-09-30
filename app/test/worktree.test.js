@@ -4,7 +4,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
-const { ensureWorktree, worktreeDiff, worktreeMerge, worktreeDiscard } = require('../src/worktree');
+const { ensureWorktree, linkNodeModules, worktreeDiff, worktreeMerge, worktreeDiscard } = require('../src/worktree');
 
 test('falls back when not a git repo', () => {
   const d = fs.mkdtempSync(path.join(os.tmpdir(), 'wt-'));
@@ -21,6 +21,48 @@ test('creates worktree on squad/<taskId> and reuses it', () => {
   assert.strictEqual(r.worktreeBranch, 'squad/t_2'); assert.strictEqual(r.cwd, r.worktreePath);
   assert.strictEqual(execFileSync('git', ['branch', '--show-current'], { cwd: r.cwd }).toString().trim(), 'squad/t_2');
   assert.deepStrictEqual(ensureWorktree(d, 't_2'), r);
+});
+
+// npm install in a worktree must not write through the shared node_modules into the main checkout
+// (t_0fd83668): a worktree whose package files differ gets NO shared node_modules, an unchanged
+// one still shares via symlink.
+test('node_modules share: unchanged package files -> symlink, changed package.json -> none (t_0fd83668)', () => {
+  const d = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'wt-')));
+  const g = (cwd, ...a) => execFileSync('git', ['-c', 'user.email=a@b', '-c', 'user.name=a', ...a], { cwd, stdio: 'pipe' }).toString().trim();
+  g(d, 'init', '-q', '-b', 'main');
+  fs.writeFileSync(path.join(d, '.gitignore'), '.squad/\n');
+  fs.writeFileSync(path.join(d, 'package.json'), '{"name":"m"}\n');
+  g(d, 'add', '.'); g(d, 'commit', '-q', '-m', 'init');
+  fs.mkdirSync(path.join(d, 'node_modules'));
+  fs.writeFileSync(path.join(d, 'node_modules', 'dep.js'), 'x');
+  const same = ensureWorktree(d, 't_nmA');
+  assert.ok(fs.lstatSync(path.join(same.worktreePath, 'node_modules')).isSymbolicLink(), 'unchanged package files: node_modules is a symlink to main');
+  // A branch that changes package.json: commit the change on a scratch worktree, then let
+  // ensureWorktree recreate the task worktree from that branch.
+  const scratch = path.join(d, '.squad', 'scratch-t_nmB');
+  g(d, 'worktree', 'add', '-b', 'squad/t_nmB', scratch);
+  fs.writeFileSync(path.join(scratch, 'package.json'), '{"name":"branch","deps":"added"}\n');
+  g(scratch, 'commit', '-qam', 'bump deps');
+  fs.rmSync(scratch, { recursive: true, force: true });
+  g(d, 'worktree', 'prune');
+  const diff = ensureWorktree(d, 't_nmB');
+  assert.strictEqual(fs.existsSync(path.join(diff.worktreePath, 'node_modules')), false, 'changed package.json: no shared node_modules in the worktree');
+  assert.strictEqual(fs.lstatSync(path.join(d, 'node_modules')).isSymbolicLink(), false, 'main checkout node_modules stays a real dir');
+});
+
+test('node_modules share: differing package-lock.json also skips the share (t_0fd83668)', () => {
+  const main = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'wt-main-')));
+  const wt = fs.mkdtempSync(path.join(os.tmpdir(), 'wt-lock-'));
+  fs.writeFileSync(path.join(main, 'package.json'), '{"name":"m"}\n');
+  fs.writeFileSync(path.join(main, 'package-lock.json'), '{"lock":1}\n');
+  fs.mkdirSync(path.join(main, 'node_modules'));
+  fs.writeFileSync(path.join(wt, 'package.json'), '{"name":"m"}\n');
+  fs.writeFileSync(path.join(wt, 'package-lock.json'), '{"lock":2}\n');
+  linkNodeModules(main, main, wt);
+  assert.strictEqual(fs.existsSync(path.join(wt, 'node_modules')), false, 'lock-only difference: no shared node_modules');
+  fs.writeFileSync(path.join(wt, 'package-lock.json'), '{"lock":1}\n');
+  linkNodeModules(main, main, wt);
+  assert.ok(fs.lstatSync(path.join(wt, 'node_modules')).isSymbolicLink(), 'identical files: the share happens');
 });
 
 test('useWorktrees defaults on (t_064066e5: code tasks get worktrees unless a project opts out)', () => {

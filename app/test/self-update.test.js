@@ -427,11 +427,12 @@ test('drain: dispatchPaused keeps the run session alive; unpausing resumes and f
   assert.strictEqual(s.listRuns().length, 0, 'no dispatch while paused');
   assert.ok(!s.readLogs().some((l) => /No more todo|Finished/.test(l.text)), 'run must not be declared finished during the drain');
 
-  // The update aborts: unpause re-ticks, the task dispatches, the run runs to completion.
+  // The update aborts: unpause re-ticks, the task dispatches, the run runs to completion — and
+  // idles at drain now (t_b2273507), it does not stop.
   o.dispatchPaused = false;
   o.tick();
   const waitFor = async (fn) => { const t0 = Date.now(); while (!fn()) { if (Date.now() - t0 > 8000) throw new Error('timeout'); await new Promise((r) => setTimeout(r, 10)); } };
-  await waitFor(() => !o.running);
+  await waitFor(() => o.runState().state === 'idle');
   assert.strictEqual(s.getTask(s.listTasks()[0].id).status, 'done');
   assert.ok(s.listRuns().length === 2, 'dev run + reviewer pickup');
   assert.ok(s.readLogs().some((l) => /No more todo tasks. Finished./.test(l.text)));
@@ -504,7 +505,7 @@ test('drain: a run whose bookkeeping crashes releases its slot; drain completes;
   await drain(w);
   assert.strictEqual(w.phase, 'idle', 'drain completed and the failed update aborted back to idle');
   assert.match(w.status().lastError, /tests failed/);
-  await waitFor(() => !o.running, 'run resumed after the abort');
+  await waitFor(() => o.runState().state === 'idle', 'run resumed after the abort and drained to idle'); // t_b2273507: drain now idles, it does not stop
   assert.strictEqual(s.getTask(s.listTasks()[0].id).status, 'done', 'the interrupted task finished after dispatch resumed');
   o.stop && o.stop();
 });
@@ -547,7 +548,7 @@ test('drain cutoff: haltProcs stops a long run, the task stays re-dispatchable a
   // reconciles the cut task back to todo and re-dispatches it; with a fast fake it runs to done.
   fs.writeFileSync(fake, '#!/bin/sh\necho \'{"type":"result","subtype":"success","session_id":"s2","total_cost_usd":0.001,"num_turns":1,"usage":{"input_tokens":10,"output_tokens":10}}\'\n');
   o.dispatchPaused = false; o.clearDrainCuts(); o.tick();
-  await waitFor(() => !o.running, 're-dispatched run finished');
+  await waitFor(() => o.runState().state === 'idle', 're-dispatched run finished (drained to idle)'); // t_b2273507: drain now idles
   assert.strictEqual(s.getTask(task.id).status, 'done');
   assert.ok(s.readLogs().some((l) => /reset to todo/.test(l.text)), 'the reconcile sweep logged the reset');
   o.stop && o.stop();
