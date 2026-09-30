@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 // Headless end-to-end: real claude CLI, PM -> Dev, goal: create hello.txt.
 const fs = require('fs'); const os = require('os'); const path = require('path');
+// Track every spawned claude child and reap it on exit/timeout, before the orchestrator loads.
+require('../test/harness/procguard').install();
 const { Store } = require('../src/store');
 const { Orchestrator } = require('../src/orchestrator');
 

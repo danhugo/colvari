@@ -17,14 +17,24 @@ const WT = require('../src/worktree');
 const tmp = (p) => fs.mkdtempSync(path.join(os.tmpdir(), p));
 const waitFor = async (fn, ms = 8000) => { const t0 = Date.now(); while (!fn()) { if (Date.now() - t0 > ms) throw new Error('timeout'); await new Promise((r) => setTimeout(r, 10)); } };
 
-// Team with the PM as the protected core and one Dev report; no CLI configured (dispatch tests
-// stub runTask, so nothing spawns).
+// Team with the PM as the protected core and one Dev report. Task dispatch is stubbed per test
+// (runTask), and wake runs (monitor nudges dispatch them outside runTask) are stubbed too, with a
+// printf fake as claudePath so no sweep in this file can ever reach the real claude binary — the
+// child-reap leak check (t_92c31037) caught this file doing a real $0.13 wake run via tick().
+const fakeClaude = (d) => {
+  const f = path.join(d, 'fake-claude.sh');
+  fs.writeFileSync(f, '#!/bin/sh\necho \'{"type":"result","subtype":"success","total_cost_usd":0,"num_turns":1,"usage":{}}\'\n');
+  fs.chmodSync(f, 0o755);
+  return f;
+};
 const setup = (d) => {
   const s = new Store(path.join(d, 'p'));
+  s.saveSettings({ claudePath: fakeClaude(d) });
   const pm = s.addNode({ name: 'PM', role: 'PM' });
   const a = s.addNode({ name: 'A', role: 'Dev' });
   s.addEdge(pm.id, a.id);
   const o = new Orchestrator(s);
+  o.wakeRun = async () => {};
   clearInterval(o._wakeTimer); clearInterval(o._stallTimer); clearInterval(o._tickTimer);
   return { s, o, pm, a };
 };

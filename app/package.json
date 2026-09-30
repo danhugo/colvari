@@ -5,7 +5,7 @@
   "main": "src/main.js",
   "scripts": {
     "start": "electron .",
-    "test": "AGENTS_SQUAD_PROJECT=$(mktemp -d) AGENTS_SQUAD_TEST_ISOLATION=1 node --test test/*.test.js",
+    "test": "AGENTS_SQUAD_PROJECT=$(mktemp -d) AGENTS_SQUAD_TEST_ISOLATION=1 node --require ./test/harness/install.js --test test/*.test.js",
     "e2e": "AGENTS_SQUAD_PROJECT=$(mktemp -d) AGENTS_SQUAD_TEST_ISOLATION=1 node cli/e2e.js",
     "smoke:real": "node cli/smoke-discovery-limits.js",
     "smoke": "AGENTS_SQUAD_SMOKE=1 electron .",
