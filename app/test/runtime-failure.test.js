@@ -214,7 +214,7 @@ test('one fast unclassified failure fails open: no breaker, no ask, dispatch con
   await waitFor(() => [t1, t2].every((t) => { const x = store.getTask(t.id); return x.parkedForHuman && x.status === 'review'; }), 20000);
   await new Promise((r) => setTimeout(r, 50));
   assert.equal(tripped(orch), false, 'a normal task failure must not trip the breaker, not even via its retries');
-  assert.equal(openQuestions(store).length, 0);
+  assert.equal(openQuestions(store).length, 2, 'each 3-crash park asks the human once (no PM on this team to message)');
   assert.equal(orch.runs, 6, 'both tasks were dispatched and retried to the 3-crash park');
   assert.ok(store.readLogs(Infinity).some((l) => l.kind === 'error' && /EACCES/.test(l.text)), 'real error text still captured for plain failures');
   assert.ok(store.getTask(t1.id).comments.length > 0);
@@ -229,7 +229,21 @@ test('the same task crashing 3 times parks it without ever tripping the breaker 
   assert.equal(store.getTask(t1.id).comments.filter((c) => /^crashed: exit code 1/.test(c.text)).length, 3, 'three crashes, then the crash cap parks the task');
   assert.equal(tripped(orch), false, 'one bad task re-crashing never opens the breaker');
   assert.equal(orch.runs, 3, 'exactly the three crash runs happened');
-  assert.equal(openQuestions(store).length, 0, 'no human ask for a single misbehaving task');
+  assert.equal(openQuestions(store).length, 1, 'the park is not silent: no PM/lead on this team, so the human is asked once');
+}));
+
+test('the 3-crash park alerts the PM with the stderr tail instead of asking the human', () => withFastMs(10000, async () => {
+  const { store, orch, mk, startManual } = setup({ cli: { stderr: GENERIC_B, code: 1 } });
+  const pm = store.addNode({ name: 'Pia', role: 'PM' });
+  const node = mk('Dev', 1);
+  const t1 = store.createTask({ title: 'solo crasher', assignee: node.id });
+  startManual();
+  await waitFor(() => { const x = store.getTask(t1.id); return x.parkedForHuman && x.status === 'review'; }, 20000);
+  const alerts = store.listMessages({ to: pm.id }).filter((m) => /crashed 3 times/.test(m.text));
+  assert.equal(alerts.length, 1, 'the PM was messaged once');
+  assert.ok(alerts[0].text.includes(t1.id), 'the alert names the task');
+  assert.ok(alerts[0].text.includes('EACCES'), 'the alert carries the stderr tail');
+  assert.equal(openQuestions(store).length, 0, 'with a PM to message, the human inbox is not asked');
 }));
 
 test('three fast unclassified failures with the same signature trip the breaker (streak rule)', () => withFastMs(10000, async () => {
@@ -246,7 +260,7 @@ test('three fast unclassified failures with the same signature trip the breaker 
   assert.equal(orch.runs, 7, 'the breaker tripped at the third distinct task\'s first failure');
   assert.equal(store.getTask(tasks[3].id).status, 'todo', 'the 4th task stays queued, not failed');
   assert.equal(unavailable.length, 1);
-  assert.equal(openQuestions(store).length, 1, 'streak trips also ask the human once');
+  assert.equal(openQuestions(store).length, 3, 'the runtime ask + one per 3-crash-parked task (t1, t2)');
   // the queued task says why it is held (dispatch hold-log)
   await waitFor(() => store.readLogs(Infinity).some((l) => /ready but not dispatched/.test(l.text) && /unavailable/i.test(l.text)));
 }));
@@ -260,7 +274,7 @@ test('the streak needs the third failure: dispatch continues through two', () =>
   // first crash is the one that trips (STREAK_MAX=3).
   await waitFor(() => tripped(orch) && !orch.procs.has(node.id), 20000);
   assert.equal(orch.runs, 7, 'two full retry cycles (6 runs) before the third task trips it');
-  assert.equal(openQuestions(store).length, 1);
+  assert.equal(openQuestions(store).length, 3, 'the runtime ask + one per 3-crash-parked task (t1, t2)');
   assert.equal(store.getTask(t3.id).status, 'todo', 'the third task stays queued behind the open breaker');
 }));
 
@@ -273,7 +287,7 @@ test('fast failures with different signatures do not accumulate into a streak', 
   await new Promise((r) => setTimeout(r, 60));
   assert.equal(tripped(orch), false, 'alternating errors must never reach STREAK_MAX');
   assert.equal(orch.runs, 12, 'all four tasks ran and retried to the 3-crash park');
-  assert.equal(openQuestions(store).length, 0);
+  assert.equal(openQuestions(store).length, 4, 'one ask per 3-crash-parked task; no runtime ask');
 }));
 
 test('slow failures never trip via the streak rule, even with the same signature', () => withFastMs(1000, async () => {
@@ -285,7 +299,7 @@ test('slow failures never trip via the streak rule, even with the same signature
   await new Promise((r) => setTimeout(r, 60));
   assert.equal(tripped(orch), false, 'slow failures at STREAK_MAX with the same signature still fail open');
   assert.equal(orch.runs, 9, 'each slow-failing task retried to the 3-crash park');
-  assert.equal(openQuestions(store).length, 0);
+  assert.equal(openQuestions(store).length, 3, 'one ask per 3-crash-parked task; no runtime ask');
 }));
 
 test('a success resets the failure streak', () => withFastMs(1000, async () => {
@@ -297,7 +311,7 @@ test('a success resets the failure streak', () => withFastMs(1000, async () => {
   await new Promise((r) => setTimeout(r, 60));
   assert.equal(tripped(orch), false, 'f, success, f, f = the success resets; retries never stack the streak past 2');
   assert.equal(orch.runs, 10, '3 failing tasks retried to the park, the OK task ran once');
-  assert.equal(openQuestions(store).length, 0);
+  assert.equal(openQuestions(store).length, 3, 'one ask per 3-crash-parked task; no runtime ask');
 }));
 
 test('secrets are redacted on every surface (logs, state, comment, inbox) and the tail is capped', async () => {
