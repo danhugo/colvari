@@ -179,16 +179,22 @@ const INSTRUMENT = `
     if (!rec) return { done: true, stale: true };
     if (!rec.down) return { done: false, waiting: 'input' };
     if (!rec.dispatch) return { done: false, waiting: 'dispatch' };
+    // Only the tail since the click matters; backward scans keep every peek O(renders since
+    // click) instead of O(window), so polling never distorts what we measure.
     const calls = P.renderCalls; const frames = P.frames;
+    let lo = calls.length;
+    while (lo > 0 && calls[lo - 1].s >= rec.down - 5) lo--;
+    let fi = frames.length;
+    while (fi > 0 && frames[fi - 1] > rec.dispatch) fi--;
     // First quiet paint: scan frames after the dispatch finished.
     let paint = 0;
-    for (let i = 1; i < frames.length; i++) {
+    for (let i = fi; i < frames.length; i++) {
       const F = frames[i];
-      if (F <= rec.dispatch) continue;
-      const prev = frames[i - 1];
+      const prev = frames[i - 1] || 0;
       let quiet = true;
-      for (const r of calls) {
-        if (r.s < rec.down - 5 || r.s > F) continue;
+      for (let k = lo; k < calls.length; k++) {
+        const r = calls[k];
+        if (r.s > F) break;
         const e = r.e == null ? Infinity : r.e;
         if (e > F || (r.s > prev && r.s <= F)) { quiet = false; break; }
       }
@@ -196,7 +202,9 @@ const INSTRUMENT = `
     }
     // Legacy endpoint: first frame after the last renderAll that started at/after the press.
     const endMarkL = Math.max(rec.down, P.lastRenderAllEnd >= rec.down ? P.lastRenderAllEnd : 0);
-    let paintL = 0; for (const t of frames) if (t > endMarkL) { paintL = t; break; }
+    let li = frames.length;
+    while (li > 0 && frames[li - 1] > endMarkL) li--;
+    const paintL = li < frames.length ? frames[li] : 0;
     if (!paint && !paintL) return { done: false, waiting: 'paint' };
     if (paint) { rec.paint = paint; rec.ms = paint - rec.down; }
     if (paintL) { rec.paintLegacy = paintL; rec.msLegacy = paintL - rec.down; }
