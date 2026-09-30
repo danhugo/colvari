@@ -38,6 +38,18 @@ test('mapping: restart pending -> warn alert with Restart now; stub or idle stat
   assert.equal(collect({ rst: { pendingCount: 3, stub: true } }).length, 0); // no backend yet: no alert
 });
 
+test('mapping: restart pending is dev-only — hidden when the backend says non-dev, shown when absent', () => {
+  // packaged build (t_7fbee55f): a stale stored pending state must never surface, whatever it says
+  assert.equal(collect({ devMode: false, rst: { pendingCount: 2, stub: false } }).length, 0);
+  assert.equal(collect({ devMode: false, rst: { pendingCount: 1, scheduledAfter: 't_1234567', stub: false } }).length, 0);
+  assert.equal(collect({ devMode: false, rst: { scheduledNow: true, stub: false } }).length, 0);
+  // devMode absent (stub/older backend): the gated-off UX is not in play — dev rows stay
+  assert.equal(collect({ rst: { pendingCount: 2, stub: false } }).length, 1);
+  // other alerts are untouched by the gate
+  const rm = collect({ devMode: false, redMaster: { red: true, failingTests: ['x'], fixTaskId: 't_abc' } });
+  assert.deepEqual(rm.map((a) => a.id), ['master-red']);
+});
+
 test('mapping: stopped with work left -> one warn per orphaned in_progress task, action Open task', () => {
   const tasks = [
     { id: 't_1', status: 'in_progress', assignee: 'n_1', title: 'Fix the thing', updatedAt: '2026-09-30T00:00:00Z' },

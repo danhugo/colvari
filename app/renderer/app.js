@@ -544,6 +544,7 @@ const agoTxt = (ts) => { const a = ago(ts); return !a ? '' : a === 'now' ? 'just
 let rstBusy = null;
 async function rstAction(kind) {
   if (rstBusy || rst.stub) return;
+  if (upd.devMode === false) return; // dev-only control (t_7fbee55f): no restart machinery outside dev mode, whatever the state says
   rstBusy = kind; renderAlerts();
   const names = kind === 'now' ? ['restartNow', 'restartPendingNow'] : ['cancelRestart', 'cancelScheduledRestart'];
   let ok = false, err = null;
@@ -560,7 +561,9 @@ function renderWatchPill() {
   const c = $('#watchst'); if (!c) return;
   const t = watch.lastWatchAt ? new Date(watch.lastWatchAt).getTime() : 0;
   // The loop goes idle-off when nothing is active; a fresh last check stays visible briefly.
-  const live = watch.active || (t && Date.now() - t < 30 * 60 * 1000);
+  // Dev-only machinery (t_7fbee55f): the digest/restart loop exists only in dev builds — no pill
+  // outside dev mode, whatever a stale state says.
+  const live = upd.devMode !== false && (watch.active || (t && Date.now() - t < 30 * 60 * 1000));
   c.classList.toggle('hidden', !live);
   if (!live) return;
   c.className = 'pill watchst';
@@ -1486,6 +1489,9 @@ async function renderAlerts() {
   const paused = rtu ? (rtu.agents ? rtu.agents.length : S.team.nodes.filter((n) => rtuFor(n.id)).length) : 0;
   const all = Alerts.collect({
     redMaster: (S.orch || {}).redMaster, rst, tasks: S.tasks, running: runningIds(),
+    // Dev-only rows (restart pending, t_7fbee55f) hide when the backend says non-dev; upd.devMode
+    // defaults true while stubbed (older backend), matching the self-update pill's convention.
+    devMode: upd.devMode,
     agents: S.orch.agents || {}, stuck: Overview.stuckAgents(S.orch.agents, logs, Date.now(), S.settings.stuckMinutes || 5),
     stalls, teamNodes: S.team.nodes, limits, stuckMinutes: S.settings.stuckMinutes || 5, now: Date.now(),
     nodeNames: Object.fromEntries(S.allNodes.map((n) => [n.id, n.name])),
@@ -1646,7 +1652,7 @@ function renderBoard() {
         busyOther ? `<span class="tag elsewhere" title="${esc(nodeName(t.assignee))} is working on ${esc(taskTitle(w.taskId))}">working elsewhere</span>` : '',
         noWorker ? `<span class="tag noworker" title="in_progress but no live agent process for ${esc(nodeName(t.assignee))}">No worker</span>` : '',
         stallTag(t),
-        rstGated(t) ? `<span class="tag rstwait" title="held back by the restart gate${rst.scheduledAfter ? ` — starts after the core restart (after ${esc(shortTaskId(rst.scheduledAfter))})` : ' — starts after the core restarts'}">waits for restart</span>` : '',
+        (upd.devMode !== false && rstGated(t)) ? `<span class="tag rstwait" title="held back by the restart gate${rst.scheduledAfter ? ` — starts after the core restart (after ${esc(shortTaskId(rst.scheduledAfter))})` : ' — starts after the core restarts'}">waits for restart</span>` : '',
         bl.length ? `<span class="tag blocked" title="waits for: ${esc(bl.map(taskTitle).join(', '))}">Blocked by ${esc(taskTitle(bl[0]).slice(0, 28))}${bl.length > 1 ? ` +${bl.length - 1}` : ''}</span>` : ready ? '<span class="tag ready" title="Ready">Ready</span>' : '',
         t.awaitingApproval ? '<span class="tag approval" title="needs approval">needs approval</span>' : ''].join('');
       const snippet = String(t.description || '').replace(/\s+/g, ' ').trim();
