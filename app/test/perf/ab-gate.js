@@ -17,7 +17,7 @@
  *   PERF_BASE_COMMIT=6710364 PERF_TRACK_COMMIT=988cb63 PERF_PAIRS=3 PERF_OUT=/tmp/ab node test/perf/ab-gate.js
  *   PERF_TRACE=1 PERF_TRACE_COMMIT=<sha> PERF_TRACE_MS=12000 node test/perf/ab-gate.js   # one traced run, no gate
  *
- * Exit code: 0 PASS, 1 FAIL, 2 INVALID (dropped/too-few samples — rerun).
+ * Exit code: 0 PASS, 1 FAIL, 2 INVALID (dropped + quiet-unsettled over 20% / too-few samples — rerun).
  */
 const { execFileSync, spawn } = require('child_process');
 const fs = require('fs');
@@ -43,9 +43,14 @@ function pct(arr, p) {
 }
 const r2 = (x) => Math.round(x * 100) / 100;
 
-// runs: [{ pair, tabMs: number[], p50?, p95?, dropped, attempted, load: {start1m, mid1m, end1m} }]
+// runs: [{ pair, tabMs: number[], p50?, p95?, dropped, unsettledQuiet, attempted, load: {...} }]
+// Validity counts BOTH unresolved populations (t_5ab07112): driver-dropped clicks (never any
+// endpoint) and quiet-unsettled ones (legacy endpoint settled, quiet-paint never did — 22-38%
+// mid-storm, invisible to the old dropped-only check). Percentiles stay settled-only; the
+// unresolved budget bounds how far they can flatter a loaded run.
 function gateDecision({ baseRuns, trackRuns, minImprove = 0.2, maxDropRate = 0.2 }) {
-  const ok = (run) => run && run.attempted > 0 && run.dropped / run.attempted <= maxDropRate && Array.isArray(run.tabMs) && run.tabMs.length > 0;
+  const unresolved = (run) => (run.dropped || 0) + (run.unsettledQuiet || 0);
+  const ok = (run) => run && run.attempted > 0 && unresolved(run) / run.attempted <= maxDropRate && Array.isArray(run.tabMs) && run.tabMs.some(Number.isFinite);
   const base = baseRuns.filter(ok);
   const track = trackRuns.filter(ok);
   const dropped = { base: baseRuns.length - base.length, track: trackRuns.length - track.length };
@@ -58,7 +63,7 @@ function gateDecision({ baseRuns, trackRuns, minImprove = 0.2, maxDropRate = 0.2
   const complete = pairs.filter((p) => p.base && p.track);
   const reasons = [];
   if (!complete.length) reasons.push('no complete pair (both sides valid) — rerun');
-  if (dropped.base || dropped.track) reasons.push(`invalid runs dropped: base ${dropped.base}, track ${dropped.track} (>20% unresolved clicks)`);
+  if (dropped.base || dropped.track) reasons.push(`invalid runs dropped: base ${dropped.base}, track ${dropped.track} (>20% unresolved clicks = driver-dropped + quiet-unsettled)`);
   const everyPair = complete.length > 0 && complete.every((p) => p.trackWinsPair);
   if (complete.length && !everyPair) reasons.push('track loses at least one pair');
   const allBase = base.flatMap((r) => r.tabMs);
@@ -111,7 +116,8 @@ async function runOne(label, { wtDir, outDir, traceMs, env }) {
   const cardMs = s.clicks.samples.filter((c) => c.label.startsWith('card')).map((c) => c.ms);
   return {
     label, pair: -1, commit: s.env.commit, appDir: s.env.ab.appDir,
-    attempted: s.env.clicksAttempted, dropped: s.env.clicksDropped,
+    attempted: s.env.clicksAttempted, dropped: s.env.clicksDropped, unsettledQuiet: s.clicks.unsettledQuiet || 0,
+    droppedByReason: s.env.clicksDroppedByReason || {},
     tabMs, cardMs, tabP50: r2(pct(tabMs, 0.5)), tabP95: r2(pct(tabMs, 0.95)), tabMax: tabMs.length ? Math.max(...tabMs) : 0,
     cardP95: r2(pct(cardMs, 0.95)),
     load: { pre1m: +pre[0].toFixed(2), mid1m: s.env.load.mid1m, post1m: +post[0].toFixed(2), start1m: s.env.load.start1m, end1m: s.env.load.end1m },
@@ -164,7 +170,7 @@ async function main() {
       const r = await runOne(label, { wtDir: wts[sha], outDir: path.join(OUT, label) });
       r.pair = pair;
       bucket.push(r);
-      console.log(`[ab] ${label}: tab n=${r.tabMs.length} p50=${r.tabP50} p95=${r.tabP95} max=${r.tabMax} dropped=${r.dropped}/${r.attempted} load1m ${r.load.start1m}→${r.load.mid1m}→${r.load.end1m} (${(r.wallMs / 1000).toFixed(0)}s)`);
+      console.log(`[ab] ${label}: tab n=${r.tabMs.filter(Number.isFinite).length}/${r.tabMs.length} p50=${r.tabP50} p95=${r.tabP95} max=${r.tabMax} dropped=${r.dropped}/${r.attempted} qunset=${r.unsettledQuiet} dropWhy=${JSON.stringify(r.droppedByReason)} load1m ${r.load.start1m}→${r.load.mid1m}→${r.load.end1m} (${(r.wallMs / 1000).toFixed(0)}s)`);
     }
   }
   const decision = gateDecision({ baseRuns, trackRuns });
@@ -179,14 +185,14 @@ async function main() {
 function renderReport(rep) {
   const rows = [...rep.baseRuns.map((r) => ({ ...r, side: 'base' })), ...rep.trackRuns.map((r) => ({ ...r, side: 'track' }))]
     .sort((a, b) => a.pair - b.pair || (a.side === 'base' ? -1 : 1))
-    .map((r) => `| ${r.pair} | ${r.side} | ${r.commit.slice(0, 9)} | ${r.tabMs.length} | ${r.tabP50} | ${r.tabP95} | ${r.tabMax} | ${r.dropped}/${r.attempted} | ${r.load.start1m}→${r.load.mid1m}→${r.load.end1m} |`).join('\n');
+    .map((r) => `| ${r.pair} | ${r.side} | ${r.commit.slice(0, 9)} | ${r.tabMs.filter(Number.isFinite).length}/${r.tabMs.length} | ${r.tabP50} | ${r.tabP95} | ${r.tabMax} | ${r.dropped}/${r.unsettledQuiet}/${r.attempted} | ${r.load.start1m}→${r.load.mid1m}→${r.load.end1m} |`).join('\n');
   const pairRows = rep.decision.perPair.map((p) => `| ${p.pair} | ${p.baseP95} | ${p.trackP95} | ${p.trackWinsPair ? 'win' : 'LOSS'} |`).join('\n');
   const d = rep.decision;
   return `# A/B gate report — ${rep.base.slice(0, 9)} (base) vs ${rep.track.slice(0, 9)} (track)
 
 ${rep.generatedAt} · ${rep.pairs} interleaved pairs · ${rep.repsPerRun} click rounds per run (tab switches are the gated population) · loadavg 1m start→mid→end per run
 
-| pair | side | commit | tab n | tab p50 | tab p95 | max | dropped | load 1m |
+| pair | side | commit | tab settled/attempts | tab p50 | tab p95 | max | dropped/qunset/attempts | load 1m |
 |---|---|---|---:|---:|---:|---:|---|---|
 ${rows}
 
