@@ -151,6 +151,7 @@ test('human message triggers exactly one auto try; the flag is persisted before 
   const t = s.createTask({ title: 'stuck work', assignee: n.id });
   s.updateTask(t.id, { status: 'in_progress', sessions: { [`${n.id}:claude`]: 'old-7' } });
   const o = new Orchestrator(s); o.running = true;
+  o.wakeUnread = () => []; // counts the auto-try spawn; the human-message wake has its own suite
   const release = blockingPreflight(o); // block at the preflight
   o.sendToAgent(n.id, 'please look at this', t.id);
   const flagged = s.getTask(t.id).autoResumeTried;
@@ -213,10 +214,12 @@ test('autoResumeStuck: the persisted flag stops tries even after a restart (new 
   s.updateTask(t.id, { status: 'in_progress', autoResumeTried: new Date().toISOString() });
   const o = new Orchestrator(s); o.running = true; // fresh instance = restart
   o.preflight = async () => ({ ok: true });
+  o.wakeUnread = () => []; // counts spawns (expects 0); the human-message wake has its own suite
   o.sendToAgent(n.id, 'hello', t.id);
   await new Promise((r) => setImmediate(r));
   assert.equal(o.autoResumeStuck('claude', 'after restart'), 0, 'no second episode from a restart');
   assert.equal(readCalls(argsLog).length, 0, 'no spawn');
+  o.stop(); // the unread human message must not wake from a leaked sweep during later tests (t_7c4538d9)
 });
 
 test('human-stopped work never auto-resumes (stamp survives even a manual reopen)', async () => {
@@ -225,6 +228,7 @@ test('human-stopped work never auto-resumes (stamp survives even a manual reopen
   const t = s.createTask({ title: 'to stop', assignee: n.id });
   const o = new Orchestrator(s); o.running = true;
   o.preflight = async () => ({ ok: true });
+  o.wakeUnread = () => []; // counts spawns across the run; the human-message wake has its own suite
   const p = o.runTask(s.getTeam().nodes.find((x) => x.id === n.id), s.getTask(t.id), s.getTeam(), s.getSettings());
   await waitUntil(() => readCalls(argsLog).length >= 1); // past the script's first line: safe to SIGTERM
   assert.equal(o.stopAgent(n.id), true, 'human stop accepted');
@@ -244,6 +248,7 @@ test('human-stopped work never auto-resumes (stamp survives even a manual reopen
   assert.equal(r.ok, true, JSON.stringify(r));
   await settle(o);
   assert.equal(readCalls(argsLog).length, 2, 'the manual button still works on human-stopped work');
+  o.stop(); // the unread human messages must not wake from a leaked sweep during later tests (t_7c4538d9)
 });
 
 // ---- store + design invariants ----
@@ -267,6 +272,10 @@ test('free signals create no timers: no polling, no retries (plan A/C invariant)
   s.updateTask(t.id, { status: 'in_progress', sessions: { [`${n.id}:claude`]: 'old-nt' } });
   const o = new Orchestrator(s); o.running = true; // never started: no tick sweep exists
   o.preflight = async () => ({ ok: true });
+  // The nudge also wakes the idle agent (t_7c4538d9) and that system owns a debounce timer by
+  // design (covered in wake.test.js). Mute the wake sweep so the spy measures only the
+  // free-signal feature's timers.
+  o.wakeUnread = () => [];
   const timers = { timeout: 0, interval: 0 };
   const sto = global.setTimeout, sio = global.setInterval;
   global.setTimeout = (...a) => { timers.timeout++; return sto(...a); };

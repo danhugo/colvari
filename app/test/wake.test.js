@@ -43,13 +43,12 @@ test('wake: send_message to an idle agent dispatches it with the messages; sende
   assert.equal(run.kind, 'agent'); assert.equal(run.taskId, null); assert.equal(run.exitCode, 0);
   assert.equal(o.agent(b.id).status, 'idle');
 
-  // human and system senders never trigger a wake
-  s.sendMessage({ from: 'human', to: b.id, text: 'no wake for humans' });
+  // system senders never trigger a wake (the human operator's messages DO — t_7c4538d9)
   s.sendMessage({ from: 'system', to: b.id, text: 'no wake for system' });
   await sleep(400);
   assert.equal(s.listRuns({ nodeId: b.id }).length, 1);
-  const late = s.listMessages({ to: b.id }).filter((m) => m.from === 'human' || m.from === 'system');
-  assert.equal(late.length, 2);
+  const late = s.listMessages({ to: b.id }).filter((m) => m.from === 'system');
+  assert.equal(late.length, 1);
   assert.ok(late.every((m) => !m.read));
 });
 
@@ -199,4 +198,49 @@ test('wake: nudge wakes respect the per-agent gap — deferred inside it, fired 
   assert.equal(nudges().length, 2, 'the changed condition fires after the gap');
   assert.match(nudges()[1].text, /1 agent idle/);
   assert.equal(wakes.length, 2);
+});
+
+test('wake: a human chat message wakes an idle agent with the human wording; no task is created', async () => {
+  const d = tmp('squad-wake-');
+  const argsLog = path.join(d, 'args.txt');
+  const fake = fakeClaude(d, `echo "$*" >> ${argsLog}\n` + RESULT);
+  const s = new Store(path.join(d, 'p')); s.saveSettings({ claudePath: fake });
+  const b = s.addNode({ name: 'B', role: 'Dev' });
+  const o = new Orchestrator(s);
+  s.sendMessage({ from: 'human', to: b.id, text: 'hi, are you there?' });
+  await waitFor(() => s.listRuns({ nodeId: b.id }).length === 1 && s.listMessages({ to: b.id })[0].read);
+  const args = fs.readFileSync(argsLog, 'utf8');
+  assert.match(args, /hi, are you there\?/);
+  assert.match(args, /human operator/);
+  assert.match(args, /create_task only for real work/);
+  assert.equal(s.listTasks().length, 0, 'a plain chat message must not create a task');
+  assert.equal(o.agent(b.id).status, 'idle');
+  const run = s.listRuns({ nodeId: b.id })[0];
+  assert.equal(run.kind, 'agent'); assert.equal(run.taskId, null); assert.equal(run.exitCode, 0);
+});
+
+test('wake: the human sender is never pair-capped; the cap still binds agent->agent', async () => {
+  const d = tmp('squad-wake-');
+  const fake = fakeClaude(d, RESULT);
+  const s = new Store(path.join(d, 'p')); s.saveSettings({ claudePath: fake });
+  const a = s.addNode({ name: 'A', role: 'Dev' }); const b = s.addNode({ name: 'B', role: 'Dev' });
+  s.addEdge(a.id, b.id);
+  const o = new Orchestrator(s);
+  const runsB = () => s.listRuns({ nodeId: b.id }).length;
+  // More than MAX_PER_PAIR human messages in a row: every single one wakes B.
+  for (let i = 0; i < WAKE.MAX_PER_PAIR + 2; i++) {
+    s.sendMessage({ from: 'human', to: b.id, text: 'chat ' + i });
+    await waitFor(() => runsB() === i + 1 && s.listMessages({ to: b.id }).every((m) => m.read));
+  }
+  // agent->agent wakes are still capped as before (human exemption must not open the cap for all).
+  const ta = makeTools(s, a.id);
+  const base = runsB();
+  for (let i = 0; i < WAKE.MAX_PER_PAIR; i++) {
+    ta.send_message({ to: 'B', text: 'ping ' + i });
+    await waitFor(() => runsB() === base + i + 1 && s.listMessages({ to: b.id }).every((m) => m.read));
+  }
+  ta.send_message({ to: 'B', text: 'ping capped' });
+  await sleep(400);
+  assert.equal(runsB(), base + WAKE.MAX_PER_PAIR);
+  assert.ok(s.listMessages({ to: b.id }).some((m) => !m.read && m.text === 'ping capped'));
 });
