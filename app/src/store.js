@@ -907,6 +907,9 @@ class Store {
 
   // ---- usage: one record per claude run (see usage.js), newest last, capped ----
   addRun(r) { this.update('runs', { runs: [] }, (d) => { d.runs.push(r); if (d.runs.length > 5000) d.runs.splice(0, d.runs.length - 5000); }); return r; }
+  // Re-persist one run after a late in-place update (proxy cost): replaces by id, appends when the
+  // run is not present (trimmed the same way), so resolveProxyCost never duplicates or loses it.
+  replaceRun(r) { this.update('runs', { runs: [] }, (d) => { const i = d.runs.findIndex((x) => x.id === r.id); if (i >= 0) d.runs[i] = r; else { d.runs.push(r); if (d.runs.length > 5000) d.runs.splice(0, d.runs.length - 5000); } }); return r; }
   listRuns(filter = {}) {
     let rs = this.read('runs', { runs: [] }).runs;
     for (const k of ['nodeId', 'taskId', 'billingSource', 'kind']) if (filter[k]) rs = rs.filter((r) => r[k] === filter[k]);

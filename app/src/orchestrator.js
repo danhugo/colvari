@@ -22,6 +22,7 @@ const RT = require('./runtimes');
 const CAP = require('./capabilities');
 const { SubagentTracker, isSubagentTool } = require('./subagents');
 const FQ = require('./failures');
+const PB = require('./litellm');
 
 const MCP_SERVER = path.join(__dirname, 'mcp-server.js');
 
@@ -201,6 +202,19 @@ class Orchestrator extends EventEmitter {
     try { for (const n of store.getTeam().nodes) { const rl = U.nodeLiveRateLimits(n); if (rl) this.subscriptionRateLimits[n.id] = rl; } } catch {}
     // Wake-on-message state: per-recipient debounce timers and per-pair ping-pong counters.
     this.userStopped = false;
+    // Real cost sources (t_6ee6a70b): the runtime price list (LiteLLM's price JSON cached at the
+    // project root, refreshed at most daily in the background) and the proxy spend-log client.
+    // No price literals live in src/ — prices come from the proxy, the fetched list or the user's
+    // settings.priceOverrides (LiteLLM field names, so values can be pasted from the JSON).
+    this.priceBook = opts.priceBook || new PB.PriceBook({
+      cachePath: path.join(store.dir, 'litellm-prices.json'),
+      overrides: () => { try { return this.store.getSettings().priceOverrides; } catch { return null; } },
+    });
+    this.fetchSpendLogs = opts.fetchSpendLogs || PB.fetchSpendLogs; // injectable for tests
+    this._proxyJobs = []; // in-flight resolveProxyCost promises (tests await them)
+    // Spend-log request ids already counted (joinSpendLogs dedupe): seeded from the persisted set so
+    // a restart does not re-apply cumulative spend-log entries to a NEW run of the same session.
+    try { this.proxySeenIds = new Set(this.store.read('proxy-spend', { seenIds: [] }).seenIds || []); } catch { this.proxySeenIds = new Set(); }
     // Idle episode (t_b2273507): the run session is on but nothing is dispatchable — set when the
     // board drains in tick(), cleared by the next real dispatch (runTask/wakeRun) or start(). The
     // cached reason says what the run is waiting for at drain time; snapshot runState carries both.
@@ -409,6 +423,37 @@ class Orchestrator extends EventEmitter {
       this.checkBudget(rec.nodeId);
     }
     this.emit('run', rec);
+  }
+  // Late proxy cost (t_6ee6a70b): LiteLLM bills per request but writes its spend log after the CLI
+  // exits, so the real cost cannot exist at record() time. Fire-and-forget fetch + session join for
+  // runs that billed through a proxy base URL; the joined per-request cost replaces estimates and
+  // fills unknowns (U.applyProxySpend) and the live counters get the delta. Never throws, never
+  // blocks the run path — tests await the returned promise via _proxyJobs.
+  resolveProxyCost(rec, env) {
+    try {
+      if (!rec || rec.proxySpend || !rec.sessionId || !env || !env.ANTHROPIC_BASE_URL) return null;
+      const apiKey = PB.proxyApiKey(env);
+      if (!apiKey) return null;
+      const baseUrl = env.ANTHROPIC_BASE_URL;
+      const job = (async () => {
+        const r = await this.fetchSpendLogs({ baseUrl, apiKey });
+        if (!r || !r.ok || !Array.isArray(r.logs)) return;
+        const spend = PB.joinSpendLogs(r.logs, { sessionId: rec.sessionId, seenRequestIds: this.proxySeenIds });
+        if (!spend) return;
+        const applied = U.applyProxySpend(rec, spend);
+        if (spend.keys.length) this.store.update('proxy-spend', { seenIds: [] }, (d) => { d.seenIds = [...new Set([...(d.seenIds || []), ...spend.keys])].slice(-20000); });
+        if (!applied) return;
+        rec.proxySpend = { total: spend.costUsd, byModel: spend.byModel, requests: spend.requests };
+        this.store.replaceRun(rec);
+        const a = this.agent(rec.nodeId);
+        a.cost += applied; this.totalCost += applied;
+        if (rec.billingSource === 'subscription') this.subCost = (this.subCost || 0) + applied; else this.billedCost = (this.billedCost || 0) + applied;
+        if (rec.kind !== 'preflight') { a.runCost += applied; this.runCost = (this.runCost || 0) + applied; }
+        this.log(rec.nodeId, 'system', `proxy cost applied: +$${applied.toFixed(4)} (${spend.requests} request${spend.requests === 1 ? '' : 's'})`);
+      })().catch(() => {}).finally(() => { const i = this._proxyJobs.indexOf(job); if (i >= 0) this._proxyJobs.splice(i, 1); });
+      this._proxyJobs.push(job);
+      return job;
+    } catch { return null; }
   }
   log(nodeId, kind, text, extra = null) {
     const a = nodeId && this.agents[nodeId];
@@ -773,6 +818,9 @@ class Orchestrator extends EventEmitter {
     // by agents' own board MCP servers are invisible to this process until the next look.
     this._tickTimer = setInterval(() => { try { this.tick(); } catch {} }, SCHED.TICK_MS);
     if (this._tickTimer.unref) this._tickTimer.unref();
+    // Runtime price list background refresh (t_6ee6a70b): at most daily; the run-time ledger uses
+    // the last-known cache either way. Never on the critical path, never in tests.
+    if (!process.env.AGENTS_SQUAD_TEST_ISOLATION) this.priceBook.refresh().catch(() => {});
     // Red-master sweep (t_897cca56): the merge gate keeps master green through merges, but a base
     // branch can also go red OUTSIDE the gate (direct commits). Detect that at startup and surface
     // it (master.red log + P0 fix task); a no-op unless the base tree differs from the last tree
@@ -1408,6 +1456,7 @@ class Orchestrator extends EventEmitter {
       const startedMs = Date.now();
       const usage = U.newRun({ projectId: this.store.meta() ? this.store.meta().id : null, nodeId: node.id, agent: node.name, ...meta });
       usage.runtime = meta.runtime || node.runtime || 'unknown'; // ledger key part; the init event corrects it if the CLI reports its own
+      usage.proxyBase = (env && env.ANTHROPIC_BASE_URL) || null; // the proxy this run billed through (reportedCostOf + spend-log fetch)
       if (!usage.model && node.model) usage.model = node.model; // non-claude runtimes report no model in events; the node's config is the best known value
       if (usage.resumedFrom) usage.baseline = this.sessionBaseline(usage.resumedFrom);
       let rt; try { rt = RT.getRuntime(meta.runtime); } catch (e) { this.log(node.id, 'error', e.message + ' (run failed, no fallback)'); rt = { id: String(meta.runtime), label: String(meta.runtime), bin: () => '' }; args = null; }
@@ -1470,7 +1519,8 @@ class Orchestrator extends EventEmitter {
           }
           delete usage.baseline;
           if (usage.sessionId && usage.cumulative) (this.sessionCum ||= new Map()).set(usage.sessionId, usage.cumulative);
-          if (args) this.record(U.finishRun(usage, { code, env, billingMode: meta.billingMode, startedMs }));
+          if (args) this.record(U.finishRun(usage, { code, env, billingMode: meta.billingMode, startedMs, priceBook: this.priceBook }));
+          if (args) this.resolveProxyCost(usage, env);
         } catch (e) { this.log(node.id, 'error', 'run close bookkeeping crashed: ' + e.message); }
         resolve({ code, ...run });
       });
@@ -1499,12 +1549,13 @@ class Orchestrator extends EventEmitter {
       child.stderr.on('data', (d) => { err += d; });
       child.on('error', (e) => this.log(node.id, 'error', 'checker spawn failed: ' + e.message));
       child.on('close', () => {
-        const j = parseJudge(out);
+        const j = parseJudge(out, { env });
         const rec = U.newRun({ projectId: this.store.meta() ? this.store.meta().id : null, nodeId: node.id, agent: node.name, ...meta, kind: 'check' });
         rec.runtime = meta.runtime || node.runtime || 'unknown';
-        if (j.raw) U.applyEvent(rec, { ...j.raw, type: 'result' }); else rec.reportedCostUsd = j.cost;
+        rec.proxyBase = (env && env.ANTHROPIC_BASE_URL) || null;
+        if (j.raw) U.applyEvent(rec, { ...j.raw, type: 'result' }); else { rec.reportedCostUsd = j.cost; rec.costKnown = !!j.costKnown; rec.proxyUnpriced = !!j.proxyUnpriced; }
         if (!rec.model) rec.model = m.checkModel || '';
-        this.record(U.finishRun(rec, { code: j.raw ? 0 : 1, env, billingMode: meta.billingMode, startedMs }));
+        this.record(U.finishRun(rec, { code: j.raw ? 0 : 1, env, billingMode: meta.billingMode, startedMs, priceBook: this.priceBook }));
         if (!j.unreadable) this.log(node.id, 'system', `goal check: ${j.met ? 'MET' : 'not met'} (${j.reason.slice(0, 200)}) cost=$${j.cost.toFixed(4)}`);
         resolve(j.unreadable ? Object.assign(j, { out, stderr: err }) : j);
       });
@@ -1903,7 +1954,7 @@ class Orchestrator extends EventEmitter {
       r = await PF.runPreflight({ cfg, settings, mcp: this.mcpConfig(node), cwd, env: bill.env, onEvent: (ev) => U.applyEvent(usage, ev) });
     } finally { a.preflight = null; }
     const events = r.events || []; delete r.events;
-    if (events.length) this.record(U.finishRun(usage, { code: r.exitCode, env: bill.env, billingMode: cfg.billingMode, startedMs: t0 }));
+    if (events.length) this.record(U.finishRun(usage, { code: r.exitCode, env: bill.env, billingMode: cfg.billingMode, startedMs: t0, priceBook: this.priceBook }));
     for (const w of bill.warnings) this.log(node.id, 'error', w);
     r.configHash = PF.configHash(node, settings);
     this.log(node.id, r.ok ? 'result' : 'error', `⚑ preflight ${node.name} ${r.ok ? 'PASS' : 'FAIL'}${r.ok ? '' : ': ' + r.error} (${r.latencyMs || 0}ms, apiKeySource=${r.apiKeySource ?? '?'}, ${(r.tokens && r.tokens.inputTokens) || 0} in / ${(r.tokens && r.tokens.outputTokens) || 0} out)`);
@@ -2022,7 +2073,10 @@ class Orchestrator extends EventEmitter {
       }
     } else if (ev.type === 'result') {
       if (run) { run.result = typeof ev.result === 'string' ? ev.result : ''; if (ev.session_id) run.sessionId = ev.session_id; }
-      const cost = Number(ev.total_cost_usd) || 0;
+      // reportedCostOf (t_6ee6a70b): absent ≠ $0, and a $0 from behind a proxy base URL is the
+      // "model not priced there" case, not a real zero (the proxy's own spend cost lands later).
+      const rc = U.reportedCostOf(ev, { viaProxy: !!(run && run.usage && run.usage.proxyBase) });
+      const cost = rc.costUsd ?? 0;
       if (run && run.usage) U.applyEvent(run.usage, ev);
       else { const t = U.tokensFromResult(ev); a.inputTokens += t.inputTokens; a.outputTokens += t.outputTokens; a.cost += cost; this.totalCost += cost; }
       if (ev.is_error && ev.result) this.log(node.id, 'error', String(ev.result).slice(0, 500));

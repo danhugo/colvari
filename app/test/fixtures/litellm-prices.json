@@ -1,0 +1,23 @@
+{
+  "zai/glm-5.2": {
+    "max_tokens": 128000,
+    "input_cost_per_token": 6e-7,
+    "output_cost_per_token": 2.2e-6,
+    "cache_read_input_token_cost": 1.1e-7,
+    "cache_creation_input_token_cost": 1.2e-6,
+    "mode": "chat"
+  },
+  "claude-sonnet-4-5-20250929": {
+    "max_tokens": 200000,
+    "input_cost_per_token": 3e-6,
+    "output_cost_per_token": 1.5e-5,
+    "cache_read_input_token_cost": 3e-7,
+    "cache_creation_input_token_cost": 3.75e-6,
+    "mode": "chat"
+  },
+  "gpt-5-mini-2026-01-13": {
+    "max_tokens": 400000,
+    "mode": "chat"
+  },
+  "not-a-model-spec": "502 bad gateway"
+}
