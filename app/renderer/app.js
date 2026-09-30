@@ -1592,7 +1592,7 @@ let showAllDone = false; let doneOpen = false;
 const doneCards = (list) => { const all = list.filter((t) => t.status === 'done').slice().sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || ''))); if (showAllDone) return all.slice().sort(byPriorityThenTitle); const top = all.slice(0, 20); const s = all.find((x) => x.id === sel.task); if (s && !top.includes(s)) { top.pop(); top.push(s); } return top; };
 function renderBoard() {
   if (!$('#tab-board').classList.contains('active')) return;
-  fillTeamSelect($('#board-team'), sel.boardTeam, (S.project && S.project.teams) || []);
+  fillTeamSelect($('#boardteam'), sel.boardTeam, (S.project && S.project.teams) || []);
   const bkey = [S.v && S.v.board, sel.task, S.orch.running, Math.floor(Date.now() / 6e4), agentStamp(), sel.boardTeam || ''].join('|');
   if (bkey === boardSig) return; boardSig = bkey;
   const sa = $('#nt-assignee'); const cur = sa.value;
@@ -1670,8 +1670,8 @@ function renderBoard() {
 }
 // Board team scope (t_1158f757): one select at the start of the toolbar; index.html is out of
 // scope for this task so the control is injected here.
-document.querySelector('#tab-board .toolbar').insertAdjacentHTML('afterbegin', '<select id="board-team" data-testid="board-team-select" title="Scope the board to one team, or show all teams"></select>');
-$('#board-team').onchange = () => { sel.boardTeam = $('#board-team').value; boardSig = ''; renderBoard(); };
+document.querySelector('#tab-board .toolbar').insertAdjacentHTML('afterbegin', '<select id="boardteam" title="Scope the board to one team, or show all teams"></select>');
+$('#boardteam').onchange = () => { sel.boardTeam = $('#boardteam').value; boardSig = ''; renderBoard(); };
 $('#nt-add').onclick = async () => {
   const title = $('#nt-title').value.trim(); if (!title) return;
   const t = await call('createTask', { title, description: $('#nt-desc').value, assignee: $('#nt-assignee').value || null });
@@ -2600,7 +2600,7 @@ $('#chat-room').addEventListener('scroll', () => { const room = $('#chat-room');
 let chatSig = null;
 function renderChat() {
   if (!$('#tab-chat.active')) return;
-  fillTeamSelect($('#chat-team'), sel.chatTeam, (S.project && S.project.teams) || []);
+  fillTeamSelect($('#chatteam'), sel.chatTeam, (S.project && S.project.teams) || []);
   const working = new Set(Object.keys(S.orch.agents || {}).filter((id) => S.orch.agents[id].status === 'working'));
   const L = projLogs();
   const sig = Chat.feedKey({ projectId: ctx.p, thread: CH.thread, logs: L, tasks: S.tasks, messages: S.messages, inbox: S.inbox, nodes: S.allNodes, working, agents: S.orch.agents, runs: RUNS }) + '|' + (sel.chatTeam || '');
@@ -2672,8 +2672,8 @@ $('#chat-send').onclick = act(chatSend);
 document.querySelector('#tabs button[data-tab=chat]').addEventListener('click', () => setTimeout(() => { chatSig = null; renderChat(); }));
 // Chat team scope (t_1158f757): one select in the header, left of the typing indicator; index.html
 // is out of scope for this task so the control is injected here.
-document.querySelector('#tab-chat .chat-head .spacer').insertAdjacentHTML('beforebegin', '<select id="chat-team" data-testid="chat-team-select" title="Scope #company to one team, or show all teams"></select>');
-$('#chat-team').onchange = () => { sel.chatTeam = $('#chat-team').value; chatSig = null; renderChat(); };
+document.querySelector('#tab-chat .chat-head .spacer').insertAdjacentHTML('beforebegin', '<select id="chatteam" title="Scope #company to one team, or show all teams"></select>');
+$('#chatteam').onchange = () => { sel.chatTeam = $('#chatteam').value; chatSig = null; renderChat(); };
 setInterval(renderChat, 1000);
 
 // ---------- composer attachments (t_993822cf): paste / drop / attach button, chips, lazy thumbs ----------
