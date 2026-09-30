@@ -237,3 +237,23 @@ test('nudgeIdle delivers the company wake to the owner and debounces the same se
   o.nudgeIdle();
   assert.equal(woken.length, 1, 'the same idle set does not re-wake');
 });
+
+test('nudgeIdle delivers the review-stranded gap to the core and debounces it (plan t_76da3303 D)', () => {
+  const s = new Store(tmp('squad-co7-'));
+  s.saveSettings({ stallTimeoutMin: 0.0001 }); // 6ms: the gap anchor opens immediately
+  const pm = s.addNode({ name: 'Pia', role: 'PM' });
+  const dev = s.addNode({ name: 'Dev', role: 'Dev' });
+  s.addEdge(pm.id, dev.id);
+  const t = s.createTask({ title: 'orphan review', assignee: pm.id }); // root PM: no lead, no review edges
+  s.updateTask(t.id, { status: 'review' });
+  const o = new Orchestrator(s);
+  const woken = []; o.wakeForHuman = async (nodeId, msgs, why) => { woken.push({ nodeId, why }); return true; };
+  o.nudgeIdle();
+  const gaps = woken.filter((w) => w.why.reason === 'review stranded');
+  assert.equal(gaps.length, 1, 'a review nobody can act on pushes the core once');
+  assert.equal(gaps[0].nodeId, pm.id);
+  assert.equal(gaps[0].why.action, 'wake core');
+  assert.deepEqual(gaps[0].why.taskIds, [t.id]);
+  o.nudgeIdle();
+  assert.equal(woken.filter((w) => w.why.reason === 'review stranded').length, 1, 'the same stranded set does not re-wake');
+});
