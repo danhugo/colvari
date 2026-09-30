@@ -86,6 +86,15 @@ test('helpycode is profile-driven: args derive from the introspector (no hand-bu
   const a = rt.buildArgs({ model: 'elice/z-ai/glm-5.3-flash', effort: 'high' }, 'hi', { helpycodePath: '/fake/hc-args' }, {}, { resume: 'S1', exec: fakeHelpyExec });
   assert.deepStrictEqual(a, ['run', '-s', 'S1', '--dangerously-skip-permissions', '--format', 'json', '--model', 'elice/z-ai/glm-5.3-flash', '--variant', 'high', 'hi']);
 });
+test('helpycode long prompt goes over stdin, not argv (ENAMETOOLONG from realpath of the message)', () => {
+  const rt = RT.getRuntime('helpycode');
+  const long = 'You are "Devon". ' + 'x'.repeat(3000);
+  const a = rt.buildArgs({ model: 'm1' }, long, { helpycodePath: '/fake/hc-long' }, {}, { exec: fakeHelpyExec });
+  assert.ok(!a.includes(long), 'a long prompt must not be a positional arg');
+  assert.equal(a.stdin, long, 'the prompt rides on args.stdin for spawnRun to pipe');
+  const s = rt.buildArgs({ model: 'm1' }, 'hi', { helpycodePath: '/fake/hc-long' }, {}, { exec: fakeHelpyExec });
+  assert.equal(s[s.length - 1], 'hi'); assert.equal(s.stdin, undefined, 'short prompts stay positional');
+});
 test('helpycode bypass flag respects the permission mode: explicit non-bypass modes leave it off', () => {
   const rt = RT.getRuntime('helpycode');
   const S = { helpycodePath: '/fake/hc-nobypass' };

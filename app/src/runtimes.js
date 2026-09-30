@@ -68,6 +68,11 @@ function profileRuntime(id, label, binFromSettings) {
       const bypass = (n.permissionMode || (settings || {}).permissionMode || 'bypassPermissions') === 'bypassPermissions';
       const args = buildProfileArgs(profile, { model: n.model, prompt, variant: n.effort, session: opts.resume, bypass });
       args.push(...splitArgs(n.extraArgs));
+      // opencode-style CLIs realpath() positional messages: a prompt longer than a path segment dies
+      // with ENAMETOOLONG. Long prompts go over stdin instead (they read it when it is not a TTY);
+      // spawnRun pipes args.stdin into the child.
+      const at = args.lastIndexOf(prompt);
+      if (typeof prompt === 'string' && prompt.length > 200 && at > 0) { args.splice(at, 1); args.stdin = prompt; }
       return args;
     },
     // Generic JSON-event parsing driven by the profile's eventMapping; wired into the orchestrator
