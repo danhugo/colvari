@@ -434,6 +434,39 @@ test('packaged build: the restart tools are not advertised in enabledTools/promp
   assert.ok(p.includes('update_task_status'), 'the board tool line survives');
 });
 
+test('packaged build: restartState and the push channel report restartPending=false despite stale stored state', () => {
+  const d = tmp('squad-restart-');
+  const { s, o, pm } = packagedSetup(d);
+  // Written after boot (an out-of-band writer / a store shared with a dev process): the
+  // constructor's wipe never saw this, so the read path itself must refuse to surface it.
+  s.setRestartPending({ scheduledNow: true, count: 7, afterTaskId: s.createTask({ title: 'anchor', assignee: pm.id, createdBy: 'human' }).id });
+  let pushed = null;
+  o.on('restart-state', (r) => { pushed = r; });
+  o.sweepRestart();
+  const st = o.restartState();
+  assert.equal(st.pendingCount, 0);
+  assert.equal(st.scheduledNow, false);
+  assert.equal(st.scheduledAfter, null, 'no anchor leaks');
+  assert.equal(st.targetSha, null);
+  assert.deepEqual(st.gating, []);
+  assert.equal(st.blockedReason, null);
+  assert.equal(o._restartGate, false, 'the gate never arms from out-of-band state');
+  assert.ok(pushed && pushed.pendingCount === 0 && !pushed.scheduledNow, "the emitted 'restart-state' is zeroed too");
+  // Dev contrast (same store ops, devMode on): the state still surfaces what is stored.
+  const dv = setup(tmp('squad-restart-'));
+  dv.s.setRestartPending({ count: 7 });
+  assert.equal(dv.o.restartState().pendingCount, 7, 'dev mode reports the stored count');
+});
+
+test('watch digest: dev still lists pending restarts; packaged never mentions restarts', () => {
+  const dev = setup(tmp('squad-restart-'));
+  dev.s.bumpRestartPending();
+  assert.ok(dev.o.watchDigest().includes('restarts pending: 1'), 'dev digest keeps the restarts line');
+  const pk = packagedSetup(tmp('squad-restart-'));
+  pk.s.setRestartPending({ count: 5 });
+  assert.ok(!pk.o.watchDigest().includes('restart'), 'packaged digest carries no restart line at all');
+});
+
 // ---- watcher integration: the scheduled restart reuses the drain/test/relaunch flow ----
 const SHA1 = 'a'.repeat(40);
 const SHA2 = 'b'.repeat(40); // origin ahead of local: a schedule has real code to restart onto (t_7426095a)

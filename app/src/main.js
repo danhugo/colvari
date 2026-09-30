@@ -6,6 +6,8 @@ const procguard = (process.env.AGENTS_SQUAD_GUI_E2E || process.env.AGENTS_SQUAD_
 const { Orchestrator, reapRunPids, interruptedFromReap } = require('./orchestrator');
 const BS = require('./bootstate');
 const { ProjectManager, TEMPLATES, isolateTestRoot } = require('./projects');
+const { BoardCache } = require('./board-cache');
+const { DeltaPump } = require('./delta-pump');
 const { pickChanged } = require('./store');
 const AC = require('./agent-config');
 const WT = require('./worktree');
@@ -122,8 +124,21 @@ function orchFor(pid) {
     o.updater = watcherFor(pid);
     bootRecovery(pid); // heartbeat check + orphan reap + interrupted-task comments (once per project)
     orchs.set(pid, o);
+    pumpFor(pid).attachOrch(o); // the pump's orch deltas feed the same 'state' payload (t_39bf39ac)
   }
   return o;
+}
+// IPC deltas (t_39bf39ac, perf track 2): one pump per project pushes {type,id,patch} batches on the
+// 'delta' channel — board-cache change events for tasks/wiki, the orchestrator 'state' snapshot, and
+// sig-checked messages/inbox/runs — so the renderer stops re-pulling sections on every state event.
+const pumps = new Map(); // projectId -> DeltaPump
+function pumpFor(pid) {
+  let p = pumps.get(pid);
+  if (!p) {
+    p = new DeltaPump({ projectId: pid, store: pm.store(pid), cache: BoardCache.forStore(pm.store(pid)), orch: () => orchs.get(pid) || null, send: (payload) => send('delta', payload) });
+    pumps.set(pid, p);
+  }
+  return p;
 }
 // Self-update: one UpdateWatcher per project (polls the repo, safe restart + resume; see self-update.js).
 const watchers = new Map(); // projectId -> UpdateWatcher
@@ -2493,7 +2508,7 @@ function toDraftProfile(bin, profile, derived = {}) {
 const api = {
   introspectRuntime: (_c, bin) => { const r = runIntrospectRuntime(bin); return toDraftProfile(bin, r.profile, r); },  listProjects: () => ({ projects: pm.list().map((p) => ({ ...p, running: !!(orchs.get(p.id) || {}).running })), templates: Object.fromEntries(Object.entries(TEMPLATES).map(([k, v]) => [k, v.label])) }),
   createProject: (_c, name, tpl) => pm.create(name, tpl), renameProject: (_c, pid, name) => pm.rename(pid, name),
-  deleteProject: (_c, pid) => { if ((orchs.get(pid) || {}).running) throw new Error('stop the project first'); orchs.delete(pid); return pm.remove(pid); },
+  deleteProject: (_c, pid) => { if ((orchs.get(pid) || {}).running) throw new Error('stop the project first'); const p = pumps.get(pid); if (p) { p.close(); pumps.delete(pid); } orchs.delete(pid); return pm.remove(pid); },
   createTeam: (c, name, tpl) => pm.createTeam(c.p, name, tpl), renameTeam: (c, tid, name) => pm.renameTeam(c.p, tid, name),
   deleteTeam: (c, tid) => pm.removeTeam(c.p, tid), duplicateTeam: (c, tid) => pm.duplicateTeam(c.p, tid),
   exportTeam: (c, tid) => pm.exportTeam(c.p, tid), importTeam: (c, json) => pm.importTeam(c.p, json),
@@ -2676,6 +2691,7 @@ app.whenReady().then(() => {
   if (!appLockHeld) return; // second launch: the running instance stays, this one exits
   createWindow();
   probeUnprobedAgents();
+  for (const p of pm.list()) pumpFor(p.id); // delta pumps stream every project's changes (t_39bf39ac)
   pollInbox(true); setInterval(() => pollInbox(false), 1500);
   // Unclean-exit detection must see the PREVIOUS instance's heartbeat (t_2ca99830): recover for
   // every known project before the heartbeat below stamps over the evidence.
@@ -2712,6 +2728,7 @@ function markCleanExits() {
   if (!appLockHeld) return;
   for (const p of pm.list()) { try { BS.writeAlive(pm.store(p.id).dir, { cleanExitAt: Date.now() }); } catch {} }
 }
+app.on('will-quit', () => { try { BoardCache.closeAll(); } catch {} }); // no leaked fs.watch handles across project switches/quit
 app.on('will-quit', markCleanExits);
 for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
   try {
