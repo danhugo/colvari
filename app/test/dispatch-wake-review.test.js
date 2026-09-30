@@ -36,7 +36,7 @@ test('scheduler: 4 ready tasks + maxConcurrency 4 dispatch all 4 at once', async
   assert.deepEqual(new Set(active.map((a) => a.taskId)), new Set(tasks.map((t) => t.id)),
     'every ready task is dispatched in the fill pass — no slot idles while ready work waits');
   assert.equal(new Set(active.map((a) => a.nodeId)).size, 4, 'one run per agent: nobody doubled up');
-  await new Promise((res) => o.on('done', res));
+  await new Promise((res) => { o.on('done', res); o.once('idle', res); }); // drain idles now (t_b2273507)
   assert.ok(tasks.every((t) => s.getTask(t.id).status === 'done'));
 });
 

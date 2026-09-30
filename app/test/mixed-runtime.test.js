@@ -20,7 +20,7 @@ test('mixed claude+codex team: codex runs report tokens but never add to billedC
   const x = s.addNode({ name: 'Cx', role: 'Dev', runtime: 'codex', model: 'gpt-5.6-terra', billingMode: 'api' });
   s.createTask({ title: 'claude task', assignee: c.id }); s.createTask({ title: 'codex task', assignee: x.id });
   const o = new Orchestrator(s);
-  await new Promise((res) => { o.once('done', res); o.start(); });
+  await new Promise((res) => { o.once('done', res); o.once('idle', res); o.start(); }); // drain idles now (t_b2273507)
   const snap = o.snapshot();
   assert.strictEqual(snap.agents[x.id].runtime, 'codex'); assert.strictEqual(snap.agents[x.id].model, 'gpt-5.6-terra');
   assert.strictEqual(snap.agents[x.id].cost, 0);
@@ -38,7 +38,7 @@ test('unknown runtime errors the run instead of falling back to claude', async (
   const t = s.createTask({ title: 'typo task', assignee: n.id });
   const o = new Orchestrator(s); const logs = [];
   o.on('log', (e) => logs.push(e));
-  await new Promise((res) => { o.once('done', res); o.start(); });
+  await new Promise((res) => { o.once('done', res); o.once('idle', res); o.start(); }); // drain idles now (t_b2273507)
   assert.notStrictEqual(s.getTask(t.id).status, 'done');
   assert.strictEqual(s.listRuns().filter((r) => r.nodeId === n.id && r.reportedCostUsd).length, 0);
   assert.ok(logs.some((e) => e.kind === 'error' && e.text.includes('unknown runtime "codx"')));
@@ -80,7 +80,7 @@ exit 1
   s.createTask({ title: 'helpycode task', assignee: h.id });
   const o = new Orchestrator(s); const logs = [];
   o.on('log', (e) => logs.push(e));
-  await new Promise((res) => { o.once('done', res); o.start(); });
+  await new Promise((res) => { o.once('done', res); o.once('idle', res); o.start(); }); // drain idles now (t_b2273507)
   const finishIdx = logs.findIndex((e) => e.kind === 'system' && e.text.includes('finished'));
   const liveKinds = logs.slice(0, finishIdx).map((e) => e.kind);
   assert.ok(liveKinds.includes('text'), 'text streamed live: ' + JSON.stringify(logs));

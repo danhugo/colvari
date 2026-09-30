@@ -39,7 +39,7 @@ test('(a) 3 ready todos with maxConcurrency=2 dispatch exactly 2; the 3rd starts
   const t2 = s.createTask({ title: 'two', assignee: n2.id });
   const t3 = s.createTask({ title: 'three', assignee: n3.id });
   const o = new Orchestrator(s);
-  const done = new Promise((res) => o.on('done', res));
+  const done = new Promise((res) => { o.on('done', res); o.once('idle', res); }); // drain idles now (t_b2273507)
   o.start();
   await waitFor(() => o.procs.size === 2, 'two slots filled');
   const active = o.snapshot().active.map((a) => a.taskId);
@@ -60,7 +60,7 @@ test('(b) a task written by an external process (board MCP) during a live run is
   s.addEdge(busy.id, idle.id); // assign edge so Busy's board tools may create tasks for Idle
   s.createTask({ title: 'keeps busy busy', assignee: busy.id });
   const o = new Orchestrator(s);
-  const done = new Promise((res) => o.on('done', res));
+  const done = new Promise((res) => { o.on('done', res); o.once('idle', res); }); // drain idles now (t_b2273507)
   o.start();
   await waitFor(() => o.procs.has(busy.id), 'the first task is live');
   const ta = makeTools(s, busy.id);

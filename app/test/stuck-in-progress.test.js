@@ -37,11 +37,11 @@ test('orchestrator resets and re-dispatches orphaned in_progress tasks instead o
   const logs = [];
   const o = new Orchestrator(s);
   o.on('log', (l) => logs.push(l.text));
-  const done = new Promise((resolve) => o.on('done', resolve));
+  const done = new Promise((resolve) => { o.on('done', resolve); o.once('idle', resolve); }); // drain idles now (t_b2273507)
   o.start();
   await done;
 
-  const stopReason = logs.find((t) => /^Stopped:|^No more todo|orphan|reconcil/i.test(t)) || '';
+  const stopReason = logs.find((t) => /Board drained|^Stopped:|^No more todo|orphan|reconcil/i.test(t)) || '';
   assert.ok(!/blocked by unfinished dependencies/.test(stopReason), `stop reason must not blame "blocked" deps while orphans exist: "${stopReason}"`);
 
   const finalTasks = s.listTasks();
@@ -61,11 +61,15 @@ test('run with a task in review and nothing dispatchable stops with a reason nam
   const logs = [];
   const o = new Orchestrator(s);
   o.on('log', (l) => logs.push(l.text));
-  const done = new Promise((resolve) => o.on('done', resolve));
+  const done = new Promise((resolve) => { o.on('done', resolve); o.once('idle', resolve); }); // drain idles now (t_b2273507)
   o.start();
   await done;
 
-  const stop = logs.find((l) => /^Stopped:|^No more todo/.test(l)) || '';
-  assert.ok(!/Finished/.test(stop), `run must not claim Finished with a task still in review: "${stop}"`);
-  assert.ok(/^Stopped: 1 unfinished task\(s\)/.test(stop) && stop.includes(t.id) && stop.includes('review'), `stop reason must name the stuck task and its state: "${stop}"`);
+  // t_b2273507: an undispatchable review no longer STOPS the run — the run goes idle and says why,
+  // naming the stuck task and its state, and never claims Finished with work still open.
+  const drained = logs.find((l) => /Board drained/.test(l)) || '';
+  assert.ok(!/Finished/.test(drained), `run must not claim Finished with a task still in review: "${drained}"`);
+  assert.ok(/run stays on \(1 unfinished task\(s\)/.test(drained) && drained.includes(t.id) && drained.includes('review'), `idle log must name the stuck task and its state: "${drained}"`);
+  assert.equal(o.snapshot().runState.state, 'idle');
+  assert.match(o.snapshot().runState.reason, /1 unfinished task/);
 });

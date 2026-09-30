@@ -19,7 +19,7 @@ function setup() {
 test('3 independent tasks start 3 simultaneous runs', async () => {
   const { s, ns } = setup();
   ns.forEach((n, i) => s.createTask({ title: 't' + i, assignee: n.id }));
-  const o = new Orchestrator(s); const done = new Promise((r) => o.on('done', r));
+  const o = new Orchestrator(s); const done = new Promise((r) => { o.on('done', r); o.once('idle', r); }); // drain idles now (t_b2273507)
   o.start();
   assert.equal(o.snapshot().active.length, 3);
   await done;
@@ -30,7 +30,7 @@ test('dependent task waits for its blocker', async () => {
   const { s, ns } = setup();
   const a = s.createTask({ title: 'a', assignee: ns[0].id });
   const b = s.createTask({ title: 'b', assignee: ns[1].id, blockedBy: [a.id] });
-  const o = new Orchestrator(s); const done = new Promise((r) => o.on('done', r));
+  const o = new Orchestrator(s); const done = new Promise((r) => { o.on('done', r); o.once('idle', r); }); // drain idles now (t_b2273507)
   o.start();
   assert.deepEqual(o.snapshot().active.map((x) => x.taskId), [a.id]);
   assert.equal(s.getTask(b.id).status, 'todo');
@@ -79,7 +79,7 @@ exit 1
   const a = mk('A'); const b = mk('B');
   s.createTask({ title: 'a', assignee: a.id }); s.createTask({ title: 'b', assignee: b.id });
   const o = new Orchestrator(s);
-  await new Promise((res) => { o.once('done', res); o.start(); });
+  await new Promise((res) => { o.once('done', res); o.once('idle', res); o.start(); }); // drain idles now (t_b2273507)
   const ca = JSON.parse(fs.readFileSync(path.join(d, 'wA', 'captured-config.json'), 'utf8'));
   const cb = JSON.parse(fs.readFileSync(path.join(d, 'wB', 'captured-config.json'), 'utf8'));
   assert.deepStrictEqual(ca.mcp.board.command.slice(-2), ['--node', a.id]);

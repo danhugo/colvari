@@ -44,7 +44,7 @@ test('running an orchestrator job from the repo cwd leaves git status clean', as
   const cwdBefore = process.cwd();
   process.chdir(repoRoot);
   try {
-    await new Promise((res) => { orch.on('done', res); orch.start(); });
+    await new Promise((res) => { orch.on('done', res); orch.once('idle', res); orch.start(); }); // drain idles now (t_b2273507)
   } finally {
     process.chdir(cwdBefore);
   }

@@ -177,7 +177,9 @@ async function autorun(file) {
   for (let i = 0; i < 90; i++) { await w(2000); const t = await win.webContents.executeJavaScript(`document.querySelector('#pf-summary').textContent`); if (!/testing|untested/.test(t)) { console.log('[autorun] preflight:', t); break; } }
   await win.webContents.executeJavaScript(`(() => { const g = document.querySelector('#goal'); g.value = ${JSON.stringify(goal)}; document.querySelector('#run').click(); })()`);
   console.log('[autorun] started', p.name);
-  orchFor(p.id).once('done', () => console.log('[autorun] done', p.name));
+  const ao = orchFor(p.id); // a drained board idles the run now (t_b2273507): both endings are log-worthy
+  ao.once('done', () => console.log('[autorun] done', p.name));
+  ao.once('idle', () => console.log('[autorun] idle', p.name));
 }
 
 // App-wide UI prefs (theme: 'system' | 'light' | 'dark') persisted in <root>/prefs.json.
@@ -546,7 +548,7 @@ async function guiE2E() {
     pm.store(p, t1).updateNode(a.id, { capabilities: stubCaps }); pm.store(p, t1).updateNode(b.id, { capabilities: stubCaps }); pm.store(p, t2).updateNode(c.id, { capabilities: stubCaps });
     const ts = [a, b, c].map((n) => s.createTask({ title: 'Parallel ' + n.name, assignee: n.id }));
     const dep = s.createTask({ title: 'Depends on ParA', assignee: c.id, blockedBy: [ts[0].id] });
-    const o = orchFor(p); const done = new Promise((r) => o.once('done', r)); o.start();
+    const o = orchFor(p); const done = new Promise((r) => { o.once('done', r); o.once('idle', r); }); o.start(); // natural drain idles now (t_b2273507)
     await ex(`$('#tabs button[data-tab=board]').click(); await refresh();`);
     const live = await waitFor(`await refresh(); return /3 running/.test($('#runstate').textContent) && [...document.querySelectorAll('.card')].some((c) => /Depends on ParA/.test(c.textContent) && /Blocked by Parallel ParA/.test((c.querySelector('.tag.blocked') || {}).textContent || ''))`, 18000);
     const hdr = await ex(`return $('#runstate').textContent`);
@@ -585,7 +587,7 @@ async function guiE2E() {
     await ex(`$('#tabs button[data-tab=team]').click(); await refresh(); renderGraph(); await w(400);`);
     const chips = await ex(`return [...document.querySelectorAll('#graph .chip text')].map((t) => t.textContent)`);
     expect('mixed: graph chips show codex + claude runtimes and opus/haiku models', ['codex', 'claude', 'opus', 'haiku'].every((c) => chips.some((x) => x.toLowerCase().startsWith(c))), chips);
-    const o = orchFor(p); const done = new Promise((r) => o.once('done', r)); o.start();
+    const o = orchFor(p); const done = new Promise((r) => { o.once('done', r); o.once('idle', r); }); o.start(); // natural drain idles now (t_b2273507)
     for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`$('#tabs button[data-tab=team]').click(); await refresh(); renderGraph(); await w(400);`); await shot(`28-mixed-graph-${t}`); }
     await done;
     for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`$('#tabs button[data-tab=overview]').click(); await refresh(); await w(400);`); await shot(`29-mixed-overview-${t}`); }

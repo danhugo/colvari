@@ -156,7 +156,7 @@ test('orchestrator passes per-agent flags, env and cwd to claude', async () => {
   const n = s.addNode({ name: 'D', role: 'Dev', workdir: work, env: 'SQUAD_FOO=bar', maxTurns: 4, disallowedTools: 'Bash', extraArgs: '--x 1' });
   s.createTask({ title: 'job', assignee: n.id });
   const o = new Orchestrator(s);
-  await new Promise((res) => { o.on('done', res); o.start(); });
+  await new Promise((res) => { o.on('done', res); o.once('idle', res); o.start(); }); // drain idles now (t_b2273507)
   const got = JSON.parse(fs.readFileSync(out, 'utf8'));
   assert.equal(fs.realpathSync(got.cwd), fs.realpathSync(work));
   assert.equal(got.foo, 'bar');

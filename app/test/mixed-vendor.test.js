@@ -25,7 +25,7 @@ test('mixed vendors: Claude/Opus PM -> Codex Dev -> Claude/Haiku Reviewer comple
   const impl = s.createTask({ title: 'impl', assignee: D.id, blockedBy: [plan.id] });
   const rev = s.createTask({ title: 'review', assignee: R.id, blockedBy: [impl.id] });
   const o = new Orchestrator(s);
-  await new Promise((res) => { o.once('done', res); o.start(); });
+  await new Promise((res) => { o.once('done', res); o.once('idle', res); o.start(); }); // drain idles now (t_b2273507)
   assert.deepStrictEqual([plan, impl, rev].map((t) => s.getTask(t.id).status), ['done', 'done', 'done']);
   const lines = fs.readFileSync(log, 'utf8').split('@@@').filter(Boolean);
   // plan, Rex's pickup of plan, impl, Rex's pickup of impl, Rex's review task, Rex2's pickup of that.
