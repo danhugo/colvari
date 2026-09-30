@@ -326,6 +326,29 @@ test('stray squad-*/gate registrations are reaped; locked, dirty and non-matchin
   assert.strictEqual(fs.existsSync(dirty), true);
 });
 
+// ---- t_a91c68ce: the self-update test step's worktree vs the sweeps ----
+// The 04:35 incident: the flow's squad-selfupdate-* worktree is a REGISTERED worktree of the
+// live repo, so every sweeper sees it, and the suite's cwd vanished mid-run (spawn node ENOENT
+// with the binary present). A clean, unlocked throwaway of that shape is reaped like any other
+// stray — which is exactly why the self-update flow (and the gate's base checkout) must hold a
+// git worktree lock while their suite runs: locked entries are never touched, by any sweeper.
+test('self-update-shaped stray: unlocked is reaped, locked is never touched', () => {
+  const { repo, s } = setup('t_lc19');
+  const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'wlc-selfupdate-')));
+  const unlocked = path.join(tmp, 'squad-selfupdate-incident'); // crashed flow leftover: reaped
+  g(repo, 'worktree', 'add', '--detach', unlocked, 'HEAD');
+  const locked = path.join(tmp, 'squad-selfupdate-livesuite'); // live test step: locked
+  g(repo, 'worktree', 'add', '--detach', locked, 'HEAD');
+  g(repo, 'worktree', 'lock', locked);
+
+  const r = WT.sweepWorktrees({ repoDir: repo, store: s });
+  assert.deepStrictEqual(r.strays, [unlocked], JSON.stringify(r));
+  assert.strictEqual(fs.existsSync(unlocked), false, 'an unlocked leftover of this shape is reaped');
+  assert.strictEqual(fs.existsSync(locked), true, 'the locked test-step worktree survives every sweeper');
+  assert.strictEqual(g(repo, 'worktree', 'list').includes(locked), true, 'its registration is intact');
+  g(repo, 'worktree', 'unlock', locked); g(repo, 'worktree', 'remove', '--force', locked); // test hygiene
+});
+
 // Repo root owning a worktree at <root>/.squad/worktrees/<taskId>.
 function repoOf(wtPath) { return path.resolve(wtPath, '..', '..', '..'); }
 
