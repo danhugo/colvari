@@ -206,6 +206,10 @@ function listWorktrees(root) {
 // between add and remove (squad-gate-base-*, in os.tmpdir()), and scratch dirs (squad-*,
 // tmp.*/wt). Only a CLEAN tree goes — a dirty one might be someone's checkout, so it is
 // reported, not destroyed. Locked entries are never touched. Branches are always kept.
+// LIVE users of such worktrees — the self-update test step (squad-selfupdate-*) and the merge
+// gate's base checkout (squad-gate-base-*) — hold a git worktree lock while their suite runs:
+// that lock is the one protection every sweeper of this repo honors, so a creator that skips it
+// owns the race of having its cwd deleted mid-run (t_a91c68ce: the 04:35 ENOENT abort).
 const STRAY_WT = /\/(squad-[^/]+|tmp\.[^/]+\/wt)$/;
 
 function reapStrayWorktrees(root, report) {

@@ -483,6 +483,125 @@ test('defaultTestRun: a hung suite is killed with its whole process group at the
   assert.ok(!ok.timedOut);
 });
 
+// ---- t_a91c68ce: the test step's throwaway worktree vs the worktree sweeps ----
+// The 04:35 incident: the flow's squad-selfupdate-* worktree is a REGISTERED worktree of the
+// live repo, so every sweeper of the repo sees it, and the suite's cwd vanished mid-run
+// (spawn node ENOENT with the binary present — reproduced byte-identical by deleting a
+// node --test cwd between file spawns). The flow now holds a git worktree lock while the
+// suite runs: the one protection all sweepers honor (stray reaper skips locked entries, git
+// refuses to remove one), plus one retry when the harness itself failed to spawn.
+
+test('test step locks its throwaway worktree against the sweeps and unlocks before removal', async () => {
+  const git = fakeGit();
+  const w = makeWatcher({ git });
+  await drain(w);
+  git.setSha(SHA2); git.setOrigin(SHA2);
+  await drain(w);
+  assert.strictEqual(w.phase, 'restarting');
+  const add = git.calls.findIndex((c) => c.startsWith('worktree add --detach '));
+  const lock = git.calls.findIndex((c) => c.startsWith('worktree lock '));
+  const unlock = git.calls.findIndex((c) => c.startsWith('worktree unlock '));
+  const rm = git.calls.findIndex((c) => c.startsWith('worktree remove --force '));
+  assert.ok(add >= 0, 'the flow registers a throwaway worktree');
+  assert.ok(lock > add, `the worktree is locked right after it is added (add=${add}, lock=${lock}, calls: ${git.calls.filter((c) => c.startsWith('worktree')).join(' | ')})`);
+  assert.ok(unlock > lock && rm > unlock, `unlock precedes removal — git refuses to remove a locked tree (calls: ${git.calls.filter((c) => c.startsWith('worktree')).join(' | ')})`);
+  const wt = git.calls[add].split(' ')[3];
+  assert.ok(/squad-selfupdate-/.test(wt), 'the locked worktree is the throwaway test worktree');
+  assert.ok(git.calls[lock].endsWith(wt) && git.calls[unlock].endsWith(wt) && git.calls[rm].endsWith(wt), 'lock/unlock/remove all target that same worktree');
+});
+
+test('infra spawn failure in the test step retries once, loudly, and can still restart', async () => {
+  const git = fakeGit();
+  let runs = 0;
+  const w = makeWatcher({ git, testRun: async () => {
+    runs++;
+    return runs === 1
+      ? { code: 1, out: "✖ test/worktree.test.js (5.4ms)\n  Error: spawn /opt/homebrew/Cellar/node/23.11.0/bin/node ENOENT\n    errno: -2,\n    code: 'ENOENT',\n    syscall: 'spawn /opt/homebrew/Cellar/node/23.11.0/bin/node'" }
+      : { code: 0, out: 'all pass' };
+  } });
+  await drain(w);
+  git.setSha(SHA2); git.setOrigin(SHA2);
+  await drain(w);
+  assert.strictEqual(runs, 2, 'the suite ran exactly twice (one retry)');
+  assert.strictEqual(w.phase, 'restarting', 'the retry went green and the restart proceeds');
+  assert.ok(w.relaunched === 1);
+  assert.ok(w.store.logs.some((l) => l.kind === 'error' && /infra spawn failure.*retrying once \(attempt 1\/2\)/.test(l.text)), 'the retry is logged loudly with its counter');
+});
+
+test('an assertion failure is never retried', async () => {
+  const git = fakeGit();
+  let runs = 0;
+  const w = makeWatcher({ git, testRun: async () => { runs++; return { code: 1, out: 'AssertionError: 1 !== 2 — tests failed badly' }; } });
+  await drain(w);
+  git.setSha(SHA2); git.setOrigin(SHA2);
+  await drain(w);
+  assert.strictEqual(runs, 1, 'a real test failure aborts on the first run');
+  assert.strictEqual(w.phase, 'idle');
+  assert.match(w.status().lastError, /tests failed/);
+});
+
+test('a second infra failure is final: the same test never retries twice in a row', async () => {
+  const git = fakeGit();
+  let runs = 0;
+  const w = makeWatcher({ git, testRun: async () => { runs++; return { code: 1, spawnError: 'ENOENT', out: 'spawn failed again' }; } });
+  await drain(w);
+  git.setSha(SHA2); git.setOrigin(SHA2);
+  await drain(w);
+  assert.strictEqual(runs, 2, 'exactly one retry, then the gate fails');
+  assert.strictEqual(w.phase, 'idle');
+  assert.match(w.status().lastError, /infra spawn failure repeated/);
+  // A later flow (new sha) may retry again — the finality is per target sha, not forever.
+  const SHA3 = 'c'.repeat(40);
+  git.setSha(SHA3); git.setOrigin(SHA3);
+  await drain(w);
+  assert.strictEqual(runs, 4, 'a new target sha gets its own single retry');
+});
+
+test('a timeout is an abort, never a retry', async () => {
+  let runs = 0;
+  const git = fakeGit();
+  const w = makeWatcher({ git, testRun: async () => { runs++; return { code: 1, out: 'suite stalled here', timedOut: true }; } });
+  await drain(w);
+  git.setSha(SHA2); git.setOrigin(SHA2);
+  await drain(w);
+  assert.strictEqual(runs, 1, 'no rerun after the hard cap');
+  assert.match(w.status().lastError, /test step timed out/);
+});
+
+test('isInfraSpawnFailure: harness spawn shapes only', async () => {
+  const { isInfraSpawnFailure } = require('../src/self-update');
+  assert.strictEqual(isInfraSpawnFailure({ code: 1, spawnError: 'ENOENT', out: '' }), true, 'child_process error event');
+  assert.strictEqual(isInfraSpawnFailure({ code: 1, out: "errno: -2,\n    code: 'ENOENT',\n    syscall: 'spawn /opt/homebrew/Cellar/node/23.11.0/bin/node',\n    path: '/opt/homebrew/Cellar/node/23.11.0/bin/node'" }), true, 'node --test inspect shape (the 04:35 incident)');
+  assert.strictEqual(isInfraSpawnFailure({ code: 1, out: "syscall: 'spawn git',\n  code: 'EAGAIN'" }), true, 'reversed order, other errno');
+  assert.strictEqual(isInfraSpawnFailure({ code: 1, out: 'npm error code ENOENT\nnpm error syscall spawn git\nnpm error path git' }), true, 'npm error style');
+  assert.strictEqual(isInfraSpawnFailure({ code: 1, out: 'AssertionError: expected 1 to equal 2' }), false, 'assertion failure');
+  assert.strictEqual(isInfraSpawnFailure({ code: 1, out: 'a test asserted code: ENOENT far away ... '.padEnd(400) + 'syscall spawn' }), false, 'distant mentions (beyond the 300-char window) do not count');
+  assert.strictEqual(isInfraSpawnFailure({ code: 0, out: "code: 'ENOENT' syscall: 'spawn'" }), false, 'a green run is never infra');
+  assert.strictEqual(isInfraSpawnFailure({ code: 1, timedOut: true, out: "code: 'ENOENT' syscall: 'spawn'" }), false, 'timeouts are their own abort, never retried');
+  assert.strictEqual(isInfraSpawnFailure(null), false);
+});
+
+test('boot reaps a stale locked squad-selfupdate-* registration left by a crashed flow', () => {
+  const { execFileSync } = require('child_process');
+  const repo = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'su-bootrepo-')));
+  const g = (...a) => execFileSync('git', a, { cwd: repo, stdio: 'pipe' });
+  g('init', '-q', '-b', 'main');
+  fs.writeFileSync(path.join(repo, 'f.txt'), 'x\n');
+  g('-c', 'user.email=a@b', '-c', 'user.name=a', 'add', '.');
+  g('-c', 'user.email=a@b', '-c', 'user.name=a', 'commit', '-qm', 'i');
+  const stale = path.join(os.tmpdir(), 'squad-selfupdate-stale-' + process.pid);
+  const other = path.join(os.tmpdir(), 'squad-gate-base-keep-' + process.pid);
+  for (const p of [stale, other]) fs.rmSync(p, { recursive: true, force: true });
+  g('worktree', 'add', '--detach', stale, 'HEAD'); g('worktree', 'lock', stale);
+  g('worktree', 'add', '--detach', other, 'HEAD'); g('worktree', 'lock', other);
+  bootResume(fakeStore(), { repoDir: repo }); // no restart state: just the boot hygiene
+  assert.strictEqual(fs.existsSync(stale), false, "the crashed flow's locked worktree is reaped at boot");
+  assert.strictEqual(g('worktree', 'list').includes('squad-selfupdate-stale'), false, 'its registration is pruned');
+  assert.strictEqual(fs.existsSync(other), true, 'non-selfupdate registrations are not ours to touch');
+  g('worktree', 'unlock', other); g('worktree', 'remove', '--force', other); // test hygiene
+  fs.rmSync(repo, { recursive: true, force: true });
+});
+
 test('request_self_update file is consumed and triggers the flow', async () => {
   const git = fakeGit();
   const w = makeWatcher({ git });

@@ -6,7 +6,8 @@
 // drainCuts marker survives the relaunch), and a stopped task resumes from its persisted session
 // after the restart, so one long run cannot freeze the whole team's dispatch indefinitely) ->
 // testing (npm test in a throwaway worktree at the new sha so a bad checkout never touches the live
-// tree; the step runs in its own process group with a hard timeout — a hung run kills the group,
+// tree; the worktree is locked so the worktree sweeps cannot delete it mid-run, and the step runs
+// in its own process group with a hard timeout — a hung run kills the group,
 // fails the restart and resumes dispatch instead of freezing the app) -> restarting (persist
 // restart-state, relaunch). A restart whose target equals the commit the app process is already
 // running is skipped entirely: no code change, no team freeze. Any failure aborts back to idle and
@@ -74,11 +75,29 @@ function defaultTestRun(args, cwd, timeoutMs, bin = 'npm') {
     const cap = (d) => { out = (out + d).slice(-65536); };
     child.stdout.on('data', cap);
     child.stderr.on('data', cap);
-    child.on('error', (e) => finish({ code: 1, out: out + '\n' + ((e && e.message) || e) }));
+    child.on('error', (e) => finish({ code: 1, out: out + '\n' + ((e && e.message) || e), spawnError: String((e && e.code) || (e && e.message) || 'spawn') }));
     child.on('close', (code) => finish(killed
       ? { code: code == null ? 1 : code, out, timedOut: true }
       : { code: code == null ? 1 : code, out }));
   });
+}
+
+// Harness-level spawn failure (t_a91c68ce): child_process itself could not spawn — the node
+// binary or the suite's cwd vanished mid-run (a concurrent worktree sweep) — NOT a test
+// assertion. Matches the child_process 'error' event (spawnError) and the failure objects
+// node --test / npm print into the output (inspect style `code: 'ENOENT' … syscall: 'spawn …'`,
+// npm style `code ENOENT … syscall spawn`). Assertion failures never carry this shape, and a
+// timed-out run is its own abort — never a retry.
+const INFRA_SPAWN_FAIL = new RegExp([
+  "code:\\s*'(?:ENOENT|EAGAIN|EPERM|EACCES)'[\\s\\S]{0,300}?syscall:\\s*'spawn",
+  "syscall:\\s*'spawn[^'\\n]*'[\\s\\S]{0,300}?code:\\s*'(?:ENOENT|EAGAIN|EPERM|EACCES)'",
+  "code\\s+(?:ENOENT|EAGAIN|EPERM|EACCES)[\\s\\S]{0,300}?syscall\\s+spawn",
+  "syscall\\s+spawn[\\s\\S]{0,300}?code\\s+(?:ENOENT|EAGAIN|EPERM|EACCES)",
+].join('|'));
+function isInfraSpawnFailure(t) {
+  if (!t || t.code === 0 || t.timedOut) return false;
+  if (t.spawnError) return true;
+  return INFRA_SPAWN_FAIL.test(String(t.out || ''));
 }
 
 class UpdateWatcher extends EventEmitter {
@@ -123,6 +142,7 @@ class UpdateWatcher extends EventEmitter {
     this.waitingOn = 0; this.lastError = null; this.lastCheckAt = null; this.drainEndsAt = null;
     this._seenSha = null;
     this._deferred = null;
+    this._infraFailSha = null;
     this._busy = false;
     const restarting = readHistory(this.store.dir).filter((x) => x.result === 'restarting');
     this.lastRestartAt = restarting.length ? Date.parse(restarting[restarting.length - 1].ts) : 0;
@@ -386,22 +406,54 @@ class UpdateWatcher extends EventEmitter {
       const build = this.npm(['run', 'build', '--if-present']);
       if (build.code !== 0) return abort('build failed: ' + build.out.slice(0, 300));
       this.setPhase('testing');
-      const wt = fs.mkdtempSync(path.join(os.tmpdir(), 'squad-selfupdate-'));
-      const wadd = this.git(['worktree', 'add', '--detach', wt, to]);
-      if (wadd.code !== 0) { try { fs.rmSync(wt, { recursive: true, force: true }); } catch {} return abort('could not create test worktree: ' + wadd.out.slice(0, 300)); }
-      try {
-        try { fs.symlinkSync(path.join(this.npmDir, 'node_modules'), path.join(wt, this.rel, 'node_modules'), 'dir'); } catch {}
-        const t = await this.testRun(path.join(wt, this.rel));
-        if (t.timedOut) {
-          const tail = String(t.out || '').trim().slice(-300);
-          return abort(`test step timed out after ${Math.round(this.testTimeoutMs / 60000)}min; killed its process group${tail ? ` — output tail: ${tail}` : ''}`);
+      // One attempt: a throwaway worktree at `to`, LOCKED against the worktree sweeps while the
+      // suite runs. The worktree is a REGISTERED worktree of this repo (git worktree add), so
+      // every sweeper of this repo sees it — the 10-min interval sweep, the orchestrator's, any
+      // app instance's — and the 2026-10-01 04:35 ENOENT abort was this suite's cwd vanishing
+      // under exactly such a sweep mid-run (spawn node ENOENT with the binary present,
+      // t_a91c68ce). A lock is the one protection they all honor: the stray-worktree reaper
+      // skips locked entries and git itself refuses to remove one (even with --force).
+      const attemptTests = async () => {
+        const wt = fs.mkdtempSync(path.join(os.tmpdir(), 'squad-selfupdate-'));
+        const wadd = this.git(['worktree', 'add', '--detach', wt, to]);
+        if (wadd.code !== 0) { try { fs.rmSync(wt, { recursive: true, force: true }); } catch {} abort('could not create test worktree: ' + wadd.out.slice(0, 300)); return null; }
+        try {
+          this.git(['worktree', 'lock', wt]);
+          try { fs.symlinkSync(path.join(this.npmDir, 'node_modules'), path.join(wt, this.rel, 'node_modules'), 'dir'); } catch {}
+          return await this.testRun(path.join(wt, this.rel));
+        } finally {
+          this.git(['worktree', 'unlock', wt]); // git refuses to remove a locked tree, even with --force
+          try { fs.unlinkSync(path.join(wt, this.rel, 'node_modules')); } catch {}
+          this.git(['worktree', 'remove', '--force', wt]);
+          try { fs.rmSync(wt, { recursive: true, force: true }); } catch {}
         }
-        if (t.code !== 0) return abort('tests failed on new code: ' + String(t.out || '').slice(-500));
-      } finally {
-        try { fs.unlinkSync(path.join(wt, this.rel, 'node_modules')); } catch {}
-        this.git(['worktree', 'remove', '--force', wt]);
-        try { fs.rmSync(wt, { recursive: true, force: true }); } catch {}
+      };
+      let t = await attemptTests();
+      if (t === null) return; // aborted inside the attempt (worktree add failed)
+      // Infra-only retry (t_a91c68ce): one rerun when the harness itself failed to spawn, never
+      // on assertion failures or timeouts. Narrow and visible per Cato's plan review: a loud
+      // error log with the attempt counter, and a SECOND infra failure on the same target sha is
+      // final — a deletion that keeps happening is a bug to surface, not to paper over.
+      if (this.phase === 'testing' && !t.timedOut && t.code !== 0 && isInfraSpawnFailure(t)) {
+        if (this._infraFailSha === to) {
+          return abort('test step infra spawn failure repeated on ' + String(to).slice(0, 7) + ' — not retrying again: ' + String(t.out || '').slice(-300));
+        }
+        this._infraFailSha = to;
+        this._log('error', 'self-update: test step died on an infra spawn failure (harness ENOENT/EAGAIN, not a test assertion) — retrying once (attempt 1/2). Output tail: ' + String(t.out || '').trim().slice(-400));
+        t = await attemptTests();
+        if (t === null) return;
+        if (this.phase === 'testing' && !t.timedOut && t.code !== 0 && isInfraSpawnFailure(t)) {
+          return abort('test step infra spawn failure repeated on ' + String(to).slice(0, 7) + ' — the same test never retries twice in a row: ' + String(t.out || '').slice(-300));
+        }
+      } else if (t.code !== 0) {
+        this._infraFailSha = null; // a real assertion failure: the harness itself works
       }
+      if (t.timedOut) {
+        const tail = String(t.out || '').trim().slice(-300);
+        return abort(`test step timed out after ${Math.round(this.testTimeoutMs / 60000)}min; killed its process group${tail ? ` — output tail: ${tail}` : ''}`);
+      }
+      if (t.code !== 0) return abort('tests failed on new code: ' + String(t.out || '').slice(-500));
+      this._infraFailSha = null;
       this._log('system', `self-update: tests passed on ${to.slice(0, 7)}; restarting.`);
       const st = { phase: 'restarting', wasRunning: !!this.runActive(), reason, fromSha: from, toSha: to, ts: new Date().toISOString(), bootAttempts: 0 };
       writeRestartState(this.store.dir, st);
@@ -414,11 +466,37 @@ class UpdateWatcher extends EventEmitter {
   }
 }
 
+// A crash between the test step's `worktree add` and its finally's unlock/remove leaves a LOCKED
+// squad-selfupdate-* registration that no worktree sweep may ever reap — that is the point of the
+// lock — so the boot that follows the crash reaps our own stale ones: the flow that owned them
+// died with the old process. Only this prefix; anything else is not ours to touch.
+function reapStaleTestWorktrees(repoDir) {
+  if (!repoDir) return;
+  try {
+    const git = defaultGit(repoDir);
+    const list = git(['worktree', 'list', '--porcelain']);
+    if (list.code !== 0 || !list.out.trim()) return;
+    let sawStale = false;
+    for (const block of list.out.split('\n\n')) {
+      const m = {};
+      for (const l of block.split('\n')) { const i = l.indexOf(' '); if (i > 0) m[l.slice(0, i)] = l.slice(i + 1); else if (l === 'locked' || l === 'detached') m[l] = true; }
+      const p = m.worktree;
+      if (!p || !/(^|[\\/])squad-selfupdate-[^/\\]+$/.test(p)) continue;
+      sawStale = true;
+      git(['worktree', 'unlock', p]);
+      git(['worktree', 'remove', '--force', '--force', p]); // double force: still-locked leftovers
+      try { fs.rmSync(p, { recursive: true, force: true }); } catch {}
+    }
+    if (sawStale) git(['worktree', 'prune']);
+  } catch {}
+}
+
 // Boot, called from main.js before the window is useful. If the last session restarted into new
 // code, count the boot attempt; if it fails to reach markBootOk twice, roll back to fromSha (never
-// through uncommitted changes) and disable auto-restart. Returns {resume}: restart the interrupted
+// through uncommitted changes) and disable auto-restart after repeated boot failures. Returns {resume}: restart the interrupted
 // Run. The activity feed gets one line either way.
 function bootResume(store, { repoDir } = {}) {
+  reapStaleTestWorktrees(repoDir);
   const dir = store.dir;
   const st = readRestartState(dir);
   if (!st || st.phase !== 'restarting') return { resume: false };
@@ -449,4 +527,4 @@ function markBootOk(store) {
   if (st && st.phase === 'restarting') writeRestartState(store.dir, { ...st, phase: 'idle' });
 }
 
-module.exports = { UpdateWatcher, bootResume, markBootOk, defaultGit, defaultNpm, defaultTestRun, TEST_TIMEOUT_MS, requestFile, readRestartState, writeRestartState, clearRestartState, readHistory, appendHistory };
+module.exports = { UpdateWatcher, bootResume, markBootOk, defaultGit, defaultNpm, defaultTestRun, isInfraSpawnFailure, reapStaleTestWorktrees, TEST_TIMEOUT_MS, requestFile, readRestartState, writeRestartState, clearRestartState, readHistory, appendHistory };
