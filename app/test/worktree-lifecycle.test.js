@@ -223,6 +223,95 @@ test('diskUsage: worktree count + bytes, symlinked node_modules not counted as a
   assert.deepStrictEqual(await WT.diskUsage(repo), u, 'served from the TTL cache');
 });
 
+// ---- t_1ff80eba: our own node_modules link is not "uncommitted changes" ----
+
+// A branch cut before the `node_modules` ignore landed: the auto-created symlink shows as
+// untracked, which used to keep done worktrees alive forever.
+function oldBranchRepo(withAppDir) {
+  const repo = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'wlc-old-')));
+  g(repo, 'init', '-q', '-b', 'main');
+  fs.writeFileSync(path.join(repo, 'a.txt'), 'base\n'); // .gitignore deliberately absent
+  if (withAppDir) {
+    fs.mkdirSync(path.join(repo, 'app', 'node_modules'), { recursive: true });
+    fs.writeFileSync(path.join(repo, 'app', 'a.txt'), 'app\n');
+    fs.writeFileSync(path.join(repo, 'app', 'node_modules', 'blob.bin'), 'x'.repeat(64 * 1024));
+    g(repo, 'add', 'a.txt', 'app/a.txt');
+  } else {
+    fs.mkdirSync(path.join(repo, 'node_modules'));
+    fs.writeFileSync(path.join(repo, 'node_modules', 'blob.bin'), 'x'.repeat(64 * 1024));
+    g(repo, 'add', 'a.txt');
+  }
+  g(repo, 'commit', '-q', '-m', 'init');
+  return repo;
+}
+
+test('symlink-only worktree on a pre-ignore branch is clean and removed; a real copy still refuses', () => {
+  const repo = oldBranchRepo(false);
+  const w = WT.ensureWorktree(repo, 't_lc14');
+  assert.ok(fs.lstatSync(path.join(w.worktreePath, 'node_modules')).isSymbolicLink());
+  assert.strictEqual(g(w.worktreePath, 'status', '--porcelain'), '?? node_modules', 'the evidence from t_1ff80eba');
+  assert.strictEqual(WT.worktreeDirty(w.worktreePath), false, 'our own link is not user work');
+  assert.deepStrictEqual(WT.removeWorktree({ worktreePath: w.worktreePath, worktreeBranch: 'squad/t_lc14' }), { removed: true });
+  assert.strictEqual(fs.existsSync(w.worktreePath), false);
+  g(repo, 'rev-parse', '--verify', 'squad/t_lc14'); // throws (test failure) if the branch was dropped
+
+  // A real node_modules dir (a deliberate local copy) is still uncommitted work: refuse.
+  const w2 = WT.ensureWorktree(repo, 't_lc15');
+  fs.rmSync(path.join(w2.worktreePath, 'node_modules'), { force: true, recursive: true }); // unlink the link, never the shared target
+  fs.mkdirSync(path.join(w2.worktreePath, 'node_modules'));
+  fs.writeFileSync(path.join(w2.worktreePath, 'node_modules', 'local.txt'), 'real\n');
+  assert.strictEqual(WT.worktreeDirty(w2.worktreePath), true);
+  assert.throws(() => WT.removeWorktree({ worktreePath: w2.worktreePath, worktreeBranch: 'squad/t_lc15' }), /uncommitted changes/);
+});
+
+test('same for the app/ layout: wt/app/node_modules link does not block removal', () => {
+  const repo = oldBranchRepo(true);
+  const w = WT.ensureWorktree(path.join(repo, 'app'), 't_lc16');
+  assert.ok(fs.lstatSync(path.join(w.worktreePath, 'app', 'node_modules')).isSymbolicLink());
+  assert.strictEqual(g(w.worktreePath, 'status', '--porcelain'), '?? app/node_modules', 'exactly the evidence comment');
+  assert.strictEqual(WT.worktreeDirty(w.worktreePath), false);
+  const r = WT.sweepWorktrees({ repoDir: repo, store: { listTasks: () => [], getTask: () => null } }); // no board entry: orphan path
+  assert.deepStrictEqual(r.removed, ['t_lc16'], JSON.stringify(r));
+  assert.strictEqual(fs.existsSync(w.worktreePath), false);
+  g(repo, 'rev-parse', '--verify', 'squad/t_lc16'); // branch kept
+});
+
+// ---- t_1ff80eba: stray gate/tmp registrations outside .squad/worktrees ----
+
+test('stray squad-*/gate registrations are reaped; locked, dirty and non-matching ones survive', () => {
+  const { repo, s } = setup('t_lc17');
+  const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'wlc-stray-')));
+  const gate = path.join(tmp, 'squad-gate-base-abc123');
+  g(repo, 'worktree', 'add', '--detach', gate, 'HEAD');
+  const scratch = path.join(tmp, 'squad-before');
+  g(repo, 'worktree', 'add', '--detach', scratch, 'HEAD');
+  const twt = path.join(tmp, 'tmp.xyz', 'wt');
+  fs.mkdirSync(path.dirname(twt), { recursive: true });
+  g(repo, 'worktree', 'add', '--detach', twt, 'HEAD');
+  const user = path.join(tmp, 'user-lab'); // no squad shape: never touched
+  g(repo, 'worktree', 'add', '-b', 'feature-lab', user);
+  const locked = path.join(tmp, 'squad-locked'); // deliberately protected: never touched
+  g(repo, 'worktree', 'add', '--detach', locked, 'HEAD');
+  g(repo, 'worktree', 'lock', locked);
+
+  const r = WT.sweepWorktrees({ repoDir: repo, store: s });
+  assert.deepStrictEqual(r.strays.sort(), [gate, scratch, twt].sort(), JSON.stringify(r));
+  for (const p of [gate, scratch, twt]) assert.strictEqual(fs.existsSync(p), false, `${p} reaped`);
+  assert.strictEqual(fs.existsSync(user), true, 'a non-squad worktree is not ours to reap');
+  assert.strictEqual(fs.existsSync(locked), true, 'locked entries are never touched');
+  assert.strictEqual(g(repo, 'worktree', 'list').includes('squad-gate-base'), false, 'registration gone');
+  g(repo, 'worktree', 'unlock', locked); g(repo, 'worktree', 'remove', '--force', locked); g(repo, 'worktree', 'remove', '--force', user); // test hygiene
+
+  // A dirty stray might be someone's checkout: reported, not destroyed.
+  const dirty = path.join(tmp, 'squad-dirty');
+  g(repo, 'worktree', 'add', '--detach', dirty, 'HEAD');
+  fs.writeFileSync(path.join(dirty, 'wip.txt'), 'mine\n');
+  const r2 = WT.sweepWorktrees({ repoDir: repo, store: s });
+  assert.deepStrictEqual(r2.strays, [], JSON.stringify(r2));
+  assert.ok(r2.retained.some((x) => x.dir === dirty && /dirty/.test(x.reason)), JSON.stringify(r2.retained));
+  assert.strictEqual(fs.existsSync(dirty), true);
+});
+
 // Repo root owning a worktree at <root>/.squad/worktrees/<taskId>.
 function repoOf(wtPath) { return path.resolve(wtPath, '..', '..', '..'); }
 
