@@ -45,6 +45,9 @@ const runtimes = (settings) => (runtimesCache ||= RT.detectRuntimes(settings, { 
 const TEST_MODE = !!(process.env.AGENTS_SQUAD_GUI_E2E || process.env.AGENTS_SQUAD_SMOKE);
 if (TEST_MODE) {
   const testRoot = isolateTestRoot();
+  // Own userData too (t_490eeee8 harness-isolation audit): the default path is shared with the
+  // live app, so a test renderer would read the live localStorage ctx AND write its own over it.
+  app.setPath('userData', path.join(testRoot, 'userData'));
   console.log(`[agents-squad] test instance pid=${process.pid} data root=${testRoot}`);
   const timeoutMs = Number(process.env.AGENTS_SQUAD_TEST_TIMEOUT_MS) || 30 * 60 * 1000;
   setTimeout(() => { console.error(`[agents-squad] test instance exceeded ${timeoutMs} ms — force exit (pid ${process.pid}, data root ${testRoot})`); procguard.reapAll(); app.exit(1); }, timeoutMs);

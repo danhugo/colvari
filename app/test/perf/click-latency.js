@@ -69,6 +69,9 @@ const CLICK_BUDGET_MS = (CLICK_REPS * TABS.length + CARD_CLICKS) * 2600; // wors
 // smoke/guiE2E scenarios never run; TEST_MODE itself stays active.
 process.env.AGENTS_SQUAD_SMOKE = '1';
 process.env.AGENTS_SQUAD_PROJECT = fs.mkdtempSync(path.join(os.tmpdir(), 'squad-perf-root-'));
+// Isolation self-check (t_490eeee8 audit): a regression above would boot the perf instance on
+// the live app's data root — refuse instead of clobbering it.
+if (!process.env.AGENTS_SQUAD_PROJECT.startsWith(os.tmpdir())) throw new Error('[perf] AGENTS_SQUAD_PROJECT must be an isolated temp root — refusing to run against shared data');
 process.env.AGENTS_SQUAD_TEST_TIMEOUT_MS = String(Math.max(180000,
   STREAM_SECONDS * 1000 + 90000 + TRACE_MS + CLICK_BUDGET_MS));
 process.env.AGENTS_SQUAD_DEV = '0'; // no UpdateWatcher in a perf instance
