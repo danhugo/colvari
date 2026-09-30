@@ -629,10 +629,15 @@ class Store {
       } else {
         MG.markMasterGreen(this, { root: r.root, tree: r.gate && r.gate.tree, base: r.base, source: 'merge gate', lastMergedTask: t.id, lastMergedBranch: t.worktreeBranch });
       }
+      // Landed: the worktree dir is disposable now — the branch (kept) recreates it on reopen.
+      this._cleanupWorktree(t);
       return this.getTask(tid);
     }
     if (!r.gate || r.gate.state === 'skipped') {
       this.commentTask(tid, 'system', `nothing merged: no commits on ${t.worktreeBranch} ahead of ${r.base}`);
+      // Branch is already an ancestor of base (nothing to lose) — drop the dir too. Fields stay:
+      // a repeated done-flip then walks the (cheap) worktree-gone guard and still comments.
+      this._cleanupWorktree(t);
       return this.getTask(tid);
     }
     // Blocked by the gate: reopen to the assignee with the capped failing output.
@@ -680,6 +685,20 @@ class Store {
     });
     this._updateTask(task.id, { isConflictResolution: true, conflictBranch: t.worktreeBranch, worktreePath: t.worktreePath, worktreeBranch: t.worktreeBranch });
     return this.getTask(t.id);
+  }
+  // Worktree lifecycle (t_9b662983): once a branch is safely in base (or was already an ancestor),
+  // the worktree dir goes away; removeWorktree refuses dirty/unmerged trees, so a retained
+  // worktree here means real uncommitted work — flag it, never force. The task's worktreePath/
+  // branch fields stay: they name the kept branch (ensureWorktree recreates the dir from it if
+  // the task reopens), and a repeated done-flip hits the worktree-gone guard instead of failing.
+  _cleanupWorktree(t) {
+    try {
+      const r = WT.removeWorktree(t);
+      if (!r.removed) return;
+      this.commentTask(t.id, 'system', `worktree removed after merge (branch ${t.worktreeBranch} kept for reopen)`);
+    } catch (e) {
+      try { this.commentTask(t.id, 'system', `worktree retained: ${String(e.message).slice(0, 200)}`); } catch {}
+    }
   }
   // Unmerged squad/<id> branches across every git repo referenced by a task's worktreePath.
   listUnmergedBranches() {

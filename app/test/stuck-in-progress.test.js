@@ -52,8 +52,9 @@ test('orchestrator resets and re-dispatches orphaned in_progress tasks instead o
 });
 
 // Regression for t_d79c74fc: a run that ends with an undispatchable task in review (reviewer session
-// died before sign-off) must tell the human why it stopped, never log "Finished." with work still open.
-test('run with a task in review and nothing dispatchable stops with a reason naming the task', async () => {
+// died before sign-off) must tell the human why nothing is running, never log "Finished." with work
+// still open. Since t_b2273507 the run IDLES instead of stopping — the idle log carries the reason.
+test('run with a task in review and nothing dispatchable idles with a reason naming the task', async () => {
   const { s, ns } = setup(2);
   const t = s.createTask({ title: 'open review', assignee: ns[0].id });
   s.updateTask(t.id, { status: 'review', awaitingApproval: true }); // approval-gated review: autoAdvanceReviews must not move it
@@ -65,7 +66,11 @@ test('run with a task in review and nothing dispatchable stops with a reason nam
   o.start();
   await done;
 
-  const stop = logs.find((l) => /^Stopped:|^No more todo/.test(l)) || '';
-  assert.ok(!/Finished/.test(stop), `run must not claim Finished with a task still in review: "${stop}"`);
-  assert.ok(/^Stopped: 1 unfinished task\(s\)/.test(stop) && stop.includes(t.id) && stop.includes('review'), `stop reason must name the stuck task and its state: "${stop}"`);
+  const idle = logs.find((l) => /^Run idle:|^Stopped:|^No more todo/.test(l)) || '';
+  assert.ok(!/Finished/.test(idle), `run must not claim Finished with a task still in review: "${idle}"`);
+  assert.ok(/^Run idle: 1 unfinished task/.test(idle) && idle.includes(t.id) && idle.includes('review'), `idle reason must name the stuck task and its state: "${idle}"`);
+  assert.equal(o.running, true, 'the run stays alive while undispatchable review work waits');
+  assert.equal(o.runState().state, 'idle');
+  assert.equal(o.runState().reason, 'waiting on review or human');
+  o.stop();
 });

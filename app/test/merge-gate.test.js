@@ -232,3 +232,24 @@ test('master health sweep: startup check runs the suite on base and lands the re
   assert.ok(p0 && p0.priority === 'P0', 'failing base creates the P0 fix task');
   assert.strictEqual(MG.readHealth(d2).state, 'red', 'red recorded');
 });
+
+// npm install in a worktree must never resolve through a stale shared symlink into the main
+// checkout (t_0fd83668): once the branch's package files differ from main, the gate drops the
+// link and installs into a real local dir; a matching share stays untouched.
+test('ensureDeps: stale node_modules symlink is dropped when package files differ (t_0fd83668)', { skip: SKIP }, () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'mgate-nm-main-')));
+  const wt = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'mgate-nm-wt-')));
+  fs.writeFileSync(path.join(root, 'package.json'), '{"name":"main"}\n');
+  fs.writeFileSync(path.join(wt, 'package.json'), '{"name":"main"}\n');
+  fs.mkdirSync(path.join(root, 'node_modules')); fs.writeFileSync(path.join(root, 'node_modules', 'dep.js'), 'x');
+  // matching files: the existing symlink share stays, no install runs
+  fs.symlinkSync(path.join(root, 'node_modules'), path.join(wt, 'node_modules'), 'dir');
+  assert.strictEqual(MG.ensureDeps(wt, root, null), null);
+  assert.ok(fs.lstatSync(path.join(wt, 'node_modules')).isSymbolicLink(), 'matching share is kept');
+  // branch changes its package files (no new deps: the local install stays offline): the symlink
+  // must be dropped and a LOCAL install happens
+  fs.writeFileSync(path.join(wt, 'package.json'), '{"name":"main","version":"2.0.0"}\n');
+  assert.strictEqual(MG.ensureDeps(wt, root, null), null, 'local install of the empty tree succeeds');
+  let st = null; try { st = fs.lstatSync(path.join(wt, 'node_modules')); } catch {}
+  assert.ok(!st || !st.isSymbolicLink(), 'after a package change node_modules is not a shared symlink (installs land locally)');
+});

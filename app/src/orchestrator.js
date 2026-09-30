@@ -1,4 +1,8 @@
-// Scheduler: runs Claude Code agents for todo tasks until the board is drained or stop() is called.
+// Scheduler: runs Claude Code agents for todo tasks. When the board drains (or only undispatchable
+// work remains) the run does NOT stop — it idles: still on at zero cost, and a ready todo task that
+// shows up later (created by the PM, a chat message, or anyone) is dispatched automatically on the
+// next dispatch sweep. Only an explicit stop() (the header Stop, a project budget cap, or the
+// maxRuns limit) ends the run (t_b2273507).
 const { spawn } = require('child_process');
 const { EventEmitter } = require('events');
 const path = require('path');
@@ -211,6 +215,11 @@ class Orchestrator extends EventEmitter {
     // Spend-log request ids already counted (joinSpendLogs dedupe): seeded from the persisted set so
     // a restart does not re-apply cumulative spend-log entries to a NEW run of the same session.
     try { this.proxySeenIds = new Set(this.store.read('proxy-spend', { seenIds: [] }).seenIds || []); } catch { this.proxySeenIds = new Set(); }
+    // Idle episode (t_b2273507): the run session is on but nothing is dispatchable — set when the
+    // board drains in tick(), cleared by the next real dispatch (runTask/wakeRun) or start(). The
+    // cached reason says what the run is waiting for at drain time; snapshot runState carries both.
+    this._idleSince = null;
+    this._idleReason = null;
     // Set by the UpdateWatcher while a self-update is pending/draining: no new dispatches (tasks or
     // wakes) until it is back to false, so the restart waits for agents instead of racing them.
     this.dispatchPaused = false;
@@ -257,6 +266,7 @@ class Orchestrator extends EventEmitter {
     // What this RUNNING process was built from (t_7e590e54): the merge path reads it to express
     // restartPending.count as "commits behind". It lives in meta because merges run in whichever
     // process holds the store (an agent's board server flips tasks done), not just the app.
+    this.repoDir = opts.repoDir || null; // the worktree lifecycle sweep (t_9b662983) needs it too
     if (opts.repoDir) {
       try {
         const sha = WT.headSha(opts.repoDir);
@@ -338,7 +348,7 @@ class Orchestrator extends EventEmitter {
   // wiki: [{title, body, updatedAt, author}], from the store's {title: {...}} page map.
   wiki() { return this._memoBy('wiki', this.sig('wiki'), () => { let ps = {}; try { ps = this.store.listWiki(); } catch {} return TL.wikiPages(ps); }); }
   // Cheap in-memory fingerprint (no I/O): everything volatile the snapshot exposes besides file-backed parts.
-  memSig() { return JSON.stringify([this.running, this.runs, this.runCost, this.runTokens, this.totalCost, this.billedCost, this.subCost, this.budgetStop, this.usagePaused, this.usageStatus || null, this.procs.size, this.agents, this.subscriptionRateLimits]); }
+  memSig() { return JSON.stringify([this.running, this.runs, this.runCost, this.runTokens, this.totalCost, this.billedCost, this.subCost, this.budgetStop, this.usagePaused, this.usageStatus || null, this.procs.size, this.agents, this.subscriptionRateLimits, this._idleSince || 0, this._idleReason || '']); }
   // Combined fingerprint for change-driven polling: in-memory state + every file the snapshot reads.
   versionSig() { return [this.memSig(), this.sig('runs'), this.sig('board'), this.sig('wiki'), this.teamsSigOf(), this.logSig()].join('|'); }
   // IPC-safe agent view. a.currentRun carries the live run record, whose .subs is a SubagentTracker
@@ -373,7 +383,28 @@ class Orchestrator extends EventEmitter {
       return view;
     } catch { return null; }
   }
-  snapshot() { return { runtimeState: this.runtimeState, redMaster: this.redMasterView(), running: this.running, totalCost: this.totalCost, billedCost: this.billedCost || 0, subCost: this.subCost || 0, runs: this.runs, active: [...this.procs.keys()].map((id) => ({ nodeId: id, taskId: this.agent(id).taskId, cwd: this.cwds && this.cwds.get(id) || null })), runCost: this.runCost || 0, budgetStop: this.budgetStop || null, agents: Object.fromEntries(Object.entries(this.agents).map(([k, a]) => [k, this.agentView(a)])), ledger: this.ledger(), usageSince: this.usageSince(), modelStats: this.modelStats(), timeline: this.timeline(), logs: this.logs(), wiki: this.wiki(), nodeTeams: this.nodeTeams() }; }
+  // Run state over IPC (Uma's pill contract, t_b2273507): 'running' while agents (or wake runs)
+  // work, 'idle' when the run session is on with nothing dispatchable, 'stopped' otherwise. The
+  // reason is shown verbatim by the UI after "stopped — …"; idle's says what the run waits for.
+  // `since` (idle only) lets the UI show how long the run has been waiting.
+  runState() {
+    if (!this.running) {
+      if (this.budgetStop) return { state: 'stopped', reason: 'budget cap reached' };
+      if (this.userStopped) return { state: 'stopped', reason: 'stopped by you' };
+      return { state: 'stopped', reason: 'not started' };
+    }
+    // Between-iteration gaps (procs momentarily empty mid-run) stay 'running': only a drain
+    // (_idleSince set) means the run has nothing left to do.
+    if (this.procs.size > 0 || !this._idleSince) return { state: 'running' };
+    return { state: 'idle', reason: this._idleReason || 'waiting for todo tasks', since: new Date(this._idleSince).toISOString() };
+  }
+  snapshot() {
+    // `running` (renderer-facing) mirrors runState's 'running' — agents actually at work, stable
+    // across the between-iteration gaps. The RUN SESSION itself may still be on while idle; that is
+    // what runState carries (t_b2273507).
+    const rs = this.runState();
+    return { runtimeState: this.runtimeState, redMaster: this.redMasterView(), running: rs.state === 'running', runState: rs, totalCost: this.totalCost, billedCost: this.billedCost || 0, subCost: this.subCost || 0, runs: this.runs, active: [...this.procs.keys()].map((id) => ({ nodeId: id, taskId: this.agent(id).taskId, cwd: this.cwds && this.cwds.get(id) || null })), runCost: this.runCost || 0, budgetStop: this.budgetStop || null, agents: Object.fromEntries(Object.entries(this.agents).map(([k, a]) => [k, this.agentView(a)])), ledger: this.ledger(), usageSince: this.usageSince(), modelStats: this.modelStats(), timeline: this.timeline(), logs: this.logs(), wiki: this.wiki(), nodeTeams: this.nodeTeams() };
+  }
   // Renderer-facing snapshot: the UI reads only agents + run scalars, so the file-backed display parts
   // (modelStats/timeline/logs/wiki/nodeTeams) are pure IPC payload — ~1.4MB per change on a large
   // project. Kept out of getAll and state pushes; snapshot() stays whole for other consumers.
@@ -614,6 +645,7 @@ class Orchestrator extends EventEmitter {
     // Single-run lock, enforced at the last choke point: never a second live run for one agent, even
     // if a caller raced past its own guard. The would-be wake stays queued (messages stay unread).
     if (this.procs.has(node.id)) { this.log(node.id, 'system', `✉ wake not dispatched: ${node.name} already has a live run (single run per agent); messages stay queued`); return; }
+    this._idleSince = null; this._idleReason = null; // a wake is real work: the idle episode is over
     const a = this.agent(node.id);
     a.status = 'working'; a.lastError = null; a.taskId = null; a.task = null; a.iteration = 0; a.stopRequested = false; a.wakePending = null;
     // Live-run reason/activity, shown by Board/Team/Overview via snapshot: what woke the agent, from
@@ -765,11 +797,20 @@ class Orchestrator extends EventEmitter {
   changed() { this.emit('state', this.snapshotSlim()); }
 
   start() {
-    if (this.running) return;
+    // Already on (actively running, or idle on a drained board): a Run press re-kicks the
+    // scheduler at once — it must NOT reset counters or clear budgets mid-session.
+    if (this.running) { this.tick(); return; }
     this.running = true; this.runs = 0; this.runCost = 0; this.runTokens = 0; this.budgetStop = null;
     this.userStopped = false;
+    this._idleSince = null; this._idleReason = null;
     for (const a of Object.values(this.agents)) { a.runCost = 0; a.runTokens = 0; a.budgetStop = null; }
     this.reconcileOrphanedTasks();
+    // Worktree lifecycle sweep (t_9b662983): before any agent spawns — worktrees whose task is
+    // done/missing go away (clean + merged only; in-flight tasks are never touched) and stale
+    // git worktree entries are pruned. A busy task id list is not needed here: nothing is running.
+    try {
+      if (this.repoDir) WT.sweepWorktrees({ repoDir: this.repoDir, store: this.store, log: (r) => this.log(null, 'system', `worktree sweep: removed ${r.removed.length}, retained ${r.retained.length}`) });
+    } catch {}
     this.log(null, 'system', 'Orchestrator started');
     this.changed();
     this.tick();
@@ -1264,7 +1305,8 @@ class Orchestrator extends EventEmitter {
     const pm = team.nodes.find((n) => n.role === 'PM');
     const open = new Set(this.store.listTasks().filter((x) => x.stuckAlertFor && !['done', 'merge_conflict'].includes(x.status)).map((x) => x.stuckAlertFor));
     for (const t of all) {
-      if (t.priority !== 'P0' || t.status !== 'todo' || open.has(t.id)) continue;
+      // An alert is never itself swept: it is P0 for the busy PM too, and re-alerting it recursed.
+      if (t.stuckAlertFor || t.createdBy === 'orchestrator' || t.priority !== 'P0' || t.status !== 'todo' || open.has(t.id)) continue;
       const busy = t.assignee && this.agent(t.assignee).taskId;
       if (t.assignee && !busy) continue;
       const nodeName = t.assignee && (team.nodes.find((n) => n.id === t.assignee) || {}).name;
@@ -1328,22 +1370,59 @@ class Orchestrator extends EventEmitter {
       // paused) so the watcher's wasRunning stays true and bootResume can restart the Run after the
       // relaunch. An aborted update unpauses and re-ticks via main.js's setPaused callback.
       if (this.dispatchPaused) return;
-      // Before declaring a stop, sweep for in_progress tasks whose agent has no live session (e.g. its
-      // process exited/crashed without updating status) and re-dispatch them instead of blocking forever.
+      // Before classifying the drained board, sweep for in_progress tasks whose agent has no live
+      // session (e.g. its process exited/crashed without updating status) and re-dispatch them.
       if (this.reconcileOrphanedTasks()) { setImmediate(() => this.tick()); return; }
-      this.running = false;
-      // A run must not read as a clean "Finished." while undispatchable unfinished work (open review,
-      // waiting_for_human, merge_conflict, a stray in_progress) remains on the board.
-      const stuck = all.filter((t) => ['in_progress', 'review', 'waiting_for_human', 'merge_conflict'].includes(t.status));
-      const why = !todo.length && !ready.length
-        ? (stuck.length ? `Stopped: ${stuck.length} unfinished task(s) with no agent to pick them up (${stuck.map((t) => `${t.id} ${t.status}`).join(', ')})` : 'No more todo tasks. Finished.')
-        : !ready.length ? `Stopped: ${todo.length} todo task(s) are blocked by unfinished dependencies or over budget` : 'Stopped: run limit reached';
-      this.log(null, 'system', why);
-      const waiting = all.filter((t) => t.awaitingApproval).length;
-      this.notify('Run finished', why + (waiting ? ` ${waiting} task(s) wait for your approval.` : ''));
-      this.changed();
-      // No agents running/pending at this point (procs is empty and nothing is left to dispatch): safe to report done.
-      this.emit('done', this.snapshot());
+      const terminal = (why) => {
+        this.running = false;
+        this.log(null, 'system', why);
+        const waiting = all.filter((t) => t.awaitingApproval).length;
+        this.notify('Run finished', why + (waiting ? ` ${waiting} task(s) wait for your approval.` : ''));
+        this.changed();
+        // No agents running/pending at this point (procs is empty and nothing is left to dispatch): safe to report done.
+        this.emit('done', this.snapshot());
+      };
+      // Two terminal stops remain even in the idle world: ready work refused because the session
+      // ran out its maxRuns cap, and ready work held ONLY by spent agent budgets (idling would look
+      // alive while nothing can ever dispatch; a fresh start() clears both).
+      if (ready.length && s.maxRuns > 0 && this.runs >= s.maxRuns) return terminal(`Stopped: run limit reached (${s.maxRuns}).`);
+      const budgetBlocked = todo.some((t) => !C.isBlocked(t, all) && this.agent(t.assignee).budgetStop)
+        || reviewReady.some(({ task, node }) => !C.isBlocked(task, all) && this.agent(node.id).budgetStop);
+      if (!ready.length && budgetBlocked) return terminal(`Stopped: ${todo.length} todo task(s) are blocked by unfinished dependencies or over budget`);
+      // Board drained (or only undispatchable work left): the run goes IDLE — still on at zero
+      // cost. New ready todo work auto-dispatches on the next sweep (t_b2273507); only an explicit
+      // stop() ends the run. The log/notify fire once per idle episode.
+      if (!this._idleSince) {
+        this._idleSince = Date.now();
+        // A run must not read as a clean "Finished." while undispatchable unfinished work (open
+        // review, waiting_for_human, merge_conflict) remains on the board — name it.
+        const stuck = all.filter((t) => ['in_progress', 'review', 'waiting_for_human', 'merge_conflict'].includes(t.status));
+        const queued = todo.length || reviewReady.length;
+        const pauseHeld = this.usagePaused || (this.store.getTeam().nodes || []).some((n) => this.runtimeUnavailableFor(n));
+        let why; let reason;
+        if (stuck.length) {
+          reason = 'waiting on review or human';
+          why = `Run idle: ${stuck.length} unfinished task(s) cannot be dispatched (${stuck.map((t) => `${t.id} ${t.status}`).join(', ')}) — blocked work stays visible; new todo tasks auto-start.`;
+        } else if (queued && pauseHeld) {
+          reason = 'paused: usage limit or runtime down';
+          why = 'Run idle: dispatch is paused (usage limit or a runtime is down) with tasks queued — still on; they auto-start once it clears.';
+        } else if (queued) {
+          reason = 'todo tasks blocked by dependencies';
+          why = `Run idle: ${todo.length} todo task(s) blocked by open dependencies — still on; they auto-start when unblocked.`;
+        } else {
+          reason = 'waiting for todo tasks';
+          why = 'No more todo tasks. Finished. Run idle — still on; new todo tasks auto-start (Stop ends the run).';
+        }
+        this._idleReason = reason;
+        this.log(null, 'system', why);
+        const waiting = all.filter((t) => t.awaitingApproval).length;
+        this.notify('Run idle', why + (waiting ? ` ${waiting} task(s) wait for your approval.` : ''));
+        this.changed();
+      }
+      // Compat drain barrier (tests + e2e await 'done' at drain): re-emitted on every idle sweep so
+      // a listener registered after the drain still resolves. Payload is the slim snapshot — the
+      // heavy display parts are irrelevant here.
+      this.emit('done', this.snapshotSlim());
     }
   }
 
@@ -1487,6 +1566,7 @@ class Orchestrator extends EventEmitter {
     // Single-run lock, enforced at the last choke point: never a second live run for one agent, even
     // if a caller raced past its own guard.
     if (this.procs.has(node.id)) { this.log(node.id, 'error', `dispatch refused: ${node.name} already has a live run (single run per agent)`); return; }
+    this._idleSince = null; this._idleReason = null; // real work: the idle episode is over (t_b2273507)
     this.runs++;
     // A run for this task started (dispatch, manual button, or auto resume): new stuck episode — the
     // previous episode's one-try flag and human-stop stamp are void.
