@@ -509,12 +509,27 @@ document.querySelectorAll('button[data-tab]').forEach((b) => b.onclick = () => {
 // ---------- header ----------
 function renderHeader() {
   const o = S.orch; const par = o.running ? runningIds().length : 0;
-  // Short status chip (t_db67859d): "4 running" — never truncates at 1440px; the full wording
-  // (parallel/agent split, run count) stays in the tooltip.
-  $('#runstate').textContent = o.running ? `${par || 1} running` : 'idle';
-  $('#runstate').title = o.running ? `running · ${par > 1 ? `${par} in parallel` : `${par || 1} agent`} · ${o.runs || 0} runs` : 'No run active';
-  $('#runstate').classList.toggle('on', !!o.running);
+  // Run-state pill (t_ac25444e), three distinct states off the orchestrator's runState contract
+  // (t_b2273507): Running (agents at work), Idle (run on, nothing to do), Stopped (scheduler off —
+  // with todo work waiting, the count shows too and the pill flags it). A stopped team with work
+  // left used to read "idle" with no start control anywhere outside the New-goal popover.
+  const rs = o.runState || (o.running ? { state: 'running' } : { state: 'stopped', reason: 'not started' });
+  const todos = S.tasks.filter((t) => t.status === 'todo').length;
+  const pill = $('#runstate');
+  if (rs.state === 'running') {
+    pill.textContent = `Running (${par || 1})`; // short status chip (t_db67859d): full wording in the tooltip
+    pill.title = `running · ${par > 1 ? `${par} in parallel` : `${par || 1} agent`} · ${o.runs || 0} runs`;
+  } else if (rs.state === 'idle') {
+    pill.textContent = 'Idle (nothing to do)';
+    pill.title = `idle · ${rs.reason || 'waiting for todo tasks'} · ${o.runs || 0} runs`;
+  } else {
+    pill.textContent = todos ? `Stopped (${todos} todo)` : 'Stopped';
+    pill.title = `stopped — ${rs.reason || 'scheduler off'}${todos ? ` · ${todos} todo waiting` : ''} · Run (or ⌘⏎) starts the team`;
+  }
+  pill.classList.toggle('on', rs.state === 'running');
+  pill.classList.toggle('halt', rs.state === 'stopped' && todos > 0);
   $('#stop').classList.toggle('hidden', !o.running); // Stop only earns a slot in the bar while something runs (⌘. always works)
+  $('#runbtn').classList.toggle('hidden', rs.state !== 'stopped'); // the visible way back while the scheduler is off
   // Money pill: the app's single cost total — API-eq over ALL recorded runs, the same per-run ledger
   // sum the Usage tab's grand total shows, so pill and tab can never disagree (t_b1115e48). The
   // billed vs subscription split stays in the tooltip: subscription usage is covered by the plan,
@@ -809,6 +824,7 @@ $('#run').onclick = async (runAtts) => {
   if (!$('#tab-chat.active')) showTab('obs'); await call('run'); refresh(); $('#goalpop').classList.add('hidden');
 };
 $('#stop').onclick = async () => { await call('stop'); refresh(); };
+$('#runbtn').onclick = () => $('#run').click(); // header Run shares the popover's start flow — the same path ⌘⏎ takes
 
 // ---------- team graph (design-tool editor: pan/zoom, drag-to-connect, minimap, auto-layout, context menu) ----------
 const W = 184, H = 80, SVGNS = 'http://www.w3.org/2000/svg';
