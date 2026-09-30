@@ -92,7 +92,7 @@ async function refresh() {
   renderAll();
 }
 const nodeName = (id) => (S.allNodes.find((n) => n.id === id) || {}).name || (id ? id : 'unassigned');
-function renderAll() { renderSidebar(); renderRtbar(); renderRedbar(); renderGraph(); renderPreflightBar(); renderNodeForm(); renderBoard(); renderWiki(); renderObs(); renderSettings(); renderHeader(); renderSelfUpdate(); renderLimitMeter(); renderUsage(); renderOverview(); renderInbox(); renderGuide(); renderChat(); }
+function renderAll() { renderSidebar(); renderGraph(); renderPreflightBar(); renderNodeForm(); renderBoard(); renderWiki(); renderObs(); renderSettings(); renderHeader(); renderSelfUpdate(); renderAlerts(); renderUsage(); renderOverview(); renderInbox(); renderGuide(); renderChat(); }
 const fmtTok = (n) => { n = n || 0; return n >= 1e6 ? (n / 1e6).toFixed(2) + 'M' : n >= 1e4 ? (n / 1e3).toFixed(1) + 'k' : String(n); };
 const COST_NOTE = { subscription: 'Covered by subscription — not billed per token', other: 'API-equivalent (reported by Claude CLI)' };
 const VENDOR = { claude: 'Claude', codex: 'Codex', opencode: 'OpenCode' };
@@ -463,7 +463,7 @@ function renderHeader() {
   c.title = total > 0
     ? `API-eq (API-equivalent) $${total.toFixed(4)} — what all recorded usage would cost at API list prices; the same single total the Usage tab's grand total shows. Actually billed per token (API key / proxy / cloud): $${billed.toFixed(4)}. Covered by subscription, not billed per token: $${sub.toFixed(4)}. "est" marks list-price estimates for keys that report no cost themselves.`
     : 'No recorded usage yet.';
-  renderRestartPill(); renderWatchPill();
+  renderWatchPill();
 }
 // ---------- core: restart-pending pill + "Core watching" indicator (plan t_42f310cf item 3, t_5a1661d5) ----------
 // IPC contract (Devon, t_20d5a23c / t_74f1f65d): pull getRestartState / getWatchStatus + pushes on
@@ -508,41 +508,13 @@ async function loadCoreState() {
 // A task is held by the restart gate if Devon's state lists it, or defensively via per-task flags.
 const rstGated = (t) => rst.gating.includes(t.id) || t.restartGated === true || t.waitReason === 'restart';
 const agoTxt = (ts) => { const a = ago(ts); return !a ? '' : a === 'now' ? 'just now' : `${a} ago`; };
-function renderRestartPill() {
-  const c = $('#restartst'); if (!c) return;
-  const armed = !!rst.scheduledAfter || rst.scheduledNow;
-  const show = armed || rst.pendingCount > 0;
-  c.classList.toggle('hidden', !show);
-  if (!show) return;
-  c.className = `pill rst-${armed ? 'armed' : 'pending'}`;
-  const n = rst.pendingCount;
-  // t_7e590e54: pendingCount reads as commits behind (cores that expose targetSha); older ones count merged changes.
-  const bits = ['Restart pending'];
-  if (n) bits.push(rst.targetSha ? `${n} commit${n === 1 ? '' : 's'} behind` : `${n} change${n === 1 ? '' : 's'}`);
-  if (rst.scheduledAfter) bits.push(`after ${shortTaskId(rst.scheduledAfter)}`);
-  else if (rst.scheduledNow) bits.push('once agents drain');
-  const label = document.createElement('span');
-  label.className = 'rstlbl';
-  label.textContent = bits.join(' · ');
-  c.replaceChildren(label);
-  // Human escape hatch (Cato t_42f310cf #7). Hidden while stubbed: without the core-restart
-  // backend the calls are guaranteed no-ops, so showing buttons would just invite dead clicks.
-  if (!rst.stub) {
-    c.appendChild(rstBtn('Restart now', 'Restart immediately — in-flight tasks finish, then the app relaunches with the merged changes.', () => rstAction('now'), rstBusy === 'now'));
-    if (armed) c.appendChild(rstBtn('Cancel schedule', 'Cancel the scheduled restart — the landed changes stay pending until the core schedules one again.', () => rstAction('cancel'), rstBusy === 'cancel'));
-    if (rstErr) { const e = document.createElement('span'); e.className = 'rsterr'; e.textContent = rstErr; c.appendChild(e); }
-  }
-  // The blocker popover (rstWaiting/renderRstPop) is the chip's tooltip now — a native title would
-  // only overlap it. Re-render the open card here so live pushes update it in place.
-  if (!$('#rstpop').classList.contains('hidden')) showRstPop();
-}
-const rstBtn = (txt, tip, fn, busy) => { const b = document.createElement('button'); b.className = 'rstact'; b.textContent = busy ? '…' : txt; b.title = tip; b.disabled = !!rstBusy; b.onclick = fn; return b; };
-// restartNow / cancelRestart (Devon, t_20d5a23c contract): the state push re-renders this pill;
-// if the push is missed we re-pull getRestartState. Failure surfaces briefly and inline.
-let rstBusy = null; let rstErr = null;
+// The restart-pending pill and its blocker popover (t_42f310cf/t_ec59eefa) became a bell alert row
+// (t_6674705d); only the action survived. restartNow / cancelRestart (Devon, t_20d5a23c contract):
+// the state push re-renders the bell; if the push is missed we re-pull getRestartState.
+let rstBusy = null;
 async function rstAction(kind) {
   if (rstBusy || rst.stub) return;
-  rstBusy = kind; renderRestartPill();
+  rstBusy = kind; renderAlerts();
   const names = kind === 'now' ? ['restartNow', 'restartPendingNow'] : ['cancelRestart', 'cancelScheduledRestart'];
   let ok = false, err = null;
   for (const nm of names) {
@@ -550,65 +522,10 @@ async function rstAction(kind) {
     catch (e) { err = e; }
   }
   rstBusy = null;
-  if (ok) { rstErr = null; loadCoreState().then(renderHeader).catch(() => {}); }
-  else {
-    rstErr = (err && err.message) || 'not available';
-    renderRestartPill();
-    setTimeout(() => { if (rstErr === ((err && err.message) || 'not available')) { rstErr = null; renderRestartPill(); } }, 4000);
-  }
+  if (ok) { loadCoreState().then(() => { renderHeader(); renderAlerts(); }).catch(() => {}); }
+  else alert((err && err.message) || 'not available');
 }
-// ---- blocker popover (t_ec59eefa): the chip's hover card with the full "waiting on" breakdown ----
-// Priority: waitingReasons — the core's authoritative multi-line list, most-blocking first (Devon
-// t_acae4863; blockedReason merely mirrors [0], so reading it alone would drop lines [1..n]) — then
-// the blockedReason/busyAgents-only shape, then — only for a core without any reason field — the
-// honest subset derivable from the state we already have, marked as provisional.
-function rstWaiting() {
-  if (rst.waitingReasons) return { lines: rst.waitingReasons.length ? rst.waitingReasons : ['Nothing — it fires on the next tick.'], stub: false };
-  if (rst.blockedReason !== undefined || rst.busyAgents !== undefined) {
-    const lines = [];
-    if (rst.blockedReason) lines.push(rst.blockedReason);
-    const extra = (rst.busyAgents || []).filter((n) => !rst.blockedReason || !rst.blockedReason.includes(n));
-    if (extra.length) lines.push(`${extra.length} agent${extra.length === 1 ? '' : 's'} still running: ${extra.join(', ')}`);
-    if (!lines.length) lines.push('Nothing — it fires on the next tick.');
-    return { lines, stub: false };
-  }
-  const armed = !!(rst.scheduledAfter || rst.scheduledNow);
-  if (!armed) return { lines: ['No restart armed yet — the core agent (PM) schedules one, or it auto-arms when pending changes hit the cap.'], stub: false };
-  const lines = [];
-  if (rst.scheduledAfter) lines.push(`Anchor task ${rst.scheduledAfter} must reach done.`);
-  lines.push('In-flight agents must finish (drain) and the updater must be idle.');
-  return { lines, stub: true }; // only here is part of the real blockers invisible to the renderer
-}
-function renderRstPop() {
-  const pop = $('#rstpop'); if (!pop) return;
-  const n = rst.pendingCount;
-  const w = rstWaiting();
-  const div = (cls, txt) => { const d = document.createElement('div'); if (cls) d.className = cls; if (txt != null) d.textContent = txt; return d; };
-  const kids = [div('rp-title', 'Restart pending')];
-  if (n) kids.push(rst.targetSha
-    ? div('rp-row', `${n} commit${n === 1 ? '' : 's'} behind the running build${rst.since ? ` — pending for ${ago(rst.since)}` : ''}; the restart targets ${rst.targetSha.slice(0, 7)}.`)
-    : div('rp-row', `${n} merged change${n === 1 ? '' : 's'} waiting${rst.since ? ` — first landed ${agoTxt(rst.since)}` : ''}.`));
-  kids.push(rst.scheduledAfter ? div('rp-row', `Scheduled: restarts once ${rst.scheduledAfter} is done.`)
-    : rst.scheduledNow ? div('rp-row', 'Scheduled: restarts once agents drain.')
-    : div('rp-row', 'Not scheduled — dispatch keeps running meanwhile.'));
-  kids.push(div('rp-sec', 'Waiting on'));
-  const ul = document.createElement('ul');
-  for (const l of w.lines) { const li = document.createElement('li'); li.textContent = l; ul.appendChild(li); }
-  kids.push(ul);
-  if (rst.gating.length) kids.push(div('rp-row rp-note', `${rst.gating.length} queued task${rst.gating.length === 1 ? '' : 's'} held by the gate: ${rst.gating.slice(0, 3).map(shortTaskId).join(', ')}${rst.gating.length > 3 ? '…' : ''}`));
-  if (w.stub) kids.push(div('rp-note', 'Exact blockers (running agents, update phase) appear here once the core update lands.'));
-  pop.replaceChildren(...kids);
-}
-function showRstPop() {
-  const c = $('#restartst'), pop = $('#rstpop');
-  if (!c || !pop || c.classList.contains('hidden')) return hideRstPop();
-  renderRstPop();
-  const r = c.getBoundingClientRect();
-  pop.style.top = `${Math.round(r.bottom + 6)}px`;
-  pop.style.right = `${Math.max(8, Math.round(window.innerWidth - r.right))}px`;
-  pop.classList.remove('hidden');
-}
-function hideRstPop() { const pop = $('#rstpop'); if (pop) pop.classList.add('hidden'); }
+// ---- blocker popover: removed with the restart pill (t_6674705d) — the bell row carries the state ----
 function renderWatchPill() {
   const c = $('#watchst'); if (!c) return;
   const t = watch.lastWatchAt ? new Date(watch.lastWatchAt).getTime() : 0;
@@ -720,8 +637,10 @@ function limitProviders(st) {
   }
   return uniq;
 }
-async function renderLimitMeter() {
-  let st; try { st = await call('usageStatus'); } catch { st = null; }
+// st comes from renderAlerts (same usageStatus read feeds the limits-hit alert), so one IPC call per
+// render feeds both the meter and the bell.
+async function renderLimitMeter(st) {
+  if (st === undefined) { try { st = await call('usageStatus'); } catch { st = null; } }
   const m = $('#limitmeter');
   m.title = 'Usage limits — one summary chip for the worst provider/window; click for the full per-provider detail in the Usage tab';
   m.onclick = () => showTab('usage');
@@ -1460,17 +1379,16 @@ function drawStallBadge(g, st, onclick) {
 // the redacted stderr tail (core caps ~2KB). Snapshot fallback: snapshotSlim carries orch.runtimeState
 // so the banner survives a page reload. Resume: call('resumeRuntime', runtime) clears the breaker and
 // re-dispatches the queued tasks.
-let rtu = null, rtuBusy = false, rtuErr = '', rtuHidden = false;
+let rtu = null;
 function setRtu(d) {
   if (!d || !d.runtime) return;
   rtu = { runtime: d.runtime, error: String(d.error || ''), agents: Array.isArray(d.agents) ? d.agents : null, at: +d.since || +d.at || Date.now() };
-  rtuHidden = false; rtuErr = '';
-  renderRtbar(); renderGraph(); renderOverview();
+  renderAlerts(); renderGraph(); renderOverview();
 }
 function clearRtu(runtime) {
   if (!rtu || (runtime && rtu.runtime !== runtime)) return;
-  rtu = null; rtuErr = '';
-  renderRtbar(); renderGraph(); renderOverview();
+  rtu = null;
+  renderAlerts(); renderGraph(); renderOverview();
 }
 // Is this agent affected? Core's agents list wins when present; otherwise affected = agent's runtime
 // (nstat overrides the node config, same precedence as the Team chip row) matches the broken runtime.
@@ -1501,81 +1419,82 @@ function drawRtuBadge(g, r) {
   el('text', { x: (W - 8) / 2, y: 9.5, 'text-anchor': 'middle' }, bg).textContent = clipText(`⏸ paused — ${label} unavailable`, 30);
   el('title', {}, bg).textContent = r.error ? `${label} unavailable: ${r.error}` : `${label} unavailable — fix it, then resume from the banner`;
 }
-// Banner under the header, visible on every tab: names the runtime, the paused agents, the real error,
-// and offers the resume action (Cato's plan conditions: say if other runtimes exist; never imply work
-// moved to them). Resume failure text shows inline; the banner only clears on resume or core recovery.
-function renderRtbar() {
-  const b = $('#rtbar'); if (!b) return;
-  if (!rtu || rtuHidden) return b.classList.add('hidden');
-  const names = (rtu.agents ? rtu.agents.map((id) => nodeName(id)) : S.team.nodes.filter((n) => rtuFor(n.id)).map((n) => n.name)).filter(Boolean);
-  const others = Object.entries((S.config || {}).runtimes || {}).filter(([id, r]) => id !== rtu.runtime && r.installed !== false).map(([id]) => runtimeLabel(id));
-  const err = rtu.error ? `<div class="rt-err" title="${esc(rtu.error)}">${esc(clipText(rtu.error, 220))}</div>` : '';
-  const rerr = rtuErr ? `<div class="rt-resume-err">Resume failed: ${esc(rtuErr)}</div>` : '';
-  b.innerHTML = `<span class="rt-ico" aria-hidden="true">⏸</span>
-    <div class="rt-body"><b>Runtime “${esc(runtimeLabel(rtu.runtime))}” unavailable</b>
-    <span class="muted">${names.length ? esc(names.join(', ')) + ' paused' : 'no agents on it'} — new work to it waits${others.length ? ` · other runtimes still available: ${esc(others.join(', '))}` : ''}</span>${err}${rerr}</div>
-    <span class="spacer"></span>
-    <button id="rt-resume" class="primary"${rtuBusy ? ' disabled' : ''}>${rtuBusy ? 'Resuming…' : 'I fixed it — resume'}</button>
-    <button id="rt-dismiss" title="Hide until the state changes">✕</button>`;
-  b.classList.remove('hidden');
-  $('#rt-resume').onclick = async () => {
-    rtuBusy = true; rtuErr = ''; renderRtbar();
-    try { await call('resumeRuntime', rtu.runtime); clearRtu(rtu.runtime); await refresh(); }
-    catch (e) { rtuErr = String(e.message || e).replace(/^Error invoking remote method 'api':\s*(Error:\s*)?/, ''); }
-    finally { rtuBusy = false; renderRtbar(); }
-  };
-  $('#rt-dismiss').onclick = () => { rtuHidden = true; renderRtbar(); };
+// ---------- alerts center (t_6674705d): ONE bell + panel fed by the pure collector (src/alerts.js) ----------
+// The old stacked banners are gone: #redbar (master red), #rtbar (runtime unavailable), #restartst +
+// #rstpop (restart pending) and the .idlebanner all became bell rows. Dismissal keeps id + fingerprint
+// in memory only — a row reappears when its state changes (different fingerprint) and resets on reload.
+// Every action op dispatches to a handler that already existed; preflight-failed rows are filtered out
+// here because the #pf-summary pill stays the single sanctioned inline signal (Critic t_7239c941 item 5).
+const dismissed = new Map(); // alert id -> fingerprint hidden until the state changes
+let alertsOpen = false;
+let fakeAlertN = 0, fakeAlertFp = ''; // dev/test hook for gui-e2e: window.__fakeAlerts(n, fpBump?)
+window.__fakeAlerts = (n, fpBump) => { fakeAlertN = Math.max(0, n | 0); fakeAlertFp = String(fpBump || ''); renderAlerts(); return fakeAlertN; };
+const fakeAlerts = (n) => Array.from({ length: n }, (_, i) => {
+  const t = S.tasks[i] || {}; const nd = S.team.nodes[i % Math.max(1, S.team.nodes.length)] || {};
+  return { id: `fake:${i}`, kind: 'fake', severity: i % 2 ? 'warn' : 'error', at: Date.now() - i * 60000, dismissable: true,
+    text: `Fake alert ${i + 1} — injected for testing`, agentId: nd.id || null, taskId: t.id || null, fingerprint: `fake${i}${fakeAlertFp}`,
+    action: t.id ? { label: 'Open task', op: 'open-task', arg: t.id } : null };
+});
+async function renderAlerts() {
+  let limits = null; try { limits = await call('usageStatus'); } catch {}
+  const stalls = S.allNodes.map((n) => ({ id: n.id, st: stallState(n.id) })).filter((x) => x.st && x.st.state === 'recovery_failed');
+  const paused = rtu ? (rtu.agents ? rtu.agents.length : S.team.nodes.filter((n) => rtuFor(n.id)).length) : 0;
+  const all = Alerts.collect({
+    redMaster: (S.orch || {}).redMaster, rst, tasks: S.tasks, running: runningIds(),
+    agents: S.orch.agents || {}, stuck: Overview.stuckAgents(S.orch.agents, logs, Date.now(), S.settings.stuckMinutes || 5),
+    stalls, teamNodes: S.team.nodes, limits, stuckMinutes: S.settings.stuckMinutes || 5, now: Date.now(),
+    nodeNames: Object.fromEntries(S.allNodes.map((n) => [n.id, n.name])),
+    rtu: rtu ? { ...rtu, paused, label: runtimeLabel(rtu.runtime) } : null,
+  }).filter((a) => a.kind !== 'preflight');
+  if (fakeAlertN > 0) all.push(...fakeAlerts(fakeAlertN));
+  const live = Alerts.sortAlerts(all).filter((a) => dismissed.get(a.id) !== a.fingerprint);
+  renderAlertBell(live);
+  renderAlertPanel(live);
+  renderLimitMeter(limits); // same usageStatus read feeds the meter — no second IPC call
 }
-
-// ---------- red-master banner (t_f72708fd) ----------
-// Contract with Devon (t_897cca56, pre-merge test gate): the orchestrator snapshot carries
-// `redMaster` — null/absent/{red:false} means master is green. Shown on every tab with no
-// dismiss: master being red blocks every merge, so it stays up until the state itself clears.
-// Shape: { red, since, failingTests: [name | {name}], testOutput, fixTaskId,
-//          lastMergedTaskId, gateBlocks: [{taskId, tests, at}] }
-// failingTests entries and gateBlocks.tests accept plain strings or {name} so minor shape drift
-// on Devon's side still renders; gateBlocks is optional (gate rejections before the field lands
-// are still visible as task comments, which the board already shows).
-function normRedMaster(d) {
-  if (!d || !d.red) return null;
-  const names = (v) => (Array.isArray(v) ? v : []).map((t) => (typeof t === 'string' ? t : (t || {}).name || '')).filter(Boolean);
-  return {
-    since: +d.since || 0,
-    tests: names(d.failingTests),
-    output: String(d.testOutput || d.output || ''),
-    fixTaskId: d.fixTaskId || null,
-    lastMergedTaskId: d.lastMergedTaskId || null,
-    blocks: (Array.isArray(d.gateBlocks) ? d.gateBlocks : []).map((b) => ({ taskId: b.taskId, tests: names(b.tests), at: +b.at || 0 })).filter((b) => b.taskId),
-  };
+function renderAlertBell(live) {
+  const b = $('#alertbell'); if (!b) return;
+  const n = live.length; const worst = live[0]; // collect() sorts error first
+  const badge = $('#alertbell-n');
+  badge.textContent = n ? (n > 9 ? '9+' : String(n)) : '';
+  badge.className = `abadge abadge-${n ? (worst ? worst.severity : 'info') : 'none'}`; // .abadge-none hides it: 0 alerts must not look wrong
+  const errs = live.filter((a) => a.severity === 'error').length;
+  b.title = n ? `Alerts — ${n}${errs ? ` (${errs} error${errs === 1 ? '' : 's'})` : ''}` : 'Alerts';
+  b.setAttribute('aria-label', b.title);
+  b.classList.toggle('active', alertsOpen);
+  b.setAttribute('aria-expanded', String(alertsOpen));
 }
-function renderRedbar() {
-  const b = $('#redbar'); if (!b) return;
-  const rm = normRedMaster((S.orch || {}).redMaster);
-  if (!rm) { b.innerHTML = ''; b.classList.add('hidden'); return; }
-  const when = rm.since ? ` <span class="rb-when">since ${new Date(rm.since).toLocaleTimeString()}</span>` : '';
-  const shown = rm.tests.slice(0, 4);
-  const chips = shown.map((t) => `<code class="rb-test" title="${esc(t)}">${esc(t)}</code>`).join('')
-    + (rm.tests.length > shown.length ? `<span class="rb-more">+${rm.tests.length - shown.length} more</span>` : '');
-  const rtask = (id) => (S.tasks || []).find((t) => t.id === id);
-  const fix = rm.fixTaskId
-    ? `<button id="rb-fix" class="primary">${esc(shortTaskId(rm.fixTaskId))}${rtask(rm.fixTaskId) ? ': ' + esc(clipText(rtask(rm.fixTaskId).title, 44)) : ' — open fix task'}</button>`
-    : '<span class="rb-nofix">no fix task yet</span>';
-  const owner = rm.lastMergedTaskId
-    ? `<span class="rb-owner" title="last task merged before master went red — likely cause, not confirmed">likely from ${esc(shortTaskId(rm.lastMergedTaskId))}${rtask(rm.lastMergedTaskId) ? ` (${esc(clipText(rtask(rm.lastMergedTaskId).title, 44))})` : ''}</span>`
-    : '';
-  const blocks = rm.blocks.slice(0, 3).map((bl) => {
-    const t = rtask(bl.taskId);
-    return `<div class="rb-block">⛔ Gate blocked the merge of ${esc(shortTaskId(bl.taskId))}${t ? ` — ${esc(clipText(t.title, 50))}` : ''} (${bl.tests.length} failing test${bl.tests.length === 1 ? '' : 's'})${t ? ` — sent back to ${esc(nodeName(t.assignee))}` : ''}</div>`;
-  }).join('');
-  const out = rm.output ? `<details class="rb-out"><summary>output</summary><pre>${esc(rm.output)}</pre></details>` : '';
-  b.innerHTML = `<span class="rb-ico" aria-hidden="true">●</span>
-    <div class="rb-body"><b>MASTER IS RED${when}</b>
-    <span class="rb-sub">the shared branch is failing tests — merges are blocked until it is green again</span>
-    ${rm.tests.length ? `<div class="rb-tests">${chips}</div>` : ''}${blocks}${out}</div>
-    <span class="spacer"></span>${owner}${fix}`;
-  b.classList.remove('hidden');
-  if ($('#rb-fix')) $('#rb-fix').onclick = () => { sel.task = rm.fixTaskId; showTab('board'); renderBoard(); };
+function closeAlerts() {
+  alertsOpen = false;
+  const p = $('#alertpanel'); if (p) p.classList.add('hidden');
+  const b = $('#alertbell'); if (b) { b.classList.remove('active'); b.setAttribute('aria-expanded', 'false'); }
 }
+function renderAlertPanel(live) {
+  const p = $('#alertpanel'); if (!p) return;
+  if (!alertsOpen) { p.classList.add('hidden'); return; }
+  const who = (a) => [a.agentId ? `<a href="#" data-alagent="${esc(a.agentId)}">${esc(nodeName(a.agentId))}</a>` : '',
+    a.taskId ? `<a href="#" data-altask="${esc(a.taskId)}">${esc(shortTaskId(a.taskId))}</a>` : ''].filter(Boolean).join(' · ');
+  p.innerHTML = `<div class="al-head">Alerts</div>${live.length ? live.map((a) => `<div class="al-row"><i class="al-dot al-${esc(a.severity)}" title="${esc(a.severity)}"></i><div class="al-body"><span class="al-what" title="${esc(a.text)}">${esc(a.text)}</span><span class="al-who">${who(a)}</span></div><span class="al-side">${a.action ? `<button class="al-act" data-alop="${esc(a.action.op)}" data-alarg="${esc(a.action.arg || '')}">${esc(a.action.label)}</button>` : ''}${a.dismissable ? `<button class="al-x" title="Hide until the state changes" data-alx="${esc(a.id)}">×</button>` : ''}</span></div>`).join('') : '<div class="al-empty">All clear — nothing needs you right now.</div>'}`;
+  p.classList.remove('hidden');
+  const r = $('#alertbell').getBoundingClientRect();
+  p.style.top = `${Math.round(r.bottom + 6)}px`;
+  p.style.right = `${Math.max(8, Math.round(window.innerWidth - r.right))}px`;
+  p.querySelectorAll('[data-alop]').forEach((b) => b.onclick = act(async () => { closeAlerts(); await runAlertOp(b.dataset.alop, b.dataset.alarg); }));
+  p.querySelectorAll('[data-alx]').forEach((b) => b.onclick = () => { const a = live.find((x) => x.id === b.dataset.alx); if (!a) return; dismissed.set(a.id, a.fingerprint); renderAlerts(); });
+  p.querySelectorAll('[data-altask]').forEach((a) => a.onclick = (e) => { e.preventDefault(); closeAlerts(); sel.task = a.dataset.altask; showTab('board'); renderBoard(); });
+  p.querySelectorAll('[data-alagent]').forEach((a) => a.onclick = (e) => { e.preventDefault(); closeAlerts(); showTab('team'); selectNode(a.dataset.alagent); });
+}
+// The only dispatcher of collector ops — each maps onto an existing handler (no new IPC).
+async function runAlertOp(op, arg) {
+  if (op === 'open-task') { if (!arg) return; sel.task = arg; showTab('board'); renderBoard(); }
+  else if (op === 'open-usage') { showTab('usage'); setTimeout(() => $('#us-limits')?.scrollIntoView({ block: 'start' }), 80); }
+  else if (op === 'open-overview') showTab('overview');
+  else if (op === 'restart-core') await rstAction('now');
+  else if (op === 'resume-runtime') { try { await call('resumeRuntime', arg); clearRtu(arg); await refresh(); } catch (e) { alert(String(e.message || e).replace(/^Error invoking remote method 'api':\s*(Error:\s*)?/, '')); } }
+  else if (op === 'retest') await testAgents(arg ? [arg] : []);
+}
+$('#alertbell').onclick = () => { alertsOpen = !alertsOpen; renderAlerts(); };
+document.addEventListener('mousedown', (e) => { if (alertsOpen && !$('#alertpanel').contains(e.target) && !$('#alertbell').contains(e.target)) closeAlerts(); });
 
 // Subagent chip on an agent card (Team graph + Overview): count + compact total tokens for the current
 // run's subagents. Per contract t_c33656ba the parent's own totals ALREADY include these — the badge is
@@ -1622,10 +1541,8 @@ function noteWakes() {
 }
 function renderIdle() {
   noteWakes();
-  const idle = S.team.nodes.filter((n) => presence(n.id) === 'idle'); const show = S.team.nodes.length && idle.length;
-  document.querySelectorAll('.idlebanner[data-where="team"]').forEach((b) => { b.classList.toggle('hidden', !show); if (!show) return;
-    b.innerHTML = `<span class="pres idle"><i></i></span><b>${idle.length} agent${idle.length > 1 ? 's' : ''} idle</b><span class="muted">${esc(idle.slice(0, 4).map((n) => n.name).join(', '))}${idle.length > 4 ? '…' : ''}</span><span class="spacer"></span><button class="primary" data-assignidle="${idle[0].id}">Assign work</button>`; });
-  document.querySelectorAll('[data-assignidle]').forEach((b) => b.onclick = () => { showTab('board'); $('#nt-assignee').value = b.dataset.assignidle; $('#nt-title').focus(); });
+  // The old "N agents idle" banner (.idlebanner) is gone (t_6674705d): idle is a normal state, and
+  // presence is already visible here and as node colors. Only the wake bars + presence chips remain.
   $('#presence').innerHTML = S.allNodes.map((n) => { const p = presence(n.id); const wk = wakeLabel(n.id); const wp = wk ? null : wakePending(n.id); const pt = wk || (wp ? pendingWakeText(wp) : ''); return `<span class="pchip ${p}${wk ? ' wake' : ''}" title="${esc(pt || n.role)}"><span class="pres ${p}"><i></i></span>${esc(n.name)} <span class="muted">${pt ? esc(clipText(pt, 52)) : p}</span></span>`; }).join('');
   const wakes = S.allNodes.map((n) => ({ n, w: wakeRun(n.id) })).filter((x) => x.w);
   const wb = $('#wakebar');
@@ -2780,25 +2697,12 @@ if (squad.onSelfUpdateStatus) squad.onSelfUpdateStatus(onUpdPush);
 else { squad.on('selfUpdateStatus', onUpdPush); squad.on('self-update-status', onUpdPush); }
 // Restart/watch pushes: prefer dedicated bridge helpers, fall back to plausible channel names
 // (Devon adds the preload helpers when the backend lands — see contract on t_20d5a23c).
-const onRestartPush = (d) => { rst = { ...normRestart(d), stub: false }; rstSeen = true; renderHeader(); boardSig = null; renderBoard(); };
+const onRestartPush = (d) => { rst = { ...normRestart(d), stub: false }; rstSeen = true; renderHeader(); renderAlerts(); boardSig = null; renderBoard(); };
 const onWatchPush = (d) => { watch = { ...normWatch(d), stub: false }; renderHeader(); };
 if (squad.onRestartState) squad.onRestartState(onRestartPush);
 else { squad.on('restart-state', onRestartPush); squad.on('restartStatus', onRestartPush); }
 if (squad.onWatchStatus) squad.onWatchStatus(onWatchPush);
 else { squad.on('watch-status', onWatchPush); squad.on('watchStatus', onWatchPush); }
-// Restart chip popover wiring (t_ec59eefa): hover shows it, leaving either element hides it after a
-// short grace gap (so moving from the chip into the card keeps it); clicking the chip toggles.
-{
-  let rstPopT = null;
-  const popEnter = () => { clearTimeout(rstPopT); showRstPop(); };
-  const popLeave = () => { clearTimeout(rstPopT); rstPopT = setTimeout(hideRstPop, 250); };
-  const chip = $('#restartst'), pop = $('#rstpop');
-  chip.addEventListener('mouseenter', popEnter);
-  chip.addEventListener('mouseleave', popLeave);
-  chip.addEventListener('click', (e) => { if (e.target.closest('.rstact')) return; clearTimeout(rstPopT); pop.classList.contains('hidden') ? showRstPop() : hideRstPop(); });
-  pop.addEventListener('mouseenter', popEnter);
-  pop.addEventListener('mouseleave', popLeave);
-}
 // Runtime unavailable/resumed pushes (contract on t_d33685f3); dash channels are primary.
 const onRtuPush = (d) => { if (d && d.projectId && d.projectId !== ctx.p) return; setRtu(d); };
 const onRtaPush = (d) => { if (d && d.projectId && d.projectId !== ctx.p) return; clearRtu(d && d.runtime); };
@@ -2825,7 +2729,7 @@ document.addEventListener('keydown', (e) => {
   else if (mod && (e.key === 'i' || e.key === 'I')) { e.preventDefault(); showTab('inbox'); }
   else if (mod && e.key === 'Enter') { e.preventDefault(); $('#run').click(); }
   else if (mod && e.key === '.') { e.preventDefault(); $('#stop').click(); }
-  else if (e.key === 'Escape' && !$('#askdlg').open) { if ($('#helpdlg').open) return; if (!$('#goalpop').classList.contains('hidden')) return $('#goalpop').classList.add('hidden'); if (typing) return document.activeElement.blur(); sel = { ...sel, node: null, edge: null, task: null }; connectMode = false; connectFrom = null; $('#connect').classList.remove('on'); renderGraph(); renderNodeForm(); renderBoard(); }
+  else if (e.key === 'Escape' && !$('#askdlg').open) { if ($('#helpdlg').open) return; if (alertsOpen) return closeAlerts(); if (!$('#goalpop').classList.contains('hidden')) return $('#goalpop').classList.add('hidden'); if (typing) return document.activeElement.blur(); sel = { ...sel, node: null, edge: null, task: null }; connectMode = false; connectFrom = null; $('#connect').classList.remove('on'); renderGraph(); renderNodeForm(); renderBoard(); }
   else if (!typing && !mod && e.key === '?') $('#helpdlg').showModal();
   else if (!typing && !mod && e.key === 'n' && document.querySelector('#tab-board.active')) { e.preventDefault(); $('#nt-title').focus(); }
   else if (!typing && !mod && e.key === '/') { e.preventDefault(); openGoalPop(); }

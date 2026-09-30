@@ -42,7 +42,9 @@ function idleNudges(team, tasks, agents = {}, opts = {}) {
     const now = Number(opts.now) || Date.now();
     const core = coreNode(team);
     if (core) {
-      const liveOnIt = (t) => { const a = agents[t.assignee] || {}; return a.status === 'working' && a.taskId === t.id; };
+      // An agent state claiming 'working' with no live process is a zombie, not a run (plan
+      // t_76da3303 D, the Session-not-found hang): callers that pass liveNodeIds get truth.
+      const liveOnIt = (t) => { const a = agents[t.assignee] || {}; return a.status === 'working' && a.taskId === t.id && !(opts.liveNodeIds && !opts.liveNodeIds.has(t.assignee)); };
       const stale = tasks.filter((t) => (t.status === 'todo' || t.status === 'in_progress')
         && !t.awaitingApproval && !t.parkedForHuman && t.assignee && !liveOnIt(t)
         && now - new Date(t.updatedAt).getTime() > staleMin * 60000);
@@ -98,4 +100,47 @@ function idleCompanyWakes(team, tasks, agents = {}) {
   return res;
 }
 
-module.exports = { agentStates, idleNudges, idleCompanyWakes, coreNode };
+// Board-shape gaps the process sweep cannot see (plan t_76da3303 D): the cycle stopped moving while
+// every process looks healthy — every other nudge here is keyed to a task object or a live run, so
+// these states sit invisible until a human stumbles on them. Same entry shape as idleNudges (pmId =
+// the core node) so nudgeIdle's debounce (per kind, sorted taskIds) dedupes each push to once per
+// task+problem. opts.staleMin (with opts.now) gates both kinds on the same anchor sweepReviews uses.
+//   'review-stranded': a task in review whose review chain is EMPTY — no review edge from the assignee
+//     and no lead to fall back to. autoAdvanceReviews comments once where nobody may be listening
+//     (t_8b11c78a: the assignee WAS the PM, whose run had already ended); only a direct push helps.
+//   'review-closeable': a parent (tasks whose parentId points at it) sitting in review while every
+//     child is done — nothing is left to run, so the review is a formality someone must close or
+//     reassign (the lost logo hand-off class: the board looked busy and moved nothing).
+function boardGapNudges(team, tasks, agents = {}, opts = {}) {
+  const staleMin = Number(opts.staleMin || 0);
+  if (!(staleMin > 0)) return [];
+  const core = coreNode(team);
+  if (!core) return [];
+  const now = Number(opts.now) || Date.now();
+  const nodes = team.nodes || [];
+  // Mirror of orchestrator reviewChain (t_8df2cab6): review edges from the assignee, then the
+  // assignee's lead. An empty chain means nobody on the team can ever act on the review.
+  const chainOf = (t) => {
+    const revs = nodes.filter((n) => (team.edges || []).some((e) => (e.type || 'assign') === 'review' && e.from === t.assignee && e.to === n.id));
+    const seen = new Set(revs.map((n) => n.id));
+    const lead = nodes.find((n) => !seen.has(n.id) && (team.edges || []).some((e) => (e.type || 'assign') === 'assign' && e.from === n.id && e.to === t.assignee));
+    return lead ? [...revs, lead] : revs;
+  };
+  const stranded = [];
+  const closeable = [];
+  for (const t of tasks) {
+    if (t.status !== 'review' || t.awaitingApproval || t.parkedForHuman) continue;
+    const mins = Math.max(1, Math.round((now - new Date(t.updatedAt).getTime()) / 60000));
+    if (mins <= staleMin) continue;
+    if (!chainOf(t).length) { stranded.push(t); continue; }
+    const kids = tasks.filter((k) => k.parentId === t.id);
+    if (kids.length && kids.every((k) => k.status === 'done')) closeable.push(t);
+  }
+  const res = [];
+  const list = (ts) => ts.slice(0, 4).map((t) => `"${String(t.title || t.id).slice(0, 40)}" (${Math.max(1, Math.round((now - new Date(t.updatedAt).getTime()) / 60000))}m)`).join(', ');
+  if (stranded.length) res.push({ pmId: core.id, idle: [], taskIds: stranded.map((t) => t.id), kind: 'review-stranded', text: `${stranded.length} task${stranded.length > 1 ? 's' : ''} in review with no reviewer configured — nobody on the team can act: ${list(stranded)}${stranded.length > 4 ? ` +${stranded.length - 4} more` : ''}. Add a reviewer or move them to done.` });
+  if (closeable.length) res.push({ pmId: core.id, idle: [], taskIds: closeable.map((t) => t.id), kind: 'review-closeable', text: `${closeable.length} parent task${closeable.length > 1 ? 's' : ''} in review while all their children are done — the cycle stopped there: ${list(closeable)}${closeable.length > 4 ? ` +${closeable.length - 4} more` : ''}. Verify and close, or reassign.` });
+  return res;
+}
+
+module.exports = { agentStates, idleNudges, idleCompanyWakes, boardGapNudges, coreNode };
