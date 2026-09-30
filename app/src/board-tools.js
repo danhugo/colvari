@@ -2,16 +2,20 @@
 const fs = require('fs');
 const path = require('path');
 const { outgoing, incoming, canAssign, canMessage, reviewees, visibleTask, canSetStatus, AGENT_PATCH_FIELDS, capPermissionMode, canManageAgent, canRetire } = require('./scope');
-const { BOARD_TOOLS } = require('./agent-config');
+const { BOARD_TOOLS, RESTART_TOOLS } = require('./agent-config');
 const { getRuntime } = require('./runtimes');
 const WT = require('./worktree');
 const C = require('./controls');
 const SU = require('./self-update');
 
-// Board tools this node may use (the rest are disabled in the node's settings).
-function enabledTools(node) {
+// Board tools this node may use (the rest are disabled in the node's settings). The restart tools
+// exist only where the app can restart itself: devMode=false (packaged build) leaves them out, so
+// they are never advertised in prompts nor registered in the MCP server. Default (undefined/true)
+// is the dev behavior every hand-built caller (tests, prompts) expects.
+function enabledTools(node, devMode) {
   const off = new Set((node && node.disabledBoardTools) || []);
-  return BOARD_TOOLS.filter((t) => !off.has(t));
+  const list = devMode === false ? BOARD_TOOLS : [...BOARD_TOOLS, ...RESTART_TOOLS];
+  return list.filter((t) => !off.has(t));
 }
 
 function makeTools(store, nodeId) {
@@ -250,9 +254,11 @@ function makeTools(store, nodeId) {
     },
     // PM-only: ask the app to update itself to the newest code. The request is a file the app's
     // UpdateWatcher consumes on its next poll; it still honors the auto-restart setting and the
-    // restart guards, and every outcome lands in the activity feed.
+    // restart guards, and every outcome lands in the activity feed. In a packaged build there is
+    // no watcher at all, so the tool errors instead of pretending to queue something.
     request_self_update({ reason = '' } = {}) {
       const t = me();
+      if (store.devMode === false) throw new Error('unavailable in packaged build: self-update only exists in dev/dogfood mode (run from source or set AGENTS_SQUAD_DEV=1)');
       const n = t.nodes.find((x) => x.id === nodeId);
       if (!n || String(n.role).toLowerCase() !== 'pm') throw new Error('scope violation: request_self_update is PM-only');
       // Self-update is dev/dogfood-only (main.js gates the watcher on the same variable).
@@ -264,8 +270,11 @@ function makeTools(store, nodeId) {
     // Cato t_42f310cf #3): arm a restart, after a given task completes or once agents drain.
     // Merges never restart the app on their own — they only count toward the pending total the
     // cap watches. afterTaskId is validated in the store (a task that may never finish is refused).
+    // In a packaged build nothing can relaunch the app, so arming would only park a schedule that
+    // never fires (and gate every new task behind it) — refuse with a clear error.
     schedule_restart({ afterTaskId = null, now = false, reason = '' } = {}) {
       const t = me();
+      if (store.devMode === false) throw new Error('unavailable in packaged build: restart scheduling only exists in dev/dogfood mode (run from source or set AGENTS_SQUAD_DEV=1)');
       const n = t.nodes.find((x) => x.id === nodeId);
       if (!n || String(n.role).toLowerCase() !== 'pm') throw new Error('scope violation: schedule_restart is PM-only (the protected core agent)');
       const rp = store.scheduleRestart({ afterTaskId, now });

@@ -113,7 +113,7 @@ function buildPrompt(team, node, task, extra = {}) {
   const msgTo = outgoing(team, node.id, ['assign', 'message']).map(nm);
   const revs = reviewees(team, node.id).map(nm);
   const unread = extra.unread || 0;
-  const tools = enabledTools(node);
+  const tools = enabledTools(node, extra.devMode);
   const roleHints = {
     PM: 'You own the goal. Break it into concrete tasks and assign them to your teammates with create_task. Do not write code yourself if a Dev is available. If a Critic is on the team: first create a plan-review task for the Critic and make every Dev task blockedBy it; finally create a Critic verification task (blockedBy the Dev tasks) that requires evidence such as screenshots before the goal is done.',
     Planner: 'Split work into small, concrete tasks and assign them to the right teammates.',
@@ -247,6 +247,13 @@ class Orchestrator extends EventEmitter {
     this._restartAfter = null;
     this._restartPushed = null;
     this._noUpdaterLogged = false;
+    // Packaged builds (devMode=false, wired from main.js DEV_MODE): there is no UpdateWatcher, so
+    // the whole restart machinery is inert — merges don't count, sweeps never arm or gate, stored
+    // state is wiped at boot (a schedule carried over from a dev run of the same project would
+    // otherwise hold dispatch forever: _fireRestart with no watcher keeps it armed for good).
+    // Default true keeps hand-wired orchestrators (tests) on the dev behavior.
+    this.devMode = opts.devMode !== false;
+    if (!this.devMode) { try { this.store.devMode = false; } catch {} }
     // Always-on restart sweep (t_acae4863): tick() evaluates sweepRestart only while a Run is
     // active (running=true), so a schedule armed while the company is idle — the PM's
     // schedule_restart tool, the cap crossing after the run ended, a pill with lingering procs —
@@ -262,6 +269,12 @@ class Orchestrator extends EventEmitter {
       const n = Number(bootRp.firedCount) || 0;
       store.clearRestartPending();
       this.log(null, 'system', `restart: completed after boot — cleared the consumed schedule (${n} change(s) had landed)`);
+    }
+    // Packaged build: wipe any leftover restart state (armed schedule, pending tally) — nothing
+    // here can ever fire it, and bumpRestartPending is off so the tally would only go stale.
+    if (!this.devMode && store.restartPending()) {
+      store.clearRestartPending();
+      this.log(null, 'system', 'packaged build: restart scheduling is unavailable here — cleared stored restart state');
     }
     // What this RUNNING process was built from (t_7e590e54): the merge path reads it to express
     // restartPending.count as "commits behind". It lives in meta because merges run in whichever
@@ -1122,6 +1135,14 @@ class Orchestrator extends EventEmitter {
   // resume). The gate STAYS on after firing — the one-second tick window before the watcher pauses
   // dispatch must not start new work; boot-clear releases it after the relaunch.
   sweepRestart() {
+    // Packaged build: never arm (no cap valve), never gate, never fire — a schedule cannot exist.
+    if (this.devMode === false) {
+      this._restartGate = false;
+      this._restartAfter = null;
+      this._restartGating = [];
+      this._pushRestartState();
+      return;
+    }
     let rp = (this.store.meta() || {}).restartPending;
     const scheduled = !!rp && !!(rp.scheduledNow || rp.afterTaskId);
     const armed = scheduled && !rp.firedAt;
@@ -1176,6 +1197,10 @@ class Orchestrator extends EventEmitter {
   // finish, then the watcher's flow takes over. Works while stopped too (no tick loop then): an
   // idle board fires immediately; a board with lingering procs fires from the next start()'s tick.
   restartNow() {
+    if (this.devMode === false) {
+      this.log(null, 'system', 'restart: unavailable in a packaged build — request ignored');
+      return;
+    }
     this.store.setRestartPending({ scheduledNow: true });
     this.log(null, 'system', 'restart: manual restart armed — in-flight tasks finish first');
     if (this.running) this.sweepRestart();
@@ -1600,9 +1625,9 @@ class Orchestrator extends EventEmitter {
       const unread = this.store.listMessages({ to: node.id }).filter((m) => !m.read).length;
       let cfg; let base = null; let baseDefer = null;
       try {
-        cfg = normalizeNode(applyPreset(node, presets)); base = buildPrompt(team, node, task, { presets, unread, boardDir: this.store.dir, worktree });
+        cfg = normalizeNode(applyPreset(node, presets)); base = buildPrompt(team, node, task, { presets, unread, boardDir: this.store.dir, worktree, devMode: this.devMode });
         const lm = normalizeMode(cfg); // loop mode: every pass but the last is told not to mark the task done
-        baseDefer = lm.mode === 'loop' && lm.loopCount > 1 ? buildPrompt(team, node, task, { presets, unread, boardDir: this.store.dir, deferDone: `${lm.loopCount} passes`, worktree }) : base;
+        baseDefer = lm.mode === 'loop' && lm.loopCount > 1 ? buildPrompt(team, node, task, { presets, unread, boardDir: this.store.dir, deferDone: `${lm.loopCount} passes`, worktree, devMode: this.devMode }) : base;
       } catch (e) { cfg = { env: {}, mode: 'single' }; this.log(node.id, 'error', 'bad agent settings: ' + e.message); }
       const m = normalizeMode(cfg);
       // Workflow mode: only the task text follows the slash command ($ARGUMENTS); the team context goes in --append-system-prompt.

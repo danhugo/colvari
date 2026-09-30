@@ -6,7 +6,11 @@ const { normalizeBilling } = require('./usage');
 const SUGGESTED_ROLES = ['PM', 'Planner', 'Dev', 'Reviewer', 'QA'];
 const PERMISSION_MODES = ['default', 'acceptEdits', 'bypassPermissions', 'plan'];
 const EDGE_TYPES = ['assign', 'message', 'review'];
-const BOARD_TOOLS = ['list_team', 'list_tasks', 'create_task', 'reassign_task', 'update_task_status', 'comment_task', 'send_message', 'read_messages', 'ask_human', 'read_wiki', 'write_wiki', 'recruit_agent', 'retire_agent', 'update_agent', 'request_self_update', 'schedule_restart'];
+// The always-available board tools. The two restart tools are NOT here: they only exist where the
+// app can restart itself (dev/dogfood — main.js DEV_MODE), so board-tools.enabledTools appends
+// RESTART_TOOLS only in dev mode and packaged builds never list, register or advertise them.
+const BOARD_TOOLS = ['list_team', 'list_tasks', 'create_task', 'reassign_task', 'update_task_status', 'comment_task', 'send_message', 'read_messages', 'ask_human', 'read_wiki', 'write_wiki', 'recruit_agent', 'retire_agent', 'update_agent'];
+const RESTART_TOOLS = ['request_self_update', 'schedule_restart'];
 const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
 
 // Fields every node carries. '' / 0 / [] / {} mean "not set" (use the project default or the CLI default).
@@ -153,4 +157,4 @@ function buildClaudeArgs(node, prompt, settings, mcpConfig, opts = {}) {
   return args;
 }
 
-module.exports = { SUGGESTED_ROLES, PERMISSION_MODES, EDGE_TYPES, BOARD_TOOLS, EFFORT_LEVELS, NODE_DEFAULTS, NODE_FIELDS, toList, toEnv, envToText, splitArgs, normalizeNode, normalizePatch, normalizePreset, findPreset, applyPreset, roleSuggestions, buildClaudeArgs, migrateEffortArg };
+module.exports = { SUGGESTED_ROLES, PERMISSION_MODES, EDGE_TYPES, BOARD_TOOLS, RESTART_TOOLS, EFFORT_LEVELS, NODE_DEFAULTS, NODE_FIELDS, toList, toEnv, envToText, splitArgs, normalizeNode, normalizePatch, normalizePreset, findPreset, applyPreset, roleSuggestions, buildClaudeArgs, migrateEffortArg };
