@@ -67,32 +67,40 @@ function canonModel(m) {
   return { model: s || 'unknown', providerHint: null };
 }
 
-// Approximate list prices per 1M tokens (USD), used ONLY when a runtime reports no usable cost
-// (costSource: 'estimated'). Models outside the table get costUsd: null ('unknown') — never a
-// guessed $0, and never a $0 rewritten into a real-looking price.
-const PRICE_PER_MTOK = [
-  [/^claude-opus/, { input: 15, output: 75, cacheRead: 1.5, cacheWrite: 18.75 }],
-  [/^claude-sonnet/, { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 }],
-  [/^claude-haiku/, { input: 1, output: 5, cacheRead: 0.1, cacheWrite: 1.25 }],
-  [/^gpt-5/, { input: 1.25, output: 10, cacheRead: 0.125 }],
-  [/^glm-/, { input: 0.6, output: 2.2 }],
-];
-const priceFor = (model) => { const m = String(model || '').toLowerCase(); const hit = PRICE_PER_MTOK.find(([re]) => re.test(m)); return hit ? hit[1] : null; };
-function estimateCostUsd(model, t = {}) {
-  const p = priceFor(model); if (!p) return null;
-  return ((t.inputTokens || 0) * p.input + (t.outputTokens || 0) * p.output
-    + (t.cacheReadTokens || 0) * (p.cacheRead || 0) + (t.cacheCreationTokens || 0) * (p.cacheWrite || 0)) / 1e6;
+// Classify a CLI result event's total_cost_usd without collapsing "absent" into $0 (t_6ee6a70b —
+// the ONE helper all four call sites share: usage.js resultSnapshot, agent-modes parseJudge,
+// orchestrator's result handler, preflight). Reported >0 is a real cost. Reported $0 splits by
+// channel: behind a proxy base URL (LiteLLM or similar) the model was likely just unpriced there
+// ('proxy-unpriced': try the proxy's own per-request cost before trusting the zero), while on a
+// direct channel the provider really reported $0. Absent/unparseable is reported:false — a missing
+// cost, not a zero. ctx: { billingSource, env, viaProxy } — any one proxy signal is enough.
+function reportedCostOf(ev = {}, ctx = {}) {
+  const raw = ev.total_cost_usd;
+  if (raw == null || raw === '') return { costUsd: null, reported: false, proxyUnpriced: false };
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return { costUsd: null, reported: false, proxyUnpriced: false };
+  if (n > 0) return { costUsd: n, reported: true, proxyUnpriced: false };
+  const viaProxy = ctx.billingSource === 'proxy' || !!ctx.viaProxy || !!(ctx.env && ctx.env.ANTHROPIC_BASE_URL);
+  return { costUsd: 0, reported: true, proxyUnpriced: viaProxy };
 }
-// Resolve one ledger entry's cost from its raw value. Reported nonzero wins. A reported $0 with
-// tokens flowing is the LiteLLM-style "model missing from the proxy cost map" case: recompute from
-// the price table when the model is known ('estimated'), otherwise null ('unknown'). No cost at all
-// estimates the same way. Token-less entries stay costless.
-function resolveEntryCost(e) {
+
+// Resolve one ledger entry's cost through the source priority (t_6ee6a70b): 1) the provider/CLI
+// reported it (nonzero, or a direct-channel $0 — really reported, kept as 0); 2) the proxy's own
+// measured per-request cost for this entry's model (proxyCostUsd, source 'proxy'); 3) the runtime
+// price list (the LiteLLM price JSON cached on disk, with user overrides — see litellm.js PriceBook;
+// source 'estimated', costPartial when a flowed token class has no price); 4) unknown. Unknown is
+// honest: no $0, no guessed number. ctx: { proxyUnpriced, priceBook, proxyCostUsd }.
+function resolveEntryCost(e, { proxyUnpriced = false, priceBook = null, proxyCostUsd = null } = {}) {
   if (e.costUsd != null && e.costUsd > 0) { e.costSource = 'reported'; return e; }
+  if (e.costUsd === 0 && !proxyUnpriced) { e.costSource = 'reported'; return e; }
   const flow = (e.inputTokens || 0) + (e.outputTokens || 0) + (e.cacheReadTokens || 0) + (e.cacheCreationTokens || 0) > 0;
-  const est = flow ? estimateCostUsd(e.model, e) : null;
-  if (est != null) { e.costUsd = est; e.costSource = 'estimated'; } else { e.costUsd = null; e.costSource = 'unknown'; }
-  return e;
+  if (flow && proxyCostUsd != null) { e.costUsd = proxyCostUsd; e.costSource = 'proxy'; delete e.costPartial; return e; }
+  if (flow && priceBook) {
+    const est = priceBook.estimate(e.model, e);
+    if (est.costUsd != null) { e.costUsd = est.costUsd; e.costSource = 'estimated'; if (est.partial) e.costPartial = true; else delete e.costPartial; return e; }
+    if (est.partial) { e.costUsd = null; e.costSource = 'unknown'; e.costPartial = true; return e; }
+  }
+  e.costUsd = null; e.costSource = 'unknown'; return e;
 }
 // Ledger key provider — the ACCOUNT a run's cost belongs to (t_f514cc2e), not the CLI's label
 // vocabulary. For subscription-billed runs every label means the same claude.ai login (modelUsage
@@ -137,13 +145,15 @@ const totalTokens = (r) => (r.inputTokens || 0) + (r.outputTokens || 0) + (r.cac
 function newRun(fields = {}) {
   return { id: 'r_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), kind: 'agent', startedAt: new Date().toISOString(), endedAt: null, durationMs: 0,
     projectId: null, nodeId: null, agent: '', taskId: null, task: '', model: '', models: [], runtime: 'unknown', provider: '', apiKeySource: null, billingMode: 'auto', billingSource: 'unknown', billingDetail: '',
-    ...emptyTokens(), ledger: [], numTurns: 0, reportedCostUsd: 0, exitCode: null, isError: false, sessionId: null, ...fields };
+    ...emptyTokens(), ledger: [], numTurns: 0, reportedCostUsd: 0, costKnown: false, proxyUnpriced: false, exitCode: null, isError: false, sessionId: null, ...fields };
 }
 const TOK = ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheCreationTokens'];
 // Raw cumulative-capable snapshot of a result event: per-model tokens (from modelUsage) + total_cost_usd.
 // Each per-model entry keeps what the CLI itself reported: costUSD (null when absent), its provider label
 // and canonicalModel, and `seen` — the token fields the CLI actually reported (unreported ones must stay
-// unknown, i.e. null, in the ledger — never 0).
+// unknown, i.e. null, in the ledger — never 0). The run-level cost keeps reportedCostOf's classification:
+// costKnown (the CLI reported a total at all — absent ≠ $0) and proxyUnpriced (a $0 that came from behind
+// a proxy base URL, i.e. the proxy had no price for the model).
 function resultSnapshot(ev = {}) {
   const mu = ev.modelUsage && typeof ev.modelUsage === 'object' ? ev.modelUsage : null;
   const perModel = {};
@@ -154,7 +164,8 @@ function resultSnapshot(ev = {}) {
       costUsd: typeof u.costUSD === 'number' ? u.costUSD : null, provider: u.provider || null, canonicalModel: u.canonicalModel || null, seen,
     };
   }
-  return { perModel, costUsd: Number(ev.total_cost_usd) || 0 };
+  const rc = reportedCostOf(ev);
+  return { perModel, costUsd: rc.costUsd ?? 0, costKnown: rc.reported, proxyUnpriced: rc.proxyUnpriced };
 }
 // Flat usage event -> one per-model entry (model id from the event or a fallback), with per-field
 // `seen` so unreported cache fields stay unknown rather than zero.
@@ -167,11 +178,12 @@ function perModelFromUsage(u = {}, model) {
 }
 // On `claude -p --resume`, result.modelUsage and total_cost_usd are cumulative for the whole session,
 // while result.usage covers only this call. Given the previous cumulative snapshot of the resumed session
-// (baseline), return this run's own share. Without a baseline, fall back to per-call usage (cost unknown -> 0,
+// (baseline), return this run's own share. Without a baseline, fall back to per-call usage (cost unknown,
 // flagged). If the numbers are not cumulative after all (any field shrinks), the raw values are used.
 // Alongside the flat tokens, perModel carries the per-key split the ledger is built from: one entry per
 // model with this run's own tokens, per-model cost delta (null when the baseline predates per-model costs),
-// and the CLI's provider/canonicalModel labels.
+// and the CLI's provider/canonicalModel labels. costKnown/proxyUnpriced describe the CURRENT event's
+// reported cost (see resultSnapshot) — the proxy's per-request costs bypass this delta logic entirely.
 function tokensForRun(ev, { resumed = false, baseline = null } = {}) {
   const raw = tokensFromResult(ev); const snap = resultSnapshot(ev);
   const rawPerModel = () => {
@@ -179,7 +191,8 @@ function tokensForRun(ev, { resumed = false, baseline = null } = {}) {
     for (const [m, e] of Object.entries(snap.perModel)) pm[m] = { ...e, seen: [...e.seen] };
     return pm;
   };
-  if (!resumed) return { tokens: raw, perModel: rawPerModel(), costUsd: snap.costUsd, snapshot: snap, basis: 'raw' };
+  const costFlags = { costKnown: snap.costKnown, proxyUnpriced: snap.proxyUnpriced };
+  if (!resumed) return { tokens: raw, perModel: rawPerModel(), costUsd: snap.costUsd, snapshot: snap, basis: 'raw', ...costFlags };
   if (baseline && baseline.perModel) {
     const d = emptyTokens(); const pm = {}; let ok = snap.costUsd >= (baseline.costUsd || 0) - 1e-9;
     for (const [m, u] of Object.entries(snap.perModel)) {
@@ -190,11 +203,11 @@ function tokensForRun(ev, { resumed = false, baseline = null } = {}) {
       pm[m] = e;
     }
     for (const m of Object.keys(baseline.perModel)) if (!snap.perModel[m]) ok = false;
-    if (ok && Object.keys(snap.perModel).length) return { tokens: { ...d, models: raw.models }, perModel: pm, costUsd: Math.max(0, snap.costUsd - (baseline.costUsd || 0)), snapshot: snap, basis: 'delta' };
-    if (!ok) return { tokens: raw, perModel: rawPerModel(), costUsd: snap.costUsd, snapshot: snap, basis: 'raw' };
+    if (ok && Object.keys(snap.perModel).length) return { tokens: { ...d, models: raw.models }, perModel: pm, costUsd: Math.max(0, snap.costUsd - (baseline.costUsd || 0)), snapshot: snap, basis: 'delta', ...costFlags };
+    if (!ok) return { tokens: raw, perModel: rawPerModel(), costUsd: snap.costUsd, snapshot: snap, basis: 'raw', ...costFlags };
   }
   const u = ev.usage || {};
-  return { tokens: { inputTokens: +u.input_tokens || 0, outputTokens: +u.output_tokens || 0, cacheReadTokens: +u.cache_read_input_tokens || 0, cacheCreationTokens: +u.cache_creation_input_tokens || 0, models: raw.models }, perModel: perModelFromUsage(u, raw.models[0]), costUsd: 0, snapshot: snap, basis: 'usage-no-baseline' };
+  return { tokens: { inputTokens: +u.input_tokens || 0, outputTokens: +u.output_tokens || 0, cacheReadTokens: +u.cache_read_input_tokens || 0, cacheCreationTokens: +u.cache_creation_input_tokens || 0, models: raw.models }, perModel: perModelFromUsage(u, raw.models[0]), costUsd: 0, snapshot: snap, basis: 'usage-no-baseline', costKnown: false, proxyUnpriced: snap.proxyUnpriced };
 }
 // Merge one result's per-model split into the run's accumulator: token fields add up (unreported
 // fields stay out of `seen`), costs add when both sides have values, labels take the latest report.
@@ -230,6 +243,8 @@ function applyEvent(run, ev) {
     for (const m of t.models) if (!run.models.includes(m)) run.models.push(m);
     if (!run.model && t.models.length) run.model = t.models[0];
     run.numTurns += +ev.num_turns || 0; run.reportedCostUsd += r.costUsd;
+    if (r.costKnown) run.costKnown = true;
+    if (r.proxyUnpriced) run.proxyUnpriced = true;
     run.cumulative = r.snapshot; run.usageBasis = r.basis;
     if (ev.duration_ms && !run.cliDurationMs) run.cliDurationMs = +ev.duration_ms;
     run.isError = run.isError || !!ev.is_error;
@@ -239,11 +254,12 @@ function applyEvent(run, ev) {
 }
 // One run's ledger entries, from its accumulated per-model split (claude: real per-model tokens/cost
 // from modelUsage) or — for runtimes without per-model reporting (codex, profile CLIs) — a single
-// entry from the flat totals. costUsd starts as the raw reported value; resolveEntryCost decides
-// reported/estimated/unknown. Entries with no tokens at all are dropped. Each entry also carries
-// `billed` — the part of its cost actually billed per token: $0 for subscription runs (covered by
-// the plan; the $0 is known, not missing), else the same value as costUsd, null when that is unknown.
-function buildLedger(run, { proxyHost = null } = {}) {
+// entry from the flat totals. costUsd starts as the raw reported value; resolveEntryCost decides the
+// source (reported / proxy / estimated / unknown) with the run's ctx. Entries with no tokens at all
+// are dropped. Each entry also carries `billed` — the part of its cost actually billed per token:
+// $0 for subscription runs (covered by the plan; the $0 is known, not missing), else the same value
+// as costUsd, null when that is unknown.
+function buildLedger(run, { proxyHost = null, priceBook = null, proxySpend = null, proxyUnpriced = false } = {}) {
   const primary = canonModel(run.model || (run.models && run.models[0]) || '');
   const flat = () => {
     const seen = run.flatSeen && run.flatSeen.length ? run.flatSeen : ['inputTokens', 'outputTokens'];
@@ -262,20 +278,36 @@ function buildLedger(run, { proxyHost = null } = {}) {
     entries.push({ runtime: accountRuntime(run.runtime, c.model), provider: providerOf({ muProvider: e.provider, providerHint: hint, billingSource: run.billingSource, proxyHost }), model: c.model, ...tokens, costUsd: e.costUsd });
   }
   // Whole-run cost with no per-model split (resumed-run fallbacks, CLIs without modelUsage cost):
-  // attribute it to the primary model's entry rather than losing or splitting it.
+  // attribute it to the primary model's entry rather than losing or splitting it. Only KNOWN
+  // reported totals attach — >0, or a direct-channel $0; an absent cost and a proxy's "model not
+  // priced" $0 must not masquerade as a reported zero.
   const main = entries.find((e) => e.model === primary.model) || entries[0];
-  if (main && main.costUsd == null && run.reportedCostUsd > 0) { main.costUsd = run.reportedCostUsd; }
-  for (const e of entries) { resolveEntryCost(e); e.billed = run.billingSource === 'subscription' ? 0 : (e.costUsd != null ? e.costUsd : null); }
+  const attachRunCost = run.reportedCostUsd > 0 || (run.costKnown && !proxyUnpriced);
+  if (main && main.costUsd == null && attachRunCost) { main.costUsd = run.reportedCostUsd; }
+  // The proxy's own per-request cost (joined + deduped from its spend logs), per model. Raw model
+  // keys canonicalize so "zai/glm-5.2-20260101" style ids match the entry's canonical model.
+  let sbm = null; let spendTotal = null;
+  if (proxySpend && typeof proxySpend === 'object') {
+    for (const [m, v] of Object.entries(proxySpend.byModel || {})) if (typeof v === 'number' && Number.isFinite(v)) { const c = canonModel(m).model; (sbm ||= {})[c] = (sbm[c] || 0) + v; }
+    if (typeof proxySpend.total === 'number' && Number.isFinite(proxySpend.total)) spendTotal = proxySpend.total;
+  }
+  const spendOf = (e, isMain) => (sbm ? (sbm[e.model] ?? null) : (isMain ? spendTotal : null));
+  for (const e of entries) { resolveEntryCost(e, { proxyUnpriced, priceBook, proxyCostUsd: spendOf(e, e === main) }); e.billed = run.billingSource === 'subscription' ? 0 : (e.costUsd != null ? e.costUsd : null); }
   return entries;
 }
-function finishRun(run, { code, env, billingMode, startedMs } = {}) {
+function finishRun(run, { code, env, billingMode, startedMs, priceBook = null, proxySpend = null } = {}) {
   run.exitCode = code ?? null; run.endedAt = new Date().toISOString();
   if (startedMs) run.durationMs = Date.now() - startedMs;
   if (billingMode) run.billingMode = billingMode;
   const b = detectBilling(env || {}, run.apiKeySource);
   run.billingSource = b.source; run.billingDetail = b.detail;
   run.billingMismatch = !['auto', undefined].includes(run.billingMode) && b.source !== 'unknown' && b.source !== run.billingMode;
-  run.ledger = buildLedger(run, { proxyHost: env && env.ANTHROPIC_BASE_URL ? hostOf(env.ANTHROPIC_BASE_URL) : null });
+  // A reported $0 only means "proxy had no price for this model" when the run really billed through one.
+  // run.proxyUnpriced covers the paths that saw the event ctx (parseJudge/preflight); when only applyEvent
+  // ran (no env there), a known total of exactly 0 over a proxy billing source is the same case.
+  const proxyUnpriced = (!!run.proxyUnpriced || (run.costKnown && !(run.reportedCostUsd > 0))) && b.source === 'proxy';
+  run.proxyUnpriced = proxyUnpriced;
+  run.ledger = buildLedger(run, { proxyHost: env && env.ANTHROPIC_BASE_URL ? hostOf(env.ANTHROPIC_BASE_URL) : null, priceBook, proxySpend, proxyUnpriced });
   if (run.ledger.length) run.provider = run.ledger[0].provider;
   delete run.perModel; delete run.flatSeen; // internal accumulators; the ledger is the persisted split
   return run;
@@ -340,7 +372,7 @@ function modelStats(runs = [], tasks = []) {
 //            costSource: 'reported'|'estimated'|'mixed'|'unknown', costPartial }]
 //   byAgent: { [agent]: rows }   byTask: { [taskId]: { task, rows } }
 //   costUsd, apiEq, billed, costPartial — $ totals across all keys (apiEq === costUsd)
-function usageLedger(runs = []) {
+function usageLedger(runs = [], { priceBook = null } = {}) {
   const TOKEN_FIELDS = ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheCreationTokens'];
   const newRow = (e) => ({ runtime: e.runtime, provider: e.provider, model: e.model, runs: 0,
     inputTokens: 0, outputTokens: 0, cacheReadTokens: null, cacheCreationTokens: null,
@@ -365,7 +397,7 @@ function usageLedger(runs = []) {
   const top = new Map(), byAgent = new Map(), byTask = new Map();
   for (const r of runs) {
     const sub = r.billingSource === 'subscription';
-    for (const e0 of ledgerEntriesOf(r)) {
+    for (const e0 of ledgerEntriesOf(r, { priceBook })) {
       // canonicalize the account key at the aggregate layer too, so entries persisted before the
       // normalization fixes (dated suffixes, org prefixes, runtime-less rows, firstParty-vs-
       // subscription labels) still collapse into one row
@@ -390,14 +422,44 @@ function usageLedger(runs = []) {
 }
 // One run's ledger entries: the persisted split, or — for pre-ledger stragglers that escaped the
 // migration — a synthesized single entry from the flat totals (never crashes, never mis-splits).
-function ledgerEntriesOf(r) {
+// Persisted entries keep their stored costUsd/costSource as-is: rows the old hard-coded table once
+// marked 'estimated' stay 'estimated' (their price basis was declared at the time; no recompute).
+// Only the synthesized path resolves afresh, with the injected priceBook when the caller has one.
+function ledgerEntriesOf(r, { priceBook = null } = {}) {
   if (Array.isArray(r.ledger) && r.ledger.length) return r.ledger;
   if (!r || !(r.inputTokens || r.outputTokens || r.cacheReadTokens || r.cacheCreationTokens)) return [];
   const c = canonModel(r.model || (r.models && r.models[0]) || '');
   const e = resolveEntryCost({ runtime: accountRuntime(r.runtime, c.model), provider: providerOf({ providerHint: c.providerHint, billingSource: r.billingSource, proxyHost: null }), model: c.model,
-    inputTokens: r.inputTokens || 0, outputTokens: r.outputTokens || 0, cacheReadTokens: r.cacheReadTokens || 0, cacheCreationTokens: r.cacheCreationTokens || 0, costUsd: r.reportedCostUsd > 0 ? r.reportedCostUsd : null });
+    inputTokens: r.inputTokens || 0, outputTokens: r.outputTokens || 0, cacheReadTokens: r.cacheReadTokens || 0, cacheCreationTokens: r.cacheCreationTokens || 0, costUsd: r.reportedCostUsd > 0 ? r.reportedCostUsd : null }, { priceBook });
   e.billed = r.billingSource === 'subscription' ? 0 : (e.costUsd != null ? e.costUsd : null);
   return [e];
+}
+
+// Late-arriving proxy cost (t_6ee6a70b): LiteLLM spend logs are written after the run, so the real
+// per-request cost lands on a persisted run record after finishRun. Re-resolve the entries the join
+// covers: the proxy's measured number replaces price-list estimates and fills unknowns; provider-
+// reported costs stay. Entries whose model got no proxy spend keep their prior state. Never runs
+// proxy numbers through the resume-delta logic (they are already per-run, joined + deduped).
+// Returns the total $ newly applied (callers feed it to live counters), 0 when nothing changed.
+function applyProxySpend(rec, proxySpend) {
+  if (!rec || !proxySpend || typeof proxySpend !== 'object' || !Array.isArray(rec.ledger) || rec.proxySpend) return 0;
+  let sbm = null; let spendTotal = null;
+  for (const [m, v] of Object.entries(proxySpend.byModel || {})) if (typeof v === 'number' && Number.isFinite(v)) { const c = canonModel(m).model; (sbm ||= {})[c] = (sbm[c] || 0) + v; }
+  if (typeof proxySpend.total === 'number' && Number.isFinite(proxySpend.total)) spendTotal = proxySpend.total;
+  if (!sbm && spendTotal == null) return 0;
+  const pm = canonModel(rec.model || (rec.models && rec.models[0]) || '').model;
+  const mainE = rec.ledger.find((e) => e.model === pm) || rec.ledger[0];
+  let applied = 0;
+  for (const e of rec.ledger) {
+    const pc = sbm ? (sbm[e.model] ?? null) : (e === mainE ? spendTotal : null);
+    if (pc == null) continue;
+    if (e.costUsd != null && e.costUsd > 0 && e.costSource === 'reported') continue;
+    applied += pc;
+    e.costUsd = pc; e.costSource = 'proxy'; delete e.costPartial;
+    e.billed = rec.billingSource === 'subscription' ? 0 : pc;
+  }
+  if (applied > 0) rec.proxySpend = proxySpend; // applied marker: a second join must not double-count
+  return applied;
 }
 
 const CSV_COLS = ['startedAt', 'endedAt', 'durationMs', 'projectId', 'kind', 'agent', 'nodeId', 'task', 'taskId', 'model', 'models', 'inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheCreationTokens', 'totalTokens', 'numTurns', 'billingMode', 'billingSource', 'billingDetail', 'apiKeySource', 'reportedCostUsd', 'costNote', 'exitCode', 'sessionId'];
@@ -651,6 +713,6 @@ function parseCompactBoundary(ev) {
 }
 
 module.exports = { resultSnapshot, tokensForRun, BILLING_MODES, BILLING_SOURCES, normalizeBilling, applyBillingEnv, detectBilling, costNote, tokensFromResult, totalTokens, newRun, applyEvent, finishRun, summarize, total, modelStats, toCSV, CSV_COLS,
-  canonModel, estimateCostUsd, resolveEntryCost, providerOf, accountRuntime, buildLedger, usageLedger, ledgerEntriesOf,
+  canonModel, reportedCostOf, resolveEntryCost, applyProxySpend, providerOf, accountRuntime, buildLedger, usageLedger, ledgerEntriesOf,
   LIMITS_DEFAULTS, normalizeLimits, authType, windowUsage, limitStatus, usageStatus, applyCliRateLimits, parseRateLimitWindow, parseRateLimits, liveRateLimits, nodeLiveRateLimits, effectiveRuntime, subscriptionGuard, providerUsageStatus, usageProviders, GUARD_DEFAULT_PCT,
   CONTEXT_WINDOW_DEFAULT, CONTEXT_WINDOW_1M, contextWindowFor, contextFromAssistant, parseCompactBoundary };

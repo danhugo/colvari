@@ -69,8 +69,11 @@ function instantiate(spec) {
 }
 
 class ProjectManager {
-  constructor(root = defaultRoot()) {
+  // opts.devMode: whether the app can restart itself (main.js DEV_MODE) — threaded into every
+  // Store so merges in packaged builds never count toward a restart (see Store.constructor).
+  constructor(root = defaultRoot(), opts = {}) {
     this.root = root;
+    this.devMode = opts.devMode !== false;
     this.pdir = path.join(root, 'projects');
     this._stores = new Map(); // (dir|teamId) -> Store — hot path reuse, see store()
     fs.mkdirSync(this.pdir, { recursive: true });
@@ -90,7 +93,7 @@ class ProjectManager {
     if (!fs.existsSync(path.join(d, 'project.json'))) throw new Error('no project ' + pid);
     const key = d + '|' + (teamId || '');
     let s = this._stores.get(key);
-    if (!s) this._stores.set(key, (s = new Store(d, teamId)));
+    if (!s) this._stores.set(key, (s = new Store(d, teamId, { devMode: this.devMode })));
     return s;
   }
   get(pid) { return this.store(pid).meta(); }

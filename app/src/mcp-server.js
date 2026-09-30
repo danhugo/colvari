@@ -8,11 +8,16 @@ const { Store } = require('./store');
 const { makeTools, enabledTools } = require('./board-tools');
 
 const arg = (k) => { const i = process.argv.indexOf(k); return i > 0 ? process.argv[i + 1] : undefined; };
-const store = new Store(arg('--project'));
+// Dev-mode gate (main.js exports AGENTS_SQUAD_DEV=1 for its children only when the app can
+// restart itself): a packaged build's agents get no restart tools and their merges count nothing
+// toward a restart that can never happen. Unset (tests spawn this server without it) reads as
+// packaged — tests that want the dev surface set the env explicitly.
+const DEV = process.env.AGENTS_SQUAD_DEV === '1';
+const store = new Store(arg('--project'), null, { devMode: DEV });
 const tools = makeTools(store, arg('--node'));
 // Only register the tools enabled for this agent (checked again on every call).
 const callerNode = store.getTeam().nodes.find((n) => n.id === arg('--node'));
-const enabled = new Set(enabledTools(callerNode));
+const enabled = new Set(enabledTools(callerNode, DEV));
 // Team management tools are listed only for a node that is core:true at startup; a node the human
 // makes core later picks them up on its next run (no hot reload). The tools also re-check the flag
 // on every call, so this registration is only the tool listing, not the guard.

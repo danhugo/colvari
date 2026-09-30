@@ -8,9 +8,9 @@ const assert = require('node:assert');
 const fs = require('fs'); const os = require('os'); const path = require('path');
 const { execSync } = require('child_process');
 const { Store } = require('../src/store');
-const { Orchestrator, RESTART } = require('../src/orchestrator');
+const { Orchestrator, buildPrompt, RESTART } = require('../src/orchestrator');
 const { UpdateWatcher } = require('../src/self-update');
-const { makeTools } = require('../src/board-tools');
+const { makeTools, enabledTools } = require('../src/board-tools');
 const MG = require('../src/merge-gate');
 const WT = require('../src/worktree');
 
@@ -347,8 +347,96 @@ test('board tool: schedule_restart is PM-only, validates, and announces', () => 
   assert.equal(r2.scheduledAfter, anchor.id);
 });
 
+// ---- packaged build (t_2e729984): devMode=false — no watcher exists, so the restart machinery
+// must be fully inert: merges never count, the cap never arms or gates, stored state dies at boot,
+// the tools refuse, and the restart tools are not advertised anywhere. ----
+
+// setup() variant wired the way main.js builds a packaged app's orchestrator.
+const packagedSetup = (d) => {
+  const s = new Store(path.join(d, 'p'));
+  s.saveSettings({ claudePath: fakeClaude(d) });
+  const pm = s.addNode({ name: 'PM', role: 'PM' });
+  const a = s.addNode({ name: 'A', role: 'Dev' });
+  s.addEdge(pm.id, a.id);
+  const o = new Orchestrator(s, { devMode: false });
+  o.wakeRun = async () => {};
+  clearInterval(o._wakeTimer); clearInterval(o._stallTimer); clearInterval(o._tickTimer); clearInterval(o._restartTimer);
+  o.updater = { status: () => ({ phase: 'idle', enabled: false }), restartNow() {} }; // main.js non-dev stub
+  return { s, o, pm, a };
+};
+
+test('packaged build: N merges >= cap still dispatch todo tasks (no count, no arm, no gate)', () => {
+  const d = tmp('squad-restart-');
+  const { s, o, pm, a } = packagedSetup(d);
+  o.updater = fakeUpdater();
+  s.saveSettings({ restartCap: 2 });
+  const orig = MG.gateMerge;
+  const root = tmp('squad-restart-root-');
+  try {
+    MG.gateMerge = () => ({ merged: true, base: 'master', root, gate: { state: 'green', tests: 1, flaky: [] } });
+    for (let i = 0; i < 3; i++) {
+      s.updateTask(s.createTask({ title: 'm' + i, assignee: a.id, createdBy: 'human' }).id, { worktreePath: '/w' + i, worktreeBranch: 'squad/m' + i, status: 'done' });
+    }
+  } finally { MG.gateMerge = orig; }
+  assert.equal(s.restartPending(), null, 'landed merges never count toward a restart that cannot happen');
+  o.sweepRestart();
+  assert.equal(s.restartPending(), null, 'the cap never auto-arms a schedule');
+  assert.equal(o._restartGate, false, 'no dispatch gate');
+  assert.equal(s.listMessages({ to: pm.id }).length, 0, 'no cap notification to the core');
+  const ran = [];
+  o.runTask = async (node, task) => { ran.push(task.id); o.procs.set(node.id, { kill() {} }); };
+  o.running = true;
+  const t1 = s.createTask({ title: 'next', assignee: a.id, createdBy: 'human' });
+  o.tick();
+  assert.deepEqual(ran, [t1.id], 'N merges >= cap: todo tasks still dispatch');
+  assert.equal(o.restartState().pendingCount, 0);
+});
+
+test('packaged build: boot wipes a stored restart schedule instead of honoring it', () => {
+  const d = tmp('squad-restart-');
+  const s = new Store(path.join(d, 'p'));
+  s.addNode({ name: 'PM', role: 'PM' });
+  // A schedule carried over from a dev run of the same project (here: armed, not yet fired).
+  s.setRestartPending({ scheduledNow: true, count: 7 });
+  const o = new Orchestrator(s, { devMode: false });
+  clearInterval(o._wakeTimer); clearInterval(o._stallTimer); clearInterval(o._tickTimer); clearInterval(o._restartTimer);
+  assert.equal(s.restartPending(), null, 'boot cleared the impossible schedule');
+  o.sweepRestart();
+  assert.equal(o._restartGate, false, 'and the gate never arms from stale state');
+  o.restartNow();
+  assert.equal(s.restartPending(), null, 'restartNow is a no-op too');
+});
+
+test('packaged build: schedule_restart/request_self_update refuse with a clear error', () => {
+  const d = tmp('squad-restart-');
+  const s = new Store(path.join(d, 'p'), null, { devMode: false });
+  const pm = s.addNode({ name: 'PM', role: 'PM' });
+  assert.throws(() => makeTools(s, pm.id).schedule_restart({ now: true }), /unavailable in packaged build/);
+  assert.equal(s.restartPending(), null, 'the refused call armed nothing');
+  assert.throws(() => makeTools(s, pm.id).request_self_update({ reason: 'x' }), /unavailable in packaged build/);
+  // The dev behavior is untouched: the same calls on a dev store still work.
+  const sd = new Store(path.join(tmp('squad-restart-'), 'q'));
+  const pmD = sd.addNode({ name: 'PM', role: 'PM' });
+  assert.equal(makeTools(sd, pmD.id).schedule_restart({ now: true }).scheduled, true);
+  assert.equal(sd.restartPending().scheduledNow, true);
+});
+
+test('packaged build: the restart tools are not advertised in enabledTools/prompts', () => {
+  const node = { id: 'n1', name: 'X', role: 'PM' };
+  assert.ok(enabledTools(node).includes('schedule_restart'), 'dev default still advertises them');
+  const off = enabledTools(node, false);
+  assert.ok(!off.includes('schedule_restart') && !off.includes('request_self_update'), 'packaged: not advertised');
+  assert.ok(off.includes('update_task_status'), 'the rest of the board stays');
+  const s = new Store(path.join(tmp('squad-restart-'), 'r'));
+  s.addNode({ name: 'PM', role: 'PM' });
+  const p = buildPrompt(s.getTeam(), s.getTeam().nodes[0], { id: 't1', title: 'T', comments: [] }, { devMode: false });
+  assert.ok(!p.includes('schedule_restart') && !p.includes('request_self_update'), 'prompt omits them');
+  assert.ok(p.includes('update_task_status'), 'the board tool line survives');
+});
+
 // ---- watcher integration: the scheduled restart reuses the drain/test/relaunch flow ----
 const SHA1 = 'a'.repeat(40);
+const SHA2 = 'b'.repeat(40); // origin ahead of local: a schedule has real code to restart onto (t_7426095a)
 function fakeGit(opts = {}) {
   const sha = opts.sha || SHA1;
   return (args) => {
@@ -356,7 +444,7 @@ function fakeGit(opts = {}) {
     if (a === 'rev-parse --abbrev-ref HEAD') return { code: 0, out: 'master' };
     if (a === 'rev-parse HEAD') return { code: 0, out: sha };
     if (a.startsWith('fetch')) return { code: 0, out: '' };
-    if (a === 'rev-parse origin/master') return { code: 0, out: sha };
+    if (a === 'rev-parse origin/master') return { code: 0, out: opts.origin || sha };
     if (a === 'status --porcelain') return { code: 0, out: '' };
     if (a.startsWith('diff --name-only')) return { code: 0, out: '' };
     if (a.startsWith('worktree')) return { code: 0, out: '' };
@@ -377,7 +465,7 @@ test('watcher: restartScheduled runs the full flow even with auto-restart off; c
   const relaunches = [];
   const w = new UpdateWatcher({
     store: watcherStore(path.join(d, 'su1')), repoDir: d, pollMs: 3.6e6,
-    git: fakeGit(), npm: fakeNpm(),
+    git: fakeGit({ origin: SHA2 }), npm: fakeNpm(),
     relaunch: () => relaunches.push(1), procCount: () => 0,
     setPaused: () => {}, drainTimeoutMs: 100,
   });
@@ -388,7 +476,7 @@ test('watcher: restartScheduled runs the full flow even with auto-restart off; c
 
   const hangs = new UpdateWatcher({
     store: watcherStore(path.join(d, 'su2')), repoDir: d, pollMs: 3.6e6,
-    git: fakeGit(), npm: fakeNpm(),
+    git: fakeGit({ origin: SHA2 }), npm: fakeNpm(),
     relaunch: () => relaunches.push(1), procCount: () => 1,
     setPaused: () => {}, drainTimeoutMs: 3.6e6,
   });

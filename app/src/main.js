@@ -18,6 +18,15 @@ const { applyAnsweredChange } = require('./team-answers');
 const { introspectRuntime: runIntrospectRuntime } = require('./introspector');
 // The app repo (main checkout): what the UpdateWatcher polls and fast-forwards.
 const APP_ROOT = path.join(__dirname, '..', '..');
+// The commit this app process launched on (t_7426095a): the self-update same-commit skip compares
+// the restart target against it. Captured once here — before any watcher/orchestrator exists, so
+// no auto-merge can have landed yet. Null (git failed) makes the watcher fall back to restarting.
+const BOOT_SHA = (() => {
+  try {
+    const r = require('child_process').spawnSync('git', ['rev-parse', 'HEAD'], { cwd: APP_ROOT, encoding: 'utf8' });
+    return r.status === 0 ? String(r.stdout || '').trim() || null : null;
+  } catch { return null; }
+})();
 // Self-update (auto-restart on new merged code) is a developer/dogfood feature: only unpackaged
 // runs (electron .) get it. A packaged build — real users — never starts a watcher and shows no
 // update UI; AGENTS_SQUAD_DEV=1 opts a packaged build back into dogfood mode, =0 forces it off
@@ -60,12 +69,12 @@ function relaunchApp() {
   app.exit(0);
 }
 
-const pm = new ProjectManager();
+const pm = new ProjectManager(undefined, { devMode: DEV_MODE });
 const orchs = new Map(); // projectId -> Orchestrator (projects run independently / concurrently)
 function orchFor(pid) {
   let o = orchs.get(pid);
   if (!o) {
-    o = new Orchestrator(pm.store(pid), { repoDir: APP_ROOT });
+    o = new Orchestrator(pm.store(pid), { repoDir: APP_ROOT, devMode: DEV_MODE });
     o.on('log', (l) => send('log', { ...l, projectId: pid }));
     o.on('state', (s) => send('state', { ...s, projectId: pid })); // slim: the renderer refreshes from the store on receipt
     o.on('notify', (n) => { send('notify', { ...n, projectId: pid }); notify(n, pid); });
@@ -100,6 +109,7 @@ function watcherFor(pid) {
     w = new SU.UpdateWatcher({
       // git runs at the repo root; npm (build/test) in the package dir (app/).
       store, repoDir: APP_ROOT, npmDir: path.join(__dirname, '..'),
+      bootSha: BOOT_SHA,
       relaunch: relaunchApp,
       procCount: () => (orchs.get(pid) || { procs: new Map() }).procs.size,
       runActive: () => (orchs.get(pid) || {}).running || false,
@@ -586,6 +596,22 @@ async function guiE2E() {
     const stubCaps = { ok: true, probedAt: new Date().toISOString(), source: 'stub', slashCommands: [], commands: [], skills: [], modes: [], categorized: [] };
     team.updateNode(A.id, { capabilities: stubCaps }); team.updateNode(B.id, { capabilities: stubCaps });
     const until = async (fn, ms = 10000) => { for (let t = 0; t < ms; t += 200) { if (fn()) return true; await new Promise((r) => setTimeout(r, 200)); } return false; };
+    // Watch the header pill through a ~1s stub pickup window and report whether it ever read
+    // 'running'. A single sample after in_progress is observed races the proc's exit (poll lag +
+    // refresh round-trip eat the window on a loaded machine), so poll instead: pass on the first
+    // 'running' sighting; once the task left the pickup phase (review/done) without one, the window
+    // is definitively over and the check fails on evidence.
+    const pillRunning = async (task, ms = 10000) => {
+      const end = Date.now() + ms;
+      while (Date.now() < end) {
+        const st = s.getTask(task.id).status;
+        const label = await ex(`await refresh(); return $('#runstate').textContent`);
+        if (/running/.test(label)) return { seen: true, label, status: st };
+        if (st !== 'todo' && st !== 'in_progress') return { seen: false, label, status: st };
+        await new Promise((r) => setTimeout(r, 120));
+      }
+      return { seen: false, label: await ex(`return $('#runstate').textContent`), status: s.getTask(task.id).status };
+    };
     const o = orchFor(p);
     expect('runidle: boot comes up stopped, never silently running', o.running === false, o.running);
     const first = s.createTask({ title: 'Idle: first piece of work', assignee: B.id });
@@ -619,7 +645,7 @@ async function guiE2E() {
       expect('idle: nothing spawns while idle (zero cost waiting)', s.listRuns().length === runsBefore && o.procs.size === 0, { before: runsBefore, after: s.listRuns().length, procs: o.procs.size });
       const second = s.createTask({ title: 'Idle: picked up without a click', assignee: B.id });
       expect('idle: a new todo is picked up on its own', await until(() => s.getTask(second.id).status === 'in_progress', 8000), s.getTask(second.id).status);
-      expect('idle: the pill reads running again during pickup', /running/.test(await ex(`await refresh(); return $('#runstate').textContent`)));
+      expect('idle: the pill reads running again during pickup', (await pillRunning(second)).seen);
       await until(() => s.getTask(second.id).status === 'done', 30000);
       await ex(`$('#stop').click(); await w(400);`); // Stop while idle: the explicit off switch
       expect('idle: Stop turns the run off', await until(() => !o.running, 5000), o.running);
@@ -629,7 +655,7 @@ async function guiE2E() {
       await new Promise((r) => setTimeout(r, 2500));
       expect('stopped: a new todo is not dispatched while stopped', s.getTask(third.id).status === 'todo' && !o.running, { status: s.getTask(third.id).status, running: o.running });
       await ex(`await refresh(); $('#run').click(); await w(200);`);
-      const resumed = await until(() => s.getTask(third.id).status === 'in_progress') && /running/.test(await ex(`await refresh(); return $('#runstate').textContent`));
+      const resumed = await until(() => s.getTask(third.id).status === 'in_progress') && (await pillRunning(third)).seen;
       expect('stopped: Run starts the run again and dispatches the waiting todo', resumed, s.getTask(third.id).status);
       await ex(`$('#stop').click(); await w(300);`); await until(() => !o.running, 5000);
       await ex(`$('#tabs button[data-tab=board]').click(); await refresh(); await w(300);`); await shot('31-runidle-board');
@@ -1757,6 +1783,40 @@ async function guiE2E() {
     await ex(`if (alertsOpen) $('#alertbell').click(); await w(100);`);
     console.log('[gui-e2e] alerts', JSON.stringify({ bell0, one, panel, dim, still, bump, red, opened, rst, rt, orph, orph2, openTask }));
   };
+  // Packaged-mode simulation (t_7fbee55f): with an identical stale dev-only state (restart pending,
+  // watcher live, self-update draining, a gated task), a non-dev backend must render none of it —
+  // the dev shot with the same injected state shows exactly what the gate hides.
+  const packagedShots = async () => {
+    await ex(`await refresh(); await w(300);`);
+    const cur = await ex(`return { p: ctx.p, t: S.teamId }`);
+    const ps = pm.store(cur.p || pid(), cur.t); let nodes = ps.getTeam().nodes;
+    if (nodes.length < 2) { ps.addNode({ name: 'Pia', role: 'PM', x: 60, y: 60 }); ps.addNode({ name: 'Devon', role: 'Dev', x: 320, y: 160 }); nodes = ps.getTeam().nodes; }
+    // Assign the gated task: team-scoped board views hide unassigned (teamless) tasks (t_1158f757).
+    const gated = ps.createTask({ title: 'Gated demo task', assignee: nodes[1].id });
+    await ex(`$('#tabs button[data-tab=board]').click(); await refresh(); await w(400);`); // renderBoard only builds cards on the active tab; refresh picks up the gated card
+    const inject = (dev) => ex(`rst = normRestart({ pendingCount: 3, targetSha: 'abcdef123456', since: Date.now() - 60000, gating: ['${gated.id}'], stub: false });
+      watch = { lastWatchAt: Date.now() - 60000, active: true, digest: '3 behind · 1 merge failed', intervalMin: 10, stub: false };
+      upd = normUpd({ phase: 'draining', waitingOn: 2, from: 'aaa1111', to: 'bbb2222', reason: 'packaged simulation', devMode: ${dev} }); upd.stub = false;
+      rstSeen = true; boardSig = null; renderSelfUpdate(); renderHeader(); renderAlerts(); renderBoard(); await w(400);`);
+    await inject(true);
+    await ex(`if (!alertsOpen) { $('#alertbell').click(); await w(300); }`);
+    const dv = await ex(`return { row: [...document.querySelectorAll('#alertpanel .al-what')].some((e) => /Restart pending/.test(e.textContent)),
+      act: !![...document.querySelectorAll('#alertpanel .al-act')].find((b) => b.textContent === 'Restart now'),
+      watch: !$('#watchst').classList.contains('hidden'), upd: !$('#updst').classList.contains('hidden'),
+      veil: !$('#updveil').classList.contains('hidden'), rstwait: document.querySelectorAll('.rstwait').length }`);
+    expect('dev mode (baseline): stale state shows restart row + Restart now, watch pill, update pill + veil, waits-for-restart tag',
+      dv.row && dv.act && dv.watch && dv.upd && dv.veil && dv.rstwait === 1, dv);
+    await shot('packaged-dev-header');
+    await inject(false);
+    const pk = await ex(`const vis = (s) => { const e = document.querySelector(s); return !!e && !e.classList.contains('hidden'); };
+      return { row: [...document.querySelectorAll('#alertpanel .al-what')].some((e) => /Restart pending/.test(e.textContent)),
+        watch: vis('#watchst'), upd: vis('#updst'), veil: vis('#updveil'),
+        rstwait: document.querySelectorAll('.rstwait').length, body: document.body.textContent.includes('Restart pending') }`);
+    expect('packaged: restart row, Restart now, watch pill, update pill + veil, waits-for-restart tag all hidden despite stale state',
+      !pk.row && !pk.watch && !pk.upd && !pk.veil && pk.rstwait === 0 && !pk.body, pk);
+    await shot('packaged-header');
+    console.log('[gui-e2e] packaged', JSON.stringify({ dv, pk }));
+  };
   // Wake run on an agent that ALSO has an in_progress task (t_8af586bc) — the case that used to
   // render bare "working": the backend keeps a.taskId null for the whole wake, so the old
   // wakeRun() veto on any in_progress task hid the wake info everywhere. Same seeded activity
@@ -2138,6 +2198,7 @@ async function guiE2E() {
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'wakebusy') { await wakeBusyShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'monitorlog') { await monitorShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'alerts') { await alertsShots(); throw null; }
+    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'packaged') { await packagedShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'subagents') { await subagentShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'dynamicteam') { await dynamicTeamShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'recruitinbox') { await recruitInboxShots(); throw null; }

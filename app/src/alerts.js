@@ -71,8 +71,10 @@
     });
 
     // 2. Restart pending (core restart gate). While stubbed, nothing is really known — stay quiet.
+    // Dev-only machinery (t_7fbee55f): packaged builds can never restart themselves, so a stale
+    // stored pending state must not surface here; devMode === false hides the row defensively.
     const rst = s.rst || {};
-    if (!rst.stub && (rst.pendingCount > 0 || rst.scheduledAfter || rst.scheduledNow)) {
+    if (s.devMode !== false && !rst.stub && (rst.pendingCount > 0 || rst.scheduledAfter || rst.scheduledNow)) {
       const bits = [];
       if (rst.pendingCount) bits.push(rst.targetSha ? `${rst.pendingCount} commit${rst.pendingCount === 1 ? '' : 's'} behind` : `${rst.pendingCount} change${rst.pendingCount === 1 ? '' : 's'}`);
       if (rst.scheduledAfter) bits.push(`after ${shortTaskId(rst.scheduledAfter)}`);
