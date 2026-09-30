@@ -111,15 +111,16 @@ async function refresh() {
 }
 const nodeName = (id) => (S.allNodes.find((n) => n.id === id) || {}).name || (id ? id : 'unassigned');
 // Tab-scoped rendering (t_8d586961): renderAll draws the always-visible chrome plus ONLY the
-// active tab's heavy view. Hidden tabs stay stale and are redrawn when activated — the team /
-// wiki / settings / inbox views simply rebuild, while board / obs / usage / overview / chat have
-// their render signature reset by the activation click (TAB_RESIG below). Same pixels on screen;
-// state events stop paying for the tabs you cannot see.
+// active tab's heavy view. Hidden tabs keep their DOM and render signature, so a revisit costs
+// nothing when nothing changed, an incremental tail-append when only new lines arrived (obs), and
+// a full rebuild only when the content really moved. Board / usage / overview reset their
+// signature on activation (TAB_RESIG below) so size-measuring views always redraw once visible.
+// Same pixels on screen; state events stop paying for the tabs you cannot see.
 const TAB_VIEW = {
   team: () => { renderGraph(); renderNodeForm(); },
   board: renderBoard,
   wiki: renderWiki,
-  obs: () => { renderObs(); renderLog(); },
+  obs: () => { renderObs(); flushLogTail(); },
   usage: renderUsage,
   overview: renderOverview,
   settings: renderSettings,
@@ -128,8 +129,25 @@ const TAB_VIEW = {
 };
 function renderAll() {
   renderSidebar(); renderPreflightBar(); renderHeader(); renderSelfUpdate(); renderAlerts(); renderGuide();
-  const view = TAB_VIEW[((document.querySelector('.tab.active') || {}).id || '').slice(4)];
-  if (view) view();
+  drawActiveView(true);
+}
+// The always-visible chrome (Perry's contract, t_8d586961): badges, counts and the restart chip
+// track state even while their tab is hidden, so they draw synchronously everywhere. Only the
+// heavy active-tab view may defer, and only on a revisit (see drawActiveView).
+function renderChrome() {
+  renderSidebar(); renderPreflightBar(); renderHeader(); renderSelfUpdate(); renderAlerts(); renderGuide();
+}
+// The active tab's view, tracked per tab so activation can tell "never drawn" (synchronous draw —
+// no blank frame) from "DOM left over from the last visit" (draw after the activation paint: the
+// click paints chrome over the still-correct old view instantly; the heavy rebuild — obs/chat run
+// ~70ms while agents stream — lands one frame later, off the input->paint path, t_8d586961).
+const TAB_PAINTED = new Set();
+function drawActiveView(sync) {
+  const name = ((document.querySelector('.tab.active') || {}).id || '').slice(4);
+  const view = TAB_VIEW[name];
+  if (!view) return;
+  if (sync || !TAB_PAINTED.has(name)) { TAB_PAINTED.add(name); view(); return; }
+  requestAnimationFrame(() => requestAnimationFrame(() => { if ($('#tab-' + name).classList.contains('active')) { TAB_PAINTED.add(name); view(); } }));
 }
 const fmtTok = (n) => { n = n || 0; return n >= 1e6 ? (n / 1e6).toFixed(2) + 'M' : n >= 1e4 ? (n / 1e3).toFixed(1) + 'k' : String(n); };
 const COST_NOTE = { subscription: 'Covered by subscription — not billed per token', other: 'API-equivalent (reported by Claude CLI)' };
@@ -468,21 +486,24 @@ $('#importfile').onchange = act(async (e) => {
 // ---------- tabs ----------
 // Every element with data-tab switches tabs — the header nav, the sidebar Inbox row and the
 // Settings gear all share the one active-state treatment (t_db67859d).
-// A freshly shown heavy section must draw once even if nothing changed while it was hidden:
-// activation resets its render signature (t_9315f18a; extended to every tab, t_8d586961). The
-// team/wiki/settings/inbox views have no signature — renderAll rebuilds them whenever shown.
+// Views that measure their size draw once per activation even when nothing changed while hidden:
+// activation resets their render signature (t_9315f18a; board/usage/overview, t_8d586961) so they
+// never size against a hidden (0-width) layout. obs and chat keep their signatures instead: their
+// DOM stays valid across the hide, so a revisit is a no-op when nothing moved, an incremental
+// tail-append when only new log lines arrived (flushLogTail), and a full rebuild only on real
+// content change. team/wiki/settings/inbox have no signature — renderAll rebuilds them whenever shown.
 const TAB_RESIG = {
   board: () => { boardSig = null; },
-  obs: () => { logSig = null; obsSig = null; },
+  obs: () => { obsSig = null; },
   usage: () => { usageSig = null; },
   overview: () => { ovSig = null; },
-  chat: () => { chatSig = null; },
 };
 document.querySelectorAll('button[data-tab]').forEach((b) => b.onclick = () => {
   document.querySelectorAll('button[data-tab]').forEach((x) => x.classList.toggle('active', x === b));
   document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.id === 'tab-' + b.dataset.tab));
   (TAB_RESIG[b.dataset.tab] || (() => {}))();
-  renderAll();
+  renderChrome();
+  drawActiveView(false);
 });
 
 // ---------- header ----------
@@ -2675,7 +2696,8 @@ $('#chat-room').addEventListener('scroll', () => { const room = $('#chat-room');
   if (room.scrollHeight - room.scrollTop - room.clientHeight < 40) { CH.pendingNew = 0; if ((CH.win || Chat.PAGE) > Chat.PAGE) { CH.win = Chat.PAGE; chatSig = null; renderChat(); } updateNewPill(); }
   else if (room.scrollTop < 80 && CH.ev && CH.ev.length > (CH.win || Chat.PAGE)) chatGrow(); });
 // Skip-no-op renders (t_9d92c3d3): the feed signature is checked BEFORE the expensive roomEvents walk,
-// so an unchanged room costs no DOM work at all. chatSig is reset to force a redraw (tab switch, send).
+// so an unchanged room costs no DOM work at all. chatSig is reset to force a redraw (send, team
+// switch, older-page grow) — plain activation keeps it, so revisiting an unchanged room is free.
 let chatSig = null;
 function renderChat() {
   if (!$('#tab-chat.active')) return;
@@ -2748,7 +2770,8 @@ $('#chat-input').addEventListener('keydown', (e) => {
   else if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); act(chatSend)(); }
 });
 $('#chat-send').onclick = act(chatSend);
-// Chat activation (sig reset + first draw) goes through the shared tab-click handler (TAB_RESIG).
+// Chat activation goes through the shared tab-click handler (TAB_RESIG keeps the signature, so a
+// revisit of an unchanged room is a no-op — the DOM from the last visit is still correct).
 // Chat team scope (t_1158f757): one select in the header, left of the typing indicator; index.html
 // is out of scope for this task so the control is injected here.
 document.querySelector('#tab-chat .chat-head .spacer').insertAdjacentHTML('beforebegin', '<select id="chatteam" title="Scope #company to one team, or show all teams"></select>');
@@ -2858,25 +2881,41 @@ function flushLogTail() {
   if ($('#tab-obs').classList.contains('active') && !appendLogTail()) renderLog();
   renderLive(); // board task-detail pane follows the stream even while Obs is hidden
 }
-// Fast append path: only when the DOM is the plain live tail (no search, all levels on, no paging,
-// no subagent blocks, pinned to bottom with auto-scroll) do the new rows equal what a full render
-// would draw — append them and refresh the signature. Anything else returns false (full render).
+// Fast append path: only when the DOM is the plain live tail (no search, all levels on, no subagent
+// blocks, pinned to bottom with auto-scroll) do the new rows equal what a full render would draw —
+// append them and refresh the signature. The windowed tail (older-bar) qualifies too: the append
+// trims from the front to keep the page identical. Anything else returns false (full render).
 function appendLogTail() {
   const box = $('#log');
   if (!box || !renderLog.winItems) return false;
   if ($('#logsearch').value || !['info', 'warn', 'error'].every((l) => logLevels.has(l))) return false;
-  if (box.querySelector('.logempty, .subblock, #log-older, #log-showall')) return false;
+  if (box.querySelector('.logempty, .subblock, #log-showall')) return false;
   if (box.scrollTop + box.clientHeight < box.scrollHeight - 20 || !$('#logauto').checked) return false;
   const f = $('#logfilter').value;
   const teamIds = sel.logTeam ? new Set(logTeamNodes().map((n) => n.id)) : null;
-  const added = logs.filter((l) => l._seq > logTailSeq && l.projectId === ctx.p && (!teamIds || teamIds.has(l.nodeId)) && (!f || l.nodeId === f) && !l.subagentId);
+  const fresh = logs.filter((l) => l.projectId === ctx.p && (!teamIds || teamIds.has(l.nodeId)) && (!f || l.nodeId === f) && (l._seq === undefined || l._seq > logTailSeq));
   logTailSeq = logSeq;
-  if (!added.length) { logSig = logKey(); return true; } // only filtered-out lines arrived
+  // Lines injected out-of-band (no _seq — tests, restored sessions) were never counted by the
+  // cursor; claiming them here would stamp a signature the DOM never rendered and hide them for
+  // good. Same for subagent lines: they nest into blocks only a full render can build.
+  if (fresh.some((l) => l._seq === undefined || l.subagentId)) return false;
+  if (!fresh.length) { logSig = logKey(); return true; } // only already-rendered or filtered-out lines arrived
+  const added = fresh;
   added.sort((a, b) => (a.at || 0) - (b.at || 0));
   if (added[0].at < logTailAt) return false; // straggler older than the tail: let renderLog re-sort
-  if (renderLog.winItems + added.length > logWin) return false; // the page window would slide
+  const olderBar = box.querySelector('#log-older');
+  if (!olderBar && renderLog.winItems + added.length > logWin) return false; // the page window would slide
   box.insertAdjacentHTML('beforeend', added.map((l) => logRow(l)).join(''));
-  renderLog.total += added.length; renderLog.winItems += added.length;
+  if (olderBar) {
+    // Windowed live tail (t_fb193107): a full render keeps the LAST logWin rows on screen, so drop
+    // the same number from the front and move the earlier-count — the fast append stays
+    // pixel-identical to what renderLog would have drawn.
+    for (let i = 0; i < added.length; i++) { const r = box.querySelector('.logrow'); if (!r) break; r.remove(); }
+    renderLog.winItems = logWin;
+    const hidden = renderLog.total + added.length - logWin;
+    olderBar.textContent = `↑ ${hidden} earlier line${hidden === 1 ? '' : 's'} — scroll up or click to load`;
+  } else renderLog.winItems += added.length;
+  renderLog.total += added.length;
   logTailAt = added[added.length - 1].at;
   logSig = logKey();
   box.scrollTop = box.scrollHeight;

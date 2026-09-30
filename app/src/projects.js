@@ -72,12 +72,27 @@ class ProjectManager {
   constructor(root = defaultRoot()) {
     this.root = root;
     this.pdir = path.join(root, 'projects');
+    this._stores = new Map(); // (dir|teamId) -> Store — hot path reuse, see store()
     fs.mkdirSync(this.pdir, { recursive: true });
     this.migrate();
     if (!this.list().length) this.create('Default', 'blank');
   }
   dir(pid) { if (!/^[\w-]+$/.test(pid || '')) throw new Error('bad project id'); return path.join(this.pdir, pid); }
-  store(pid, teamId = null) { const d = this.dir(pid); if (!fs.existsSync(path.join(d, 'project.json'))) throw new Error('no project ' + pid); return new Store(d, teamId); }
+  // One Store instance per (project dir, teamId), reused across calls (t_8d586961): the renderer's
+  // getAll builds ST(c)/TS(c) several times a second while agents stream, and every fresh Store
+  // paid cold construction migrations plus — with the task-file cache — a full re-read + re-parse
+  // of every board task file (~110ms of getAll on the 550-task board). Store is disk-backed and
+  // its locks are file-based, so sharing one instance across call sites changes no semantics;
+  // out-of-band writes are still seen (reads hit the disk every call). Entries live as long as
+  // the project; remove() drops them with the directory.
+  store(pid, teamId = null) {
+    const d = this.dir(pid);
+    if (!fs.existsSync(path.join(d, 'project.json'))) throw new Error('no project ' + pid);
+    const key = d + '|' + (teamId || '');
+    let s = this._stores.get(key);
+    if (!s) this._stores.set(key, (s = new Store(d, teamId)));
+    return s;
+  }
   get(pid) { return this.store(pid).meta(); }
   list() {
     return fs.readdirSync(this.pdir).map((d) => { try { return JSON.parse(fs.readFileSync(path.join(this.pdir, d, 'project.json'), 'utf8')); } catch { return null; } })
@@ -115,6 +130,7 @@ class ProjectManager {
   remove(pid) {
     if (this.list().length <= 1) throw new Error('cannot delete the last project');
     fs.rmSync(this.dir(pid), { recursive: true, force: true });
+    for (const k of [...this._stores.keys()]) if (k.startsWith(this.dir(pid) + '|')) this._stores.delete(k);
   }
 
   // ---- teams ----
