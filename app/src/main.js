@@ -438,8 +438,10 @@ async function guiE2E() {
     // Guide must not cover the editor: it collapses to a chip once the team exists.
     g.guide = await ex(`const r = $('#guide').getBoundingClientRect(); return $('#guide').classList.contains('hidden') ? 'hidden' : r.width < 300 ? 'mini' : 'open'`);
     expect('graph: Get started guide does not cover the editor', g.guide !== 'open', g);
-    g.idle = await ex(`renderIdle(); return document.querySelector('.idlebanner[data-where=team]').textContent`);
-    expect('graph: idle banner counts only this team (no cross-team ghost)', /12 agents idle/.test(g.idle), g);
+    // (t_6674705d removed the .idlebanner the old cross-team ghost check read; the presence chips now
+    // carry the same team-scoped idle info.)
+    g.presence = await ex(`renderIdle(); return { chips: document.querySelectorAll('#presence .pchip').length, idle: document.querySelectorAll('#presence .pchip.idle').length }`);
+    expect('graph: presence chips still render after the idle banner removal', g.presence.chips >= 2, g.presence);
     for (const t of ['light', 'dark']) {
       require('electron').nativeTheme.themeSource = t; await ex(`await w(400); fitView(); selectNode('${target.id}'); await w(300);`);
       await rclick(await at(target.id)); await shot(`24-graph-menu-${t}`); await closeMenu(); await shot(`25-graph-panel-${t}`);
@@ -1378,43 +1380,104 @@ async function guiE2E() {
     await shot('monitor-log');
     console.log('[gui-e2e] monitorlog', JSON.stringify(rows));
   };
-  // Red-master banner (t_f72708fd): S.orch.redMaster is seeded exactly as Devon's pre-merge gate
-  // (t_897cca56) will publish it on the orchestrator snapshot (contract recorded on that task):
-  // { red, since, failingTests:[name|{name}], testOutput, fixTaskId, lastMergedTaskId,
-  //   gateBlocks:[{taskId, tests, at}] }. Checks the solid banner content, the fix-task link,
-  //   the gate-block line, persistence across tabs, and the green (red:false) clear.
-  const redbarShots = async () => {
+  // Alerts center (t_6674705d): one bell + panel fed by the pure collector (src/alerts.js), which
+  // replaced the stacked banners (#redbar, #rtbar, #restartst + #rstpop, .idlebanner). Checks the
+  // PM/Critic matrix: no old banner DOM ids left; 0/1/6 alerts x 1100/1400 x light/dark shots; panel
+  // open at 1100 stays inside the window; dismiss hides until the state changes (id+fingerprint);
+  // real-state smokes: redMaster (Fix opens the fix task), restart pending, runtime down (error,
+  // Resume, no dismiss while down), orphan task (Open task lands on the Retest+Resume stuckbar).
+  const alertsShots = async () => {
     await waitFor(`return !!document.querySelector('#tpl-select option')`); await ex(`await refresh();`);
     const cur = await ex(`return { p: ctx.p, t: S.teamId }`);
     const ps = pm.store(cur.p || pid(), cur.t); let nodes = ps.getTeam().nodes;
     if (nodes.length < 2) { ps.addNode({ name: 'Pia', role: 'PM', x: 60, y: 60 }); ps.addNode({ name: 'Devon', role: 'Dev', x: 320, y: 160 }); nodes = ps.getTeam().nodes; }
     const [pmN, dev] = nodes;
     const fix = ps.createTask({ title: 'P0: fix red master — usage invariants', assignee: dev.id, priority: 'P0' });
-    const bounced = ps.createTask({ title: 'Logs team filter polish', assignee: dev.id });
-    await ex(`await refresh(); await w(200);`);
-    // Re-seed right before every read: a background refresh() replaces S (and S.orch) at any time.
-    const seed = `S.orch.redMaster = { red: true, since: Date.now() - 42 * 60000,
-      failingTests: ['usage-invariants.test.js › vendorTable resolves in renderer/app.js', { name: 'orchestrator.test.js › drain lets long tasks finish' }, 'store.test.js › auto-merge blocked by gate'],
-      testOutput: 'FAIL app/test/usage-invariants.test.js\\n  ● vendorTable resolves in renderer/app.js\\n    expect(received).toBeTruthy()\\n\\nFAIL app/test/orchestrator.test.js\\n  ● drain lets long tasks finish',
-      fixTaskId: '${fix.id}', lastMergedTaskId: '${bounced.id}',
-      gateBlocks: [{ taskId: '${bounced.id}', tests: ['usage-invariants.test.js › vendorTable resolves'], at: Date.now() - 5 * 60000 }] };
-      renderRedbar();`;
-    await ex(`$('#tabs button[data-tab=board]').click(); await w(200);`);
-    const on = await ex(`${seed} await w(100); return { vis: !$('#redbar').classList.contains('hidden'), title: ($('#redbar b') || {}).textContent || '', chips: document.querySelectorAll('#redbar .rb-test').length, fix: ($('#rb-fix') || {}).textContent || '', block: ($('.rb-block') || {}).textContent || '', out: !!$('#redbar .rb-out') }`);
-    expect('redbar: solid banner with red title, failing-test chips (string + {name}), fix task, gate block, output toggle',
-      on.vis && /MASTER IS RED/.test(on.title) && /since/.test(on.title) && on.chips === 3 && on.fix.includes(fix.id.slice(0, 6)) && on.fix.includes('P0: fix red master') && /Gate blocked the merge of/.test(on.block) && on.block.includes('Logs team filter polish') && on.block.includes('sent back to Devon') && on.out, on);
-    await shot('redbar-board');
-    await ex(`$('#rb-fix').click(); await w(400);`);
+    await ex(`await refresh(); await w(300);`); // todo tasks raise no alerts: the 0-alert baseline is clean
+    const rows = () => `[...document.querySelectorAll('#alertpanel .al-what')].map((e) => e.textContent)`;
+    const rowAct = (re) => `(() => { const r = [...document.querySelectorAll('#alertpanel .al-row')].find((r) => ${re}.test(r.textContent)); return r && r.querySelector('.al-act') ? r.querySelector('.al-act').textContent : null; })()`;
+
+    const gone = await ex(`return ['#redbar', '#rtbar', '#restartst', '#rstpop', '.idlebanner'].filter((s) => document.querySelector(s))`);
+    expect('alerts: no old banner DOM ids left (#redbar #rtbar #restartst #rstpop .idlebanner)', gone.length === 0, gone);
+    const bell0 = await ex(`return { bell: !!$('#alertbell'), badgeHidden: $('#alertbell-n').classList.contains('abadge-none'), plain: !$('#alertbell-n').textContent }`);
+    expect('alerts: bell present, 0 alerts -> plain bell, no badge, no count', bell0.bell && bell0.badgeHidden && bell0.plain, bell0);
+    for (const [wd, tag] of [[1400, 1400], [1100, 1100]]) for (const th of ['light', 'dark']) {
+      win.setSize(wd, 800); require('electron').nativeTheme.themeSource = th; await ex(`await w(400);`);
+      await shot(`alerts-0-${tag}-${th}`);
+    }
+
+    win.setSize(1400, 800); require('electron').nativeTheme.themeSource = 'light';
+    await ex(`__fakeAlerts(1); await w(400); if (alertsOpen) { $('#alertbell').click(); await w(250); }`); // panel closed: bell + badge only
+    const one = await ex(`return { n: $('#alertbell-n').textContent, cls: $('#alertbell-n').className }`);
+    expect('alerts: 1 fake alert -> badge 1 with error color (worst severity)', one.n === '1' && /abadge-error/.test(one.cls), one);
+    await shot('alerts-1-1400-light');
+    await ex(`if (!alertsOpen) { $('#alertbell').click(); await w(250); }`);
+    const panel = await ex(`return { open: !$('#alertpanel').classList.contains('hidden'), rows: document.querySelectorAll('#alertpanel .al-row').length, empty: !!$('#alertpanel .al-empty') }`);
+    expect('alerts: panel opens with 1 row (not the empty state)', panel.open && panel.rows === 1 && !panel.empty, panel);
+    await shot('alerts-1-panel-open');
+    await ex(`[...document.querySelectorAll('#alertpanel .al-x')].find((b) => /Fake alert/.test(b.closest('.al-row').textContent)).click(); await w(400);`);
+    const dim = await ex(`return { rows: document.querySelectorAll('#alertpanel .al-row').length, empty: !!$('#alertpanel .al-empty'), badge: $('#alertbell-n').className }`);
+    expect('alerts: dismiss hides the row -> empty state, badge hidden', dim.rows === 0 && dim.empty && /abadge-none/.test(dim.badge), dim);
+    const still = await ex(`__fakeAlerts(1); await w(400); return { rows: document.querySelectorAll('#alertpanel .al-row').length, empty: !!$('#alertpanel .al-empty') }`);
+    expect('alerts: same state re-injected -> stays dismissed (id+fingerprint)', still.rows === 0 && still.empty, still);
+    const bump = await ex(`__fakeAlerts(1, 'v2'); await w(400); return { rows: document.querySelectorAll('#alertpanel .al-row').length }`);
+    expect('alerts: state changed (new fingerprint) -> row reappears', bump.rows === 1, bump);
+    await ex(`__fakeAlerts(0); dismissed.clear(); await w(300);`);
+
+    for (const [wd, tag] of [[1400, 1400], [1100, 1100]]) for (const th of ['light', 'dark']) {
+      win.setSize(wd, 800); require('electron').nativeTheme.themeSource = th;
+      await ex(`__fakeAlerts(6); await w(400); if (!alertsOpen) { $('#alertbell').click(); await w(250); }`);
+      const g = await ex(`const r = $('#alertpanel').getBoundingClientRect(); return { n: $('#alertbell-n').textContent, rows: document.querySelectorAll('#alertpanel .al-row').length, first: document.querySelector('#alertpanel .al-dot').className, right: Math.round(r.right), iw: window.innerWidth }`);
+      expect(`alerts: 6 alerts at ${tag}px ${th} — badge 6, 6 rows, error dot first, panel inside viewport`, g.n === '6' && g.rows === 6 && /al-error/.test(g.first) && g.right > 0 && g.right <= g.iw - 4, g);
+      await shot(`alerts-6-${tag}-${th}`);
+      await ex(`__fakeAlerts(0); await w(300);`);
+    }
+    require('electron').nativeTheme.themeSource = 'system';
+
+    win.setSize(1400, 800);
+    await ex(`$('#tabs button[data-tab=board]').click(); await w(200); if (!alertsOpen) { $('#alertbell').click(); await w(250); }
+      S.orch.redMaster = { red: true, since: Date.now() - 42 * 60000, failingTests: ['usage-invariants.test.js › vendorTable resolves in renderer/app.js'], fixTaskId: '${fix.id}', gateBlocks: [] }; renderAlerts(); await w(400);`);
+    const red = await ex(`return { n: $('#alertbell-n').textContent, cls: $('#alertbell-n').className, rows: ${rows()}, act: ${rowAct('/Master is red/')}, xs: document.querySelectorAll('#alertpanel .al-x').length }`);
+    expect('alerts: master red -> row with failing test + Fix action, no dismiss (stays until green)', red.rows.length === 1 && /Master is red/.test(red.rows[0]) && /usage-invariants/.test(red.rows[0]) && red.act === 'Fix' && /abadge-error/.test(red.cls) && red.xs === 0, red);
+    await shot('alerts-redmaster');
+    await ex(`[...document.querySelectorAll('#alertpanel .al-act')].find((b) => b.textContent === 'Fix').click(); await w(400);`);
     const opened = await ex(`return { boardTab: $('#tab-board').classList.contains('active'), detail: ($('#taskdetail h3') || {}).textContent || '', sel: sel.task === '${fix.id}' }`);
-    expect('redbar: fix-task link opens the board task detail for the fix task', opened.boardTab && opened.detail.includes('P0: fix red master') && opened.sel, opened);
-    await shot('redbar-fixtask');
-    await ex(`$('#tabs button[data-tab=chat]').click(); await w(200);`);
-    const cross = await ex(`${seed} await w(100); return { vis: !$('#redbar').classList.contains('hidden') }`);
-    expect('redbar: banner persists on other tabs (chat)', cross.vis, cross);
-    await shot('redbar-chat');
-    const off = await ex(`S.orch.redMaster = { red: false }; renderRedbar(); await w(100); return { hidden: $('#redbar').classList.contains('hidden') }`);
-    expect('redbar: red:false clears the banner (master green again)', off.hidden, off);
-    console.log('[gui-e2e] redbar', JSON.stringify({ on, opened, cross, off }));
+    expect('alerts: Fix action opens the board task detail for the fix task', opened.boardTab && opened.detail.includes('P0: fix red master') && opened.sel, opened);
+    await shot('alerts-fixtask');
+    await ex(`S.orch.redMaster = { red: false }; renderAlerts(); await w(200); if (!alertsOpen) { $('#alertbell').click(); await w(250); }`);
+
+    const rst = await ex(`rst = normRestart({ pendingCount: 3, targetSha: 'abcdef123456', since: Date.now() - 60000, stub: false }); renderAlerts(); await w(300);
+      return { rows: ${rows()}, act: ${rowAct('/Restart pending/')}, n: $('#alertbell-n').textContent }`);
+    expect('alerts: restart pending -> row "Restart pending — 3 commits behind" with Restart now', rst.rows.some((t) => /Restart pending — 3 commits behind/.test(t)) && rst.act === 'Restart now', rst);
+    await shot('alerts-restart');
+    await ex(`rst = normRestart({ pendingCount: 0, stub: true }); renderAlerts(); await w(150); if (!alertsOpen) { $('#alertbell').click(); await w(250); }`);
+
+    const rt = await ex(`setRtu({ runtime: 'claude', error: 'exit 1', agents: [], since: Date.now() }); await w(300);
+      return { rows: ${rows()}, act: ${rowAct('/unavailable/')}, cls: $('#alertbell-n').className, xs: document.querySelectorAll('#alertpanel .al-x').length }`);
+    expect('alerts: runtime down -> error row with Resume, NO dismiss while down (Critic condition)', rt.rows.length === 1 && /Claude unavailable/.test(rt.rows[0]) && rt.act === 'Resume' && /abadge-error/.test(rt.cls) && rt.xs === 0, rt);
+    await shot('alerts-runtimedown');
+    await ex(`clearRtu('claude'); await w(150); if (!alertsOpen) { $('#alertbell').click(); await w(250); }`);
+
+    const orph = await ex(`return { rows: ${rows()} }`);
+    expect('alerts: nothing left but the clean state before the orphan smoke', orph.rows.length === 0, orph);
+    const orphan = ps.createTask({ title: 'Stopped with work left demo', assignee: dev.id });
+    ps.updateTask(orphan.id, { status: 'in_progress' }); // assignee has no live agent process -> stuck-task alert
+    const orph2 = await ex(`await refresh(); await w(400); return { rows: ${rows()}, n: $('#alertbell-n').textContent }`);
+    expect('alerts: stopped with work left -> row names the task, no live worker', orph2.rows.some((t) => /Stopped with work left demo/.test(t) && /no live worker/.test(t)), orph2);
+    const openTask = await ex(`const b = [...document.querySelectorAll('#alertpanel .al-act')].find((b) => b.textContent === 'Open task'); b.click(); await w(400);
+      return { sel: sel.task === '${orphan.id}', detail: ($('#taskdetail h3') || {}).textContent || '', stuck: !!document.querySelector('#taskdetail .stuckbar'), retest: [...document.querySelectorAll('#taskdetail button')].some((b) => /Retest \\+ Resume/.test(b.textContent)) }`);
+    expect('alerts: Open task lands on the task detail where the t_747e0d1e Retest+Resume button lives (no duplication)', openTask.sel && openTask.stuck && openTask.retest && /Stopped with work left demo/.test(openTask.detail), openTask);
+    await shot('alerts-orphan-open');
+    // The idle banner is gone (.idlebanner removed): the same team-scoped idle detection now lives in
+    // the presence chips — assert it the way the old firstrun check did, on the seeded team.
+    const idle = await ex(`await switchTo({ t: S.project.teams[0].id }); $('#tabs button[data-tab=team]').click(); await w(300); const keep = [S.orch.agents, S.orch.idle];
+      S.orch.agents = {}; S.orch.idle = S.allNodes.map((n) => n.id); renderGraph(); renderIdle(); await w(300); window.__idleKeep = keep;
+      const chips = [...document.querySelectorAll('#presence .pchip.idle')].map((c) => c.textContent).join('|');
+      return { chips, n: document.querySelectorAll('#presence .pchip').length, idleN: document.querySelectorAll('#presence .pchip.idle').length };`);
+    expect('alerts: idle agents still visible as presence chips after the banner removal', idle.n >= 2 && idle.idleN === idle.n && /Pia/.test(idle.chips) && /Devon/.test(idle.chips), idle);
+    await ex(`[S.orch.agents, S.orch.idle] = window.__idleKeep; await refresh(); await w(300);`);
+    await ex(`if (alertsOpen) $('#alertbell').click(); await w(100);`);
+    console.log('[gui-e2e] alerts', JSON.stringify({ bell0, one, panel, dim, still, bump, red, opened, rst, rt, orph, orph2, openTask }));
   };
   // Wake run on an agent that ALSO has an in_progress task (t_8af586bc) — the case that used to
   // render bare "working": the backend keeps a.taskId null for the whole wake, so the old
@@ -1792,7 +1855,7 @@ async function guiE2E() {
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'wake') { await wakeShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'wakebusy') { await wakeBusyShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'monitorlog') { await monitorShots(); throw null; }
-    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'redbar') { await redbarShots(); throw null; }
+    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'alerts') { await alertsShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'subagents') { await subagentShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'dynamicteam') { await dynamicTeamShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'recruitinbox') { await recruitInboxShots(); throw null; }
@@ -1963,7 +2026,8 @@ async function guiE2E() {
       await ex(`$('#tabs button[data-tab=team]').click(); $('#reopenguide').click(); await w(400);`); await shot(`main-firstrun-${theme}`);
       expect(`firstrun guide opens (${theme})`, await ex(`return !$('#guide').classList.contains('hidden')`));
       await ex(`$('#g-close').click(); await w(200);`); // real dismiss (resets forced/hidden state), not just a CSS class -- otherwise the next renderGuide() re-opens it full-size over later shots
-      // Idle detection on the real team: the PM's Dev report is working -> banner names the rest; Dev's node shows the busy arc.
+      // Idle detection on the real team: the PM's Dev report is working -> presence names the rest; Dev's node shows the busy arc.
+      // (t_6674705d: the idle banner is gone; the same team-scoped idle detection is asserted on the presence chips.)
       const ip = (global.__idleP ||= pm.create('Idle demo')); const istore = pm.store(ip.id); const iorch = orchFor(ip.id);
       if (!istore.getTeam().nodes.length) { const [p, d, r] = [['PM', 'PM'], ['Dev', 'Dev'], ['Reviewer', 'Reviewer']].map(([name, role], i) => istore.addNode({ name, role, x: 80 + i * 220, y: 120 })); istore.addEdge(p.id, d.id); istore.addEdge(p.id, r.id); }
       const team = istore.getTeam(); const pmN = team.nodes.find((n) => n.role === 'PM'); const reps = team.edges.filter((e) => e.from === pmN.id).map((e) => e.to);
@@ -1971,10 +2035,11 @@ async function guiE2E() {
       const idleNames = team.nodes.filter((n) => n.id !== dev.id).map((n) => n.name);
       const idle = await ex(`$('#tabs button[data-tab=team]').click(); await w(300); const keep = [S.orch.agents, S.orch.idle];
         S.orch.agents = { '${dev.id}': { status: 'working' } }; S.orch.idle = S.allNodes.filter((n) => n.id !== '${dev.id}').map((n) => n.id);
-        renderGraph(); renderIdle(); await w(300); const b = document.querySelector('.idlebanner[data-where=team]'); window.__idleKeep = keep;
-        return { txt: b.classList.contains('hidden') ? '' : b.textContent, busy: document.querySelectorAll('#graph .pres.busy').length, idleRings: document.querySelectorAll('#graph .pres.idle').length };`);
-      await shot(`idle-banner-${theme}`);
-      expect(`idle banner names real idle agents, not busy Dev (${theme})`, idle.txt.includes(`${idleNames.length} agent`) && idleNames.every((nm) => idle.txt.includes(nm)) && !idle.txt.includes(dev.name) && idle.busy === 1 && idle.idleRings === idleNames.length, { idle, idleNames, dev: dev.name });
+        renderGraph(); renderIdle(); await w(300); window.__idleKeep = keep;
+        const chips = [...document.querySelectorAll('#presence .pchip.idle')].map((c) => c.textContent).join('|');
+        return { txt: chips, busy: document.querySelectorAll('#graph .pres.busy').length, idleRings: document.querySelectorAll('#graph .pres.idle').length };`);
+      await shot(`idle-presence-${theme}`);
+      expect(`presence chips name real idle agents, not busy Dev (${theme})`, idleNames.every((nm) => idle.txt.includes(nm)) && !idle.txt.includes(dev.name) && idle.busy === 1 && idle.idleRings === idleNames.length, { idle, idleNames, dev: dev.name });
       await ex(`[S.orch.agents, S.orch.idle] = window.__idleKeep; await switchTo(${JSON.stringify(prevCtx)}); await w(300);`);
       if (theme === 'dark') { // Live orchestrator nudge: PM with an open goal + idle reports gets a board message.
         const goal = istore.createTask({ title: 'Idle nudge goal', assignee: pmN.id, createdBy: pmN.id }); iorch.nudgeIdle();

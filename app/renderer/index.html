@@ -12,11 +12,11 @@
   <span class="spacer"></span>
   <div id="limitmeter" class="limitmeter hidden" title="Usage limits"></div>
   <span id="watchst" class="pill hidden" title=""></span>
-  <span id="restartst" class="pill hidden"></span>
   <span id="updst" class="pill hidden"></span>
   <span id="runstate" class="pill">idle</span>
   <span id="totalcost" class="pill" title="API-equivalent (reported by Claude CLI). Not what you pay on a Pro/Max subscription.">API-eq $0.0000</span>
   <button id="stop" class="hidden" title="Stop all agents (⌘.)">Stop</button><button id="newgoal" class="primary" title="New goal for the team (/)">＋ New goal</button>
+  <button id="alertbell" title="Alerts" aria-label="Alerts" aria-expanded="false"><svg class="navicon" viewBox="0 0 24 24"><path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15L6 16Z"/><path d="M10 20.5a2 2 0 0 0 4 0"/></svg><span id="alertbell-n" class="abadge hidden"></span></button><!-- alerts center (t_6674705d): spec in wiki alerts-center -->
   <button id="themebtn" class="iconbtn" title="Toggle light/dark theme" aria-label="Toggle light/dark theme"><svg class="navicon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><g class="icon-sun"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.4M12 19.1v2.4M21.5 12h-2.4M4.9 12H2.5M18.7 5.3 17 7M7 17l-1.7 1.7M18.7 18.7 17 17M7 7 5.3 5.3"/></g><g class="icon-moon"><path d="M20.5 14.5A8.5 8.5 0 0 1 9.5 3.5a8.5 8.5 0 1 0 11 11Z"/></g></svg></button><!-- settings button: was a circle + 8 rays (looked like a 2nd sun next to the theme toggle); now a gear -->
   <button id="settingsbtn" data-tab="settings" class="iconbtn" title="Settings (⌘,)" aria-label="Settings"><svg class="navicon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M10.3 2.5h3.4l.5 2.5 1.7.7 2.1-1.4 2.4 2.4-1.4 2.1.7 1.7 2.5.5v3.4l-2.5.5-.7 1.7 1.4 2.1-2.4 2.4-2.1-1.4-1.7.7-.5 2.5h-3.4l-.5-2.5-1.7-.7-2.1 1.4-2.4-2.4 1.4-2.1-.7-1.7-2.5-.5v-3.4l2.5-.5.7-1.7-1.4-2.1 2.4-2.4 2.1 1.4 1.7-.7z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg></button><button id="help" title="Keyboard shortcuts (?)">?</button>
   <div id="goalpop" class="goalpop hidden" role="dialog" aria-label="New goal for the team">
@@ -25,10 +25,8 @@
     <div class="goalpop-foot"><span class="muted">⌘⏎ run · / opens this</span><span class="spacer"></span><button id="run" class="primary">Run</button></div>
   </div>
 </header>
-<div id="rstpop" class="rstpop hidden" role="tooltip"></div>
 <div id="updveil" class="updveil hidden" role="status" aria-live="polite"></div>
-<div id="redbar" class="redbar hidden" role="alert"></div>
-<div id="rtbar" class="rtbar hidden" role="alert"></div>
+<div id="alertpanel" class="alertpanel hidden" role="dialog" aria-label="Alerts"></div>
 <div id="body">
 <aside id="sidebar">
   <section class="sb-sec sb-sec-nav"><button id="sb-inbox" class="sb-inbox" data-tab="inbox" title="Inbox — questions and approvals waiting for you"><svg class="navicon" viewBox="0 0 24 24"><path d="M4 12 6.5 5h11L20 12v6a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 18v-6ZM4 12h5.5l1 2h3l1-2H20"/></svg><span class="lbl">Inbox</span><span class="spacer"></span><span class="badge" id="inbox-tab-badge"></span></button></section>
@@ -52,7 +50,6 @@
   </section>
   <section id="tab-team" class="tab">
     <div class="toolbar gtoolbar"><div class="tgroup"><button id="addnode" class="primary" title="Add agent (or right-click the canvas)">＋ Agent</button><button id="testteam" title="Run a cheap preflight check on every agent">Test team</button></div><div class="tgroup"><button id="connect" class="icon" title="Connect mode: click source then target (or drag from a node's right handle)">⤳</button><select id="edgetype" title="Type for click-connect edges"><option>assign</option><option>message</option><option>review</option></select><button id="delsel" class="icon" title="Delete selected (⌫)">✕</button></div><span id="pf-summary" class="pill"></span><span id="hint" class="muted">Drag a node's handle to connect · right-click for actions · scroll to pan, ⌘/pinch to zoom</span></div>
-    <div class="idlebanner hidden" data-where="team"></div>
     <div class="split"><div class="canvas"><svg id="graph"></svg>
       <div class="gcontrols"><button id="zoomout" title="Zoom out">−</button><span id="zoomlvl">100%</span><button id="zoomin" title="Zoom in">＋</button><span class="gsep"></span><button id="fit" title="Fit view: centre the whole graph at ≤100% zoom">Fit</button><button id="autolayout" title="Auto-layout: arrange agents in layers">Layout</button></div>
       <svg id="minimap" preserveAspectRatio="xMidYMid meet"></svg>
@@ -116,6 +113,7 @@
 <script src="../src/graph-view.js"></script>
 <script src="../src/chat.js"></script>
 <script src="../src/subagent-view.js"></script>
+<script src="../src/alerts.js"></script>
 <script src="app.js"></script>
 <div id="ctxmenu" class="ctxmenu hidden"></div>
 </body></html>
