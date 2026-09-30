@@ -1696,7 +1696,7 @@ class Orchestrator extends EventEmitter {
       const sessKey = `${node.id}:${meta.runtime}`;
       let resume = (task.sessions && task.sessions[sessKey]) || (m.continueSession ? this.lastSession(node.id, meta.runtime) : null);
       this.log(node.id, 'system', `▶ ${node.name} starts "${task.title}" in ${cwd} [mode=${m.mode}${resume ? ', resume ' + resume : ''}]`);
-      let code = 1; let judge = null; let i = 0; let reason = ''; let human = null; let recover = false; let humanAtts = []; let freshTried = false;
+      let code = 1; let judge = null; let i = 0; let reason = ''; let human = null; let recover = false; let humanAtts = []; let freshTried = false; let stderr = '';
       a.stopRequested = false; a.pendingHuman = [];
       for (;;) {
         // The run was killed for a self-update restart (haltProcs): no further iterations, human
@@ -1716,7 +1716,7 @@ class Orchestrator extends EventEmitter {
         if (i > 0) this.log(node.id, 'system', `↻ ${node.name} iteration ${i + 1} (${m.mode})`);
         const usedResume = !!(args && resume);
         const r = await this.spawnRun(node, args, cwd, env, settings, { ...meta, iteration: i + 1, resumedFrom: usedResume ? resume : null });
-        code = r.code; i++; human = null; recover = false; humanAtts = [];
+        code = r.code; stderr = r.stderr || ''; i++; human = null; recover = false; humanAtts = [];
         if (code !== 0) this.noteRuntimeFailure(node.id, meta.runtime, r, task.id);
         else this._rtFailures.delete(meta.runtime); // real progress resets the streak
         if (r.sessionId) {
@@ -1821,7 +1821,9 @@ class Orchestrator extends EventEmitter {
           if (priorCrashes >= 2) {
             const g = gate('review'); g.parkedForHuman = true;
             this.store.updateTask(task.id, g);
-            this.store.commentTask(task.id, 'orchestrator', `crashed: exit code ${code} after ${i} iteration(s) (${reason}); ${priorCrashes + 1} crashes — parked for a human instead of re-queuing.`);
+            const tail = FQ.redactError(stderr) || `exit ${code}, no stderr`;
+            this.store.commentTask(task.id, 'orchestrator', `crashed: exit code ${code} after ${i} iteration(s) (${reason}); ${priorCrashes + 1} crashes — parked for a human instead of re-queuing.\nstderr tail: ${tail}`);
+            this.alertCrashPark(node, task, priorCrashes + 1, tail);
           } else {
             this.store.updateTask(task.id, { status: 'todo' });
             this.store.commentTask(task.id, 'orchestrator', `crashed: exit code ${code} after ${i} iteration(s) (${reason}); back to todo.`);
@@ -1860,6 +1862,26 @@ class Orchestrator extends EventEmitter {
     if (okRuntime && this.running && !this.userStopped) { try { this.autoResumeStuck(okRuntime, 'run finished ok'); } catch {} }
     setImmediate(() => this.tick());
     setImmediate(() => this.tick());
+  }
+
+  // Crash cap alert (t_01d6ad04): the 3-crash park used to happen in silence — the comment sat on
+  // the task until someone happened to open the board. Tell the PM (or the agent's lead) with the
+  // stderr tail; a team with neither asks the human directly — without a taskId, so the parked
+  // review state is untouched (an askHuman WITH one would flip the task to in_progress on answer,
+  // where dispatch would never pick it up again).
+  alertCrashPark(node, task, crashes, tail) {
+    const team = this.store.getTeam();
+    const lead = incoming(team, node.id, ['assign']).map((id) => team.nodes.find((n) => n.id === id)).find((n) => n && n.id !== node.id);
+    const pm = team.nodes.find((n) => n.role === 'PM' && n.id !== node.id);
+    const to = pm || lead;
+    const why = `"${task.title}" (id=${task.id}) crashed ${crashes} times and is parked for a human. stderr tail: ${tail}`;
+    if (to) {
+      this.store.sendMessage({ from: 'system', to: to.id, text: why });
+      this.log(node.id, 'system', `⚠ "${task.title}" parked after ${crashes} crashes — alerted ${to.name}`);
+    } else {
+      try { this.store.askHuman({ nodeId: node.id, question: why, choices: ['retry', 'reassign', 'park'] }); } catch {}
+      this.log(node.id, 'system', `⚠ "${task.title}" parked after ${crashes} crashes — no PM/lead on the team, asked the human`);
+    }
   }
 
   // A run on `runtime` exited non-zero: log the real (redacted) error tail, classify, and maybe
