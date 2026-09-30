@@ -57,7 +57,7 @@ function fakeNpm(opts = {}) {
 }
 
 // Watcher with fake deps and instant timing. `agents` counts down how many draining polls wait for.
-function makeWatcher({ store = fakeStore(), git, npm, npmDir, agents = 0, wasRunning = false, relaunch, sleep, haltProcs, drainTimeoutMs } = {}) {
+function makeWatcher({ store = fakeStore(), git, npm, npmDir, agents = 0, wasRunning = false, relaunch, sleep, haltProcs, drainTimeoutMs, testRun, testTimeoutMs } = {}) {
   const npmF = npm || fakeNpm();
   const gitF = git || fakeGit();
   let ticks = 0;
@@ -70,7 +70,7 @@ function makeWatcher({ store = fakeStore(), git, npm, npmDir, agents = 0, wasRun
     runActive: () => wasRunning,
     sleep: sleep || (() => new Promise((r) => setTimeout(r, 1))),
     haltProcs: haltProcs || (() => Promise.resolve()),
-    drainTimeoutMs,
+    drainTimeoutMs, testRun, testTimeoutMs,
   });
   w.gitF = gitF; w.npmF = npmF;
   return w;
@@ -331,8 +331,163 @@ test('restartNow bypasses the guards', async () => {
   assert.strictEqual(w.relaunched, 1);
 });
 
+// ---- t_7426095a: never restart onto the commit that is already running ----
+// The incident boot launched on f83c8cd and scheduled f83c8cd -> f83c8cd ("21 changes" was a stale
+// pending count): the team was paused and the app froze on the test step for code already live.
+
+test('same-commit restart is skipped: repeated scheduled requests at the running sha are no-ops', async () => {
+  const git = fakeGit();
+  const w = makeWatcher({ git });
+  assert.strictEqual(w.bootSha, SHA1, 'the running sha is captured from git at watcher creation');
+  assert.strictEqual(w.status().bootSha, SHA1);
+  await drain(w); // baseline: learn the running sha
+  const pauses = [];
+  w.setPaused = (v) => pauses.push(v);
+  // Cato's acceptance: 3 merge "events" (here: forced requests) at the same sha -> 0 restarts.
+  for (let i = 0; i < 3; i++) {
+    w.restartScheduled('scheduled restart (now)');
+    await drain(w);
+    assert.strictEqual(w.phase, 'idle');
+  }
+  assert.ok(!w.relaunched, 'no restart onto the commit already running');
+  assert.ok(pauses.length === 0, 'the team is never paused for a no-op restart');
+  assert.ok(w.store.logs.some((l) => /nothing to restart onto/.test(l.text)), 'the skip is logged');
+  // One new sha -> exactly 1 restart.
+  git.setSha(SHA2); git.setOrigin(SHA2);
+  w.restartScheduled('scheduled restart (now)');
+  await drain(w);
+  assert.strictEqual(w.phase, 'restarting');
+  assert.strictEqual(w.relaunched, 1, 'a new sha still restarts');
+  assert.strictEqual(readRestartState(w.store.dir).fromSha, SHA1);
+});
+
+test('a stood-down scheduled restart releases the dispatch schedule (the orchestrator gate lifts)', async () => {
+  const { Store } = require('../src/store');
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'su-disarm-'));
+  const s = new Store(path.join(d, 'p'));
+  s.saveSettings({ autoRestart: true });
+  const git = fakeGit();
+  const w = new UpdateWatcher({
+    store: s, repoDir: '/repo', pollMs: 3.6e6, git, npm: fakeNpm(),
+    relaunch: () => { w.relaunched = (w.relaunched || 0) + 1; },
+  });
+  clearInterval(w._timer);
+  s.setRestartPending({ scheduledNow: true, count: 7 });
+  w.restartScheduled('scheduled restart (now)');
+  await new Promise((r) => setTimeout(r, 30));
+  assert.strictEqual(w.phase, 'idle');
+  assert.ok(!w.relaunched, 'nothing to restart onto');
+  const rp = s.restartPending();
+  assert.ok(rp && !rp.scheduledNow && !rp.afterTaskId && !rp.firedAt, 'the schedule is disarmed so the dispatch gate lifts with it');
+  assert.strictEqual(rp.count, 7, 'the pending count survives the stand-down');
+  assert.ok(s.readLogs().some((l) => /nothing to restart onto/.test(l.text)));
+  assert.ok(s.readLogs().some((l) => /released the dispatch schedule/.test(l.text)));
+});
+
+test('unknown running sha (boot capture failed): the same-commit skip stands down and the restart proceeds', async () => {
+  const git = fakeGit();
+  const w = makeWatcher({ git });
+  w.bootSha = null; // main.js captures the boot sha itself; a failed capture passes null
+  await drain(w);
+  w.restartScheduled('scheduled restart (now)');
+  await drain(w);
+  assert.strictEqual(w.phase, 'restarting', 'never skip on an unknown running sha — restart the old way');
+  assert.strictEqual(w.relaunched, 1);
+  assert.ok(w.store.logs.some((l) => /running sha unknown/.test(l.text)), 'the fallback is logged');
+});
+
+test('a drain that coalesces onto the running commit stands down before testing', async () => {
+  const git = fakeGit();
+  let releaseDrain;
+  const w = makeWatcher({ git, agents: 1, sleep: () => new Promise((r) => { releaseDrain = r; }) });
+  await drain(w); // baseline: seen/boot sha SHA1
+  git.setSha(SHA2); git.setOrigin(SHA2);
+  const p = w.tick();
+  await new Promise((r) => setImmediate(r)); // let the flow reach the drain
+  assert.strictEqual(w.phase, 'draining');
+  git.setSha(SHA1); git.setOrigin(SHA1); // while draining, HEAD lands back on the running sha
+  releaseDrain();
+  await p;
+  assert.strictEqual(w.phase, 'idle');
+  assert.ok(!w.relaunched, 'the same-commit coalesce never relaunches');
+  assert.strictEqual(w.status().lastError, null, 'a stand-down is not an error');
+  assert.ok(w.store.logs.some((l) => /standing down — no restart/.test(l.text)));
+  assert.ok(!w.npmF.calls.some(([a]) => a === 'test'), 'the test step never runs for a same-commit target');
+});
+
+test('a same-commit request_self_update is consumed politely without a flow', async () => {
+  // A PM request at the running sha: consumed politely, no restart, no defer.
+  const git = fakeGit();
+  const w = makeWatcher({ git });
+  await drain(w);
+  fs.writeFileSync(requestFile(w.store.dir), JSON.stringify({ reason: 'PM asked again', from: 'n_pm' }));
+  await drain(w);
+  assert.strictEqual(w.phase, 'idle');
+  assert.ok(!w.relaunched);
+  assert.ok(!fs.existsSync(requestFile(w.store.dir)), 'the request is consumed');
+  assert.strictEqual(w.status().deferredTo, null, 'nothing is parked for retry — there is nothing to apply');
+});
+
+test('restart test step timeout: hard cap fails the restart, cleans up and resumes dispatch', async () => {
+  const git = fakeGit();
+  const pauses = [];
+  const w = makeWatcher({
+    git, testTimeoutMs: 5 * 60 * 1000,
+    testRun: async () => ({ code: 1, out: 'suite stalled here', timedOut: true }),
+  });
+  w.setPaused = (v) => pauses.push(v);
+  await drain(w);
+  git.setSha(SHA2); git.setOrigin(SHA2);
+  await drain(w);
+  assert.strictEqual(w.phase, 'idle', 'the timed-out restart aborted back to idle');
+  assert.ok(!w.relaunched);
+  assert.match(w.status().lastError, /test step timed out after 5min/);
+  assert.match(readHistory(w.store.dir).slice(-1)[0].result, /test step timed out/);
+  assert.deepStrictEqual(pauses, [true, true, true, false], 'dispatch paused through pending/draining/testing, resumed by the abort');
+  assert.ok(git.calls.some((c) => c.startsWith('worktree remove')), 'the throwaway test worktree is cleaned up even on timeout');
+});
+
+test('defaultTestRun: a hung suite is killed with its whole process group at the deadline', async () => {
+  const { defaultTestRun } = require('../src/self-update');
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'su-testrun-'));
+  // Fake "npm test": records its own pid and a background child's, then outlives any sane cap.
+  const slow = path.join(d, 'slow.sh');
+  fs.writeFileSync(slow, '#!/bin/sh\necho $$ > "' + slow + '.pids"\nsleep 60 &\necho $! >> "' + slow + '.pids"\nwait\n');
+  fs.chmodSync(slow, 0o755);
+  const t0 = Date.now();
+  // Under full-suite load the OS can take a beat to exec the script; if the cap fired before the
+  // script even started (no pids recorded) run it once more — the mechanics under test (timedOut
+  // flag + group kill) are deterministic once the process exists.
+  const readPids = () => { try { return fs.readFileSync(slow + '.pids', 'utf8').trim().split('\n').map(Number); } catch { return null; } };
+  let r = await defaultTestRun([], d, 800, slow);
+  let pids = readPids();
+  if (!pids) {
+    r = await defaultTestRun([], d, 800, slow);
+    pids = readPids();
+  }
+  assert.strictEqual(r.timedOut, true, 'the step reports the timeout');
+  assert.ok(Date.now() - t0 < 20 * 1000, 'the cap fired, not the 60s fake suite');
+  await new Promise((res) => setTimeout(res, 200));
+  assert.ok(pids, 'the fake suite recorded its pids');
+  for (const pid of pids) {
+    let alive = true;
+    try { process.kill(pid, 0); } catch { alive = false; }
+    assert.ok(!alive, `group member ${pid} did not survive the group kill`);
+  }
+  // Happy path: a fast fake completes normally, no timedOut marker.
+  const fast = path.join(d, 'fast.sh');
+  fs.writeFileSync(fast, '#!/bin/sh\nexit 0\n');
+  fs.chmodSync(fast, 0o755);
+  const ok = await defaultTestRun([], d, 8000, fast);
+  assert.strictEqual(ok.code, 0);
+  assert.ok(!ok.timedOut);
+});
+
 test('request_self_update file is consumed and triggers the flow', async () => {
-  const w = makeWatcher({ git: fakeGit() });
+  const git = fakeGit();
+  const w = makeWatcher({ git });
+  await drain(w); // baseline: learn the running sha
+  git.setSha(SHA2); git.setOrigin(SHA2); // a request alone is not enough since t_7426095a: there must be code to restart onto
   fs.writeFileSync(requestFile(w.store.dir), JSON.stringify({ reason: 'PM asked for it', from: 'n_pm' }));
   await drain(w);
   assert.strictEqual(w.phase, 'restarting');

@@ -18,6 +18,15 @@ const { applyAnsweredChange } = require('./team-answers');
 const { introspectRuntime: runIntrospectRuntime } = require('./introspector');
 // The app repo (main checkout): what the UpdateWatcher polls and fast-forwards.
 const APP_ROOT = path.join(__dirname, '..', '..');
+// The commit this app process launched on (t_7426095a): the self-update same-commit skip compares
+// the restart target against it. Captured once here — before any watcher/orchestrator exists, so
+// no auto-merge can have landed yet. Null (git failed) makes the watcher fall back to restarting.
+const BOOT_SHA = (() => {
+  try {
+    const r = require('child_process').spawnSync('git', ['rev-parse', 'HEAD'], { cwd: APP_ROOT, encoding: 'utf8' });
+    return r.status === 0 ? String(r.stdout || '').trim() || null : null;
+  } catch { return null; }
+})();
 // Self-update (auto-restart on new merged code) is a developer/dogfood feature: only unpackaged
 // runs (electron .) get it. A packaged build — real users — never starts a watcher and shows no
 // update UI; AGENTS_SQUAD_DEV=1 opts a packaged build back into dogfood mode, =0 forces it off
@@ -100,6 +109,7 @@ function watcherFor(pid) {
     w = new SU.UpdateWatcher({
       // git runs at the repo root; npm (build/test) in the package dir (app/).
       store, repoDir: APP_ROOT, npmDir: path.join(__dirname, '..'),
+      bootSha: BOOT_SHA,
       relaunch: relaunchApp,
       procCount: () => (orchs.get(pid) || { procs: new Map() }).procs.size,
       runActive: () => (orchs.get(pid) || {}).running || false,

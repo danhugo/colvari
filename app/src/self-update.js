@@ -6,11 +6,14 @@
 // drainCuts marker survives the relaunch), and a stopped task resumes from its persisted session
 // after the restart, so one long run cannot freeze the whole team's dispatch indefinitely) ->
 // testing (npm test in a throwaway worktree at the new sha so a bad checkout never touches the live
-// tree) -> restarting (persist restart-state, relaunch). Any failure aborts back to idle and logs the
-// reason. On boot, bootResume() resumes a Run interrupted by a restart, or rolls back to the previous
-// sha and disables auto-restart after repeated boot failures. All git/npm/relaunch steps are
-// injectable for tests.
-const { spawnSync } = require('child_process');
+// tree; the step runs in its own process group with a hard timeout — a hung run kills the group,
+// fails the restart and resumes dispatch instead of freezing the app) -> restarting (persist
+// restart-state, relaunch). A restart whose target equals the commit the app process is already
+// running is skipped entirely: no code change, no team freeze. Any failure aborts back to idle and
+// logs the reason. On boot, bootResume() resumes a Run interrupted by a restart, or rolls back to
+// the previous sha and disables auto-restart after repeated boot failures. All git/npm/relaunch
+// steps are injectable for tests.
+const { spawn, spawnSync } = require('child_process');
 const { EventEmitter } = require('events');
 const fs = require('fs');
 const os = require('os');
@@ -49,6 +52,35 @@ function defaultNpm(repoDir) {
   };
 }
 
+// Hard cap for the restart test step: a hung suite (wake.test.js once stalled 8.5 min against the
+// live app) must fail the restart, not freeze the team forever.
+const TEST_TIMEOUT_MS = 10 * 60 * 1000;
+
+// The restart test step: `npm test` in its own process group with a hard timeout. The old
+// spawnSync blocked the app's main thread for the whole suite and had no ceiling; now the app
+// stays responsive and, past the deadline, the whole group (npm -> node --test -> per-file
+// children) is SIGKILLed so nothing outlives the failed step. Resolves {code, out, timedOut?}.
+// (bin defaults to npm; the fourth parameter exists so tests can drive a fake runner.)
+function defaultTestRun(args, cwd, timeoutMs, bin = 'npm') {
+  return new Promise((resolve) => {
+    const child = spawn(bin, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+    let out = ''; let killed = false; let settled = false;
+    const finish = (r) => { if (settled) return; settled = true; clearTimeout(timer); resolve(r); };
+    const timer = setTimeout(() => {
+      killed = true;
+      try { process.kill(-child.pid, 'SIGKILL'); } catch {}
+      try { child.kill('SIGKILL'); } catch {}
+    }, timeoutMs);
+    const cap = (d) => { out = (out + d).slice(-65536); };
+    child.stdout.on('data', cap);
+    child.stderr.on('data', cap);
+    child.on('error', (e) => finish({ code: 1, out: out + '\n' + ((e && e.message) || e) }));
+    child.on('close', (code) => finish(killed
+      ? { code: code == null ? 1 : code, out, timedOut: true }
+      : { code: code == null ? 1 : code, out }));
+  });
+}
+
 class UpdateWatcher extends EventEmitter {
   constructor(opts = {}) {
     super();
@@ -64,6 +96,17 @@ class UpdateWatcher extends EventEmitter {
     this.npm = opts.npm || defaultNpm(this.npmDir);
     // Lockfile/worktree paths are repo-relative; npm's lives under the package dir.
     this.rel = path.relative(this.repoDir, this.npmDir) || '.';
+    // Test step runner + its hard cap. An injected npm (tests) keeps the sync {code, out}
+    // signature and runs without the process-group treatment; defaultTestRun is the real thing.
+    this._injectedNpm = opts.npm != null;
+    this.testTimeoutMs = opts.testTimeoutMs ?? TEST_TIMEOUT_MS;
+    this.testRun = opts.testRun
+      || ((cwd) => (this._injectedNpm ? Promise.resolve(this.npm(['test'], cwd)) : defaultTestRun(['test'], cwd, this.testTimeoutMs)));
+    // The commit this app process is actually running (the sha it launched on, captured by main.js
+    // before any watcher exists). A restart targeting it is a no-op and is skipped; null (git
+    // failed at boot) falls back to the old restart-anyway behavior — never skip on unknown state.
+    this.bootSha = opts.bootSha !== undefined ? opts.bootSha
+      : (() => { const r = this.git(['rev-parse', 'HEAD']); return r.code === 0 ? r.out.trim() || null : null; })();
     this.relaunch = opts.relaunch || (() => { const { app } = require('electron'); app.relaunch(); app.exit(0); });
     this.procCount = opts.procCount || (() => 0);
     this.runActive = opts.runActive || (() => false);
@@ -136,13 +179,26 @@ class UpdateWatcher extends EventEmitter {
       waitingOn: this.waitingOn, lastError: this.lastError, lastCheckAt: this.lastCheckAt,
       drainEndsAt: this.drainEndsAt, drainTimeoutMin: this.phase === 'draining' && isFinite(this.drainMs()) ? this.drainMs() / 60000 : null,
       lastSeenSha: this._seenSha, deferredTo: this._deferred ? this._deferred.sha : null,
-      branch: this.baseBranch(), autoRestart: this.autoRestart(),
+      branch: this.baseBranch(), autoRestart: this.autoRestart(), bootSha: this.bootSha, testTimeoutMs: this.testTimeoutMs,
       lastRestartAt: this.lastRestartAt || null, restartsLastHour: this.restartsLastHour(),
       history: readHistory(this.store.dir).slice(-10).reverse(),
     };
   }
   emitStatus() { this.emit('status', this.status()); }
   setPhase(phase) { this.phase = phase; this.setPaused(phase !== 'idle'); this.emitStatus(); }
+  // A stand-down (nothing to restart onto) never relaunches, but the orchestrator holds its
+  // dispatch gate until the relaunch — lift it here by disarming any armed/fired schedule, the
+  // way cancelRestart does (the pending count is kept). Best-effort: test stores without restart
+  // state are skipped.
+  _disarmScheduleIfAny() {
+    try {
+      const rp = this.store.restartPending && this.store.restartPending();
+      if (rp && (rp.scheduledNow || rp.afterTaskId || rp.firedAt)) {
+        this.store.setRestartPending({ scheduledNow: false, afterTaskId: null, firedAt: null, firedCount: null });
+        this._log('system', 'self-update: stood-down restart released the dispatch schedule (the pending count stays).');
+      }
+    } catch {}
+  }
   _log(kind, text) {
     const l = { nodeId: null, kind, text, at: this.now(), taskId: null, task: null, level: TL.levelOf(kind) };
     try { this.store.appendLog(l); } catch {}
@@ -195,6 +251,18 @@ class UpdateWatcher extends EventEmitter {
     this._seenSha = s.to;
     if (!isNew && !keepDefer && !req && !force) { this.emitStatus(); return; }
     const reason = reasonOverride || (req && req.reason) || (keepDefer && this._deferred.reason) || `new commits on ${this.baseBranch()}`;
+    // Never restart onto the commit this process is already running (t_7426095a): the incident
+    // boot scheduled f83c8cd -> f83c8cd ("21 changes" was a stale pending count), paused the
+    // team and froze on the test step for code that was already live. Unknown boot sha: fall
+    // through and restart the old way.
+    if (this.bootSha && s.to === this.bootSha) {
+      this._deferred = null;
+      this._log('system', `self-update: ${reason} skipped — target ${s.to.slice(0, 7)} is the commit already running; nothing to restart onto.`);
+      this._disarmScheduleIfAny();
+      this.emitStatus();
+      return;
+    }
+    if (!this.bootSha && (req || force)) this._log('system', `self-update: ${reason} — running sha unknown (boot capture failed); the same-commit skip cannot apply, restarting anyway.`);
     if (!this.autoRestart() && !force) {
       if (req) this._log('system', `self-update requested (${reason}) but auto-restart is off; ignoring.`);
       this.emitStatus(); return;
@@ -236,6 +304,15 @@ class UpdateWatcher extends EventEmitter {
     };
     try {
       this._busy = true;
+      // Belt for direct _flow callers / a bootSha learned late: never drain the team to restart
+      // onto the commit that is already running (t_7426095a).
+      if (this.bootSha && String(to) === String(this.bootSha)) {
+        this._log('system', `self-update: target ${String(to).slice(0, 7)} is the commit already running — nothing to restart onto; standing down.`);
+        this._busy = false;
+        this._disarmScheduleIfAny();
+        this.setPhase('idle');
+        return;
+      }
       this.setPhase('pending');
       // Fail fast, before pausing anyone: if the main checkout is dirty (a dev mid-edit) the update
       // is going to abort, and better it costs the team nothing. Re-checked after the drain, since
@@ -283,6 +360,16 @@ class UpdateWatcher extends EventEmitter {
         this._log('system', `self-update: newer commits landed during the drain; coalescing this restart ${String(to).slice(0, 7)} -> ${String(latest.to).slice(0, 7)}.`);
         to = latest.to; this.toSha = to; this._seenSha = to;
       }
+      // A coalesce (or a force-push back) can land the target on the running commit after the
+      // freeze was already paid: still nothing to restart onto — stand down instead of relaunching
+      // the same code.
+      if (this.bootSha && String(to) === String(this.bootSha)) {
+        this._log('system', `self-update: coalesced target is the running commit ${String(to).slice(0, 7)}; standing down — no restart.`);
+        this._busy = false;
+        this._disarmScheduleIfAny();
+        this.setPhase('idle');
+        return;
+      }
       const dirty = this.git(['status', '--porcelain']);
       if (dirty.code !== 0 || dirty.out.trim()) return abort('main checkout has uncommitted changes; refusing to fast-forward');
       if (to !== from) {
@@ -304,8 +391,12 @@ class UpdateWatcher extends EventEmitter {
       if (wadd.code !== 0) { try { fs.rmSync(wt, { recursive: true, force: true }); } catch {} return abort('could not create test worktree: ' + wadd.out.slice(0, 300)); }
       try {
         try { fs.symlinkSync(path.join(this.npmDir, 'node_modules'), path.join(wt, this.rel, 'node_modules'), 'dir'); } catch {}
-        const t = this.npm(['test'], path.join(wt, this.rel));
-        if (t.code !== 0) return abort('tests failed on new code: ' + t.out.slice(-500));
+        const t = await this.testRun(path.join(wt, this.rel));
+        if (t.timedOut) {
+          const tail = String(t.out || '').trim().slice(-300);
+          return abort(`test step timed out after ${Math.round(this.testTimeoutMs / 60000)}min; killed its process group${tail ? ` — output tail: ${tail}` : ''}`);
+        }
+        if (t.code !== 0) return abort('tests failed on new code: ' + String(t.out || '').slice(-500));
       } finally {
         try { fs.unlinkSync(path.join(wt, this.rel, 'node_modules')); } catch {}
         this.git(['worktree', 'remove', '--force', wt]);
@@ -358,4 +449,4 @@ function markBootOk(store) {
   if (st && st.phase === 'restarting') writeRestartState(store.dir, { ...st, phase: 'idle' });
 }
 
-module.exports = { UpdateWatcher, bootResume, markBootOk, defaultGit, defaultNpm, requestFile, readRestartState, writeRestartState, clearRestartState, readHistory, appendHistory };
+module.exports = { UpdateWatcher, bootResume, markBootOk, defaultGit, defaultNpm, defaultTestRun, TEST_TIMEOUT_MS, requestFile, readRestartState, writeRestartState, clearRestartState, readHistory, appendHistory };

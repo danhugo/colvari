@@ -119,7 +119,7 @@ test('qa: the dispatch pause is bounded — past the drain grace the restart pro
   const relaunches = []; let halts = 0;
   const w = new UpdateWatcher({
     store: watcherStore(path.join(d, 'su')), repoDir: d, pollMs: 3.6e6,
-    git: fakeGit(), npm: fakeNpm(),
+    git: fakeGit({ origin: SHA2 }), npm: fakeNpm(),
     relaunch: () => relaunches.push(1),
     procCount: () => 1, // a run that never finishes
     setPaused: () => {},
@@ -280,13 +280,14 @@ test('qa: an anchor still in review blocks the fire; completing the anchor fires
 
 // ---- watcher fakes (same shape as test/restart.test.js) ----
 const SHA1 = 'a'.repeat(40);
-function fakeGit() {
+const SHA2 = 'b'.repeat(40); // origin ahead of local: a schedule has real code to restart onto (t_7426095a)
+function fakeGit(opts = {}) {
   return (args) => {
     const a = args.join(' ');
     if (a === 'rev-parse --abbrev-ref HEAD') return { code: 0, out: 'master' };
     if (a === 'rev-parse HEAD') return { code: 0, out: SHA1 };
     if (a.startsWith('fetch')) return { code: 0, out: '' };
-    if (a === 'rev-parse origin/master') return { code: 0, out: SHA1 };
+    if (a === 'rev-parse origin/master') return { code: 0, out: opts.origin || SHA1 };
     if (a === 'status --porcelain') return { code: 0, out: '' };
     if (a.startsWith('diff --name-only')) return { code: 0, out: '' };
     if (a.startsWith('worktree')) return { code: 0, out: '' };
