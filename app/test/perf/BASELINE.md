@@ -58,6 +58,36 @@ Remaining hot spots for the next gate:
   fixed click coordinates), not card render cost. Harness v2 should re-query card rects
   before each click; tab numbers are unaffected.
 
+## Formal full-journey gate: `6710364` → `fe9f84c` (tracks 1+2+3+sweep guard — 2026-10-01, t_4382031b)
+
+4 interleaved ab-gate pairs (base, track, base, track…), 8 click rounds per run, tab
+switches gated. Ambient loadavg1m swung 4.4 → 33 across the session (Flux's merge-gate
+npm test ran concurrently) — the every-pair rule held anyway, with the smallest margin
+still 1.77×. Raw: `results/track23-fe9f84c/` (gate-report.json/md + 8 run dirs),
+pooled track side in `results/track23-fe9f84c.json`.
+
+| pair | base p50/p95 | track p50/p95 | verdict |
+|---|---:|---:|---|
+| 1 | 72.0 / 121.6 | 31.5 / 68.6 | win |
+| 2 | 93.4 / 201.8 | 38.9 / 107.7 | win |
+| 3 | 72.8 / 189.4 | 32.6 / 63.3 | win |
+| 4 | 79.3 / 165.2 | 33.7 / 64.9 | win |
+
+Pooled: base p50 78.6 / p95 183.7 (n=224) · track p50 33.4 / p95 85.8 (n=224; need
+≤ 146.96). **Gate verdict: PASS — 4/4 pairs, pooled p95 −53%, p50 2.35×.**
+
+Track-side solo protocol numbers (the 4 track runs pooled, v2 quiet-paint): **p50 33.4 /
+p95 85.8 / p99 120.6 / max 178.8 — both targets PASS under a load-swingy session.**
+Per-tab pooled p95: board 68.6 · chat 66.9 · team 71.8 · usage 58.2 · overview 43.0 ·
+wiki 45.3 · **obs 137.9 (max 178.8 — worst tab again; settles poorly, but now the laggard
+in two independent sessions)**. Cards (report-only): pooled p95 129.1, max 137.3.
+
+Mechanism medians across the 4 track runs: `getAll` p50 3.71 ms (was 124), IPC 5.5/s
+(was 29–37/s — the delta channel replaced per-refresh full re-pulls), renderAll p50
+0.5 ms, refresh p50 15.4 ms, long tasks 14–26 per window, log pushes 22.8/s. The
+`unsettledQuiet` bucket (10–28 per run) is the known validity gap — Flux's harness fix
+(t_f468b3a9) lands the corrected gate validity check.
+
 ---
 
 ## Historical baseline: `8b44f143f` (2026-09-30, t_f02c2572, single run)
