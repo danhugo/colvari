@@ -777,9 +777,9 @@ header > strong.brand { display:flex; align-items:center; gap:6px; font-weight:7
 
 /* Board: one horizontal row, per-column vertical scroll */
 #columns { display:flex; gap:8px; overflow-x:auto; overflow-y:hidden; min-height:0; }
-#columns .col { flex:1 1 0; min-width:190px; overflow-y:auto; min-height:0; }
+#columns .col { flex:1 1 0; min-width:160px; overflow-y:auto; min-height:0; scrollbar-gutter:stable; } /* every column reserves the scrollbar lane, so the scrolling Done column is not narrower */
 #columns .col h3 { position:sticky; top:-8px; background:inherit; z-index:1; padding:2px 0; }
-#columns .col.folded { flex:0 0 120px; min-width:120px; }
+#columns .col.folded { flex:1 1 0; min-width:160px; } /* same width as every other column, open or folded */
 #columns .col.folded::after { content:none !important; }
 #columns .col.merge_conflict h3 { color:var(--danger); }
 #columns .col.merge_conflict:has(.card) { border:1px solid var(--danger); background:color-mix(in srgb, var(--danger) 6%, var(--bg-sidebar)); }

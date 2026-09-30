@@ -1725,7 +1725,7 @@ const ago = (ts) => { if (!ts) return ''; const sec = (Date.now() - new Date(ts)
 // activation (sig reset in the tab-click handler).
 let boardSig = null, logSig = null, obsSig = null, usageSig = null, usageGroup = 0;
 const agentStamp = () => Object.entries(S.orch.agents || {}).map(([k, a]) => `${k}${a.status}${a.taskId || ''}${a.iteration || 0}${a.stall ? '!' : ''}${a.run && a.run.stall ? '!' : ''}`).join();
-let showAllDone = false; let doneOpen = false;
+let showAllDone = false; let doneOpen = true; // open by default: the 20 most recent done tasks show without a click
 // Done column: the 20 most recently updated, but a selected card is never allowed to vanish under the fold (t_db029901).
 const doneCards = (list) => { const all = list.filter((t) => t.status === 'done').slice().sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || ''))); if (showAllDone) return all.slice().sort(byPriorityThenTitle); const top = all.slice(0, 20); const s = all.find((x) => x.id === sel.task); if (s && !top.includes(s)) { top.pop(); top.push(s); } return top; };
 function renderBoard() {
