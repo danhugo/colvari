@@ -16,6 +16,9 @@ const { Orchestrator } = require('../src/orchestrator');
 // payload and exits with a chosen code. "Fast" vs "slow" failures are timed against FAIL.FAIL.FAST_MS,
 // which each test lowers for its own duration — the exported constant object must be read at
 // failure time (like the orchestrator's WAKE/STALL), not captured at require time.
+// Tests that REQUIRE a streak trip give FAST_MS wide headroom (10s): under full-suite load a
+// fake-CLI spawn can exceed any tighter wall-clock threshold and be misclassified slow, so the
+// breaker never reaches STREAK_MAX and the trip never happens.
 
 const FAIL = require('../src/failures'); // classifyFailure(text) -> 'auth'|'model'|null, redactError(text) -> string, FAIL = { FAST_MS, STREAK_MAX, TAIL_CAP }
 
@@ -214,7 +217,7 @@ test('one fast unclassified failure fails open: no breaker, no ask, dispatch con
   assert.ok(store.getTask(t1.id).comments.length > 0);
 });
 
-test('three fast unclassified failures with the same signature trip the breaker (streak rule)', () => withFastMs(1000, async () => {
+test('three fast unclassified failures with the same signature trip the breaker (streak rule)', () => withFastMs(10000, async () => {
   const { store, orch, mk, startManual } = setup({ cli: { stderr: GENERIC_A, code: 1 } });
   const node = mk('Dev', 1);
   const tasks = [1, 2, 3, 4].map((i) => store.createTask({ title: 'flaky ' + i, assignee: node.id }));
@@ -231,7 +234,7 @@ test('three fast unclassified failures with the same signature trip the breaker 
   await waitFor(() => store.readLogs(Infinity).some((l) => /ready but not dispatched/.test(l.text) && /unavailable/i.test(l.text)));
 }));
 
-test('the streak needs the third failure: dispatch continues through two', () => withFastMs(1000, async () => {
+test('the streak needs the third failure: dispatch continues through two', () => withFastMs(10000, async () => {
   const { store, orch, mk, startManual } = setup({ cli: { stderr: GENERIC_A, code: 1 } });
   const node = mk('Dev', 1);
   const t3 = [1, 2, 3].map((i) => store.createTask({ title: 'flaky ' + i, assignee: node.id }))[2];

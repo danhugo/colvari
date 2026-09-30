@@ -84,11 +84,17 @@ catch (e) { out.error = String((e && e.message) || e); finish(null, null); }
 if (child && child.pid) { try { fs.writeFileSync(cfg.pidFile, [child.pid, lstart(child.pid), cfg.cmdLine].join('\\t') + '\\n'); } catch {} }
 const bufs = { o: [], e: [] };
 let timer = null;
+let fired = false; // the hard deadline has passed: from here on, any close is a timeout death
+const SIG_BY_CODE = { 1: 'SIGHUP', 2: 'SIGINT', 3: 'SIGQUIT', 6: 'SIGABRT', 9: 'SIGKILL', 14: 'SIGALRM', 15: 'SIGTERM' };
 child.on('error', (e) => { if (timer) clearTimeout(timer); out.stdout = tail(bufs.o); out.stderr = tail(bufs.e); out.error = String((e && e.message) || e); finish(null, null); });
 child.stdout.on('data', (d) => bufs.o.push(d));
 child.stderr.on('data', (d) => bufs.e.push(d));
-if (cfg.timeoutMs > 0) timer = setTimeout(() => { try { process.kill(-child.pid, 'SIGTERM'); } catch {} setTimeout(() => { try { process.kill(-child.pid, 'SIGKILL'); } catch {} }, cfg.graceMs || 300); }, cfg.timeoutMs);
-child.on('close', (code, signal) => { if (timer) clearTimeout(timer); out.stdout = tail(bufs.o); out.stderr = tail(bufs.e); finish(code, signal); });
+// After the deadline the tree may die INDIRECTLY: an external reaper (observed on macOS 26 with
+// on-access AV: the suite's children get SIGKILLed ~TERM_GRACE after the group TERM) can leave
+// the direct child exiting normally with 128+N. That is still a timeout death — report the
+// encoded signal, never a bogus normal exit code.
+if (cfg.timeoutMs > 0) timer = setTimeout(() => { fired = true; try { process.kill(-child.pid, 'SIGTERM'); } catch {} setTimeout(() => { try { process.kill(-child.pid, 'SIGKILL'); } catch {} }, cfg.graceMs || 300); }, cfg.timeoutMs);
+child.on('close', (code, signal) => { if (timer) clearTimeout(timer); out.stdout = tail(bufs.o); out.stderr = tail(bufs.e); if (fired && code != null && code >= 128 + 1 && SIG_BY_CODE[code - 128]) { finish(null, SIG_BY_CODE[code - 128]); return; } finish(code, signal); });
 `;
 // The gate's spawns must never outlive the gate: the suite runs in its own group under the
 // watchdog, and on return — clean OR timed out — the recorded group is swept, so node --test's
