@@ -10,7 +10,7 @@ let P = { projects: [], templates: {} };
 let S = { allNodes: [], team: { nodes: [], edges: [] }, tasks: [], wiki: {}, settings: { rolePresets: [] }, messages: [], orch: { agents: {} }, config: { permissionModes: [], edgeTypes: ['assign'], boardTools: [], roles: [] } };
 const EDGE_DESC = { assign: 'can assign tasks to and message', message: 'can send messages to', review: 'is reviewed by' };
 const list = (v) => (Array.isArray(v) ? v : []).join('\n');
-let sel = { node: null, edge: null, task: null, page: null, logTeam: '' };
+let sel = { node: null, edge: null, task: null, page: null, logTeam: '', chatTeam: '', boardTeam: '' };
 let connectFrom = null, connectMode = false, wikiEdit = false;
 const logs = [];
 const logsLoaded = new Set(); // projects whose persisted logs.jsonl was merged into logs
@@ -376,7 +376,7 @@ function renderSidebar() {
   $('#teamlist').innerHTML = teams.map((t) => `<div data-tid="${t.id}" class="${t.id === ctx.t ? 'sel' : ''}"><i class="teamdot" style="background:var(--agent-${teamHue(t.id)})"></i>${esc(t.name)}</div>`).join('');
 }
 function switchTo(c) {
-  if (c.p !== ctx.p) { sel = { node: null, edge: null, task: null, page: null, logTeam: '' }; wikiEdit = false; $('#wk-title').value = ''; $('#wk-content').value = ''; }
+  if (c.p !== ctx.p) { sel = { node: null, edge: null, task: null, page: null, logTeam: '', chatTeam: '', boardTeam: '' }; wikiEdit = false; $('#wk-title').value = ''; $('#wk-content').value = ''; }
   else sel = { ...sel, node: null, edge: null };
   connectFrom = null; connectMode = false; $('#connect').classList.remove('on');
   ctx = c;
@@ -386,12 +386,16 @@ function switchTo(c) {
   if (lastV && c.t) { delete lastV.team; delete lastV.teams; }
   // The sidebar selection drives every team-scoped tab: sync the Logs tab's own team filter so
   // switching teams here is visible there too (the dropdown can still narrow it afterwards).
+  // Chat and Board follow the same rule (t_1158f757): their selects reset to the clicked team.
   if (c.t && sel.logTeam !== c.t) { sel.logTeam = c.t; $('#logfilter').value = ''; }
+  if (c.t && sel.chatTeam !== c.t) sel.chatTeam = c.t;
+  if (c.t && sel.boardTeam !== c.t) sel.boardTeam = c.t;
   // refresh() mutates ctx (ctx.t = s.teamId) and ctx IS c, so the "was this a project switch?"
   // intent must be captured before the await — c.t is unreliable by the time the .then runs.
   const projectSwitch = !c.t;
   refresh().then(() => {
     if (projectSwitch && sel.logTeam !== (ctx.t || '')) { sel.logTeam = ctx.t || ''; $('#logfilter').value = ''; } // follow the auto-picked team
+    if (projectSwitch) { sel.chatTeam = ctx.t || ''; sel.boardTeam = ctx.t || ''; }
     renderObs(); renderLog();
   });
 }
@@ -745,6 +749,21 @@ const agentStep = (id) => {
   const i = S.allNodes.filter((x) => x.teamId === n.teamId).findIndex((x) => x.id === id);
   return i < 0 ? 0 : i % 3;
 };
+// Team scoping (t_1158f757): one predicate shared by the Logs/Chat/Board team filters.
+// team = '' (All teams) passes everything; an id that is not a team node never passes a
+// real team — chat events get their own "no team anywhere stays visible" rule on top.
+const nodeTeamOf = (id) => { const n = S.allNodes.find((x) => x.id === id); return (n && n.teamId) || null; };
+const teamScoped = (team, id) => !team || nodeTeamOf(id) === team;
+const taskTeamOf = (tid) => { const t = S.tasks.find((x) => x.id === tid); return t ? nodeTeamOf(t.assignee) : null; };
+const teamNameOf = (tid) => (((S.project || {}).teams) || []).find((t) => t.id === tid);
+// Cross-team badge: small pill with the other team's name, tinted by its teamHue.
+const teamBadge = (tid) => { const tm = teamNameOf(tid); const name = tm ? tm.name : tid;
+  return `<span class="tbadge" data-testid="team-badge" data-team="${esc(tid)}" style="--tb:var(--agent-${teamHue(tid)})" title="${esc(name)}">${esc(name)}</span>`; };
+// Per-view team select (Chat + Board headers): options are rebuilt only when the team set
+// or the value changes, so the 1s render ticks never clobber an open dropdown.
+const fillTeamSelect = (el, val, teams) => { if (!el) return; const sig = teams.map((t) => t.id).join() + '|' + (val || '');
+  if (el.dataset.tsig === sig) return; el.dataset.tsig = sig;
+  el.innerHTML = '<option value="">All teams</option>' + teams.map((t) => `<option value="${t.id}">${esc(t.name)}</option>`).join(''); el.value = val || ''; };
 const agentVar = (id) => { const s = agentStep(id); return s ? `color-mix(in srgb, var(--agent-${agentColor(id)}) ${s === 1 ? 80 : 62}%, var(--agent-mix))` : `var(--agent-${agentColor(id)})`; };
 // Leads/PMs read as circles vs the member squircle (avatarHtml adds the class).
 const isLeadRole = (role) => /\b(pm|lead|manager|chief|director|head)\b/i.test(String(role || ''));
@@ -1543,8 +1562,10 @@ function renderIdle() {
   noteWakes();
   // The old "N agents idle" banner (.idlebanner) is gone (t_6674705d): idle is a normal state, and
   // presence is already visible here and as node colors. Only the wake bars + presence chips remain.
-  $('#presence').innerHTML = S.allNodes.map((n) => { const p = presence(n.id); const wk = wakeLabel(n.id); const wp = wk ? null : wakePending(n.id); const pt = wk || (wp ? pendingWakeText(wp) : ''); return `<span class="pchip ${p}${wk ? ' wake' : ''}" title="${esc(pt || n.role)}"><span class="pres ${p}"><i></i></span>${esc(n.name)} <span class="muted">${pt ? esc(clipText(pt, 52)) : p}</span></span>`; }).join('');
-  const wakes = S.allNodes.map((n) => ({ n, w: wakeRun(n.id) })).filter((x) => x.w);
+  // Both follow the board's team scope (t_1158f757).
+  const idleNodes = S.allNodes.filter((n) => teamScoped(sel.boardTeam, n.id));
+  $('#presence').innerHTML = idleNodes.map((n) => { const p = presence(n.id); const wk = wakeLabel(n.id); const wp = wk ? null : wakePending(n.id); const pt = wk || (wp ? pendingWakeText(wp) : ''); return `<span class="pchip ${p}${wk ? ' wake' : ''}" title="${esc(pt || n.role)}"><span class="pres ${p}"><i></i></span>${esc(n.name)} <span class="muted">${pt ? esc(clipText(pt, 52)) : p}</span></span>`; }).join('');
+  const wakes = idleNodes.map((n) => ({ n, w: wakeRun(n.id) })).filter((x) => x.w);
   const wb = $('#wakebar');
   if (wb) { wb.classList.toggle('hidden', !wakes.length);
     wb.innerHTML = wakes.map(({ n, w }) => `<div class="wakebar"><span class="pres busy"><i></i></span><b>${esc(n.name)}</b><span>Working — woken by message from ${esc(w.from)}: "${esc(w.excerpt)}"${w.queued ? ` <span class="muted">(+${w.queued} queued)</span>` : ''}</span><span class="spacer"></span>${w.taskId ? `<button class="linklike" data-waketask="${w.taskId}">${esc(taskTitle(w.taskId))} →</button>` : ''}</div>`).join('');
@@ -1568,17 +1589,21 @@ let boardSig = null, logSig = null, obsSig = null, usageSig = null, usageGroup =
 const agentStamp = () => Object.entries(S.orch.agents || {}).map(([k, a]) => `${k}${a.status}${a.taskId || ''}${a.iteration || 0}${a.stall ? '!' : ''}${a.run && a.run.stall ? '!' : ''}`).join();
 let showAllDone = false; let doneOpen = false;
 // Done column: the 20 most recently updated, but a selected card is never allowed to vanish under the fold (t_db029901).
-const doneCards = () => { const all = S.tasks.filter((t) => t.status === 'done').slice().sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || ''))); if (showAllDone) return all.slice().sort(byPriorityThenTitle); const top = all.slice(0, 20); const s = all.find((x) => x.id === sel.task); if (s && !top.includes(s)) { top.pop(); top.push(s); } return top; };
+const doneCards = (list) => { const all = list.filter((t) => t.status === 'done').slice().sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || ''))); if (showAllDone) return all.slice().sort(byPriorityThenTitle); const top = all.slice(0, 20); const s = all.find((x) => x.id === sel.task); if (s && !top.includes(s)) { top.pop(); top.push(s); } return top; };
 function renderBoard() {
   if (!$('#tab-board').classList.contains('active')) return;
-  const bkey = [S.v && S.v.board, sel.task, S.orch.running, Math.floor(Date.now() / 6e4), agentStamp()].join('|');
+  fillTeamSelect($('#board-team'), sel.boardTeam, (S.project && S.project.teams) || []);
+  const bkey = [S.v && S.v.board, sel.task, S.orch.running, Math.floor(Date.now() / 6e4), agentStamp(), sel.boardTeam || ''].join('|');
   if (bkey === boardSig) return; boardSig = bkey;
   const sa = $('#nt-assignee'); const cur = sa.value;
   sa.innerHTML = S.allNodes.map((n) => `<option value="${n.id}">${esc(n.name)} (${n.role})</option>`).join('') || '<option value="">(add agents first)</option>';
   if (cur) sa.value = cur;
   renderIdle();
-  $('#columns').innerHTML = ['todo', 'in_progress', 'waiting_for_human', 'review', 'merge_conflict', 'done'].map((st) => { const total = S.tasks.filter((t) => t.status === st).length; const fold = st === 'done' && !doneOpen; return `<div class="col ${st}${fold ? ' folded' : ''}"><h3 ${st === 'done' ? 'id="done-h" style="cursor:pointer" title="Toggle done"' : ''}>${st === 'done' ? (fold ? '▸ ' : '▾ ') : ''}${st === 'done' && !showAllDone && total > 20 ? `done 20/${total}` : `${st.replaceAll('_', ' ')} (${total})`}</h3>${st === 'todo' && !S.tasks.length ? '<div class="hint-first">Create a goal task, assign it to an agent (usually the PM), then press Run.</div>' : ''}${
-    (fold ? [] : st === 'done' ? doneCards() : S.tasks.filter((t) => t.status === st).slice().sort(byPriorityThenTitle)).map((t) => { const bl = openBlockers(t); const w = (S.orch.agents[t.assignee] || {});
+  // Team scope (t_1158f757): a team view lists tasks whose assignee is in it (unassigned are
+  // teamless and hide); All teams ('') lists everything. The detail panel stays global.
+  const tasks = S.tasks.filter((t) => teamScoped(sel.boardTeam, t.assignee));
+  $('#columns').innerHTML = ['todo', 'in_progress', 'waiting_for_human', 'review', 'merge_conflict', 'done'].map((st) => { const total = tasks.filter((t) => t.status === st).length; const fold = st === 'done' && !doneOpen; return `<div class="col ${st}${fold ? ' folded' : ''}"><h3 ${st === 'done' ? 'id="done-h" style="cursor:pointer" title="Toggle done"' : ''}>${st === 'done' ? (fold ? '▸ ' : '▾ ') : ''}${st === 'done' && !showAllDone && total > 20 ? `done 20/${total}` : `${st.replaceAll('_', ' ')} (${total})`}</h3>${st === 'todo' && !tasks.length ? `<div class="hint-first" data-testid="board-empty-team">${sel.boardTeam && S.tasks.length ? 'No tasks for this team.' : 'Create a goal task, assign it to an agent (usually the PM), then press Run.'}</div>` : ''}${
+    (fold ? [] : st === 'done' ? doneCards(tasks) : tasks.filter((t) => t.status === st).slice().sort(byPriorityThenTitle)).map((t) => { const bl = openBlockers(t); const w = (S.orch.agents[t.assignee] || {});
       // Worker state must match reality: an agent with a live run is busy — on THIS task (or an
       // unattributed wake run for it) reads "live", on another task reads "working elsewhere",
       // and only an assignee with no live process at all earns "No worker".
@@ -1589,7 +1614,9 @@ function renderBoard() {
       const busyOther = ip && busy && !live;
       const noWorker = ip && t.assignee && !busy;
       const ready = !bl.length && ['todo', 'backlog'].includes(t.status);
-      const tags = [live ? '<span class="tag live" title="live">live</span>' : '',
+      const cbt = sel.boardTeam ? nodeTeamOf(t.createdBy) : null; // cross-team: created by another team
+      const tags = [cbt && cbt !== sel.boardTeam ? teamBadge(cbt) : '',
+        live ? '<span class="tag live" title="live">live</span>' : '',
         busyOther ? `<span class="tag elsewhere" title="${esc(nodeName(t.assignee))} is working on ${esc(taskTitle(w.taskId))}">working elsewhere</span>` : '',
         noWorker ? `<span class="tag noworker" title="in_progress but no live agent process for ${esc(nodeName(t.assignee))}">No worker</span>` : '',
         stallTag(t),
@@ -1641,6 +1668,10 @@ function renderBoard() {
   renderBoard.last = t.id; renderLive();
   $('#td-del').onclick = async () => { if (confirm('Delete task?')) { await call('deleteTask', t.id); sel.task = null; refresh(); } };
 }
+// Board team scope (t_1158f757): one select at the start of the toolbar; index.html is out of
+// scope for this task so the control is injected here.
+document.querySelector('#tab-board .toolbar').insertAdjacentHTML('afterbegin', '<select id="board-team" data-testid="board-team-select" title="Scope the board to one team, or show all teams"></select>');
+$('#board-team').onchange = () => { sel.boardTeam = $('#board-team').value; boardSig = ''; renderBoard(); };
 $('#nt-add').onclick = async () => {
   const title = $('#nt-title').value.trim(); if (!title) return;
   const t = await call('createTask', { title, description: $('#nt-desc').value, assignee: $('#nt-assignee').value || null });
@@ -1697,7 +1728,7 @@ $('#wk-save').onclick = async () => { const t = $('#wk-title').value.trim(); if 
 $('#wk-del').onclick = async () => { $('#wk-more').open = false; if (sel.page && confirm(`Delete page "${sel.page}"? This can't be undone.`)) { await call('deleteWiki', sel.page); sel.page = null; $('#wk-title').value = ''; $('#wk-content').value = ''; refresh(); } };
 
 // ---------- observability ----------
-const logTeamNodes = () => sel.logTeam ? S.allNodes.filter((n) => n.teamId === sel.logTeam) : S.allNodes;
+const logTeamNodes = () => S.allNodes.filter((n) => teamScoped(sel.logTeam, n.id));
 const obsIdleOpen = new Set();
 function renderObs() {
   if (!$('#tab-obs').classList.contains('active')) return;
@@ -2490,6 +2521,21 @@ setInterval(renderOverview, 1000);
 
 // ---------- chat: #company room, task threads, working indicator, composer ----------
 const CH = { thread: null, key: '', mi: 0, asks: [] };
+// Chat team scope (t_1158f757): an event belongs to the selected team when its sender or
+// receiver does, or (one lookup) its task's assignee does — that covers human/orchestrator
+// authored comments and questions on this team's tasks. An event with no team node and no
+// task context is system-level and stays visible in every team view (Critic call).
+const chatInScope = (e) => { const st = sel.chatTeam; if (!st) return true;
+  const sides = [nodeTeamOf(e.who), nodeTeamOf(e.to)];
+  if (sides.includes(st)) return true;
+  if (e.taskId) { const tt = taskTeamOf(e.taskId); if (tt) return tt === st; }
+  return !sides.some(Boolean); };
+// Badge team for a cross-team event: the party NOT in the selected team (sender, then
+// receiver, then the task's assignee team); null when everything involved is in-team.
+const crossTeamOf = (e) => { const st = sel.chatTeam; if (!st) return null;
+  const a = nodeTeamOf(e.who); if (a && a !== st) return a;
+  const b = nodeTeamOf(e.to); if (b && b !== st) return b;
+  const tt = e.taskId ? taskTeamOf(e.taskId) : null; return tt && tt !== st ? tt : null; };
 const who = (id) => { const n = S.allNodes.find((x) => x.id === id); return n ? { name: n.name, role: n.role, color: agentVar(n.id), ini: Chat.initials(n.name), lead: isLeadRole(n.role) } : id === 'human' ? { name: 'You', role: '', color: 'transparent', ini: '', human: true } : { name: id || 'system', role: '', color: 'var(--bg-hover)', ini: '⚙', sys: true }; };
 function bubble(e) {
   const link = e.taskId && !CH.thread ? ` data-thread="${e.taskId}"` : ''; const tt = link ? taskTitle(e.taskId) : ''; const tl = link && !e._sameTask ? `<span class="tlink" title="${esc(tt)}">↳ ${esc(tt)}</span>` : '';
@@ -2510,10 +2556,10 @@ function bubble(e) {
   const ico = (p) => `<svg viewBox="0 0 24 24" aria-hidden="true">${p}</svg>`;
   const IC = { handoff: '<path d="M5 12h14M13 6l6 6-6 6"/>', message: '<path d="M4 6h16v12H4zM4 7l8 6 8-6"/>', comment: '<path d="M4 5h16v11H8l-4 4z"/>' };
   if (IC[e.type]) { const t = e.type === 'handoff' ? `assigned “${e.text}” to @${who(e.to).name}` : e.type === 'message' ? `@${who(e.to).name} ${e.text}` : e.text;
-    return `<div class="bubble evrow ${e.type}${link ? ' linked' : ''}"${link}>${ico(IC[e.type])}<span>${esc(t)}</span>${tl}${rep}</div>`; }
+    return `<div class="bubble evrow ${e.type}${link ? ' linked' : ''}"${link}>${ico(IC[e.type])}<span>${esc(t)}</span>${e._tb ? teamBadge(e._tb) : ''}${tl}${rep}</div>`; }
   const text = e.text;
   const attsHtml = Chat.attThumbs(e.atts);
-  return `<div class="bubble ${e.type}${link ? ' linked' : ''}"${link}>${chatMd(text)}${attsHtml}${tl}${rep}</div>`;
+  return `<div class="bubble ${e.type}${link ? ' linked' : ''}"${link}>${chatMd(text)}${attsHtml}${tl}${e._tb ? teamBadge(e._tb) : ''}${rep}</div>`;
 }
 // Agent messages are markdown: render the light subset (fences, inline code, bold, links, bullets,
 // headings) inside the pre-wrap bubble so real messages don't show raw ** and ` (t_h0a1c2e3).
@@ -2554,15 +2600,18 @@ $('#chat-room').addEventListener('scroll', () => { const room = $('#chat-room');
 let chatSig = null;
 function renderChat() {
   if (!$('#tab-chat.active')) return;
+  fillTeamSelect($('#chat-team'), sel.chatTeam, (S.project && S.project.teams) || []);
   const working = new Set(Object.keys(S.orch.agents || {}).filter((id) => S.orch.agents[id].status === 'working'));
   const L = projLogs();
-  const sig = Chat.feedKey({ projectId: ctx.p, thread: CH.thread, logs: L, tasks: S.tasks, messages: S.messages, inbox: S.inbox, nodes: S.allNodes, working, agents: S.orch.agents, runs: RUNS });
+  const sig = Chat.feedKey({ projectId: ctx.p, thread: CH.thread, logs: L, tasks: S.tasks, messages: S.messages, inbox: S.inbox, nodes: S.allNodes, working, agents: S.orch.agents, runs: RUNS }) + '|' + (sel.chatTeam || '');
   if (sig === chatSig) return;
   chatSig = sig;
-  const ev = Chat.roomEvents(L, S.tasks, S.messages, S.inbox, Chat.MAX, subRecOf); // capped to the last Chat.MAX (500) events
+  let ev = Chat.roomEvents(L, S.tasks, S.messages, S.inbox, Chat.MAX, subRecOf); // capped to the last Chat.MAX (500) events
+  if (sel.chatTeam) { ev = ev.filter(chatInScope); for (const e of ev) e._tb = crossTeamOf(e); } // team scope + cross-team badges (t_1158f757)
   CH.ev = ev;
   CH.asks = ev.filter((e) => e.type === 'question').map((e) => e.who);
-  $('#chat-typing').innerHTML = [...working].map((id) => { const wk = wakeLabel(id); return `<span class="typing"><span class="spin"></span>${esc(clipText(wk || `${who(id).name} is working`, 64))}<span class="dots"></span></span>`; }).join(' · ');
+  const workingT = sel.chatTeam ? new Set([...working].filter((id) => teamScoped(sel.chatTeam, id))) : working;
+  $('#chat-typing').innerHTML = [...workingT].map((id) => { const wk = wakeLabel(id); return `<span class="typing"><span class="spin"></span>${esc(clipText(wk || `${who(id).name} is working`, 64))}<span class="dots"></span></span>`; }).join(' · ');
   renderYourTurn(ev);
   const room = $('#chat-room'); const atBottom = room.scrollHeight - room.scrollTop - room.clientHeight < 40;
   const prevH = room.scrollHeight, prevTop = room.scrollTop;
@@ -2571,7 +2620,8 @@ function renderChat() {
   // count events newer than the previous tail instead.
   const delta = ev.filter((e) => e.at > (CH.evTailAt ?? -Infinity)).length;
   if (ev.length) CH.evTailAt = ev[ev.length - 1].at;
-  room.innerHTML = page.items.length ? (page.hidden ? `<button id="chat-older" class="olderbar linklike">↑ ${page.hidden} earlier message${page.hidden === 1 ? '' : 's'} — scroll up or click to load</button>` : '') + renderGroups(page.items, working)
+  room.innerHTML = page.items.length ? (page.hidden ? `<button id="chat-older" class="olderbar linklike">↑ ${page.hidden} earlier message${page.hidden === 1 ? '' : 's'} — scroll up or click to load</button>` : '') + renderGroups(page.items, workingT)
+    : sel.chatTeam ? '<p class="muted logempty" data-testid="chat-empty-team">No messages for this team.</p>'
     : S.team.nodes.length ? `<div class="cempty"><svg class="brandmark big" viewBox="0 0 32 32" aria-hidden="true"><path d="M23 9A10 10 0 1 0 23 23" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/><g fill="currentColor"><circle cx="23" cy="9" r="3.6"/><circle cx="6" cy="16" r="3.6"/><circle cx="23" cy="23" r="3.6"/></g></svg><b>#company is quiet</b>Type a goal below, or @mention an agent (e.g. <code>@${esc(S.team.nodes[0].name)} write hello.txt</code>).</div>` : '<div class="cempty"><svg class="brandmark big" viewBox="0 0 32 32" aria-hidden="true"><path d="M23 9A10 10 0 1 0 23 23" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/><g fill="currentColor"><circle cx="23" cy="9" r="3.6"/><circle cx="6" cy="16" r="3.6"/><circle cx="23" cy="23" r="3.6"/></g></svg><b>No team yet</b>Create your team in the Team tab (or use the first-run guide), then chat with it here.</div>';
   if (atBottom) { CH.win = Chat.PAGE; room.scrollTop = room.scrollHeight; CH.pendingNew = 0; }
   else { room.scrollTop = Chat.anchorScroll(prevTop, prevH, room.scrollHeight); CH.pendingNew = (CH.pendingNew || 0) + delta; }
@@ -2579,7 +2629,7 @@ function renderChat() {
   updateNewPill();
   const th = $('#chat-thread'); const t = S.tasks.find((x) => x.id === CH.thread); th.classList.toggle('hidden', !t);
   if (t) { const tev = ev.filter((e) => e.taskId === t.id);
-    th.innerHTML = `<div class="chat-head"><b>🧵 ${esc(t.title)}</b><span class="role">${esc(t.status)}</span><span class="spacer"></span><button id="ch-close" title="Close thread">✕</button></div><div id="chat-threadroom">${tev.length ? renderGroups(tev, working) : '<p class="muted" style="padding:16px">Nothing in this thread yet.</p>'}</div>`;
+    th.innerHTML = `<div class="chat-head"><b>🧵 ${esc(t.title)}</b><span class="role">${esc(t.status)}</span><span class="spacer"></span><button id="ch-close" title="Close thread">✕</button></div><div id="chat-threadroom">${tev.length ? renderGroups(tev, workingT) : '<p class="muted" style="padding:16px">Nothing in this thread yet.</p>'}</div>`;
     $('#ch-close').onclick = () => { CH.thread = null; renderChat(); }; }
   document.querySelectorAll('#tab-chat [data-thread]').forEach((b) => b.onclick = () => { CH.thread = b.dataset.thread; renderChat(); });
   document.querySelectorAll('#tab-chat .bubble.question').forEach((d) => {
@@ -2620,6 +2670,10 @@ $('#chat-input').addEventListener('keydown', (e) => {
 });
 $('#chat-send').onclick = act(chatSend);
 document.querySelector('#tabs button[data-tab=chat]').addEventListener('click', () => setTimeout(() => { chatSig = null; renderChat(); }));
+// Chat team scope (t_1158f757): one select in the header, left of the typing indicator; index.html
+// is out of scope for this task so the control is injected here.
+document.querySelector('#tab-chat .chat-head .spacer').insertAdjacentHTML('beforebegin', '<select id="chat-team" data-testid="chat-team-select" title="Scope #company to one team, or show all teams"></select>');
+$('#chat-team').onchange = () => { sel.chatTeam = $('#chat-team').value; chatSig = null; renderChat(); };
 setInterval(renderChat, 1000);
 
 // ---------- composer attachments (t_993822cf): paste / drop / attach button, chips, lazy thumbs ----------
