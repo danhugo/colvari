@@ -85,9 +85,15 @@ function sanitizeAttachments(list) {
 class Store {
   // teamId: which team graph this store edits. Without it, getTeam() returns the union of all
   // teams in the project (used by the orchestrator and MCP server: node ids are globally unique).
-  constructor(dir, teamId = null) {
+  // devMode: whether the app this store belongs to can ever restart itself (main.js DEV_MODE —
+  // false in packaged builds). Only merges consult it: they must not count toward a restart that
+  // can never happen. Merges run in whichever process holds the store (the app AND each agent's
+  // board MCP server), so every production entry point threads the flag; default true keeps tests
+  // and hand-wired stores on the dev behavior.
+  constructor(dir, teamId = null, opts = {}) {
     this.dir = dir;
     this.teamId = teamId;
+    this.devMode = opts.devMode !== false;
     fs.mkdirSync(dir, { recursive: true });
     this.migrateUsageLedger();
     this.migrateNodeProtection();
@@ -136,7 +142,7 @@ class Store {
       fs.writeFileSync(marker, new Date().toISOString());
     } catch {}
   }
-  forTeam(teamId) { return new Store(this.dir, teamId); }
+  forTeam(teamId) { return new Store(this.dir, teamId, { devMode: this.devMode }); }
   meta() { return this.read('project', null); }
   teamFile() {
     if (this.teamId) return 'team-' + this.teamId;
@@ -614,15 +620,20 @@ class Store {
       // commits the running build (meta.buildSha, written by the app at boot) is behind. Without a
       // buildSha — fresh store, or the merge ran where the boot sha was never recorded — the plain
       // merge tally holds, and a failed rev-list falls back the same way.
-      let bump = { sha: r.sha || null };
-      try {
-        const build = (this.meta() || {}).buildSha;
-        if (bump.sha && build && build !== bump.sha) {
-          const n = WT.commitsBehind(r.root, build, bump.sha);
-          if (n > 0) bump.behind = n;
-        }
-      } catch {}
-      this.bumpRestartPending(bump);
+      // Packaged build (devMode=false): nothing can ever restart, so merges count nothing —
+      // otherwise the tally would grow forever and a later dev run of the same project would
+      // inherit a bogus "commits behind".
+      if (this.devMode) {
+        let bump = { sha: r.sha || null };
+        try {
+          const build = (this.meta() || {}).buildSha;
+          if (bump.sha && build && build !== bump.sha) {
+            const n = WT.commitsBehind(r.root, build, bump.sha);
+            if (n > 0) bump.behind = n;
+          }
+        } catch {}
+        this.bumpRestartPending(bump);
+      }
       if (r.reason === 'tree-mismatch') {
         // Landed, but the base tree is not the tree we tested — someone bypassed the lock.
         MG.ensureRedMasterTask(this, { root: r.root, tests: ['(post-merge tree mismatch — base changed outside the gate)'], base: r.base, source: 'post-merge verification', lastMergedTask: t.id, lastMergedBranch: t.worktreeBranch });
