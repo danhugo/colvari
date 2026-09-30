@@ -451,7 +451,7 @@ function switchTo(c) {
   const projectSwitch = !c.t;
   refresh().then(() => {
     if (projectSwitch && sel.logTeam !== (ctx.t || '')) { sel.logTeam = ctx.t || ''; $('#logfilter').value = ''; } // follow the auto-picked team
-    if (projectSwitch) { sel.chatTeam = ctx.t || ''; sel.boardTeam = ctx.t || ''; }
+    if (projectSwitch) { sel.chatTeam = ctx.t || ''; sel.boardTeam = ctx.t || ''; syncRecovery(); } // each project carries its own boot-recovery story (t_6911ba60)
     renderObs(); renderLog();
   });
 }
@@ -1612,6 +1612,29 @@ async function runAlertOp(op, arg) {
 }
 $('#alertbell').onclick = () => { alertsOpen = !alertsOpen; renderAlerts(); };
 document.addEventListener('mousedown', (e) => { if (alertsOpen && !$('#alertpanel').contains(e.target) && !$('#alertbell').contains(e.target)) closeAlerts(); });
+
+// Unclean-exit recovery banner (t_6911ba60): at boot the main process checks the heartbeat
+// breadcrumb and reaps orphaned run groups; getLastExit reports what it found — {unclean,
+// lastAliveAt, lastAlivePid, reaped:[{pid,cmd}], interruptedTasks:[id]}. unclean means the previous
+// instance died without notice; the timestamp is "last seen alive" (±5s heartbeat), never an exact
+// crash time. Interrupted tasks stay in_progress — resuming is the user's call, so they are links,
+// not actions. Shown once per renderer session per project (boot + project switches); dismissal is
+// in-memory, so a page reload re-asks rather than silently hiding a still-true warning.
+const recDismissed = new Set();
+async function syncRecovery() {
+  const bar = $('#recoverybar'); if (!bar || !ctx.p) return;
+  let d = null; try { d = await call('getLastExit'); } catch { return bar.classList.add('hidden'); } // older backend without the handler: stay quiet
+  if (!d || !d.unclean || recDismissed.has(ctx.p)) return bar.classList.add('hidden');
+  const n = (d.reaped || []).length, ts = d.interruptedTasks || [];
+  const when = d.lastAliveAt
+    ? `last seen alive ${agoTxt(d.lastAliveAt)} <span class="muted" title="last heartbeat before the exit (${esc(d.lastAlivePid ? 'pid ' + d.lastAlivePid : 'previous instance')})">(${esc(new Date(d.lastAliveAt).toLocaleString())})</span>`
+    : 'last seen alive at an unknown time';
+  const bits = [when, n ? `${n} orphan agent run${n === 1 ? '' : 's'} stopped` : '', `${ts.length} task${ts.length === 1 ? '' : 's'} interrupted`].filter(Boolean);
+  bar.innerHTML = `<span class="rb-dot" title="warning"></span><span class="rb-txt"><b>Last session ended unexpectedly</b> — ${bits.join(' · ')}${ts.length ? ':' : ''}</span>${ts.map((id) => `<button class="linklike" data-rbtask="${esc(id)}" title="Open on the board">${esc(taskTitle(id) || id)} →</button>`).join('')}<span class="spacer"></span><button class="rb-x" title="Dismiss" aria-label="Dismiss recovery banner">✕</button>`;
+  bar.querySelectorAll('[data-rbtask]').forEach((b) => b.onclick = () => { sel.task = b.dataset.rbtask; showTab('board'); renderBoard(); });
+  bar.querySelector('.rb-x').onclick = () => { recDismissed.add(ctx.p); bar.classList.add('hidden'); };
+  bar.classList.remove('hidden');
+}
 
 // Subagent chip on an agent card (Team graph + Overview): count + compact total tokens for the current
 // run's subagents. Per contract t_c33656ba the parent's own totals ALREADY include these — the badge is
@@ -2974,7 +2997,7 @@ squad.on('delta', (b) => {
 });
 squad.on('state', (st) => { if (st.projectId && st.projectId !== ctx.p) { clearTimeout(pendingP); pendingP = setTimeout(async () => { P = await call('listProjects'); renderSidebar(); }, 200); return; } clearTimeout(pending); }); // same-project state arrives as deltas now; cancel a pending pull instead of scheduling one
 setInterval(() => { if (S.orch.running) refresh(); }, 2000); // pick up board changes made by agents
-refresh();
+refresh().then(() => syncRecovery()); // recovery banner needs a settled ctx.p (t_6911ba60)
 $('#help').onclick = () => $('#helpdlg').showModal();
 
 // ---------- first-run guide: workdir + runtime -> starter team (+ Test team) -> first goal ----------

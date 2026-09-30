@@ -526,6 +526,15 @@ header #wtdisk.wtwarn { background:var(--warning-soft); color:var(--warning-text
 /* wake-run: agent running because a message woke it (no in_progress task) */
 .wakebar { border:1px solid var(--accent); background:var(--accent-soft); color:var(--accent-text); border-radius:6px; padding:4px 8px; margin-bottom:4px; display:flex; gap:8px; align-items:center; font-size:12px; }
 .wakebar .spacer { flex:1; }
+/* unclean-exit recovery banner (t_6911ba60): one full-width warn strip between the header and the
+   app, shown once per boot when the previous instance died without notice. Same visual family as
+   .wakebar (tinted strip + linklike task links); task links land on the board with the task open. */
+.recoverybar { border-bottom:1px solid var(--warning-strong); background:var(--warning-soft); color:var(--warning-text); padding:5px 12px; display:flex; gap:8px; align-items:center; font-size:12px; }
+.recoverybar.hidden { display:none; }
+.recoverybar .spacer { flex:1; }
+.recoverybar .rb-dot { width:8px; height:8px; border-radius:var(--radius-full); background:var(--warning-strong); flex:none; }
+.recoverybar .rb-txt { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.recoverybar .rb-x { background:none; border:none; color:inherit; cursor:pointer; font:inherit; padding:0 2px; opacity:.7; } .recoverybar .rb-x:hover, .recoverybar .rb-x:focus-visible { opacity:1; }
 .pchip.wake { border-color:var(--accent); } .pchip.wake .muted { color:var(--accent-text); }
 #graph .wakerunbadge, #ov-graph .wakerunbadge { cursor:default; }
 #graph .wakerunbadge rect, #ov-graph .wakerunbadge rect { fill:var(--accent-soft); stroke:var(--accent); }
