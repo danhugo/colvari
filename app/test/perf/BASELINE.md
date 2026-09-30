@@ -1,4 +1,33 @@
-# Click-latency baseline while agents stream (t_f02c2572)
+# Click-latency baseline while agents stream (t_f02c2572, re-baselined t_2ba2e086)
+
+## Official baseline: master `6710364` (2026-09-30, t_2ba2e086 — gate for tracks 1-3)
+
+4 back-to-back harness runs at the identical commit (raw: `results/baseline-6710364.json`
++ per-run JSONs in `results/baseline-6710364/`). Same protocol as below (4 synthetic agents
+× 6 ev/s, ~574-task seeded board, 66 real input clicks per run). Ambient loadavg per run:
+9.3 / 7.4 / 18.6 / 31.7.
+
+| Run | p50 | p95 | p99 | max | long tasks >50 ms |
+|---|---:|---:|---:|---:|---:|
+| r1 | 42.5 | 120.8 | 220.5 | 220.5 | 41 |
+| r2 | 59.4 | 484.4 | 791.1 | 791.1 | 45 |
+| r3 | 76.5 | 298.2 | 989.2 | 989.2 | 57 |
+| r4 | 75.8 | 479.3 | 571.7 | 571.7 | 49 |
+| **Pooled (n=264)** | **61.6** | **372.4** | **765.8** | **989.2** | 192 total |
+
+**Verdict vs targets (p95 < 100 ms, p99 < 200 ms): FAIL on both, ~4x over.**
+Run-to-run p95 swings 121→484 ms at the identical commit (streaming-phase luck + ambient
+load), so **always gate on pooled percentiles of ≥3 runs** — a single run proves nothing.
+Worst targets (pooled p95): obs 791 ms, chat 484 ms, usage 479 ms; lightest: team/wiki.
+Systemic cost unchanged from the 8b44f14 analysis below: ~8-9 IPC round-trips per
+refresh at ~2.3-3.2 refreshes/s, full renderAll on every push (renderLog per pushed line
+dominates), 41-57 long tasks >50 ms per ~60-85 s window.
+
+Living scoreboard + per-track verdicts: wiki page **"Perf numbers: click latency"**.
+
+---
+
+## Historical baseline: `8b44f143f` (2026-09-30, t_f02c2572, single run)
 
 Measured 2026-09-30 on commit `8b44f143f` with `node test/perf/click-latency.js`
 (4 agents × 6 ev/s synthetic stream, ~574-task board, 200 seeded runs, 1500 seeded log
@@ -65,7 +94,13 @@ Even the lightest tabs (team 40/64, wiki 13/32) breach p95 50 ms.
 
     cd app
     PERF_AGENTS=4 PERF_TASKS=4 PERF_CLICK_REPS=8 PERF_SAMPLE_MS=25000 PERF_WARM_MS=5000 \
-      PERF_OUT=/tmp/colvari-perf node test/perf/click-latency.js
+      PERF_OUT=/tmp/colvari-perf ./node_modules/.bin/electron test/perf/click-latency.js
+
+(The script is an Electron main entry — run it with the electron binary, not plain node;
+it boots an isolated throwaway instance, so the live app is never touched.)
 
 Knobs: `PERF_SEED_TASKS` (default 550), `PERF_SEED_LOGS` (1500), `PERF_SEED_RUNS` (200),
 `STREAM_SECONDS` (auto: sampling window + margin), `STREAM_EPS` (6 events/s/agent).
+Per-track re-measure protocol (t_2ba2e086): ≥3 runs on the track's merge commit, pool the
+click samples, compare pooled p50/p95/p99 against `results/baseline-6710364.json`; a track
+counts as done only when pooled p95 AND p99 improve without a p50 regression.
