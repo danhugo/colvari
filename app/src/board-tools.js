@@ -157,19 +157,30 @@ function makeTools(store, nodeId) {
       return warn ? { ...task, warning: warn } : task;
     },
     update_task_status({ taskId, status, priority }) {
-      const t = me(); const tk = store.getTask(taskId);
+      const t = me(); let tk = store.getTask(taskId);
       if (!tk) throw new Error('no task ' + taskId);
       if (!canSetStatus(t, nodeId, tk, status)) throw new Error('scope violation: cannot modify this task');
       if (tk.awaitingApproval && status === 'done') throw new Error('this task is waiting for human approval; only a human can move it to done');
       // A done flip must never strand an unmerged branch. When the task carries its worktree, the
       // merge gate inside store.updateTask lands the branch as part of this same flip (every gate
-      // failure reopens the task), so done cannot stick unmerged. Without a worktree the merge
-      // would never run — refuse up front with the branch named, unless the branch is provably
+      // failure reopens the task), so done cannot stick unmerged. Without a link the merge would
+      // never run: when the derived squad/<id> — the branch ensureWorktree manages — still exists
+      // with unmerged work (useWorktrees off, a manually created worktree, or a lost link —
+      // t_c1c1d235), re-link it and let the done flip run the gate. A recorded branch that
+      // ensureWorktree cannot manage is refused with the branch named, unless it is provably
       // already merged or there is no repo to ask (fail-open keeps no-git stores working).
-      if (status === 'done' && tk.worktreeBranch && !tk.worktreePath) {
+      if (status === 'done' && !tk.worktreePath) {
+        const branch = tk.worktreeBranch || `squad/${tk.id}`;
         const root = squadRepoRoot();
-        const st = root && WT.branchMergeState(root, tk.worktreeBranch);
-        if (st && !st.merged) throw new Error(`cannot mark done: branch ${tk.worktreeBranch} is not merged into ${st.base} and the task has no worktree for the auto-merge — merge it into ${st.base} (or restore the task's worktree), then mark done again.`);
+        const st = root && WT.branchExists(root, branch) ? WT.branchMergeState(root, branch) : null;
+        if (st && !st.merged && !tk.worktreeBranch) {
+          const w = WT.ensureWorktree(root, tk.id);
+          if (!w.warning) {
+            store.updateTask(taskId, { worktreePath: w.worktreePath, worktreeBranch: w.worktreeBranch });
+            tk = store.getTask(taskId);
+          }
+        }
+        if (st && !st.merged && !tk.worktreePath) throw new Error(`cannot mark done: branch ${branch} is not merged into ${st.base} and the task has no worktree for the auto-merge — merge it into ${st.base} (or restore the task's worktree), then mark done again.`);
       }
       const g = C.gateStatus(status, t.nodes.find((n) => n.id === tk.assignee), store.getSettings());
       // Explicit agent-initiated review (vs. the orchestrator parking an incomplete/failed run for a human):
