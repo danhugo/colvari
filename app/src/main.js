@@ -1783,6 +1783,40 @@ async function guiE2E() {
     await ex(`if (alertsOpen) $('#alertbell').click(); await w(100);`);
     console.log('[gui-e2e] alerts', JSON.stringify({ bell0, one, panel, dim, still, bump, red, opened, rst, rt, orph, orph2, openTask }));
   };
+  // Packaged-mode simulation (t_7fbee55f): with an identical stale dev-only state (restart pending,
+  // watcher live, self-update draining, a gated task), a non-dev backend must render none of it —
+  // the dev shot with the same injected state shows exactly what the gate hides.
+  const packagedShots = async () => {
+    await ex(`await refresh(); await w(300);`);
+    const cur = await ex(`return { p: ctx.p, t: S.teamId }`);
+    const ps = pm.store(cur.p || pid(), cur.t); let nodes = ps.getTeam().nodes;
+    if (nodes.length < 2) { ps.addNode({ name: 'Pia', role: 'PM', x: 60, y: 60 }); ps.addNode({ name: 'Devon', role: 'Dev', x: 320, y: 160 }); nodes = ps.getTeam().nodes; }
+    // Assign the gated task: team-scoped board views hide unassigned (teamless) tasks (t_1158f757).
+    const gated = ps.createTask({ title: 'Gated demo task', assignee: nodes[1].id });
+    await ex(`$('#tabs button[data-tab=board]').click(); await refresh(); await w(400);`); // renderBoard only builds cards on the active tab; refresh picks up the gated card
+    const inject = (dev) => ex(`rst = normRestart({ pendingCount: 3, targetSha: 'abcdef123456', since: Date.now() - 60000, gating: ['${gated.id}'], stub: false });
+      watch = { lastWatchAt: Date.now() - 60000, active: true, digest: '3 behind · 1 merge failed', intervalMin: 10, stub: false };
+      upd = normUpd({ phase: 'draining', waitingOn: 2, from: 'aaa1111', to: 'bbb2222', reason: 'packaged simulation', devMode: ${dev} }); upd.stub = false;
+      rstSeen = true; boardSig = null; renderSelfUpdate(); renderHeader(); renderAlerts(); renderBoard(); await w(400);`);
+    await inject(true);
+    await ex(`if (!alertsOpen) { $('#alertbell').click(); await w(300); }`);
+    const dv = await ex(`return { row: [...document.querySelectorAll('#alertpanel .al-what')].some((e) => /Restart pending/.test(e.textContent)),
+      act: !![...document.querySelectorAll('#alertpanel .al-act')].find((b) => b.textContent === 'Restart now'),
+      watch: !$('#watchst').classList.contains('hidden'), upd: !$('#updst').classList.contains('hidden'),
+      veil: !$('#updveil').classList.contains('hidden'), rstwait: document.querySelectorAll('.rstwait').length }`);
+    expect('dev mode (baseline): stale state shows restart row + Restart now, watch pill, update pill + veil, waits-for-restart tag',
+      dv.row && dv.act && dv.watch && dv.upd && dv.veil && dv.rstwait === 1, dv);
+    await shot('packaged-dev-header');
+    await inject(false);
+    const pk = await ex(`const vis = (s) => { const e = document.querySelector(s); return !!e && !e.classList.contains('hidden'); };
+      return { row: [...document.querySelectorAll('#alertpanel .al-what')].some((e) => /Restart pending/.test(e.textContent)),
+        watch: vis('#watchst'), upd: vis('#updst'), veil: vis('#updveil'),
+        rstwait: document.querySelectorAll('.rstwait').length, body: document.body.textContent.includes('Restart pending') }`);
+    expect('packaged: restart row, Restart now, watch pill, update pill + veil, waits-for-restart tag all hidden despite stale state',
+      !pk.row && !pk.watch && !pk.upd && !pk.veil && pk.rstwait === 0 && !pk.body, pk);
+    await shot('packaged-header');
+    console.log('[gui-e2e] packaged', JSON.stringify({ dv, pk }));
+  };
   // Wake run on an agent that ALSO has an in_progress task (t_8af586bc) — the case that used to
   // render bare "working": the backend keeps a.taskId null for the whole wake, so the old
   // wakeRun() veto on any in_progress task hid the wake info everywhere. Same seeded activity
@@ -2163,6 +2197,7 @@ async function guiE2E() {
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'wakebusy') { await wakeBusyShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'monitorlog') { await monitorShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'alerts') { await alertsShots(); throw null; }
+    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'packaged') { await packagedShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'subagents') { await subagentShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'dynamicteam') { await dynamicTeamShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'recruitinbox') { await recruitInboxShots(); throw null; }
