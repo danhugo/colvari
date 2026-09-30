@@ -1403,14 +1403,25 @@ async function guiE2E() {
     expect('alerts: bell present, 0 alerts -> plain bell, no badge, no count', bell0.bell && bell0.badgeHidden && bell0.plain, bell0);
     for (const [wd, tag] of [[1400, 1400], [1100, 1100]]) for (const th of ['light', 'dark']) {
       win.setSize(wd, 800); require('electron').nativeTheme.themeSource = th; await ex(`await w(400);`);
+      const hd = await ex(`const vis = (s) => { const e = document.querySelector(s); return !!e && e.offsetWidth > 2; };
+        return { brand: vis('header > strong.brand'), chat: vis('#tabs button[data-tab=chat]'), team: vis('#tabs button[data-tab=team]'), board: vis('#tabs button[data-tab=board]'), bell: vis('#alertbell') }`);
+      expect(`alerts: header keeps the logo, the Chat/Team/Board tabs and the bell at ${tag}px ${th} even with 0 alerts`, hd.brand && hd.chat && hd.team && hd.board && hd.bell, hd);
       await shot(`alerts-0-${tag}-${th}`);
     }
+    win.setSize(1000, 800); require('electron').nativeTheme.themeSource = 'light'; await ex(`await w(400);`);
+    await shot('alerts-0-1000-light'); // Critic edge check: exactly at the breakpoint (brand + secondary tabs hide, primary icon tabs stay)
 
-    win.setSize(1400, 800); require('electron').nativeTheme.themeSource = 'light';
-    await ex(`__fakeAlerts(1); await w(400); if (alertsOpen) { $('#alertbell').click(); await w(250); }`); // panel closed: bell + badge only
-    const one = await ex(`return { n: $('#alertbell-n').textContent, cls: $('#alertbell-n').className }`);
-    expect('alerts: 1 fake alert -> badge 1 with error color (worst severity)', one.n === '1' && /abadge-error/.test(one.cls), one);
-    await shot('alerts-1-1400-light');
+    for (let i = 2; i <= 6; i++) ps.createTask({ title: `Fake target ${i}`, assignee: dev.id }); // todo tasks raise no alerts; they give fakes 2-6 a real task so every fake row gets its Open task action
+    await ex(`await refresh(); await w(200);`);
+    let one;
+    for (const [wd, tag] of [[1400, 1400], [1100, 1100]]) for (const th of ['light', 'dark']) {
+      win.setSize(wd, 800); require('electron').nativeTheme.themeSource = th;
+      await ex(`__fakeAlerts(1); await w(400); if (alertsOpen) { $('#alertbell').click(); await w(250); }`); // panel closed: bell + badge only
+      one = await ex(`return { n: $('#alertbell-n').textContent, cls: $('#alertbell-n').className }`);
+      expect('alerts: 1 fake alert -> badge 1 with error color (worst severity)', one.n === '1' && /abadge-error/.test(one.cls), one);
+      await shot(`alerts-1-${tag}-${th}`);
+    }
+    win.setSize(1100, 800); require('electron').nativeTheme.themeSource = 'light';
     await ex(`if (!alertsOpen) { $('#alertbell').click(); await w(250); }`);
     const panel = await ex(`return { open: !$('#alertpanel').classList.contains('hidden'), rows: document.querySelectorAll('#alertpanel .al-row').length, empty: !!$('#alertpanel .al-empty') }`);
     expect('alerts: panel opens with 1 row (not the empty state)', panel.open && panel.rows === 1 && !panel.empty, panel);
@@ -1427,8 +1438,8 @@ async function guiE2E() {
     for (const [wd, tag] of [[1400, 1400], [1100, 1100]]) for (const th of ['light', 'dark']) {
       win.setSize(wd, 800); require('electron').nativeTheme.themeSource = th;
       await ex(`__fakeAlerts(6); await w(400); if (!alertsOpen) { $('#alertbell').click(); await w(250); }`);
-      const g = await ex(`const r = $('#alertpanel').getBoundingClientRect(); return { n: $('#alertbell-n').textContent, rows: document.querySelectorAll('#alertpanel .al-row').length, first: document.querySelector('#alertpanel .al-dot').className, right: Math.round(r.right), iw: window.innerWidth }`);
-      expect(`alerts: 6 alerts at ${tag}px ${th} — badge 6, 6 rows, error dot first, panel inside viewport`, g.n === '6' && g.rows === 6 && /al-error/.test(g.first) && g.right > 0 && g.right <= g.iw - 4, g);
+      const g = await ex(`const r = $('#alertpanel').getBoundingClientRect(); return { n: $('#alertbell-n').textContent, rows: document.querySelectorAll('#alertpanel .al-row').length, acts: document.querySelectorAll('#alertpanel .al-act').length, first: document.querySelector('#alertpanel .al-dot').className, right: Math.round(r.right), iw: window.innerWidth }`);
+      expect(`alerts: 6 alerts at ${tag}px ${th} — badge 6, 6 rows each with a working action, error dot first, panel inside viewport`, g.n === '6' && g.rows === 6 && g.acts === 6 && /al-error/.test(g.first) && g.right > 0 && g.right <= g.iw - 4, g);
       await shot(`alerts-6-${tag}-${th}`);
       await ex(`__fakeAlerts(0); await w(300);`);
     }
@@ -1746,7 +1757,7 @@ async function guiE2E() {
     }
     // Overflow guard (t_ea33cef4): every optional pill forced on (restart pending + core watching + update chip +
     // limit warning + Stop) must still fit at 1100 and 1400px. Screenshots per width for the Critic.
-    await ex(`rst = { ...rst, pendingCount: 3, stub: false, since: new Date().toISOString() }; watch = { ...watch, active: true, lastWatchAt: new Date().toISOString() }; renderRestartPill(); renderWatchPill(); $('#stop').classList.remove('hidden'); const u = $('#updst'); u.classList.remove('hidden'); u.textContent = 'Update ready · restart to apply';`);
+    await ex(`rst = { ...rst, pendingCount: 3, stub: false, since: new Date().toISOString() }; watch = { ...watch, active: true, lastWatchAt: new Date().toISOString() }; await renderAlerts(); renderWatchPill(); $('#stop').classList.remove('hidden'); const u = $('#updst'); u.classList.remove('hidden'); u.textContent = 'Update ready · restart to apply';`);
     await ex(`$('#tabs button[data-tab=board]').click(); await w(300);`);
     for (const cw of [1100, 1400]) {
       win.setContentSize(cw, 700); await new Promise((r) => setTimeout(r, 350));
@@ -1756,7 +1767,7 @@ async function guiE2E() {
       for (const th of ['light', 'dark']) { require('electron').nativeTheme.themeSource = th; await ex(`await w(250);`); await shot(`board-topbar-${cw}-${th}`); }
       require('electron').nativeTheme.themeSource = 'system';
     }
-    await ex(`rst = { ...rst, pendingCount: 0 }; watch = { ...watch, active: false, lastWatchAt: null }; renderRestartPill(); renderWatchPill(); $('#stop').classList.add('hidden'); $('#updst').classList.add('hidden'); $('#tabs button[data-tab=chat]').click();`);
+    await ex(`rst = { ...rst, pendingCount: 0 }; watch = { ...watch, active: false, lastWatchAt: null }; await renderAlerts(); renderWatchPill(); $('#stop').classList.add('hidden'); $('#updst').classList.add('hidden'); $('#tabs button[data-tab=chat]').click();`);
     win.setContentSize(1400, Math.max(600, Math.min(prevSize[1], 800))); await new Promise((r) => setTimeout(r, 350));
     // Critic round 3: the chip and the cost pill must be READABLE at 900px, not squashed — assert
     // unclipped (scrollWidth <= clientWidth) and width-stable (the SAME width as at 1400px).
