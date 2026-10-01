@@ -434,13 +434,19 @@ async function main() {
   // inside an A/B comparison.
   const stopTrace = TRACE_MS > 0 ? await startTrace(TRACE_MS) : null;  // Click campaign: every tab, CLICK_REPS rounds, real input events, interleaved so each tab
   // sees a different streaming phase. Then board card-selection clicks (a heavy non-tab button).
-  let attempted = 0, dropped = 0; const droppedDetails = [];
+  let attempted = 0, dropped = 0, tabsSkipped = 0; const droppedDetails = [];
   const land = (label, r) => { attempted++; if (!r || !r.ok) { dropped++; droppedDetails.push((r && r.detail) || { label, waiting: 'unknown' }); } };
   for (let rep = 0; rep < CLICK_REPS; rep++) {
     // No #tabs scope: settings lives in the topbar and inbox in the sidebar — the old scoped
     // selector never matched them, so 2 tabs × CLICK_REPS clicks were deterministic no-target
     // drops (the constant 16/82, t_5ab07112). data-tab is document-unique.
-    for (const tab of TABS) land(`tab:${tab}`, await clickOnce(`tab:${tab}`, `button[data-tab="${tab}"]`));
+    // Only tabs present in THIS app's nav (t_759c7498): a removed tab (overview on the
+    // One-Team-view branch) would otherwise burn deterministic no-target drops per run
+    // from the same 20% validity budget the quiet-paint storm already taxes.
+    for (const tab of TABS) {
+      if (inst.tabs && inst.tabs.length && !inst.tabs.includes(tab)) { tabsSkipped++; continue; }
+      land(`tab:${tab}`, await clickOnce(`tab:${tab}`, `button[data-tab="${tab}"]`));
+    }
   }
   await ex(`showTab('board'); await w(400);`);
   const cards = await ex(`return [...document.querySelectorAll('.card')].slice(0, ${CARD_CLICKS}).map((c) => { const r = c.getBoundingClientRect(); return [Math.round(r.x + r.width / 2), Math.round(r.y + Math.min(14, r.height / 2))]; })`);
@@ -481,7 +487,7 @@ async function main() {
     electron: process.versions.electron, node: process.versions.node,
     agents: AGENTS, tasks: TASKS, streamSeconds: STREAM_SECONDS, streamEps: STREAM_EPS,
     clickReps: CLICK_REPS, warmMs: WARM_MS, sampleMs: SAMPLE_MS, clickWallMs: clickWall,
-    clicksAttempted: attempted, clicksDropped: dropped,
+    clicksAttempted: attempted, clicksDropped: dropped, tabsSkipped,
     // Drop forensics (t_f468b3a9): why each dropped click never resolved. The once-deterministic
     // 16/82 subset should be attributable from these fields alone.
     clicksDroppedByReason: droppedDetails.reduce((m, d) => { const k = `${d.waiting}`; m[k] = (m[k] || 0) + 1; return m; }, {}),
