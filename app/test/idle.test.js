@@ -112,3 +112,13 @@ test('idleNudges: an agent state claiming working with a dead proc no longer sup
   assert.equal(out[0].kind, 'stale');
   assert.deepEqual(out[0].taskIds, ['t1']);
 });
+
+test('staffingSummary: ready per role (unassigned too), blocked incl. waiting_for_human, busy/idle per role', () => {
+  const { staffingSummary } = require('../src/idle');
+  const tm = { nodes: [{ id: 'a', role: 'Dev' }, { id: 'b', role: 'Dev' }, { id: 'c', role: 'Critic' }], edges: [] };
+  const tasks = [
+    { id: '1', status: 'in_progress', assignee: 'a' }, { id: '2', status: 'todo', assignee: 'b' }, { id: '3', status: 'todo' },
+    { id: '4', status: 'todo', assignee: 'c', blockedBy: ['1'] }, { id: '5', status: 'waiting_for_human', assignee: 'c' },
+  ];
+  assert.equal(staffingSummary(tm, tasks), 'Ready: Dev 1, unassigned 1 | Blocked: 2\nAgents: Dev 1 busy/1 idle, Critic 0 busy/1 idle');
+});
