@@ -1584,7 +1584,7 @@ async function renderAlerts() {
     redMaster: (S.orch || {}).redMaster, rst, tasks: S.tasks, running: runningIds(),
     // Dev-only rows (restart pending, t_7fbee55f) hide when the backend says non-dev; upd.devMode
     // defaults true while stubbed (older backend), matching the self-update pill's convention.
-    devMode: upd.devMode,
+    devMode: upd.devMode, updError: upd.state === 'idle' ? upd.lastError : '',
     agents: S.orch.agents || {}, stuck: Overview.stuckAgents(S.orch.agents, logs, Date.now(), S.settings.stuckMinutes || 5),
     stalls, teamNodes: S.team.nodes, limits, stuckMinutes: S.settings.stuckMinutes || 5, now: Date.now(),
     nodeNames: Object.fromEntries(S.allNodes.map((n) => [n.id, n.name])),
@@ -2920,7 +2920,7 @@ function renderInbox() {
 // ---------- live updates ----------
 let pending = null, pendingP = null;
 // Self-update status push: prefer the dedicated bridge method, fall back to either plausible channel name.
-const onUpdPush = (d) => { upd = { ...normUpd(d), stub: false }; trackUpd(); renderSelfUpdate(); renderUpdSettings(); };
+const onUpdPush = (d) => { upd = { ...normUpd(d), stub: false }; trackUpd(); renderSelfUpdate(); renderUpdSettings(); renderAlerts(); };
 if (squad.onSelfUpdateStatus) squad.onSelfUpdateStatus(onUpdPush);
 else { squad.on('selfUpdateStatus', onUpdPush); squad.on('self-update-status', onUpdPush); }
 // Restart/watch pushes: prefer dedicated bridge helpers, fall back to plausible channel names
