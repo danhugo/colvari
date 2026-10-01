@@ -1201,9 +1201,13 @@ const clipText = (s, max) => (String(s).length > max ? String(s).slice(0, max - 
 function selectNode(id) { hideMenus(); sel = { ...sel, node: id, edge: null }; renderGraph(); renderNodeForm(); }
 async function duplicateNode(n) { const { id, ...rest } = n; const c = await call('addNode', { ...rest, name: n.name + ' copy', x: n.x + 30, y: n.y + H + 30 }); sel.node = c.id; refresh(); }
 async function deleteNode(n) {
+  if (n.core) { alert(`${n.name} is the core agent and cannot be deleted.`); return; }
   if (n.protected) { alert(`${n.name} is protected from retirement — clear "Protected" in its editor first.`); return; }
-  if (!confirm(`Delete ${n.name}?`)) return;
-  await call('removeNode', n.id); sel.node = null; refresh();
+  const open = S.tasks.filter((t) => t.assignee === n.id && t.status !== 'done');
+  const list = open.length ? `\n\nOpen tasks (moved to its manager or the core):\n${open.map((t) => `• ${t.title} [${t.status}]`).join('\n')}` : '';
+  if (!confirm(`Delete ${n.name}?${list}`)) return;
+  try { await call('removeNode', n.id); } catch (e) { alert(e.message); }
+  sel.node = null; refresh();
 }
 function startConnect(n) { connectMode = true; connectFrom = n.id; $('#connect').classList.add('on'); $('#hint').textContent = `From ${n.name}: click the target node`; renderGraph(); }
 async function connect(from, to, type) { try { await call('addEdge', from, to, type); lastEdgeType = type; } catch (e) { alert(e.message); } refresh(); }
@@ -1244,7 +1248,7 @@ function canvasMenu(ev) {
   const items = [['Add agent here', () => addAgentAt(x, y)], ['Auto-layout', autoLayout], ['Fit view', fitView], ['Reset zoom', () => zoomAt(1 / VP.zoom)]];
   showMenu(ev.clientX, ev.clientY, menuItems(items)); bindMenu(items);
 }
-async function addAgentAt(x, y) { const k = S.team.nodes.length; const role = k === 0 ? 'PM' : 'Dev'; const n = await call('addNode', { name: `${role} ${k + 1}`, role, x: Math.round(x), y: Math.round(y) }); sel.node = n.id; refresh(); }
+async function addAgentAt(x, y) { const role = S.team.nodes.length === 0 ? 'PM' : 'Dev'; const taken = new Set(S.team.nodes.map((x) => x.name)); let k = 1; while (taken.has(`${role} ${k}`)) k++; const n = await call('addNode', { name: `${role} ${k}`, role, x: Math.round(x), y: Math.round(y) }); sel.node = n.id; refresh(); }
 // Layered (Sugiyama-lite) layout: longest-path layers over assign/review edges, barycentre ordering, centred rows.
 async function autoLayout() {
   if (!S.team.nodes.length) return; graphAuto = true; expandedClusters.clear(); renderGraph();
@@ -1292,14 +1296,12 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape') hideMenus(
 window.addEventListener('resize', () => renderMinimap());
 $('#testteam').onclick = () => testAgents(S.team.nodes.map((n) => n.id));
 $('#delsel').onclick = async () => {
-  if (sel.edge) await call('removeEdge', sel.edge);
-  else if (sel.node) {
-    const pn = (S.team.nodes || []).find((x) => x.id === sel.node);
-    if (pn && pn.protected) alert(`${pn.name} is protected from retirement — clear "Protected" in its editor first.`);
-    else if (confirm('Delete this agent?')) await call('removeNode', sel.node);
-  }
-  sel.node = sel.edge = null; refresh();
+  if (sel.edge) { await call('removeEdge', sel.edge); sel.edge = null; refresh(); }
+  else { const n = S.team.nodes.find((x) => x.id === sel.node); if (n) await deleteNode(n); }
 };
+document.addEventListener('keydown', (e) => {
+  if ((e.key === 'Delete' || e.key === 'Backspace') && !e.target.closest('input,textarea,select,[contenteditable]') && $('#delsel').offsetParent) { e.preventDefault(); $('#delsel').click(); }
+});
 function renderNodeForm() {
   if (!$('#tab-team').classList.contains('active')) return; // hidden tab: redrawn on activation (renderAll)
   const f = $('#nodeform'); const n = S.team.nodes.find((x) => x.id === sel.node);
