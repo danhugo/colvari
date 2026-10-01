@@ -877,8 +877,16 @@ const fillTeamSelect = (el, val, teams) => { if (!el) return; const sig = teams.
 const agentVar = (id) => { const s = agentStep(id); return s ? `color-mix(in srgb, var(--agent-${agentColor(id)}) ${s === 1 ? 80 : 62}%, var(--agent-mix))` : `var(--agent-${agentColor(id)})`; };
 // Leads/PMs read as circles vs the member squircle (avatarHtml adds the class).
 const isLeadRole = (role) => /\b(pm|lead|manager|chief|director|head)\b/i.test(String(role || ''));
+// Agent avatar background: role → existing brand token (wiki decision-dicebear-avatars; the -text family
+// passes contrast in both themes, plain --agent-N fails light mode). Lead checked first so "Dev Lead" reads lead.
+const roleBg = (role) => { const r = String(role || '');
+  if (isLeadRole(r)) return 'var(--accent-text)';
+  if (/critic/i.test(r)) return 'var(--agent-3-text)';
+  if (/review/i.test(r)) return 'var(--agent-2-text)';
+  if (/design/i.test(r)) return 'var(--agent-4-text)';
+  if (/\b(dev|engineer)\b/i.test(r)) return 'var(--agent-5-text)';
+  return 'var(--fg-muted)'; };
 const edgeSeed = (e) => { let h = 0; for (const c of String(e.id || '')) h = (h * 31 + c.charCodeAt(0)) >>> 0; return h; };
-const initials = (s) => String(s || '?').split(/\s+/).map((w) => w[0]).join('').slice(0, 2).toUpperCase();
 const nodeLive = (n) => ((S.nstat || {})[n.id] || {}).status || ((S.orch.agents[n.id] || {}).status === 'working' ? 'working' : 'idle');
 const applyVP = () => { const v = $('#graph > g.viewport'); if (v) v.setAttribute('transform', `translate(${VP.x},${VP.y}) scale(${VP.zoom})`); const gs = $('#graph'); if (gs) { gs.classList.toggle('lod-far', VP.zoom < 0.6); gs.style.setProperty('--nz', Math.max(1, 12 / (13 * VP.zoom)).toFixed(3)); } renderMinimap(); $('#zoomlvl') && ($('#zoomlvl').textContent = Math.round(VP.zoom * 100) + '%'); };
 const saveVP = () => { clearTimeout(vpSave); vpSave = setTimeout(() => call('setViewport', VP).catch(() => {}), 400); };
@@ -1042,6 +1050,8 @@ function renderGraph() {
   if (vpTeam !== ctx.t) { vpTeam = ctx.t; vpCount = 0; } // first open always re-fits (once visible, see below) — a persisted viewport can be stale (tiny/panned away)
   const defs = el('defs', {}, svg);
   for (const t of ['assign', 'message', 'review', 'sel']) { const m = el('marker', { id: 'arr-' + t, viewBox: '0 0 10 10', refX: 9, refY: 5, markerWidth: 8, markerHeight: 8, markerUnits: 'userSpaceOnUse', orient: 'auto-start-reverse' }, defs); el('path', { d: 'M0,1 L9,5 L0,9 z', class: 'arrow arrow-' + t }, m); }
+  // One shared round mask (objectBoundingBox → scales to every node's <image>) for the DiceBear faces.
+  el('circle', { cx: 0.5, cy: 0.5, r: 0.5 }, el('clipPath', { id: 'avclip-team', clipPathUnits: 'objectBoundingBox' }, defs));
   const vp = el('g', { class: 'viewport' }, svg); const eL = el('g', { class: 'edges' }, vp), nL = el('g', { class: 'nodes' }, vp), xL = el('g', { class: 'edges cross-layer' }, vp), lL = el('g', { class: 'labels' }, vp); // cross-team edges draw above nodes so the dashed line into the ghost stays visible
   const nodes = allGraphNodes(); const byId = Object.fromEntries(nodes.map((n) => [n.id, n]));
   const edges = GV.edges;
@@ -1087,9 +1097,9 @@ function renderGraph() {
     const g = el('g', { class: 'node' + (sel.node === n.id || connectFrom === n.id ? ' sel' : '') + ' st-' + live + (live === 'working' ? ' working' : '') + (rtuFor(n.id) ? ' rtpaused' : ''), transform: `translate(${n.x},${n.y})`, 'data-id': n.id }, nL);
     el('rect', { class: 'card', width: W, height: H, rx: 12 }, g);
     el('rect', { class: 'stripe', width: 4, height: H - 20, x: 0, y: 10, rx: 2, style: `fill:${agentVar(n.id)}` }, g);
-    el('circle', { class: 'avatar', cx: 30, cy: 26, r: 14, style: `fill:${agentVar(n.id)};--av:${agentVar(n.id)}` }, g);
+    el('circle', { class: 'avatar', cx: 30, cy: 26, r: 14, style: `fill:${roleBg(n.role)};--av:${roleBg(n.role)}` }, g);
     if (isLeadRole(n.role)) el('text', { x: 40, y: 37, class: 'leadstar', 'text-anchor': 'middle' }, g).textContent = '★';
-    el('text', { x: 30, y: 30.5, class: 'avtext', 'text-anchor': 'middle' }, g).textContent = initials(n.name);
+    el('image', { class: 'avface', href: faceUri(n.id), x: 16, y: 12, width: 28, height: 28, 'clip-path': 'url(#avclip-team)' }, g);
     el('text', { x: 52, y: 23, class: 'nname' }, g).textContent = clipText(n.name, Math.max(6, Math.round(16 / Math.max(1, 11 / (13 * VP.zoom)))));
     el('text', { x: 52, y: 38, class: 'nrole' }, g).textContent = clipText(n.role, 20);
     const rtId = ns.runtime || n.runtime || 'claude';
@@ -1762,7 +1772,7 @@ function renderBoard() {
         bl.length ? `<span class="tag blocked" title="waits for: ${esc(bl.map(taskTitle).join(', '))}">Blocked by ${esc(taskTitle(bl[0]).slice(0, 28))}${bl.length > 1 ? ` +${bl.length - 1}` : ''}</span>` : ready ? '<span class="tag ready" title="Ready">Ready</span>' : '',
         t.awaitingApproval ? '<span class="tag approval" title="needs approval">needs approval</span>' : ''].join('');
       const snippet = String(t.description || '').replace(/\s+/g, ' ').trim();
-      return `<div class="card ${sel.task === t.id ? 'sel' : ''}${t.awaitingApproval ? ' approval' : ''}" data-id="${t.id}"><b>${esc(t.title)}</b>${snippet && snippet !== t.title ? `<span class="cdesc" title="${esc(snippet)}">${esc(clipText(snippet, 100))}</span>` : ''}${tags ? `<span class="ctags">${tags}</span>` : ''}<small class="cmeta">${priorityBadge(t)}${t.assignee ? `<span class="avatar sm" style="background:${who(t.assignee).color}" title="${esc(nodeName(t.assignee))}">${esc(who(t.assignee).ini)}</span><span class="cname">${esc(nodeName(t.assignee))}</span>` : '<span class="muted">unassigned</span>'}<span class="cago" title="last updated">${ago(t.updatedAt) || '—'}</span>${t.comments.length ? `<span class="ccount" title="${t.comments.length} comment${t.comments.length === 1 ? '' : 's'}">💬 ${t.comments.length}</span>` : ''}</small></div>`; }).join('')}${st === 'done' && !fold && total > 20 ? `<button class="ghost" id="toggle-done">${showAllDone ? 'Show recent only' : 'Show all done'}</button>` : ''}</div>`; }).join('');
+      return `<div class="card ${sel.task === t.id ? 'sel' : ''}${t.awaitingApproval ? ' approval' : ''}" data-id="${t.id}"><b>${esc(t.title)}</b>${snippet && snippet !== t.title ? `<span class="cdesc" title="${esc(snippet)}">${esc(clipText(snippet, 100))}</span>` : ''}${tags ? `<span class="ctags">${tags}</span>` : ''}<small class="cmeta">${priorityBadge(t)}${t.assignee ? ((w) => `<span class="avatar sm" style="background:${avatarBg(w)}" title="${esc(w.name)}">${avatarBody(t.assignee, w)}</span><span class="cname">${esc(w.name)}</span>`)(who(t.assignee)) : '<span class="muted">unassigned</span>'}<span class="cago" title="last updated">${ago(t.updatedAt) || '—'}</span>${t.comments.length ? `<span class="ccount" title="${t.comments.length} comment${t.comments.length === 1 ? '' : 's'}">💬 ${t.comments.length}</span>` : ''}</small></div>`; }).join('')}${st === 'done' && !fold && total > 20 ? `<button class="ghost" id="toggle-done">${showAllDone ? 'Show recent only' : 'Show all done'}</button>` : ''}</div>`; }).join('');
   if ($('#done-h')) $('#done-h').onclick = () => { doneOpen = !doneOpen; boardSig = ''; renderBoard(); };
   if ($('#toggle-done')) $('#toggle-done').onclick = () => { showAllDone = !showAllDone; boardSig = ''; renderBoard(); };
   document.querySelectorAll('.card').forEach((c) => c.onclick = () => { sel.task = sel.task === c.dataset.id ? null : c.dataset.id; renderBoard(); });
@@ -1893,7 +1903,7 @@ function renderObs() {
       a.taskId ? `<span class="ltid" title="${esc(ttl || a.taskId)}">${esc(shortTaskId(a.taskId))}</span>` : '',
       ttl ? `<span class="lttl">${esc(ttl)}</span>` : ''].filter(Boolean).join(' · ');
     const model = `${runtimeLabel(n.runtime || 'claude')} · ${n.model || 'default'}`;
-    return `<div class="logagent-row ${cur === n.id ? 'sel' : ''}" data-id="${n.id}"><span class="avatar sm ${a.status === 'working' ? 'working' : ''}" style="background:${w.color}" title="${esc(w.name)}">${esc(w.ini)}</span><span class="lameta"><b>${esc(n.name)}</b><small class="lastat">${stat}</small><small class="lamodel" title="${esc(model)}">${esc(model)}</small></span><span class="lacount" title="${counts[n.id] || 0} log lines">${counts[n.id] || 0}</span><span class="lactions">${orphanedTasks().filter((t) => t.assignee === n.id).slice(0, 1).map((t) => stuckBtn(t.id)).join('')}${a.status === 'working' ? `<button data-stopagent="${n.id}" title="Stop">⏹</button>` : ''}<button data-msgagent="${n.id}" title="Message">✉</button></span></div>`; }).join('');
+    return `<div class="logagent-row ${cur === n.id ? 'sel' : ''}" data-id="${n.id}"><span class="avatar sm ${a.status === 'working' ? 'working' : ''}" style="background:${avatarBg(w)}" title="${esc(w.name)}">${avatarBody(n.id, w)}</span><span class="lameta"><b>${esc(n.name)}</b><small class="lastat">${stat}</small><small class="lamodel" title="${esc(model)}">${esc(model)}</small></span><span class="lacount" title="${counts[n.id] || 0} log lines">${counts[n.id] || 0}</span><span class="lactions">${orphanedTasks().filter((t) => t.assignee === n.id).slice(0, 1).map((t) => stuckBtn(t.id)).join('')}${a.status === 'working' ? `<button data-stopagent="${n.id}" title="Stop">⏹</button>` : ''}<button data-msgagent="${n.id}" title="Message">✉</button></span></div>`; }).join('');
   $('#logagents').innerHTML = `<div class="logagent-row ${!cur ? 'sel' : ''}" data-id=""><span class="avatar sm" style="background:#3a3f4b">∀</span><span class="lameta"><b>All agents</b><small class="lastat">every session</small></span><span class="lacount" title="${total} log lines">${total}</span></div>` +
     (rows || '<p class="muted logempty">No agents in this team.</p>');
   document.querySelectorAll('#logagents [data-idle]').forEach((d) => d.onclick = () => { obsIdleOpen.add(d.dataset.idle); obsSig = ''; renderObs(); });
@@ -1930,7 +1940,7 @@ function logRow(l) {
   let text = l.kind === 'monitor' ? monitorText(l) : esc(l.text);
   const hum = humanLog(l.text);
   if (hum && l.kind !== 'monitor') text = `<details class="logjson"><summary>${esc(hum.head)}</summary><pre>${esc(hum.json)}</pre></details>`;
-  return `<div class="logrow lv-${lvl}"><span class="logtime">${new Date(l.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span><span class="avatar sm" style="background:${w.color}" title="${esc(w.name)}">${esc(w.ini)}</span><span class="logagent" title="${esc(w.name)}">${esc(w.name)}</span>${task}<span class="loglevel lv-${lvl}">${badge}</span><span class="logtext">${text}</span></div>`;
+  return `<div class="logrow lv-${lvl}"><span class="logtime">${new Date(l.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span><span class="avatar sm" style="background:${avatarBg(w)}" title="${esc(w.name)}">${avatarBody(l.nodeId, w)}</span><span class="logagent" title="${esc(w.name)}">${esc(w.name)}</span>${task}<span class="loglevel lv-${lvl}">${badge}</span><span class="logtext">${text}</span></div>`;
 }
 // ---------- subagents (contract: t_c33656ba) ----------
 // Records live on the owning agent (S.orch.agents[id].subagents) for the current run and persist per
@@ -2548,6 +2558,7 @@ function renderOverview() {
   const visById = Object.fromEntries(ovNodes.map((n) => [n.id, n]));
   const defs = el('defs', {}, svg);
   for (const t of ['assign', 'message', 'review']) { const m = el('marker', { id: 'ovarr-' + t, viewBox: '0 0 10 10', refX: 9, refY: 5, markerWidth: 8, markerHeight: 8, markerUnits: 'userSpaceOnUse', orient: 'auto-start-reverse' }, defs); el('path', { d: 'M0,1 L9,5 L0,9 z', class: 'arrow arrow-' + t }, m); }
+  el('circle', { cx: 0.5, cy: 0.5, r: 0.5 }, el('clipPath', { id: 'avclip-ov', clipPathUnits: 'objectBoundingBox' }, defs));
   // Same orthogonal geometry (and parallel-edge offsets) as the Team graph, so both views read alike.
   const pk = (e) => [e.from, e.to].sort().join('|'); const pairN = {}, pairI = {}; ovEdges.forEach((e) => { pairN[pk(e)] = (pairN[pk(e)] || 0) + 1; });
   // Glance view: plain elbows between facing sides (drawn under the cards), no obstacle detours — detours made long bus lines that ran off-canvas.
@@ -2566,9 +2577,9 @@ function renderOverview() {
     const g = el('g', { class: 'node' + (live === 'working' ? ' working st-working' : ' st-' + live) + (isStuck ? ' stuck' : '') + (rtuFor(n.id) ? ' rtpaused' : ''), transform: `translate(${n.x},${n.y})`, 'data-id': n.id }, svg);
     el('rect', { class: 'card', width: W, height: H, rx: 12 }, g);
     el('rect', { class: 'stripe', width: 4, height: H - 20, x: 0, y: 10, rx: 2, style: `fill:${agentVar(n.id)}` }, g);
-    el('circle', { class: 'avatar', cx: 26, cy: 24, r: 13, style: `fill:${agentVar(n.id)};--av:${agentVar(n.id)}` }, g);
+    el('circle', { class: 'avatar', cx: 26, cy: 24, r: 13, style: `fill:${roleBg(n.role)};--av:${roleBg(n.role)}` }, g);
     if (isLeadRole(n.role)) el('text', { x: 35.5, y: 34, class: 'leadstar', 'text-anchor': 'middle' }, g).textContent = '★';
-    el('text', { x: 26, y: 28.5, class: 'avtext', 'text-anchor': 'middle' }, g).textContent = initials(n.name);
+    el('image', { class: 'avface', href: faceUri(n.id), x: 13, y: 11, width: 26, height: 26, 'clip-path': 'url(#avclip-ov)' }, g);
     el('text', { x: 47, y: 21, class: 'nname' }, g).textContent = clipText(n.name, 16);
     el('text', { x: 47, y: 36, class: 'nrole' }, g).textContent = isStuck ? '⚠ stuck' : `${clipText(n.role, 14)} · ${live === 'working' ? 'Working' : humanStatus(live)}`;
     el('text', { x: 47, y: 50, 'font-size': 10, opacity: 0.8, class: 'ov-vendor' }, g).textContent = clipText(`${VENDOR[n.runtime || 'claude'] || n.runtime} · ${n.model || 'default'}`, 26);
@@ -2636,10 +2647,10 @@ function renderOverview() {
   else {
     ts.classList.remove('hidden');
     const as = byId[t.assignee];
-    head.innerHTML = `<div class="ovth-title">${esc(t.title)}</div><div class="ovth-meta"><span class="ovth-status ${esc(t.status)}">${esc(humanStatus(t.status))}</span>${as ? `<span class="ovth-assignee"><span class="ovth-av" style="background:${agentVar(as.id)}">${esc(initials(as.name))}</span>${esc(as.name)}</span>` : '<span class="muted">Unassigned</span>'}</div>`;
+    head.innerHTML = `<div class="ovth-title">${esc(t.title)}</div><div class="ovth-meta"><span class="ovth-status ${esc(t.status)}">${esc(humanStatus(t.status))}</span>${as ? ((w) => `<span class="ovth-assignee"><span class="ovth-av" style="background:${avatarBg(w)}">${avatarBody(as.id, w)}</span>${esc(as.name)}</span>`)(who(as.id)) : '<span class="muted">Unassigned</span>'}</div>`;
   }
   function humanStatus(s) { const w = String(s || '').replaceAll('_', ' '); return w.charAt(0).toUpperCase() + w.slice(1); }
-  const ovAvatar = (id) => { const n = byId[id]; return n ? `<span class="ovth-av" style="background:${agentVar(id)}">${esc(initials(n.name))}</span>` : `<span class="ovth-av sys">${id === 'human' ? 'H' : '•'}</span>`; };
+  const ovAvatar = (id) => { const n = byId[id]; if (!n) return `<span class="ovth-av sys">${id === 'human' ? 'H' : '•'}</span>`; const w = who(id); return `<span class="ovth-av" style="background:${avatarBg(w)}">${avatarBody(id, w)}</span>`; };
   // Collapsible nested block for a subagent's tool activity inside the task thread (native <details>,
   // open state preserved via data-k like the tool chips).
   const ovSubBlock = (it, depth) => {
@@ -2683,7 +2694,7 @@ const crossTeamOf = (e) => { const st = sel.chatTeam; if (!st) return null;
   const a = nodeTeamOf(e.who); if (a && a !== st) return a;
   const b = nodeTeamOf(e.to); if (b && b !== st) return b;
   const tt = e.taskId ? taskTeamOf(e.taskId) : null; return tt && tt !== st ? tt : null; };
-const who = (id) => { const n = S.allNodes.find((x) => x.id === id); return n ? { name: n.name, role: n.role, color: agentVar(n.id), ini: Chat.initials(n.name), lead: isLeadRole(n.role) } : id === 'human' ? { name: 'You', role: '', color: 'transparent', ini: '', human: true } : { name: id || 'system', role: '', color: 'var(--bg-hover)', ini: '⚙', sys: true }; };
+const who = (id) => { const n = S.allNodes.find((x) => x.id === id); return n ? { name: n.name, role: n.role, color: agentVar(n.id), bg: roleBg(n.role), ini: Chat.initials(n.name), lead: isLeadRole(n.role) } : id === 'human' ? { name: 'You', role: '', color: 'transparent', ini: '', human: true } : { name: id || 'system', role: '', color: 'var(--bg-hover)', ini: '⚙', sys: true }; };
 function bubble(e) {
   const link = e.taskId && !CH.thread ? ` data-thread="${e.taskId}"` : ''; const tt = link ? taskTitle(e.taskId) : ''; const tl = link && !e._sameTask ? `<span class="tlink" title="${esc(tt)}">↳ ${esc(tt)}</span>` : '';
   const rep = e.count > 1 ? `<span class="repeat" title="repeated ${e.count} times">×${e.count}</span>` : '';
@@ -2719,7 +2730,18 @@ function chatMd(src) {
 // Collapse repeats moved to Chat.collapseRepeats (pure, unit-tested); merge adjacent same-author groups (no repeated "You" headers); questions stay separate.
 const mergeGroups = (gs) => gs.reduce((out, g) => { const p = out[out.length - 1]; if (p && p.who === g.who && g.items[0].type !== 'question' && p.items[0].type !== 'question') p.items.push(...g.items); else out.push({ ...g, items: [...g.items] }); return out; }, []).map((g) => ({ ...g, items: Chat.collapseRepeats(g.items) }));
 const needsYou = () => new Set([...(S.inbox || []).map((i) => i.nodeId), ...CH.asks]);
-const avatarHtml = (id, working, ask) => { const w = who(id); return `<div class="avatar${w.lead ? ' is-lead' : ''}${w.human ? ' human' : ''}${w.sys ? ' sys' : ''}${working.has(id) ? ' working' : ''}${ask.has(id) ? ' ask' : ''}" style="background:${w.color}" title="${esc(w.name)}${working.has(id) ? ' · working' : ask.has(id) ? ' · needs you' : ''}">${esc(w.ini)}</div>`; };
+// Agents wear a DiceBear face (wiki decision-dicebear-avatars) over their role colour; human/system keep initials/glyph.
+// avatarUri's SVG still paints DiceBear's own full-canvas background (white base + a seeded colour rect),
+// which would hide the role token behind it — strip those full-canvas rects so the CSS background shows.
+const faceCache = new Map();
+const faceUri = (id) => { let u = faceCache.get(id);
+  if (!u) { const svg = decodeURIComponent(avatarUri(id).replace(/^[^,]*,/, ''));
+    u = 'data:image/svg+xml;utf8,' + encodeURIComponent(svg.replace(/<rect[^>]*?width="120"[^>]*?height="120"[^>]*?\/>/g, ''));
+    faceCache.set(id, u); }
+  return u; };
+const avatarBg = (w) => (w.human || w.sys) ? w.color : (w.bg || w.color);
+const avatarBody = (id, w) => (w.human || w.sys) ? esc(w.ini) : `<img class="avface" src="${faceUri(id)}" alt="" draggable="false">`;
+const avatarHtml = (id, working, ask) => { const w = who(id); return `<div class="avatar${w.lead ? ' is-lead' : ''}${w.human ? ' human' : ''}${w.sys ? ' sys' : ''}${working.has(id) ? ' working' : ''}${ask.has(id) ? ' ask' : ''}" style="background:${avatarBg(w)}" title="${esc(w.name)}${working.has(id) ? ' · working' : ask.has(id) ? ' · needs you' : ''}">${avatarBody(id, w)}</div>`; };
 // ≥3 consecutive handoffs from one actor fold into one expandable "assigned N tasks" row.
 const bubbleRuns = (items) => { const out = []; items.forEach((it, k) => { it._sameTask = k > 0 && !!it.taskId && items[k - 1].taskId === it.taskId; }); for (let i = 0; i < items.length;) { let j = i; while (j < items.length && items[j].type === 'handoff') j++;
   if (j - i >= 3) { const run = items.slice(i, j); out.push(`<details class="evrun"><summary class="evrow"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg><span>assigned ${run.length} tasks</span></summary>${run.map(bubble).join('')}</details>`); i = j; } else { j = Math.max(j, i + 1); out.push(...items.slice(i, j).map(bubble)); i = j; } } return out.join(''); };
@@ -2790,7 +2812,7 @@ function chatPreview() {
   pv.textContent = Chat.preview(p); pv.className = p ? p.kind : 'muted';
   const ms = Chat.mentionMatches(v, S.team.nodes); const box = $('#chat-mentions'); box.classList.toggle('hidden', !ms || !ms.length);
   CH.mi = Math.min(CH.mi, Math.max(0, (ms || []).length - 1));
-  box.innerHTML = (ms || []).map((n, i) => `<div data-name="${esc(n.name)}" class="${i === CH.mi ? 'sel' : ''}"><span class="avatar${isLeadRole(n.role) ? ' is-lead' : ''}" style="background:${agentVar(n.id)}">${esc(Chat.initials(n.name))}</span>${esc(n.name)} <span class="role">${esc(n.role)}</span></div>`).join('');
+  box.innerHTML = (ms || []).map((n, i) => `<div data-name="${esc(n.name)}" class="${i === CH.mi ? 'sel' : ''}"><span class="avatar${isLeadRole(n.role) ? ' is-lead' : ''}" style="background:${roleBg(n.role)}">${avatarBody(n.id, who(n.id))}</span>${esc(n.name)} <span class="role">${esc(n.role)}</span></div>`).join('');
   box.querySelectorAll('div').forEach((d) => d.onmousedown = (e) => { e.preventDefault(); pickMention(d.dataset.name); });
 }
 function pickMention(name) { const i = $('#chat-input'); i.value = i.value.replace(/@(\w*)$/, '@' + name + ' '); i.focus(); CH.mi = 0; chatPreview(); }
