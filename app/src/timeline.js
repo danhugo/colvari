@@ -9,30 +9,15 @@ const ATTENTION_RANK = { waiting_for_human: 0, blocked: 1, error: 2 };
 // Lanes (grouped by nodeId) are ordered needs-attention first: waiting_for_human, then blocked, then error,
 // using `tasks` (store.listTasks()) to resolve each entry's current task status; ties keep chronological order.
 // nodeTeams ({nodeId: {teamId, teamName}}, see store.nodeTeamMap) tags each entry so the renderer can filter by team.
-// liveAgents ({nodeId: agent}, orchestrator live state) merge as open-ended bars for agents still working:
-// endedAt stays null and `live` is true, so the consumer draws end=now at render time (no timer here).
-// wakeFrom is who woke the agent (nodeId, shown as "wake: <name>"): a taskId-null run triggered by a
-// message — live from activity.fromNodeId, past ones from the run record's fromNodeId (set in orchestrator record()).
-function timeline(runs = [], tasks = [], nodeTeams = {}, liveAgents = {}) {
-  const wakeOf = (taskId, fromNodeId) => (taskId ? null : fromNodeId || null);
+function timeline(runs = [], tasks = [], nodeTeams = {}) {
   const entries = runs
     .filter((r) => r.kind === 'agent' && r.nodeId)
     .map((r) => ({
       nodeId: r.nodeId, agent: r.agent || '', taskId: r.taskId || null, task: r.task || '',
       startedAt: r.startedAt || null, endedAt: r.endedAt || null, durationMs: r.durationMs || 0,
-      model: r.model || '', isError: !!r.isError, live: false, wakeFrom: wakeOf(r.taskId, r.fromNodeId),
+      model: r.model || '', isError: !!r.isError,
       teamId: (nodeTeams[r.nodeId] || {}).teamId || null, teamName: (nodeTeams[r.nodeId] || {}).teamName || null,
     }));
-  for (const [id, a] of Object.entries(liveAgents || {})) {
-    if (!a || a.status !== 'working' || !a.activity || !a.activity.startedAt) continue;
-    entries.push({
-      nodeId: id, agent: '', taskId: a.taskId || null, task: a.task || '',
-      startedAt: new Date(a.activity.startedAt).toISOString(), endedAt: null, durationMs: 0,
-      model: a.model || '', isError: false, live: true,
-      wakeFrom: wakeOf(a.taskId, !a.taskId && a.activity.trigger === 'message' ? a.activity.fromNodeId : null),
-      teamId: (nodeTeams[id] || {}).teamId || null, teamName: (nodeTeams[id] || {}).teamName || null,
-    });
-  }
   const byTaskId = new Map(tasks.map((t) => [t.id, t]));
   const blockedIds = new Set(tasks.filter((t) => isBlocked(t, tasks)).map((t) => t.id));
   const lanes = new Map();

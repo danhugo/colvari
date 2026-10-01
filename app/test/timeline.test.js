@@ -13,7 +13,7 @@ test('timeline: keeps only agent runs, maps start/end per agent+task', () => {
   ];
   const tl = TL.timeline(runs);
   assert.equal(tl.length, 1);
-  assert.deepEqual(tl[0], { nodeId: 'n1', agent: 'Dev', taskId: 't1', task: 'Do X', startedAt: '2026-01-01T00:00:00.000Z', endedAt: '2026-01-01T00:01:00.000Z', durationMs: 60000, model: 'claude-x', isError: false, live: false, wakeFrom: null, teamId: null, teamName: null });
+  assert.deepEqual(tl[0], { nodeId: 'n1', agent: 'Dev', taskId: 't1', task: 'Do X', startedAt: '2026-01-01T00:00:00.000Z', endedAt: '2026-01-01T00:01:00.000Z', durationMs: 60000, model: 'claude-x', isError: false, teamId: null, teamName: null });
 });
 
 test('timeline: tags entries with teamId/teamName from the nodeTeams map', () => {
@@ -23,7 +23,7 @@ test('timeline: tags entries with teamId/teamName from the nodeTeams map', () =>
   ];
   const nodeTeams = { n1: { teamId: 'team-a', teamName: 'Alpha' } };
   const tl = TL.timeline(runs, [], nodeTeams);
-  assert.deepEqual(tl.find((e) => e.nodeId === 'n1'), { nodeId: 'n1', agent: 'Dev', taskId: 't1', task: 'Do X', startedAt: '2026-01-01T00:00:00.000Z', endedAt: null, durationMs: 0, model: '', isError: false, live: false, wakeFrom: null, teamId: 'team-a', teamName: 'Alpha' });
+  assert.deepEqual(tl.find((e) => e.nodeId === 'n1'), { nodeId: 'n1', agent: 'Dev', taskId: 't1', task: 'Do X', startedAt: '2026-01-01T00:00:00.000Z', endedAt: null, durationMs: 0, model: '', isError: false, teamId: 'team-a', teamName: 'Alpha' });
   assert.equal(tl.find((e) => e.nodeId === 'n2').teamId, null);
 });
 
@@ -47,26 +47,6 @@ test('logEntries: tags entries with teamId/teamName from the nodeTeams map', () 
   const lines = [{ at: 1, nodeId: 'n1', kind: 'system', text: 'hi' }];
   const es = TL.logEntries(lines, { n1: { teamId: 'team-a', teamName: 'Alpha' } });
   assert.deepEqual(es[0], { ts: 1, agentId: 'n1', level: 'info', text: 'hi', taskId: null, task: '', subagentId: null, teamId: 'team-a', teamName: 'Alpha' });
-});
-
-test('timeline: live working agents merge as open-ended bars; wake runs carry who woke it', () => {
-  const runs = [
-    { kind: 'agent', nodeId: 'n1', agent: 'Dev', taskId: 't1', task: 'Do X', startedAt: '2026-01-01T00:00:00.000Z', endedAt: '2026-01-01T00:01:00.000Z', durationMs: 60000 },
-    { kind: 'agent', nodeId: 'n2', agent: 'Critic', taskId: null, task: '', startedAt: '2026-01-01T01:00:00.000Z', endedAt: '2026-01-01T01:02:00.000Z', fromNodeId: 'n3' },
-  ];
-  const agents = {
-    n1: { status: 'working', taskId: 't1', task: 'Do X', model: 'claude-x', activity: { trigger: 'task', startedAt: Date.parse('2026-01-01T02:00:00.000Z') } },
-    n2: { status: 'working', taskId: null, task: null, model: 'claude-y', activity: { trigger: 'message', fromNodeId: 'n3', startedAt: Date.parse('2026-01-01T02:01:00.000Z') } },
-    n4: { status: 'idle', taskId: null, task: null, activity: null }, // not working: no live bar
-    n5: { status: 'working', taskId: 't9', task: 'No activity yet', activity: null }, // no startedAt: no live bar
-  };
-  const tl = TL.timeline(runs, [], {}, agents);
-  assert.deepEqual(tl.find((e) => e.live && e.nodeId === 'n1'), { nodeId: 'n1', agent: '', taskId: 't1', task: 'Do X', startedAt: '2026-01-01T02:00:00.000Z', endedAt: null, durationMs: 0, model: 'claude-x', isError: false, live: true, wakeFrom: null, teamId: null, teamName: null });
-  const liveWake = tl.find((e) => e.live && e.nodeId === 'n2');
-  assert.equal(liveWake.taskId, null);
-  assert.equal(liveWake.wakeFrom, 'n3'); // live wake run labelled with who woke it
-  assert.equal(tl.find((e) => !e.live && e.nodeId === 'n2').wakeFrom, 'n3'); // past wake run keeps the waker
-  assert.equal(tl.some((e) => e.nodeId === 'n4' || e.nodeId === 'n5'), false);
 });
 
 test('timeline: lanes sorted needs-attention first (waiting_for_human, blocked, error), then normal', () => {
@@ -125,29 +105,6 @@ test('orchestrator snapshot tags timeline/logs with team info via nodeTeams', ()
   assert.equal(snap.timeline[0].teamId, 'team-a');
   assert.equal(snap.timeline[0].teamName, 'Alpha');
   assert.equal(snap.logs.find((l) => l.text === 'boom').teamId, 'team-a');
-
-  fs.rmSync(dir, { recursive: true, force: true });
-});
-
-test('orchestrator: ended wake runs keep fromNodeId; snapshot.timeline merges live agents', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sq-timeline-live-'));
-  const store = new Store(dir);
-  const orch = new Orchestrator(store);
-  const a = orch.agent('n1');
-  a.status = 'working'; a.taskId = null; a.task = null;
-  a.activity = { trigger: 'message', fromNodeId: 'n2', startedAt: Date.now() };
-  orch.record({ kind: 'agent', nodeId: 'n1', agent: 'Dev', taskId: null, task: '', startedAt: '2026-01-01T00:00:00.000Z', endedAt: '2026-01-01T00:01:00.000Z', durationMs: 60000, model: 'claude-x', isError: false, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, reportedCostUsd: 0, billingSource: 'subscription' });
-  assert.equal(store.listRuns().find((r) => r.kind === 'agent').fromNodeId, 'n2'); // waker stamped before activity clears
-
-  let tl = orch.timeline();
-  const live = tl.find((e) => e.live && e.nodeId === 'n1');
-  assert.equal(live.endedAt, null); // open-ended: consumer draws end=now
-  assert.equal(live.wakeFrom, 'n2');
-  assert.equal(tl.find((e) => !e.live && e.nodeId === 'n1').wakeFrom, 'n2');
-
-  a.status = 'idle'; a.activity = null;
-  tl = orch.timeline(); // memo key includes agent state, so the ended run drops its live bar
-  assert.equal(tl.some((e) => e.live), false);
 
   fs.rmSync(dir, { recursive: true, force: true });
 });
