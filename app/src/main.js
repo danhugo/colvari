@@ -314,6 +314,37 @@ async function guiE2E() {
     expect('overview: stuck badge with Stop and Nudge', await ex(`S.settings.stuckMinutes = 1; S.orch.agents = { '${b.id}': { status: 'working', startedAt: Date.now() - 600000 } }; renderOverview(); return !!document.querySelector('#ov-graph .node.stuck') && !!document.querySelector('[data-ovstop]') && !!document.querySelector('[data-ovnudge]')`));
     await shot('13-overview-stuck');
   };
+  // Nudge = system status check (t_a7254182): the stuck-bar button must send the sendToAgent extra
+  // {from:'system', interrupt:false} — never a human message that SIGTERMs the live run — and carry
+  // a tooltip saying it waits for the current run (stalled runs are the watchdog's job).
+  const nudgeShots = async () => {
+    await ex(`await refresh();`);
+    const cur = await ex(`return { p: ctx.p, t: S.teamId }`);
+    const ps = pm.store(cur.p || pid(), cur.t);
+    let nodes = ps.getTeam().nodes;
+    if (nodes.length < 2) { ps.addNode({ name: 'Pia', role: 'PM', x: 60, y: 60 }); ps.addNode({ name: 'Devon', role: 'Dev', x: 320, y: 160 }); nodes = ps.getTeam().nodes; }
+    const [, b] = nodes;
+    await ex(`$('#tabs button[data-tab=overview]').click(); await w(500); await refresh();`);
+    const orch2 = orchFor(cur.p || pid()); const origSend = orch2.sendToAgent; const calls = [];
+    orch2.sendToAgent = (...args) => { calls.push(args); return origSend.apply(orch2, args); };
+    // Inject + click in ONE evaluate: a background refresh() replaces S at any time and would drop the button.
+    let clicked = '';
+    try {
+      clicked = await ex(`window.alert = () => {}; S.settings.stuckMinutes = 1; S.orch.agents = { '${b.id}': { status: 'working', startedAt: Date.now() - 600000 } }; renderOverview(); const btn = document.querySelector('[data-ovnudge]'); if (!btn) return 'no-button'; window.__tooltip = btn.title; btn.click(); await w(600); return 'clicked'`);
+    } finally { orch2.sendToAgent = origSend; }
+    const tooltip = await ex(`return window.__tooltip || ''`);
+    const a = calls[0] || [];
+    expect('nudge: stuck bar renders the Nudge button', clicked === 'clicked', clicked);
+    expect('nudge: tooltip says no-interrupt and waiting for the run', /never interrupts/.test(tooltip) && /stalled/.test(tooltip), tooltip);
+    expect('nudge: click sends sendToAgent(id, Status check, null, {from:system, interrupt:false})', clicked === 'clicked' && calls.length === 1 && a.length === 4 && a[0] === b.id && /Status check/.test(a[1]) && a[2] === null && !!a[3] && a[3].from === 'system' && a[3].interrupt === false, { clicked, args: a });
+    // The click's refresh() drops the renderer-injected stuck bar, and the nudge's own stored message
+    // is FRESH output that un-sticks the agent (by design). Freeze refresh, clamp ALL of the node's
+    // logs to 10min old (the fresh '✉ message stored' log would otherwise win stuckAgents' Math.max),
+    // re-inject the working state, and settle before the shot.
+    await ex(`window._refresh = refresh; refresh = async () => {}; S.settings.stuckMinutes = 1; S.orch.agents = { '${b.id}': { status: 'working', startedAt: Date.now() - 600000 } }; for (const l of logs) if (l.nodeId === '${b.id}') l.at = Math.min(l.at, Date.now() - 600000); renderOverview(); await w(500)`);
+    await shot('nudge-stuck');
+    console.log('[gui-e2e] nudge', JSON.stringify({ clicked, tooltip, args: a }));
+  };
   // First-run guide (steps 1-3) in a fresh project, then Human Inbox: ask_human with choices, answer, approval item.
   const firstrunInbox = async () => {
     const fp = pm.create('First run'); const fstore = pm.store(fp.id); const forch = orchFor(fp.id);
@@ -2355,6 +2386,7 @@ async function guiE2E() {
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'windowing') { await windowingShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'firstrun') { await firstrunInbox(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'overview') { await overviewShots(); throw null; }
+    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'nudge') { await nudgeShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'teamscope') { await teamScopeShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'parallel') { await parallelShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'runidle') { await runIdleShots(); throw null; }
