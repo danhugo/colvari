@@ -552,6 +552,23 @@ class Store {
     });
   }
   removeNode(nid) {
+    // The one delete path (human IPC; retire_agent lands here after its own reassign). Guards first:
+    // the core is not deletable, and an agent owning an in_progress task may be running it right now
+    // (refusing, like retire_agent, avoids two workers on one task). Remaining open tasks go to the
+    // first incoming edge source (the manager), else the team core — never stranded on a deleted
+    // node; done tasks keep their assignee as history.
+    const node = this.getTeam().nodes.find((n) => n.id === nid);
+    if (node) {
+      if (node.core) throw new Error('cannot delete the core agent');
+      const inProg = this.listTasks({ assignee: nid, status: 'in_progress' });
+      if (inProg.length) throw new Error(`refused: "${node.name}" still owns ${inProg.length} in_progress task(s) (${inProg.map((t) => t.id).join(', ')}) — stop the run or let it finish first`);
+      const open = this.listTasks({ assignee: nid }).filter((t) => t.status !== 'done');
+      if (open.length) {
+        const to = (this.getTeam().edges.find((e) => e.to === nid) || {}).from || (this.getTeam().nodes.find((n) => n.core) || {}).id;
+        if (!to) throw new Error('no manager or core to take the open tasks of "' + node.name + '"');
+        for (const tk of open) this.updateTask(tk.id, { assignee: to });
+      }
+    }
     this.update(this.teamFile(), { nodes: [], edges: [] }, (t) => { t.nodes = t.nodes.filter((n) => n.id !== nid); t.edges = t.edges.filter((e) => e.from !== nid && e.to !== nid); });
     for (const tid of this.teamIds()) if ('team-' + tid !== this.teamFile()) this.update('team-' + tid, { nodes: [], edges: [] }, (t) => { t.edges = t.edges.filter((e) => e.to !== nid); });
   }

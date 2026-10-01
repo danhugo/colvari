@@ -2079,6 +2079,46 @@ async function guiE2E() {
     await shot('37-dynamicteam-settings');
     console.log('[gui-e2e] dynamicteam', JSON.stringify({ cores: cores().map((n) => n.id), createdBy: ps.getTeam().nodes.find((n) => n.id === ra.id).createdBy, settings: { maxAgents: psettings.getSettings().maxAgents, teamChangeApproval: psettings.getSettings().teamChangeApproval } }));
   };
+  // Delete-agent backend (t_749f4cc1): the removeNode IPC must refuse the core, refuse while the
+  // agent still owns an in_progress task (it may be running right now), and hand the agent's other
+  // open tasks to its manager (first incoming edge source, else the team core) instead of leaving
+  // them stranded on a deleted node. Done tasks keep their assignee as history.
+  const deleteNodeShots = async () => {
+    await ex(`await refresh();`);
+    const cur = await ex(`return { p: ctx.p, t: S.teamId }`);
+    const ps = pm.store(cur.p, cur.t);
+    const core = ps.getTeam().nodes.find((n) => n.core) || ps.addNode({ name: 'Corey', role: 'PM', core: true, x: 60, y: 60 });
+    const mgr = ps.addNode({ name: 'Manager', role: 'PM', x: 340, y: 60 });
+    const w = ps.addNode({ name: 'Wally', role: 'Dev', x: 620, y: 60 });
+    ps.addEdge(mgr.id, w.id);
+    const todo = ps.createTask({ title: 'Delete-me open work', assignee: w.id });
+    const done = ps.createTask({ title: 'Already shipped', assignee: w.id });
+    ps.updateTask(done.id, { status: 'done' });
+    await ex(`$('#tabs button[data-tab=team]').click(); await w(400); await refresh();`);
+    await shot('45-deletenode-before');
+    // (1) the core is refused by the backend, not just hidden by the UI
+    const coreTry = await ex(`try { await call('removeNode', '${core.id}'); return 'deleted'; } catch (e) { return 'refused: ' + (e.message || e); }`);
+    expect('deletenode: core refused by the removeNode IPC', /core/i.test(coreTry) && !!ps.getTeam().nodes.find((n) => n.id === core.id), coreTry);
+    // (2) refused while an in_progress task is owned (the agent may be running it)
+    const run = ps.createTask({ title: 'Running right now', assignee: w.id });
+    ps.updateTask(run.id, { status: 'in_progress' });
+    const runTry = await ex(`try { await call('removeNode', '${w.id}'); return 'deleted'; } catch (e) { return 'refused: ' + (e.message || e); }`);
+    expect('deletenode: refuses while an in_progress task is owned', /in_progress/i.test(runTry) && !!ps.getTeam().nodes.find((n) => n.id === w.id) && ps.getTask(run.id).status === 'in_progress', runTry);
+    // (3) open tasks go to the manager, node + edges go, done task untouched
+    ps.updateTask(run.id, { status: 'todo' });
+    await ex(`await call('removeNode', '${w.id}'); await w(300); await refresh();`);
+    const after = { wGone: !ps.getTeam().nodes.some((n) => n.id === w.id), edgesGone: !ps.getTeam().edges.some((e) => e.from === w.id || e.to === w.id),
+      todoTo: ps.getTask(todo.id).assignee, runTo: ps.getTask(run.id).assignee, doneKeeps: ps.getTask(done.id).assignee };
+    expect('deletenode: open tasks to the manager, done untouched, node+edges gone', after.wGone && after.edgesGone && after.todoTo === mgr.id && after.runTo === mgr.id && after.doneKeeps === w.id, after);
+    // (4) no incoming edge -> the team core inherits
+    const w2 = ps.addNode({ name: 'Loner', role: 'Dev', x: 860, y: 60 });
+    const loner = ps.createTask({ title: 'Orphan work', assignee: w2.id });
+    await ex(`await call('removeNode', '${w2.id}'); await w(300);`);
+    expect('deletenode: no manager -> the core inherits', !ps.getTeam().nodes.some((n) => n.id === w2.id) && ps.getTask(loner.id).assignee === core.id, ps.getTask(loner.id).assignee);
+    await ex(`$('#tabs button[data-tab=team]').click(); await w(300); await refresh();`);
+    await shot('46-deletenode-after');
+    console.log('[gui-e2e] deletenode', JSON.stringify({ coreTry, runTry, after }));
+  };
   // Recruit approval through the human Inbox (t_49f926ea): a core's recruit_agent files an approval
   // request in the Inbox; approving it in the UI must add the node to the graph LIVE (no reload),
   // declining must not — and the core is told either way. The REAL tool implementation runs
@@ -2327,6 +2367,7 @@ async function guiE2E() {
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'subagents') { await subagentShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'dynamicteam') { await dynamicTeamShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'recruitinbox') { await recruitInboxShots(); throw null; }
+    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'deletenode') { await deleteNodeShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'topbar') { await topbarShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'composerclear') { await composerClearShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'timelinelive') { await timelineLiveShots(); throw null; }
