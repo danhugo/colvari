@@ -179,7 +179,7 @@ test('in-flight tasks are never touched (status, busy list, shared conflict dir)
   assert.strictEqual(fs.existsSync(wt), true);
 });
 
-test('orphan worktrees are removed (clean + merged only) and the sweep prunes', () => {
+test('dirs unknown to the store are never swept — a 0-commit branch is merged by definition (t_f4453909); the sweep still prunes', () => {
   const { s, task, wt, repo } = setup('t_lc7'); // task t_lc7 is todo: its dir must survive
   const mk = (name, withCommit) => {
     const dir = path.join(repo, '.squad', 'worktrees', name);
@@ -188,12 +188,13 @@ test('orphan worktrees are removed (clean + merged only) and the sweep prunes', 
     return dir;
   };
   mk('t_orphan1', true); // unmerged: retained
-  const orphan2 = mk('t_orphan2', false); // clean + no commits: removed
+  const orphan2 = mk('t_orphan2', false); // clean + no commits: still retained — identical to a task that just started
   let r = WT.sweepWorktrees({ repoDir: repo, store: s });
-  assert.deepStrictEqual(r.removed, ['t_orphan2'], JSON.stringify(r));
-  assert.ok(r.retained.some((x) => x.dir === 't_orphan1' && /unmerged/.test(x.reason)), JSON.stringify(r.retained));
+  assert.deepStrictEqual(r.removed, [], JSON.stringify(r));
+  assert.ok(r.retained.some((x) => x.dir === 't_orphan1' && /unknown to this store/.test(x.reason)), JSON.stringify(r.retained));
+  assert.ok(r.retained.some((x) => x.dir === 't_orphan2' && /unknown to this store/.test(x.reason)), JSON.stringify(r.retained));
   assert.ok(r.retained.some((x) => x.dir === 't_lc7'), 'in-flight task dir survives');
-  assert.strictEqual(fs.existsSync(orphan2), false);
+  assert.strictEqual(fs.existsSync(orphan2), true);
   assert.strictEqual(r.pruned, true);
   // A stale admin entry (dir deleted by hand) is pruned even though the sweep never saw the dir.
   g(repo, 'worktree', 'add', '-b', 'squad/t_orphan3', path.join(repo, '.squad', 'worktrees', 't_orphan3'));
@@ -290,6 +291,25 @@ test('a store that cannot see a worktree id retains it when work is at stake (t_
   assert.strictEqual(fs.readFileSync(path.join(w.worktreePath, 'scratch.txt'), 'utf8'), 'gate outputs\n');
 });
 
+// The 2026-10-01 incident (t_f4453909): a sibling project's store swept this repo, saw live
+// tasks as unknown ids, and deleted their worktrees mid-run — a task that just started has a
+// 0-commit branch (= fully merged) and a clean tree, indistinguishable from a merged orphan
+// by git alone. Only a store that knows the id may remove the dir.
+test('a foreign store never removes a live in_progress task worktree at 0 commits on a clean tree (t_f4453909)', () => {
+  const { s, task, wt, repo } = setup('t_lc21'); // the exact incident shape: 0 commits, clean tree
+  s._updateTask(task.id, { status: 'in_progress' });
+  const foreign = { listTasks: () => [], getTask: () => null }; // sibling project's / harness store
+  const r = WT.sweepWorktrees({ repoDir: repo, store: foreign });
+  assert.deepStrictEqual(r.removed, [], JSON.stringify(r));
+  assert.ok(r.retained.some((e) => e.dir === 't_lc21' && /unknown to this store/.test(e.reason)), JSON.stringify(r.retained));
+  assert.strictEqual(fs.existsSync(wt), true, 'the live worktree survives a foreign sweep');
+  // The owning store, by contrast, retains it for the plain reason: the task is in flight.
+  const r2 = WT.sweepWorktrees({ repoDir: repo, store: s });
+  assert.deepStrictEqual(r2.removed, [], JSON.stringify(r2));
+  assert.ok(r2.retained.some((e) => e.dir === 't_lc21' && /in_progress/.test(e.reason)), JSON.stringify(r2.retained));
+  assert.strictEqual(fs.existsSync(wt), true);
+});
+
 // ---- t_1ff80eba: stray gate/tmp registrations outside .squad/worktrees ----
 
 test('stray squad-*/gate registrations are reaped; locked, dirty and non-matching ones survive', () => {
@@ -378,15 +398,19 @@ test('removeWorktree: absent is a quiet no-op, dirty refuses, unmerged refuses, 
 // main.js sweeps at boot + every 10 min and orchestrator.start() sweeps before agents spawn
 // (orchestrator.js); this pins the start() wiring — without it a refactor could silently
 // disconnect startup cleanup while every sweepWorktrees unit test stays green.
-test('startup sweep wiring: Orchestrator.start() sweeps orphan worktrees before agents spawn', () => {
+test('startup sweep wiring: Orchestrator.start() sweeps removable worktrees before agents spawn', () => {
   const repo = bareRepo();
-  const orphan = path.join(repo, '.squad', 'worktrees', 't_orpwire');
-  g(repo, 'worktree', 'add', '-b', 'squad/t_orpwire', orphan);
+  const dir = path.join(repo, '.squad', 'worktrees', 't_orpwire');
+  g(repo, 'worktree', 'add', '-b', 'squad/t_orpwire', dir);
   const s = new Store(fs.mkdtempSync(path.join(os.tmpdir(), 'wlc-wirestore-'))); // empty board: nothing to dispatch
+  const task = s.createTask({ title: 'wired', assignee: 'n_dev' });
+  // Raw done flip (no merge machinery): done + 0-commit branch (= merged) + clean tree is
+  // removable, but only by this owning store — an unknown id is never swept (t_f4453909).
+  s._updateTask(task.id, { status: 'done', worktreePath: dir, worktreeBranch: 'squad/t_orpwire' });
   const o = new Orchestrator(s, { repoDir: repo });
   o.spawnFn = () => ({ unref() {} }); // stub the detached red-master health child
   o.start();
   try {
-    assert.strictEqual(fs.existsSync(orphan), false, 'orphan swept during start(), before any agent could spawn');
+    assert.strictEqual(fs.existsSync(dir), false, 'removable worktree swept during start(), before any agent could spawn');
   } finally { o.stop(); }
 });
