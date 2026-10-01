@@ -1727,6 +1727,49 @@ async function guiE2E() {
     await shot('wake-board-cleared');
     console.log('[gui-e2e] wake', JSON.stringify({ board, team, ov, off }));
   };
+  // Timeline with a live task run and a message-wake run (t_59147edd, plan t_6e1bb175/(b)). The landed
+  // fix (t_634c6702) is the data layer: orchestrator timeline() merges live working agents as open-ended
+  // bars and carries wakeFrom ("who woke it") on taskId-null runs — from live activity for in-flight
+  // wakes, from the stored run record's fromNodeId (stamped by record()) for ended ones. That data is
+  // not renderer-visible yet (getAll ships snapshotSlim(), which drops `timeline`, and the Overview
+  // DOM lanes are built from '▶ ... starts' log lines only), so the live bar is asserted in the DOM
+  // while the wake bar is asserted directly on the orchestrator. Seeds every real input channel:
+  // backend agent state via orchFor (the orchestrator agent()/wakeRun shapes), a stored runs.json wake
+  // record with fromNodeId, and the '▶' log lines the DOM lanes use.
+  const timelineLiveShots = async () => {
+    await waitFor(`return !!document.querySelector('#tpl-select option')`); await ex(`await refresh();`);
+    const cp = pm.create('Timeline Live'); const ps = pm.store(cp.id);
+    const stubCaps = { ok: true, probedAt: new Date().toISOString(), source: 'stub', slashCommands: [], commands: [], skills: [], modes: [], categorized: [] };
+    const pia = ps.addNode({ name: 'Pia', role: 'PM', x: 60, y: 60 });
+    const devon = ps.addNode({ name: 'Devon', role: 'Dev', x: 320, y: 120 });
+    const dana = ps.addNode({ name: 'Dana', role: 'Dev', x: 320, y: 240 });
+    ps.addEdge(pia.id, devon.id, 'assign'); ps.addEdge(pia.id, dana.id, 'message');
+    [pia, devon, dana].forEach((n) => ps.updateNode(n.id, { capabilities: stubCaps }));
+    const task = ps.createTask({ title: 'Fix the login redirect loop', assignee: devon.id });
+    ps._updateTask(task.id, { status: 'in_progress' });
+    // Backend agent state exactly as the orchestrator holds it while Devon runs the task and Dana
+    // handles a message wake — this is what timeline() merges (see Dev A's unit test shapes).
+    const orch = orchFor(cp.id);
+    const oa = orch.agent(devon.id); oa.status = 'working'; oa.taskId = task.id; oa.task = 'Fix the login redirect loop'; oa.activity = { trigger: 'task', startedAt: Date.now() };
+    const od = orch.agent(dana.id); od.status = 'working'; od.taskId = null; od.task = null; od.activity = { trigger: 'message', messageId: 'm1', fromNodeId: pia.id, taskId: null, count: 1, startedAt: Date.now() };
+    // Stored (ended) wake run with taskId null and the waker stamped, as orchestrator.record() writes it.
+    ps.addRun({ id: 'r_e2ewake', kind: 'agent', nodeId: dana.id, taskId: null, task: '', startedAt: Date.now() - 120000, endedAt: Date.now() - 60000, durationMs: 60000, model: 'stub', isError: false, fromNodeId: pia.id, inputTokens: 10, outputTokens: 10, cacheReadTokens: 0, cacheCreationTokens: 0, reportedCostUsd: 0, billingSource: 'api', sessionId: 'e2e-wake' });
+    await ex(`await switchTo({ p: '${cp.id}', t: '${pm.get(cp.id).teams[0].id}' }); await w(300);`);
+    const L = (ago, n, kind, text) => `logs.push({ projectId: '${cp.id}', nodeId: '${n.id}', kind: '${kind}', text: ${JSON.stringify(text)}, at: Date.now() - ${ago} });`;
+    const seed = `${L(120000, devon, 'system', '▶ Devon starts "Fix the login redirect loop" in /work [mode=once]')}${L(60000, devon, 'tool', 'Read {"file_path":"login.ts"}')}${L(60000, dana, 'system', '▶ Dana wakes to handle messages in /work')}`
+      + `S.orch.agents = { '${devon.id}': { status: 'working', taskId: '${task.id}', task: 'Fix the login redirect loop' }, '${dana.id}': { status: 'working', taskId: null, activity: { trigger: 'message', messageId: 'm1', messageIds: ['m1'], fromNodeId: '${pia.id}', excerpt: 'Please check the failing build', taskId: null, count: 1, startedAt: Date.now() } } }; renderIdle(); renderGraph(); renderOverview();`;
+    await ex(`$('#tabs button[data-tab=overview]').click(); await w(300);`);
+    const bars = await ex(`${seed} await w(200); return [...document.querySelectorAll('#ov-timeline rect.run')].map((r) => ({ live: r.classList.contains('live'), t: (r.querySelector('title') || {}).textContent || '' }));`);
+    expect('timelinelive: the in-flight task run renders as an open live bar', bars.some((b) => b.live && /login redirect/i.test(b.t)), bars);
+    // The landed fix surface: orchestrator timeline() merges live agents and carries the waker.
+    const tl = orch.timeline();
+    expect('timelinelive: the live task run merges as an open-ended bar in the orchestrator timeline', tl.some((e) => e.nodeId === devon.id && e.live && e.taskId === task.id), tl);
+    expect('timelinelive: the wake run merges with wakeFrom = who woke it (live activity + stored record)', tl.some((e) => e.nodeId === dana.id && e.live && !e.taskId && e.wakeFrom === pia.id) && tl.some((e) => e.nodeId === dana.id && !e.live && e.wakeFrom === pia.id), tl);
+    const tb = await ex(`${seed} await w(100); const b = $('#ov-timelinewrap').getBoundingClientRect(); return { x: Math.round(b.x), y: Math.round(b.y), width: Math.round(b.width), height: Math.round(b.height) };`);
+    fs.writeFileSync(path.join(out, 'timelinelive-overview.png'), (await win.capturePage(tb)).toPNG());
+    await shot('timelinelive-overview-full');
+    console.log('[gui-e2e] timelinelive', JSON.stringify({ bars, tl, crop: tb }));
+  };
   // Monitor log lines (t_43243765, plan t_a4ceb629/C): the core's watchdog decisions render as
   // accent "Monitor" rows — badge + action — reason with plain taskIds; a line persisted without
   // the structured fields falls back to its raw text.
@@ -2277,6 +2320,7 @@ async function guiE2E() {
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'recruitinbox') { await recruitInboxShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'topbar') { await topbarShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'composerclear') { await composerClearShots(); throw null; }
+    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'timelinelive') { await timelineLiveShots(); throw null; }
     // project/team management through the UI: create a project from the Startup template, then a Solo team, then switch back.
     // The template select renders with the Settings view (tab-scoped rendering, t_8d586961), so open
     // Settings first and wait until the first refresh has filled it before choosing a template.
