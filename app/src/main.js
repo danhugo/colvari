@@ -335,7 +335,7 @@ async function guiE2E() {
     const tooltip = await ex(`return window.__tooltip || ''`);
     const a = calls[0] || [];
     expect('nudge: stuck bar renders the Nudge button', clicked === 'clicked', clicked);
-    expect('nudge: tooltip says no-kill and waiting for the run', /never kills a running agent/.test(tooltip) && /stalled/.test(tooltip), tooltip);
+    expect('nudge: tooltip says no-interrupt and waiting for the run', /never interrupts/.test(tooltip) && /stalled/.test(tooltip), tooltip);
     expect('nudge: click sends sendToAgent(id, Status check, null, {from:system, interrupt:false})', clicked === 'clicked' && calls.length === 1 && a.length === 4 && a[0] === b.id && /Status check/.test(a[1]) && a[2] === null && !!a[3] && a[3].from === 'system' && a[3].interrupt === false, { clicked, args: a });
     // The click's refresh() drops the renderer-injected stuck bar, and the nudge's own stored message
     // is FRESH output that un-sticks the agent (by design). Freeze refresh, clamp ALL of the node's
