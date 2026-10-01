@@ -14,6 +14,7 @@ const TL = require('./timeline');
 const PRESET_FIELDS = ['systemPrompt', 'allowedTools', 'disallowedTools', 'permissionMode'];
 const pick = (o, ks) => Object.fromEntries(ks.map((k) => [k, o[k]]));
 const { normalizeNode, normalizePatch, normalizePreset, applyPreset, EDGE_TYPES, SUGGESTED_ROLES } = require('./agent-config');
+const { defaultName } = require('./agent-name');
 const WT = require('./worktree');
 const MG = require('./merge-gate');
 const { BoardCache } = require('./board-cache');
@@ -507,6 +508,7 @@ class Store {
     const presets = this.getSettings().rolePresets;
     const node = { id: n.id || id('n'), ...normalizeNode(applyPreset(n, presets)), x: n.x, y: n.y };
     this.update(this.teamFile(), { nodes: [], edges: [] }, (t) => {
+      if (!String(n.name || '').trim()) node.name = defaultName(node.id, node.role, t.nodes);
       // Explicit x/y (context menu, toolbar add, duplicate, seeds) is kept; otherwise claim the first
       // free grid cell inside the lock so nodes created back-to-back never stack at (80,80). An
       // explicit spot that lands on a placed node (toolbar add staggers by only 20px) is not free
