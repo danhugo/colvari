@@ -2731,12 +2731,10 @@ function chatMd(src) {
 const mergeGroups = (gs) => gs.reduce((out, g) => { const p = out[out.length - 1]; if (p && p.who === g.who && g.items[0].type !== 'question' && p.items[0].type !== 'question') p.items.push(...g.items); else out.push({ ...g, items: [...g.items] }); return out; }, []).map((g) => ({ ...g, items: Chat.collapseRepeats(g.items) }));
 const needsYou = () => new Set([...(S.inbox || []).map((i) => i.nodeId), ...CH.asks]);
 // Agents wear a DiceBear face (wiki decision-dicebear-avatars) over their role colour; human/system keep initials/glyph.
-// avatarUri's SVG still paints DiceBear's own full-canvas background (white base + a seeded colour rect),
-// which would hide the role token behind it — strip those full-canvas rects so the CSS background shows.
+// avatarUri.faceSvg drops DiceBear's coloured background rect so the role token shows behind the face.
 const faceCache = new Map();
 const faceUri = (id) => { let u = faceCache.get(id);
-  if (!u) { const svg = decodeURIComponent(avatarUri(id).replace(/^[^,]*,/, ''));
-    u = 'data:image/svg+xml;utf8,' + encodeURIComponent(svg.replace(/<rect[^>]*?width="120"[^>]*?height="120"[^>]*?\/>/g, ''));
+  if (!u) { u = 'data:image/svg+xml;utf8,' + encodeURIComponent(avatarUri.faceSvg(id));
     faceCache.set(id, u); }
   return u; };
 const avatarBg = (w) => (w.human || w.sys) ? w.color : (w.bg || w.color);
