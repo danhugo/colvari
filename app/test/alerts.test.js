@@ -144,3 +144,14 @@ test('fingerprint: stable for the same state, changes when the state changes (di
   const stuck = (updated) => collect({ tasks: [{ id: 't_1', status: 'in_progress', assignee: 'n_1', title: 'A', updatedAt: updated }] })[0].fingerprint;
   assert.notEqual(stuck('2026-09-30T00:00:00Z'), stuck('2026-09-30T00:05:00Z'));
 });
+
+test('mapping: self-update abort -> one dismissable error alert with the reason; none when empty or non-dev', () => {
+  const out = collect({ updError: 'test step timed out after 10min' });
+  assert.equal(out.length, 1);
+  assert.equal(out[0].id, 'self-update-aborted');
+  assert.equal(out[0].severity, 'error');
+  assert.match(out[0].text, /old code/);
+  assert.match(out[0].text, /timed out/);
+  assert.equal(collect({ updError: '' }).length, 0);
+  assert.equal(collect({ updError: 'x', devMode: false }).length, 0);
+});
