@@ -173,3 +173,17 @@ test('parent task auto-completes when all subtasks are done', () => {
   assert.equal(s.getTask(p.id).status, 'done');
   assert.equal(s.getTask(root.id).status, 'done');
 });
+
+test('listTasks uncached: status and assignee filters AND together', () => {
+  const s = tmp();
+  const both = s.createTask({ title: 'both', assignee: 'n1' });
+  s.createTask({ title: 'todo other assignee', assignee: 'n2' });
+  const mine = s.createTask({ title: 'n1 in progress', assignee: 'n1' });
+  s.updateTask(mine.id, { status: 'in_progress' });
+  const got = s.listTasks({ status: 'todo', assignee: 'n1' });
+  assert.equal(got.length, 1);
+  assert.equal(got[0].id, both.id);
+  assert.equal(s.listTasks({ assignee: 'n1' }).length, 2);
+  assert.equal(s.listTasks({ status: 'todo' }).length, 2);
+  assert.equal(s.listTasks().length, 3);
+});
