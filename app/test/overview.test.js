@@ -28,6 +28,17 @@ test('timeline: runs, tool ticks and status markers per lane', () => {
   assert.equal(L.z, undefined);
 });
 
+test('timeline: wake runs show a bar labelled with who woke it, live until the run ends', () => {
+  const logs = [
+    { nodeId: 'a', kind: 'system', text: '▶ Pia wakes to handle messages from Critic in /x', at: 300 },
+    { nodeId: 'a', kind: 'system', text: '■ Pia finished the wake run (exit 0)', at: 400 },
+    { nodeId: 'b', kind: 'system', text: '▶ Dev wakes to handle messages from you in /x [resume s1]', at: 350 },
+  ];
+  const L = O.timeline(logs, ['a', 'b'], 500);
+  assert.deepEqual(L.a.runs, [{ start: 300, end: 400, task: 'wake: Critic' }]);
+  assert.deepEqual(L.b.runs, [{ start: 350, end: 500, task: 'wake: you', live: true }]);
+});
+
 test('edge flashes: assign / send_message light the matching edge for 10s', () => {
   const edges = [{ id: 'e1', from: 'a', to: 'b' }, { id: 'e2', from: 'b', to: 'a' }];
   const logs = [{ nodeId: 'a', kind: 'tool', text: 'mcp__board__create_task {"assignee":"b"}', at: 5000 }, { nodeId: 'b', kind: 'tool', text: 'mcp__board__send_message {"to":"a","text":"hi"}', at: 0 }];
