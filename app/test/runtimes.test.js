@@ -242,3 +242,20 @@ test('derived profiles are cached per binary and re-derived when the CLI version
   assert.notStrictEqual(p3, p1);
   assert.ok(helpCalls > callsAfterFirst, 'expected re-derivation after version change');
 });
+
+test('helpycode text event with an empty profile fails loud, not silent', () => {
+  const rt = RT.getRuntime('helpycode');
+  const noBin = () => '';
+  const o = rt.parseEvent({ type: 'text', part: { type: 'text', text: 'hi' } }, { helpycodePath: '/fake/missing' }, { exec: noBin });
+  assert.ok(o.logs.some(([k, t]) => k === 'error' && /no textPath/.test(t)));
+});
+test('empty-version (binary missing) profile is not cached', () => {
+  let n = 0; const ex = () => { n++; return ''; };
+  RT.deriveRuntimeProfile('/fake/hc-gone', { exec: ex, probe: false });
+  const first = n; RT.deriveRuntimeProfile('/fake/hc-gone', { exec: ex, probe: false });
+  assert.ok(n > first);
+});
+test('send_message to "human" says how to reply', () => {
+  const src = fs.readFileSync(path.join(__dirname, '../src/board-tools.js'), 'utf8');
+  assert.match(src, /To reply to the human, put the reply in your final answer, or use ask_human/);
+});
