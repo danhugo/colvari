@@ -749,9 +749,13 @@ header > strong.brand { display:flex; align-items:center; gap:6px; font-weight:7
 #tab-board button:not(.primary):hover { background:var(--bg-hover); border-color:var(--fg-secondary); }
 #tab-board #toggle-done { width:100%; }
 /* Detail panel folds its width away so the columns reflow instead of jumping on selection. */
-#taskdetail { min-width:0; overflow-y:auto; overflow-x:hidden; transition:width var(--dur-base) var(--ease-out), padding var(--dur-base) var(--ease-out), border-color var(--dur-base) var(--ease-out), opacity var(--dur-base) var(--ease-out); }
+#taskdetail { position:relative; min-width:0; overflow-y:auto; overflow-x:hidden; transition:width var(--dur-base) var(--ease-out), padding var(--dur-base) var(--ease-out), border-color var(--dur-base) var(--ease-out), opacity var(--dur-base) var(--ease-out); }
 #taskdetail .td-inner { width:318px; } /* panel width − 2×padding − 2×border; keeps text from re-wrapping mid-animation */
 #taskdetail.closed { width:0; padding:0; border-color:transparent; opacity:0; overflow:hidden; }
+/* Close affordance for the task detail panel (same ghost-✕ pattern as the chat thread). */
+#taskdetail .td-close { position:absolute; top:10px; right:10px; background:none; border:none; color:var(--fg-muted); font-size:13px; line-height:1; padding:3px 7px; border-radius:var(--radius-sm); }
+#taskdetail .td-close:hover { color:var(--fg-primary); background:var(--bg-hover); }
+#taskdetail .td-inner h3 { padding-right:26px; } /* long titles wrap before reaching the close button */
 /* t_831325b9: Overview sweep - hide empty thread panel, drop always-on explainer (kept as tooltip) */
 #ov-threadpanel[hidden] { display:none; } .ov-purpose { display:none; }
 

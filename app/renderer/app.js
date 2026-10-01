@@ -1765,14 +1765,14 @@ function renderBoard() {
       return `<div class="card ${sel.task === t.id ? 'sel' : ''}${t.awaitingApproval ? ' approval' : ''}" data-id="${t.id}"><b>${esc(t.title)}</b>${snippet && snippet !== t.title ? `<span class="cdesc" title="${esc(snippet)}">${esc(clipText(snippet, 100))}</span>` : ''}${tags ? `<span class="ctags">${tags}</span>` : ''}<small class="cmeta">${priorityBadge(t)}${t.assignee ? `<span class="avatar sm" style="background:${who(t.assignee).color}" title="${esc(nodeName(t.assignee))}">${esc(who(t.assignee).ini)}</span><span class="cname">${esc(nodeName(t.assignee))}</span>` : '<span class="muted">unassigned</span>'}<span class="cago" title="last updated">${ago(t.updatedAt) || '—'}</span>${t.comments.length ? `<span class="ccount" title="${t.comments.length} comment${t.comments.length === 1 ? '' : 's'}">💬 ${t.comments.length}</span>` : ''}</small></div>`; }).join('')}${st === 'done' && !fold && total > 20 ? `<button class="ghost" id="toggle-done">${showAllDone ? 'Show recent only' : 'Show all done'}</button>` : ''}</div>`; }).join('');
   if ($('#done-h')) $('#done-h').onclick = () => { doneOpen = !doneOpen; boardSig = ''; renderBoard(); };
   if ($('#toggle-done')) $('#toggle-done').onclick = () => { showAllDone = !showAllDone; boardSig = ''; renderBoard(); };
-  document.querySelectorAll('.card').forEach((c) => c.onclick = () => { sel.task = c.dataset.id; renderBoard(); });
+  document.querySelectorAll('.card').forEach((c) => c.onclick = () => { sel.task = sel.task === c.dataset.id ? null : c.dataset.id; renderBoard(); });
   const d = $('#taskdetail'); const t = S.tasks.find((x) => x.id === sel.task);
-  if (!t) { d.innerHTML = ''; d.classList.add('closed'); return; }
+  if (!t) { d.innerHTML = ''; d.classList.add('closed'); renderBoard.last = null; return; }
   d.classList.remove('closed');
   const keep = Object.fromEntries(['td-msg', 'td-note', 'td-comment'].map((k) => [k, $('#' + k) && $('#' + k).value])); const focused = document.activeElement && document.activeElement.id;
   const ag = S.orch.agents[t.assignee] || {}; const live = ag.status === 'working' && (ag.taskId == null || ag.taskId === t.id); const bl = openBlockers(t); const deps = new Set(t.blockedBy || []);
   const cmtCut = Math.max(0, t.comments.length - 200); const cmts = t.comments.slice(-200); // cap long comment threads
-  d.innerHTML = `<div class="td-inner"><h3>${priorityBadge(t)} ${esc(t.title)}</h3><p class="muted">${t.id} · by ${esc(t.createdBy === 'human' ? 'human' : nodeName(t.createdBy))}</p>
+  d.innerHTML = `<div class="td-inner"><button id="td-close" class="td-close" title="Close (Esc)" aria-label="Close task details">✕</button><h3>${priorityBadge(t)} ${esc(t.title)}</h3><p class="muted">${t.id} · by ${esc(t.createdBy === 'human' ? 'human' : nodeName(t.createdBy))}</p>
     ${t.awaitingApproval ? `<div class="approvebox"><b>Waiting for your approval.</b> The agent marked this task done.<textarea id="td-note" rows="2" placeholder="Note (optional; required context when requesting changes)"></textarea><p><button id="td-approve" class="primary">Approve → done</button> <button id="td-reject">Request changes → todo</button></p></div>` : ''}
     ${live || (t.assignee && ag.status === 'working') ? `<div class="livebox"><div class="toolbar"><b>${live ? 'Live' : esc(wakeLabel(t.assignee) || nodeName(t.assignee) + ' is working on another task')}</b>${live ? `<span class="muted">iteration ${ag.iteration || 1}${ag.pendingHuman ? ' · message queued' : ''}</span><span class="spacer"></span><button id="td-stopagent">Stop agent</button>` : ''}</div>${live ? '<pre id="td-live"></pre>' : ''}</div>` : ''}
     ${t.assignee ? `<label>Message ${esc(nodeName(t.assignee))} <span class="muted">(${live ? 'interrupts the run and resumes the same session with your message' : 'stored in the agent inbox for its next run'})</span></label><div class="toolbar"><input id="td-msg" placeholder="Answer or instruction for the agent" style="flex:1"><button id="td-send">Send</button></div>` : ''}
@@ -1804,6 +1804,7 @@ function renderBoard() {
   if (renderBoard.last === t.id) for (const [k, v] of Object.entries(keep)) if (v && $('#' + k)) $('#' + k).value = v;
   if (renderBoard.last === t.id && focused && focused.startsWith('td-') && $('#' + focused)) $('#' + focused).focus();
   renderBoard.last = t.id; renderLive();
+  $('#td-close').onclick = () => { sel.task = null; renderBoard(); };
   $('#td-del').onclick = async () => { if (confirm('Delete task?')) { await call('deleteTask', t.id); sel.task = null; refresh(); } };
 }
 // Board team scope (t_1158f757): one select at the start of the toolbar; index.html is out of
