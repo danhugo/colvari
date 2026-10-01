@@ -54,6 +54,14 @@
     return [...worst.values()].sort((a, b) => b.pct - a.pct);
   }
 
+  // Agents whose status is working and whose last log line is older than `minutes`. Moved here from
+  // the removed Overview module (wiki decision-one-team-view) — the stuck alert is its only consumer;
+  // the renderer calls this while building the collect() state.
+  function stuckAgents(agents, logs, now, minutes = 5) {
+    const last = {}; for (const l of logs || []) if (l.nodeId) last[l.nodeId] = Math.max(last[l.nodeId] || 0, l.at);
+    return Object.keys(agents || {}).filter((id) => agents[id].status === 'working' && now - (last[id] ?? agents[id].startedAt ?? now) >= minutes * 60000);
+  }
+
   function collect(state) {
     const s = state || {};
     const out = [];
@@ -114,7 +122,7 @@
         id: `stuck-agent:${id}`, kind: 'stuck-agent', severity: 'warn', at: now, dismissable: true,
         text: `${nameOf(id)} stuck — no output for ${s.stuckMinutes || 5} min`, agentId: id, taskId: a.taskId || null,
         fingerprint: String(a.taskId || ''),
-        action: a.taskId ? { label: 'Open task', op: 'open-task', arg: a.taskId } : { label: 'Open overview', op: 'open-overview' },
+        action: a.taskId ? { label: 'Open task', op: 'open-task', arg: a.taskId } : { label: 'Open team', op: 'open-team' },
       });
     }
     // 4b. Agent failed: the supervisor exhausted its recoveries (stall.state 'recovery_failed').
@@ -123,7 +131,7 @@
         id: `agent-recovery:${x.id}`, kind: 'agent-recovery', severity: 'error', at: now, dismissable: true,
         text: `${nameOf(x.id)} — recovery failed (attempt ${x.st.attempt}/${x.st.max})`, agentId: x.id, taskId: x.st.taskId || null,
         fingerprint: `${x.st.attempt}|${x.st.taskId || ''}`,
-        action: x.st.taskId ? { label: 'Open task', op: 'open-task', arg: x.st.taskId } : { label: 'Open overview', op: 'open-overview' },
+        action: x.st.taskId ? { label: 'Open task', op: 'open-task', arg: x.st.taskId } : { label: 'Open team', op: 'open-team' },
       });
     }
 
@@ -168,5 +176,5 @@
     return list.sort((a, b) => (rank[a.severity] ?? 9) - (rank[b.severity] ?? 9) || (b.at || 0) - (a.at || 0));
   }
 
-  return { collect, normRedMaster, limitHits, sortAlerts };
+  return { collect, normRedMaster, limitHits, sortAlerts, stuckAgents };
 });
