@@ -232,6 +232,9 @@ header .pill { font-variant-numeric:tabular-nums; } .pill.quiet { color:var(--mu
 .chat-head { display:flex; align-items:center; gap:8px; padding:10px 16px; border-bottom:1px solid var(--border); } .chat .muted { color:var(--fg-muted); }
 #chat-room { flex:1; overflow:auto; padding:8px 0; } .cgroup { display:flex; gap:10px; padding:6px 16px; } .cgroup:hover { background:var(--bg-hover); }
 .avatar { flex:0 0 36px; height:36px; border-radius:50%; display:flex; align-items:center; justify-content:center; color:var(--fg-on-accent); font-weight:700; font-size:13px; position:relative; }
+/* DiceBear face fills its avatar shell; radius follows the shell (squircle chips, circle leads).
+   img-scoped on purpose: on the SVG <image> nodes CSS width/height would override the geometry attrs. */
+img.avface { width:100%; height:100%; display:block; border-radius:inherit; }
 .cbody { min-width:0; flex:1; } .cname { font-weight:700; } .role { font-size:10px; padding:0 6px; border-radius:6px; background:var(--bg-hover); color:var(--fg-secondary); margin-left:6px; font-weight:600; } .cname time { color:var(--fg-muted); font-size:11px; font-weight:400; margin-left:6px; }
 .bubble { margin:3px 0; white-space:pre-wrap; word-break:break-word; line-height:1.4; } .bubble.thought { color:var(--fg-secondary); } .bubble.action, .bubble.handoff { color:var(--accent-text); } .bubble.error { color:var(--term-red); }
 .bubble.linked { cursor:pointer; } .bubble.linked:hover .tlink { text-decoration:underline; } .tlink { color:var(--accent-text); font-size:11px; margin-left:6px; }
