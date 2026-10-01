@@ -633,9 +633,11 @@ class Store {
     // Cached path (t_479e7290): warm reads are pure memory. The cache loads + migrates once per
     // project dir; the memo tiers in _tlistWhole are only for uncached (MCP/scripts) Stores.
     if (this.cache && !this.cache.closed) return this.cache.listTasks(filter);
-    const ts = this._tlistWhole();
-    if (filter.status) return ts.filter((t) => t.status === filter.status);
-    if (filter.assignee) return ts.filter((t) => t.assignee === filter.assignee);
+    let ts = this._tlistWhole();
+    // Filters AND together (same shape as board-cache.listTasks) — an early return on status
+    // used to drop assignee, making retire_agent's todo-reassign reassign the whole board.
+    if (filter.status) ts = ts.filter((t) => t.status === filter.status);
+    if (filter.assignee) ts = ts.filter((t) => t.assignee === filter.assignee);
     return ts;
   }
   // The whole board, sorted, memoized (t_8d586961): with a 550+ task board every listing used to
