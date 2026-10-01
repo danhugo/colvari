@@ -231,12 +231,15 @@ const wtDirNames = (root) => {
   try { return fs.readdirSync(wtRoot, { withFileTypes: true }).filter((d) => d.isDirectory() && fs.existsSync(path.join(wtRoot, d.name, '.git'))).map((d) => d.name); } catch { return []; }
 };
 
-// Sweep a repo's .squad/worktrees: a dir is removed only when every task referencing it is done
-// (a conflict task reuses its parent's dir) with a fully merged branch and a clean tree — or when
-// NO task references it at all (orphan). Tasks still in flight — any non-done status, or one of
-// busyTaskIds — always retain their worktree, and a board read error proves nothing about
-// orphans (the sweep no-ops). Stray gate/tmp registrations outside .squad/worktrees are reaped
-// independently of the board (t_1ff80eba). Ends with `git worktree prune`; never uses --force.
+// Sweep a repo's .squad/worktrees: a dir is removed only when the store KNOWS every task
+// referencing it (a conflict task reuses its parent's dir) and each is done with a fully merged
+// branch and a clean tree. Tasks still in flight — any non-done status, or one of busyTaskIds —
+// always retain their worktree, and so does a dir whose id the store cannot resolve: a sibling
+// project's store sees live tasks this way, and a just-started task has a 0-commit branch
+// (= merged) and a clean tree, so git alone is never proof of orphan (t_f4453909). A board read
+// error proves nothing either (the sweep no-ops). Stray gate/tmp registrations outside
+// .squad/worktrees are reaped independently of the board (t_1ff80eba). Ends with `git worktree
+// prune`; never uses --force.
 // Returns { removed: [ids], retained: [{dir, reason}], strays: [paths], pruned } for callers to
 // log/assert.
 function sweepWorktrees(opts = {}) {
@@ -255,17 +258,14 @@ function sweepWorktrees(opts = {}) {
     let owners = (refs.get(path.resolve(dir)) || []).slice();
     if (!owners.length) {
       let t; try { t = store.getTask(name); } catch { report.retained.push({ dir: name, reason: 'task lookup failed' }); continue; }
-      // An id this store cannot resolve is NOT automatically an orphan (t_e23df71f): harness
+      // An id this store cannot resolve is NEVER removed (t_e23df71f, t_f4453909): harness
       // instances sweep with a throwaway store that sees none of the real tasks, and a sibling
-      // project's store may not know the id either. Removal needs git-level proof that nothing
-      // unique is lost — clean tree AND squad branch fully merged; anything else is retained.
+      // project's store may not know the id either. Git cannot prove an orphan — a task that
+      // just started has a 0-commit branch (an ancestor of HEAD) and an untouched tree, exactly
+      // the shape that got two live in_progress worktrees deleted on 2026-10-01. Only a store
+      // that knows the id may remove it; anything else is retained and reported.
       if (t) owners = [t];
-      else {
-        let merged = false;
-        try { git(root, ['merge-base', '--is-ancestor', `squad/${name}`, 'HEAD']); merged = true; } catch {}
-        if (merged && !worktreeDirty(dir)) owners = [{ id: name, status: 'done' }]; // synthetic: removable below
-        else { report.retained.push({ dir: name, reason: merged ? `task unknown to this store and worktree dirty — not proof of orphan` : `task unknown to this store and squad/${name} unmerged — not proof of orphan` }); continue; }
-      }
+      else { report.retained.push({ dir: name, reason: 'task unknown to this store — not proof of orphan' }); continue; }
     }
     let reason = null;
     for (const t of owners) {
