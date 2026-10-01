@@ -706,7 +706,9 @@ class Orchestrator extends EventEmitter {
       fs.mkdirSync(cwd, { recursive: true });
       this.cwds.set(node.id, cwd);
       const resume = this.lastSession(node.id, meta.runtime);
-      this.log(node.id, 'system', `▶ ${node.name} wakes to handle messages in ${cwd}${resume ? ' [resume ' + resume + ']' : ''}`);
+      // The waker rides in the log line so the Overview timeline lane can label the bar "wake: <who>" (t_634c6702).
+      const fromName = msgs[0].from === 'human' ? 'you' : (team.nodes.find((n) => n.id === msgs[0].from) || {}).name || msgs[0].from;
+      this.log(node.id, 'system', `▶ ${node.name} wakes to handle messages from ${fromName} in ${cwd}${resume ? ' [resume ' + resume + ']' : ''}`);
       let args = null;
       // Wake messages can carry attachments (their paths are in wakePrompt): pass the dir like the
       // task-run path does, or the agent gets a path it cannot read.
