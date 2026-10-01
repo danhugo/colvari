@@ -87,6 +87,14 @@
       });
     }
 
+    // 2b. Self-update aborted: one row with the reason; the fingerprint is the reason, so a dismissed
+    // alert stays dismissed and a different abort raises a new one.
+    if (s.devMode !== false && s.updError) out.push({
+      id: 'self-update-aborted', kind: 'self-update-aborted', severity: 'error', at: now, dismissable: true,
+      text: `Self-update aborted — the app stays on the old code. ${clip(s.updError, 160)}`, agentId: null, taskId: null,
+      fingerprint: String(s.updError), action: null,
+    });
+
     // 3. Stopped with work left: in_progress with an assignee whose agent process is gone.
     const running = new Set(s.running || []);
     for (const t of s.tasks || []) {

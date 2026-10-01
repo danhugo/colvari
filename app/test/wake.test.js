@@ -9,7 +9,19 @@ const { Orchestrator, WAKE, wakePrompt } = require('../src/orchestrator');
 
 // Short timings so sweeps fire quickly; the semantics under test are unchanged.
 WAKE.SWEEP_MS = 40; WAKE.DEBOUNCE_MS = 60; WAKE.MIN_GAP_MS = 80;
-test.after(() => { WAKE.SWEEP_MS = 1000; WAKE.DEBOUNCE_MS = 1500; WAKE.MIN_GAP_MS = 5 * 60 * 1000; });
+// Every orchestrator a test creates must be stopped at file end: the wake sweep re-arms a REF'd
+// debounce timer for any idle agent left with unread messages, and the per-pair-cap tests leave
+// agents pair-capped with unread messages on purpose (that is the asserted end state). Nothing in
+// the file dispatches those messages afterwards, so the timer chain re-arms forever and pins the
+// file process until WAKE.PAIR_WINDOW_MS (10min) expires and one final dispatch drains the inbox —
+// which stalled the whole suite ~10min and blew self-update's test step (t_4362c329). stop()
+// clears wakeTimers synchronously and makes the (unref'd) sweep inert, so the process exits.
+const orchs = [];
+const makeOrch = (s) => { const o = new Orchestrator(s); orchs.push(o); return o; };
+test.after(() => {
+  WAKE.SWEEP_MS = 1000; WAKE.DEBOUNCE_MS = 1500; WAKE.MIN_GAP_MS = 5 * 60 * 1000;
+  for (const o of orchs) { try { o.stop(); } catch {} }
+});
 
 const tmp = (p) => fs.mkdtempSync(path.join(os.tmpdir(), p));
 const fakeClaude = (dir, body) => { const f = path.join(dir, 'fake-claude.sh'); fs.writeFileSync(f, '#!/bin/sh\n' + body); fs.chmodSync(f, 0o755); return f; };
@@ -24,7 +36,7 @@ test('wake: send_message to an idle agent dispatches it with the messages; sende
   const s = new Store(path.join(d, 'p')); s.saveSettings({ claudePath: fake });
   const a = s.addNode({ name: 'A', role: 'Dev' }); const b = s.addNode({ name: 'B', role: 'Dev' });
   s.addEdge(a.id, b.id);
-  const o = new Orchestrator(s);
+  const o = makeOrch(s);
   const woken = []; o.on('woken_by_message', (w) => woken.push(w));
 
   const ta = makeTools(s, a.id);
@@ -59,7 +71,7 @@ test('wake: a burst of messages coalesces into one dispatch', async () => {
   const s = new Store(path.join(d, 'p')); s.saveSettings({ claudePath: fake });
   const a = s.addNode({ name: 'A', role: 'Dev' }); const b = s.addNode({ name: 'B', role: 'Dev' });
   s.addEdge(a.id, b.id);
-  const o = new Orchestrator(s);
+  const o = makeOrch(s);
   const ta = makeTools(s, a.id);
   ta.send_message({ to: 'B', text: 'one' });
   ta.send_message({ to: 'B', text: 'two' });
@@ -77,7 +89,7 @@ test('wake: per-pair cap stops a ping-pong loop', async () => {
   const s = new Store(path.join(d, 'p')); s.saveSettings({ claudePath: fake });
   const a = s.addNode({ name: 'A', role: 'Dev' }); const b = s.addNode({ name: 'B', role: 'Dev' });
   s.addEdge(a.id, b.id); s.addEdge(b.id, a.id);
-  const o = new Orchestrator(s);
+  const o = makeOrch(s);
   const ta = makeTools(s, a.id); const tb = makeTools(s, b.id);
   const runsB = () => s.listRuns({ nodeId: b.id }).length;
   const runsA = () => s.listRuns({ nodeId: a.id }).length;
@@ -106,7 +118,7 @@ test('wake: the live run records activity {trigger, messageId, fromNodeId, excer
   const s = new Store(path.join(d, 'p')); s.saveSettings({ claudePath: fake });
   const a = s.addNode({ name: 'A', role: 'Dev' }); const b = s.addNode({ name: 'B', role: 'Dev' });
   s.addEdge(a.id, b.id);
-  const o = new Orchestrator(s);
+  const o = makeOrch(s);
   assert.equal(o.agent(b.id).activity, null);
   const t0 = s.createTask({ title: 'related', assignee: b.id });
   const ta = makeTools(s, a.id);
@@ -143,7 +155,7 @@ test('wake: a working agent is not woken; user stop() cancels pending wake dispa
   const a = s.addNode({ name: 'A', role: 'Dev' });
   const b = s.addNode({ name: 'B', role: 'Dev' });
   s.addEdge(a.id, b.id);
-  const o = new Orchestrator(s);
+  const o = makeOrch(s);
   const tools = makeTools(s, a.id);
   // B is working on a task: A's message is delivered through the task run, not a wake.
   o.agent(b.id).status = 'working';
@@ -165,7 +177,7 @@ test('wake: nudge wakes respect the per-agent gap — deferred inside it, fired 
   const r1 = s.addNode({ name: 'Rhea', role: 'Dev' }); const r2 = s.addNode({ name: 'Uma', role: 'Dev' });
   s.addEdge(pm.id, r1.id); s.addEdge(pm.id, r2.id);
   s.createTask({ title: 'goal', assignee: pm.id, createdBy: pm.id }); // open goal: idle nudges apply
-  const o = new Orchestrator(s);
+  const o = makeOrch(s);
   o.running = true; // wakeForHuman's run gate; no tick loop is driven here
   const wakes = [];
   o.wakeRun = async (node, msgs) => { wakes.push(msgs.map((m) => m.text)); }; // stub the run itself
@@ -206,7 +218,7 @@ test('wake: a human chat message wakes an idle agent with the human wording; no 
   const fake = fakeClaude(d, `echo "$*" >> ${argsLog}\n` + RESULT);
   const s = new Store(path.join(d, 'p')); s.saveSettings({ claudePath: fake });
   const b = s.addNode({ name: 'B', role: 'Dev' });
-  const o = new Orchestrator(s);
+  const o = makeOrch(s);
   s.sendMessage({ from: 'human', to: b.id, text: 'hi, are you there?' });
   await waitFor(() => s.listRuns({ nodeId: b.id }).length === 1 && s.listMessages({ to: b.id })[0].read);
   const args = fs.readFileSync(argsLog, 'utf8');
@@ -225,7 +237,7 @@ test('wake: the human sender is never pair-capped; the cap still binds agent->ag
   const s = new Store(path.join(d, 'p')); s.saveSettings({ claudePath: fake });
   const a = s.addNode({ name: 'A', role: 'Dev' }); const b = s.addNode({ name: 'B', role: 'Dev' });
   s.addEdge(a.id, b.id);
-  const o = new Orchestrator(s);
+  const o = makeOrch(s);
   const runsB = () => s.listRuns({ nodeId: b.id }).length;
   // More than MAX_PER_PAIR human messages in a row: every single one wakes B.
   for (let i = 0; i < WAKE.MAX_PER_PAIR + 2; i++) {
