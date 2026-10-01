@@ -2089,7 +2089,7 @@ class Orchestrator extends EventEmitter {
     // no per-CLI branch here. Claude's stream-json stays handled inline below.
     const rt = (() => { try { return RT.getRuntime(runtime); } catch { return null; } })();
     if (rt && rt.parseEvent) {
-      const o = rt.parseEvent(ev, this.store.getSettings());
+      const o = rt.parseEvent(ev, this.store.getSettings(), { env: this.env(node) });
       for (const [k, t] of o.logs) if (String(t).trim()) this.log(node.id, k, t);
       if (run && run.subs && o.subagent) this.onSubagentSignal(node.id, run, o.subagent);
       if (run && o.sessionId) { run.sessionId = o.sessionId; if (run.usage) run.usage.sessionId = o.sessionId; }
