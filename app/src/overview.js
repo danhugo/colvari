@@ -12,13 +12,14 @@
     return Object.keys(agents || {}).filter((id) => agents[id].status === 'working' && now - (last[id] ?? agents[id].startedAt ?? now) >= minutes * 60000);
   }
 
-  // One lane per node: run bars (from "▶ ... starts" to result/error/stop), tool ticks, status markers.
+  // One lane per node: run bars (from "▶ ... starts" to result/error/stop; wake runs label "wake: <who>"), tool ticks, status markers.
   function timeline(logs, nodeIds, now) {
     const lanes = Object.fromEntries(nodeIds.map((id) => [id, { runs: [], ticks: [], marks: [] }]));
     for (const l of logs.slice().sort((a, b) => a.at - b.at)) {
       const ln = lanes[l.nodeId]; if (!ln) continue;
       const open = ln.runs.length && ln.runs[ln.runs.length - 1].end == null ? ln.runs[ln.runs.length - 1] : null;
       if (l.kind === 'system' && /^▶ .* starts "/.test(l.text)) { if (open) open.end = l.at; ln.runs.push({ start: l.at, end: null, task: (/starts "(.*?)"/.exec(l.text) || [])[1] || '' }); }
+      else if (l.kind === 'system' && /^▶ .* wakes to handle messages from (.+?) in /.test(l.text)) { if (open) open.end = l.at; ln.runs.push({ start: l.at, end: null, task: 'wake: ' + (/wakes to handle messages from (.+?) in /.exec(l.text) || [])[1] }); }
       else if (l.kind === 'tool') {
         ln.ticks.push({ at: l.at, name: toolName(l.text) });
         if (toolName(l.text) === 'update_task_status') { const inp = toolInput(l.text); ln.marks.push({ at: l.at, status: inp.status || '?', taskId: inp.taskId }); }
