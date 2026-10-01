@@ -259,3 +259,13 @@ test('send_message to "human" says how to reply', () => {
   const src = fs.readFileSync(path.join(__dirname, '../src/board-tools.js'), 'utf8');
   assert.match(src, /To reply to the human, put the reply in your final answer, or use ask_human/);
 });
+
+test('helpycode parseEvent with env finds the binary under a Finder-like PATH', { skip: !require('child_process').spawnSync('which', ['helpycode']).stdout.length }, () => {
+  const dir = path.dirname(require('child_process').spawnSync('which', ['helpycode'], { encoding: 'utf8' }).stdout.trim());
+  const saved = process.env.PATH; process.env.PATH = '/usr/bin:/bin';
+  try {
+    const ev = { type: 'text', part: { text: 'HELLO' } };
+    const o = RT.getRuntime('helpycode').parseEvent(ev, {}, { env: { PATH: `/usr/bin:/bin:${dir}` } });
+    assert.deepStrictEqual(o.logs, [['text', 'HELLO']]);
+  } finally { process.env.PATH = saved; }
+});
