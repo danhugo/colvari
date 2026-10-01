@@ -1322,6 +1322,7 @@ function renderNodeForm() {
     <div class="toolbar"><button id="nf-test" ${testing.has(n.id) ? 'disabled' : ''}>Test agent</button><span class="muted">saves first, then runs a cheap check</span></div>
     <div id="nf-pf">${pfDetail(n)}</div>
     <label>Name</label><input id="nf-name" value="${esc(n.name)}">
+    <label>Face</label><div><img id="nf-face" width="40" height="40" alt="" style="background:${roleBg(n.role)};border-radius:50%;vertical-align:middle" src="${faceUri(n.id)}"> <button id="nf-newface" type="button">New face</button> <button id="nf-resetface" type="button">Reset</button></div>
     <label>Role <span class="muted">(free text; presets: ${presets.length})</span></label><input id="nf-role" list="rolelist" value="${esc(n.role)}"><datalist id="rolelist">${C.roles.map((r) => `<option value="${esc(r)}">`).join('')}</datalist>
     <div class="toolbar"><button id="nf-applypreset" ${presets.some((p) => p.name.toLowerCase() === String(n.role).toLowerCase()) ? '' : 'disabled'}>Apply preset</button><button id="nf-savepreset">Save as role preset</button></div>
     <label class="inline"><input type="checkbox" id="nf-core" ${n.core ? 'checked' : ''}> Core agent <span class="muted">(protected; recruits and retires teammates; one per team)</span></label>
@@ -1387,7 +1388,12 @@ function renderNodeForm() {
   $('#nf-caps-refresh').onclick = () => refreshCaps(n);
   wireCapsView(n);
   if (!n.capabilities && !CAPS_LOADING.has(n.id)) refreshCaps(n);
+  let seed = n.avatarSeed || '';
+  const showFace = () => { $('#nf-face').src = faceUri(n.id, seed); };
+  $('#nf-newface').onclick = () => { seed = Math.random().toString(36).slice(2, 10); showFace(); };
+  $('#nf-resetface').onclick = () => { seed = ''; showFace(); };
   const read = () => ({
+    avatarSeed: seed,
     runtime: $('#nf-runtime').value, name: $('#nf-name').value, role: $('#nf-role').value.trim() || 'Dev', model: $('#nf-model').value.trim(), workdir: $('#nf-workdir').value.trim(), systemPrompt: $('#nf-prompt').value,
     permissionMode: $('#nf-perm').value, allowedTools: $('#nf-allowed').value, disallowedTools: $('#nf-disallowed').value, maxTurns: +$('#nf-maxturns').value || 0,
     appendSystemPrompt: $('#nf-append').value, addDirs: $('#nf-adddirs').value, env: $('#nf-env').value, extraArgs: $('#nf-extra').value.trim(),
@@ -2735,9 +2741,9 @@ const needsYou = () => new Set([...(S.inbox || []).map((i) => i.nodeId), ...CH.a
 // Agents wear a DiceBear face (wiki decision-dicebear-avatars) over their role colour; human/system keep initials/glyph.
 // avatarUri.faceSvg drops DiceBear's coloured background rect so the role token shows behind the face.
 const faceCache = new Map();
-const faceUri = (id) => { let u = faceCache.get(id);
-  if (!u) { u = 'data:image/svg+xml;utf8,' + encodeURIComponent(avatarUri.faceSvg(id));
-    faceCache.set(id, u); }
+const faceUri = (id, seed) => { seed = seed || ((S.allNodes || []).find((x) => x.id === id) || {}).avatarSeed || id; let u = faceCache.get(seed);
+  if (!u) { u = 'data:image/svg+xml;utf8,' + encodeURIComponent(avatarUri.faceSvg(seed));
+    faceCache.set(seed, u); }
   return u; };
 const avatarBg = (w) => (w.human || w.sys) ? w.color : (w.bg || w.color);
 const avatarBody = (id, w) => (w.human || w.sys) ? esc(w.ini) : `<img class="avface" src="${faceUri(id)}" alt="" draggable="false">`;

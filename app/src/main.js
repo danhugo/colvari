@@ -2379,6 +2379,14 @@ async function guiE2E() {
       const av1 = await ex(`const g = document.querySelector('#graph .node[data-id="${tgt.id}"]'); return { bg: g.querySelector('.avatar').style.fill, face: (g.querySelector('image') || g.querySelector('img') || {}).getAttribute?.('href') || null }`);
       expect('agentname: manual role/avatar change sticks, typed name and face kept', ps.getTeam().nodes.find((n) => n.id === tgt.id).name === 'Renamy' && av1.bg !== av0.bg && av1.face === av0.face, { av0, av1 });
       await shot('agentname-rename');
+      // Manual face override: New face saves an avatarSeed and the graph face changes; Reset returns to the id face.
+      await ex(`selectNode('${tgt.id}'); await w(400); $('#nf-newface').click(); $('#nf-save').click(); await w(600); await refresh(); await w(300);`);
+      const av2 = await ex(`return document.querySelector('#graph .node[data-id="${tgt.id}"] image').getAttribute('href')`);
+      expect('agentname: New face saved a seed and changed the face', !!ps.getTeam().nodes.find((n) => n.id === tgt.id).avatarSeed && av2 !== av1.face, { av1, av2 });
+      await shot('agentname-newface');
+      await ex(`selectNode('${tgt.id}'); await w(400); $('#nf-resetface').click(); $('#nf-save').click(); await w(600); await refresh(); await w(300);`);
+      const av3 = await ex(`return document.querySelector('#graph .node[data-id="${tgt.id}"] image').getAttribute('href')`);
+      expect('agentname: Reset returns to the auto face', !ps.getTeam().nodes.find((n) => n.id === tgt.id).avatarSeed && av3 === av1.face, { av1, av3 });
       for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`await w(400);`); await shot(`agentname-${t}`); }
       require('electron').nativeTheme.themeSource = 'system'; throw null;
     }
