@@ -1748,7 +1748,7 @@ async function guiE2E() {
     const task = ps.createTask({ title: 'Fix the login redirect loop', assignee: devon.id });
     ps._updateTask(task.id, { status: 'in_progress' });
     // Backend agent state exactly as the orchestrator holds it while Devon runs the task and Dana
-    // handles a message wake — this is what timeline() merges (see Dev A's unit test shapes).
+    // handles a message wake — the seed below mirrors it renderer-side for the Overview lanes.
     const orch = orchFor(cp.id);
     const oa = orch.agent(devon.id); oa.status = 'working'; oa.taskId = task.id; oa.task = 'Fix the login redirect loop'; oa.activity = { trigger: 'task', startedAt: Date.now() };
     const od = orch.agent(dana.id); od.status = 'working'; od.taskId = null; od.task = null; od.activity = { trigger: 'message', messageId: 'm1', fromNodeId: pia.id, taskId: null, count: 1, startedAt: Date.now() };
@@ -1756,19 +1756,17 @@ async function guiE2E() {
     ps.addRun({ id: 'r_e2ewake', kind: 'agent', nodeId: dana.id, taskId: null, task: '', startedAt: Date.now() - 120000, endedAt: Date.now() - 60000, durationMs: 60000, model: 'stub', isError: false, fromNodeId: pia.id, inputTokens: 10, outputTokens: 10, cacheReadTokens: 0, cacheCreationTokens: 0, reportedCostUsd: 0, billingSource: 'api', sessionId: 'e2e-wake' });
     await ex(`await switchTo({ p: '${cp.id}', t: '${pm.get(cp.id).teams[0].id}' }); await w(300);`);
     const L = (ago, n, kind, text) => `logs.push({ projectId: '${cp.id}', nodeId: '${n.id}', kind: '${kind}', text: ${JSON.stringify(text)}, at: Date.now() - ${ago} });`;
-    const seed = `${L(120000, devon, 'system', '▶ Devon starts "Fix the login redirect loop" in /work [mode=once]')}${L(60000, devon, 'tool', 'Read {"file_path":"login.ts"}')}${L(60000, dana, 'system', '▶ Dana wakes to handle messages in /work')}`
+    const seed = `${L(120000, devon, 'system', '▶ Devon starts "Fix the login redirect loop" in /work [mode=once]')}${L(60000, devon, 'tool', 'Read {"file_path":"login.ts"}')}${L(60000, dana, 'system', '▶ Dana wakes to handle messages from Pia in /work')}`
       + `S.orch.agents = { '${devon.id}': { status: 'working', taskId: '${task.id}', task: 'Fix the login redirect loop' }, '${dana.id}': { status: 'working', taskId: null, activity: { trigger: 'message', messageId: 'm1', messageIds: ['m1'], fromNodeId: '${pia.id}', excerpt: 'Please check the failing build', taskId: null, count: 1, startedAt: Date.now() } } }; renderIdle(); renderGraph(); renderOverview();`;
     await ex(`$('#tabs button[data-tab=overview]').click(); await w(300);`);
     const bars = await ex(`${seed} await w(200); return [...document.querySelectorAll('#ov-timeline rect.run')].map((r) => ({ live: r.classList.contains('live'), t: (r.querySelector('title') || {}).textContent || '' }));`);
     expect('timelinelive: the in-flight task run renders as an open live bar', bars.some((b) => b.live && /login redirect/i.test(b.t)), bars);
-    // The landed fix surface: orchestrator timeline() merges live agents and carries the waker.
-    const tl = orch.timeline();
-    expect('timelinelive: the live task run merges as an open-ended bar in the orchestrator timeline', tl.some((e) => e.nodeId === devon.id && e.live && e.taskId === task.id), tl);
-    expect('timelinelive: the wake run merges with wakeFrom = who woke it (live activity + stored record)', tl.some((e) => e.nodeId === dana.id && e.live && !e.taskId && e.wakeFrom === pia.id) && tl.some((e) => e.nodeId === dana.id && !e.live && e.wakeFrom === pia.id), tl);
+    // The re-scoped wake fix (5bbe2ba) lives in the renderer: the wake log line labels an open live bar 'wake: <who>'.
+    expect('timelinelive: the wake run renders as an open live bar labelled wake: Pia', bars.some((b) => b.live && b.t === 'wake: Pia'), bars);
     const tb = await ex(`${seed} await w(100); const b = $('#ov-timelinewrap').getBoundingClientRect(); return { x: Math.round(b.x), y: Math.round(b.y), width: Math.round(b.width), height: Math.round(b.height) };`);
     fs.writeFileSync(path.join(out, 'timelinelive-overview.png'), (await win.capturePage(tb)).toPNG());
     await shot('timelinelive-overview-full');
-    console.log('[gui-e2e] timelinelive', JSON.stringify({ bars, tl, crop: tb }));
+    console.log('[gui-e2e] timelinelive', JSON.stringify({ bars, crop: tb }));
   };
   // Monitor log lines (t_43243765, plan t_a4ceb629/C): the core's watchdog decisions render as
   // accent "Monitor" rows — badge + action — reason with plain taskIds; a line persisted without
