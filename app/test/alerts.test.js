@@ -66,13 +66,22 @@ test('mapping: stopped with work left -> one warn per orphaned in_progress task,
   assert.deepEqual(out[0].action, { label: 'Open task', op: 'open-task', arg: 't_1' });
 });
 
-test('mapping: agent stuck -> warn; with a current task it opens the task, else the overview', () => {
+test('mapping: agent stuck -> warn; with a current task it opens the task, else the Team view', () => {
   const out = collect({ agents: { n_2: { status: 'working', taskId: 't_9' } }, stuck: ['n_2'], stuckMinutes: 5, nodeNames: { n_2: 'Pia' } });
   assert.deepEqual(out.map((a) => a.id), ['stuck-agent:n_2']);
   assert.equal(out[0].text, 'Pia stuck — no output for 5 min');
   assert.deepEqual(out[0].action, { label: 'Open task', op: 'open-task', arg: 't_9' });
   const bare = collect({ agents: { n_2: { status: 'working' } }, stuck: ['n_2'], nodeNames: { n_2: 'Pia' } })[0];
-  assert.deepEqual(bare.action, { label: 'Open overview', op: 'open-overview' });
+  assert.deepEqual(bare.action, { label: 'Open team', op: 'open-team' });
+});
+
+test('stuckAgents: working agents silent for N minutes (moved from the removed Overview module)', () => {
+  const M = 60000;
+  const agents = { a: { status: 'working' }, b: { status: 'working' }, c: { status: 'idle' }, d: { status: 'working', startedAt: 0 } };
+  const logs = [{ nodeId: 'a', at: 0 }, { nodeId: 'b', at: 8 * M }, { nodeId: 'c', at: 0 }];
+  assert.deepEqual(A.stuckAgents(agents, logs, 10 * M, 5).sort(), ['a', 'd']);
+  assert.deepEqual(A.stuckAgents(agents, logs, 10 * M, 15), []);
+  assert.deepEqual(A.stuckAgents(agents, logs, 10 * M, 1).sort(), ['a', 'b', 'd']);
 });
 
 test('mapping: recovery failed -> error alert pointing at the task', () => {
