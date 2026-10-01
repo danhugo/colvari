@@ -1248,7 +1248,7 @@ function canvasMenu(ev) {
   const items = [['Add agent here', () => addAgentAt(x, y)], ['Auto-layout', autoLayout], ['Fit view', fitView], ['Reset zoom', () => zoomAt(1 / VP.zoom)]];
   showMenu(ev.clientX, ev.clientY, menuItems(items)); bindMenu(items);
 }
-async function addAgentAt(x, y) { const role = S.team.nodes.length === 0 ? 'PM' : 'Dev'; const taken = new Set(S.team.nodes.map((x) => x.name)); let k = 1; while (taken.has(`${role} ${k}`)) k++; const n = await call('addNode', { name: `${role} ${k}`, role, x: Math.round(x), y: Math.round(y) }); sel.node = n.id; refresh(); }
+async function addAgentAt(x, y) { const role = S.team.nodes.length === 0 ? 'PM' : 'Dev'; const n = await call('addNode', { role, x: Math.round(x), y: Math.round(y) }); sel.node = n.id; refresh(); }
 // Layered (Sugiyama-lite) layout: longest-path layers over assign/review edges, barycentre ordering, centred rows.
 async function autoLayout() {
   if (!S.team.nodes.length) return; graphAuto = true; expandedClusters.clear(); renderGraph();

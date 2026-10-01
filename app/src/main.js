@@ -2353,6 +2353,14 @@ async function guiE2E() {
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'discovery') { await discoveryPanelShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'usage') { await usagePerModelShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'existingdata') { await existingDataShots(); throw null; }
+    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'agentname') {
+      const cur = await ex(`return { p: ctx.p, t: S.teamId }`); const ps = pm.store(cur.p || pid(), cur.t);
+      if (!ps.getTeam().nodes.length) { ps.addNode({ name: 'Rhea', role: 'PM', x: 60, y: 60 }); await ex(`await refresh(); await w(300);`); }
+      await ex(`$('#tabs button[data-tab=team]').click(); await w(300); $('#addnode').click(); await w(400); $('#addnode').click(); await w(400); $('#addnode').click(); await w(500);`);
+      const names = ps.getTeam().nodes.map((n) => n.name); console.log('[gui-e2e] agentname', JSON.stringify(names));
+      for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`await w(400);`); await shot(`agentname-${t}`); }
+      require('electron').nativeTheme.themeSource = 'system'; throw null;
+    }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'polish') { await polishShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'mainlogswiki') { await mainLogsWikiShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'teamfilter') { await teamFilterShots(); throw null; }
