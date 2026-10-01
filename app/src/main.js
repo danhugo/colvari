@@ -366,7 +366,7 @@ async function guiE2E() {
     const ps = pm.store(cur.p || pid(), cur.t); let nodes = ps.getTeam().nodes;
     if (nodes.length < 2) { ps.addNode({ name: 'Pia', role: 'PM', x: 60, y: 60 }); ps.addNode({ name: 'Devon', role: 'Dev', x: 320, y: 160 }); nodes = ps.getTeam().nodes; }
     const [a, b] = nodes; const t = ps.createTask({ title: 'Chat demo', assignee: b.id, createdBy: a.id });
-    ps.sendMessage({ from: a.id, to: b.id, text: 'Please keep it vanilla JS.', taskId: t.id }); ps.commentTask(t.id, b.id, 'On it.');
+    ps.commentTask(t.id, b.id, 'On it.');
     const q = ps.addInbox({ kind: 'question', taskId: t.id, nodeId: b.id, question: 'Dark or light theme?', choices: ['dark', 'light'] });
     const L = (ago, nodeId, kind, text) => `logs.push({ projectId: ctx.p, nodeId: '${nodeId}', kind: '${kind}', text: ${JSON.stringify(text)}, at: Date.now() - ${ago} });`;
     await ex(`$('#tabs button[data-tab=chat]').click(); ${L(90000, b.id, 'system', '▶ ' + b.name + ' starts "Chat demo" in /x')}${L(80000, b.id, 'text', 'I will add a chat view with bubbles and tool chips.')}
@@ -380,10 +380,21 @@ async function guiE2E() {
     const th = await ex(`return { open: !$('#chat-thread').classList.contains('hidden'), title: $('#chat-thread .chat-head').textContent, items: document.querySelectorAll('#chat-threadroom .bubble, #chat-threadroom .cchip').length }`);
     expect('chat: thread pane shows the task', th.open && th.title.includes('Chat demo') && th.items >= 3, th);
     await shot('18-chat-thread');
-    const seedWorking = `S.orch = { ...S.orch, running: true, runs: 1, agents: { '${b.id}': { status: 'working', taskId: '${t.id}' } } }; renderHeader(); chatSig = null; renderChat();`;
-    await ex(`window._refresh = refresh; refresh = async () => {}; if (!$('#tab-chat.active')) $('#tabs button[data-tab=chat]').click(); ${seedWorking} await w(400);`);
-    const typing = await ex(`return { typing: $('#chat-typing').textContent, header: $('#runstate').textContent, dot: !!document.querySelector('#chat-room .avatar.working') }`);
-    expect('chat: working indicator (text, running header, green dot)', typing.typing.includes(b.name + ' is working') && /^\d+ running/.test(typing.header) && typing.dot, typing);
+    // Sent here, not earlier: an unread teammate message schedules a real wake run for b, which
+    // would race the synthetic working state below (seen live: the pill flipped to "Stopped (1
+    // todo)" mid-check). The thread pane below still needs the message.
+    ps.sendMessage({ from: a.id, to: b.id, text: 'Please keep it vanilla JS.', taskId: t.id });
+    // runState rides the seed (t_ac25444e pill contract): running and runState.state==='running'
+    // always co-occur in real snapshots, so the synthetic state must carry both. Seed and read in
+    // ONE evaluation so no tick or wake can interleave between seeding and reading.
+    const seedWorking = `S.orch = { ...S.orch, running: true, runState: { state: 'running' }, runs: 1, agents: { '${b.id}': { status: 'working', taskId: '${t.id}' } } }; renderHeader(); chatSig = null; renderChat();`;
+    await ex(`window._refresh = refresh; refresh = async () => {}; if (!$('#tab-chat.active')) $('#tabs button[data-tab=chat]').click();`);
+    // Re-seed on every read (idempotent): a stray render tick can repaint the room between
+    // seeding and reading, so each sample re-asserts the synthetic state before measuring it.
+    const seedRead = `${seedWorking} await w(50); return { typing: $('#chat-typing').textContent, header: $('#runstate').textContent, dot: !!document.querySelector('#chat-room .avatar.working') }`;
+    let typing = null;
+    for (let i = 0; i < 10; i++) { typing = await ex(seedRead); if (typing.typing.includes(b.name + ' is working') && /^Running \(\d+\)$/.test(typing.header) && typing.dot) break; await new Promise((r) => setTimeout(r, 300)); }
+    expect('chat: working indicator (text, running header, green dot)', typing.typing.includes(b.name + ' is working') && /^Running \(\d+\)$/.test(typing.header) && typing.dot, typing);
     await shot('19-chat-working'); await ex(`refresh = window._refresh; await refresh();`);
     const origRun = api.run; api.run = () => ({ stubbed: true });
     await ex(`CH.thread = null; const i = $('#chat-input'); i.value = '@${b.name.slice(0, 2)}'; i.dispatchEvent(new Event('input')); await w(200);`);
@@ -607,9 +618,9 @@ async function guiE2E() {
     const dep = s.createTask({ title: 'Depends on ParA', assignee: c.id, blockedBy: [ts[0].id] });
     const o = orchFor(p); const done = new Promise((r) => o.once('done', r)); o.start();
     await ex(`$('#tabs button[data-tab=board]').click(); await refresh();`);
-    const live = await waitFor(`await refresh(); return /3 running/.test($('#runstate').textContent) && [...document.querySelectorAll('.card')].some((c) => /Depends on ParA/.test(c.textContent) && /Blocked by Parallel ParA/.test((c.querySelector('.tag.blocked') || {}).textContent || ''))`, 18000);
+    const live = await waitFor(`await refresh(); return /Running \\(3\\)/.test($('#runstate').textContent) && [...document.querySelectorAll('.card')].some((c) => /Depends on ParA/.test(c.textContent) && /Blocked by Parallel ParA/.test((c.querySelector('.tag.blocked') || {}).textContent || ''))`, 18000);
     const hdr = await ex(`return $('#runstate').textContent`);
-    expect('parallel: header shows "3 running" and dependent shows Blocked by Parallel ParA', live, hdr);
+    expect('parallel: header shows "Running (3)" and dependent shows Blocked by Parallel ParA', live, hdr);
     expect('parallel: 3 agents working at once across 2 teams', ts.every((t) => s.getTask(t.id).status === 'in_progress') && s.getTask(dep.id).status === 'todo', ts.map((t) => s.getTask(t.id).status));
     for (const t of ['light', 'dark']) {
       require('electron').nativeTheme.themeSource = t;
@@ -617,7 +628,7 @@ async function guiE2E() {
       await ex(`$('#tabs button[data-tab=overview]').click(); await w(300);`); await shot(`27-parallel-overview-${t}`);
     }
     require('electron').nativeTheme.themeSource = 'system';
-    expect('parallel: still 3 running after shots', /3 running/.test(await ex(`await refresh(); return $('#runstate').textContent`)));
+    expect('parallel: still Running (3) after shots', /Running \(3\)/.test(await ex(`await refresh(); return $('#runstate').textContent`)));
     await done;
     const win = (tid) => { const r = s.listRuns().find((x) => x.taskId === tid && x.kind === 'agent'); return r ? [Date.parse(r.startedAt), Date.parse(r.endedAt)] : [0, 0]; };
     const [A, B, C] = ts.map((t) => win(t.id)); const D = win(dep.id); const ov = (x, y) => x[0] < y[1] && y[0] < x[1];
