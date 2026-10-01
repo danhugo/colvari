@@ -2091,6 +2091,17 @@ async function guiE2E() {
     const mgr = ps.addNode({ name: 'Manager', role: 'PM', x: 340, y: 60 });
     const w = ps.addNode({ name: 'Wally', role: 'Dev', x: 620, y: 60 });
     ps.addEdge(mgr.id, w.id);
+    // (0) the real UI path: select + Delete button -> deleteNode() -> confirm text lists the open tasks (confirm is stubbed, a native box cannot be clicked from JS)
+    const w0 = ps.addNode({ name: 'Uni', role: 'Dev', x: 620, y: 200 }); ps.setNodeProtected(w0.id, false); // human-made nodes start protected
+     ps.addEdge(mgr.id, w0.id);
+    const u1 = ps.createTask({ title: 'UI open one', assignee: w0.id }); ps.createTask({ title: 'UI open two', assignee: w0.id });
+    await ex(`await refresh(); selectNode('${w0.id}'); await w(300); window.__confirms = []; window.__alerts = []; window.alert = (m) => window.__alerts.push(m); window.confirm = (m) => { window.__confirms.push(m); return true; };`);
+    await shot('44-deletenode-confirm');
+    await ex(`$('#delsel').click(); await w(800); await refresh(); await w(300);`);
+    const msgs = await ex(`return window.__confirms`);
+    expect('deletenode: confirm box names the agent and the open-task count', msgs.length === 1 && /Delete Uni\?/.test(msgs[0]) && (msgs[0].match(/•/g) || []).length === 2, msgs);
+    expect('deletenode: UI delete removed node + edges, tasks went to the manager', !ps.getTeam().nodes.some((n) => n.id === w0.id) && !ps.getTeam().edges.some((e) => e.from === w0.id || e.to === w0.id) && ps.getTask(u1.id).assignee === mgr.id, ps.getTask(u1.id).assignee);
+    expect('deletenode: node gone from the graph DOM', await ex(`return !document.querySelector('#graph .node[data-id="${w0.id}"]')`));
     const todo = ps.createTask({ title: 'Delete-me open work', assignee: w.id });
     const done = ps.createTask({ title: 'Already shipped', assignee: w.id });
     ps.updateTask(done.id, { status: 'done' });
@@ -2358,6 +2369,16 @@ async function guiE2E() {
       if (!ps.getTeam().nodes.length) { ps.addNode({ name: 'Rhea', role: 'PM', x: 60, y: 60 }); await ex(`await refresh(); await w(300);`); }
       await ex(`$('#tabs button[data-tab=team]').click(); await w(300); $('#addnode').click(); await w(400); $('#addnode').click(); await w(400); $('#addnode').click(); await w(500);`);
       const names = ps.getTeam().nodes.map((n) => n.name); console.log('[gui-e2e] agentname', JSON.stringify(names));
+      // Editor steps (t_28bbf522): rename through the form, then a manual role change must keep the typed name and the face.
+      const tgt = ps.getTeam().nodes[ps.getTeam().nodes.length - 1];
+      await ex(`selectNode('${tgt.id}'); await w(400); $('#nf-name').value = 'Renamy'; $('#nf-save').click(); await w(600); await refresh(); await w(300);`);
+      expect('agentname: rename in the editor saved', ps.getTeam().nodes.find((n) => n.id === tgt.id).name === 'Renamy', ps.getTeam().nodes.map((n) => n.name));
+      expect('agentname: renamed label on the graph', await ex(`return /Renamy/.test((document.querySelector('#graph .node[data-id="${tgt.id}"]') || {}).textContent || '')`));
+      const av0 = await ex(`const g = document.querySelector('#graph .node[data-id="${tgt.id}"]'); return { bg: g.querySelector('.avatar').style.fill, face: (g.querySelector('image') || g.querySelector('img') || {}).getAttribute?.('href') || null }`);
+      await ex(`selectNode('${tgt.id}'); await w(400); $('#nf-role').value = 'Reviewer'; $('#nf-save').click(); await w(600); await refresh(); await w(300);`);
+      const av1 = await ex(`const g = document.querySelector('#graph .node[data-id="${tgt.id}"]'); return { bg: g.querySelector('.avatar').style.fill, face: (g.querySelector('image') || g.querySelector('img') || {}).getAttribute?.('href') || null }`);
+      expect('agentname: manual role/avatar change sticks, typed name and face kept', ps.getTeam().nodes.find((n) => n.id === tgt.id).name === 'Renamy' && av1.bg !== av0.bg && av1.face === av0.face, { av0, av1 });
+      await shot('agentname-rename');
       for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`await w(400);`); await shot(`agentname-${t}`); }
       require('electron').nativeTheme.themeSource = 'system'; throw null;
     }
