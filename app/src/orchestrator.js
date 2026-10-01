@@ -344,7 +344,9 @@ class Orchestrator extends EventEmitter {
   // nodeTeams: {nodeId: {teamId, teamName}} across all teams in the project, for tagging log/timeline entries.
   nodeTeams() { return this._memoBy('nodeTeams', this.teamsSigOf(), () => { try { return this.store.nodeTeamMap(); } catch { return {}; } }); }
   // timeline: per-run start/end per agent+task, lanes ordered needs-attention first (TL.timeline, see timeline.js).
-  timeline() { return this._memoBy('timeline', this.sig('runs') + '|' + this.sig('board') + '|' + this.teamsSigOf(), () => { let ts = []; try { ts = this.store.listTasks(); } catch {} return TL.timeline(this.runsMemo(), ts, this.nodeTeams()); }); }
+  // Live agents merge as open-ended bars, so the memo key also fingerprints in-memory agent
+  // status/activity (mirrors Overview.overviewKey's activity fields) — file sigs alone would serve stale live bars.
+  timeline() { const liveSig = JSON.stringify(Object.entries(this.agents || {}).map(([id, a]) => [id, a.status || '', a.activity ? [a.activity.trigger || '', a.activity.fromNodeId || '', a.activity.startedAt || 0] : null])); return this._memoBy('timeline', this.sig('runs') + '|' + this.sig('board') + '|' + this.teamsSigOf() + '|' + liveSig, () => { let ts = []; try { ts = this.store.listTasks(); } catch {} return TL.timeline(this.runsMemo(), ts, this.nodeTeams(), this.agents); }); }
   // logs: structured {ts, agentId, level, text} entries from the persisted orchestrator log.
   // The raw parse is cached incrementally (only newly appended bytes are read+parsed); the mapped
   // entries are memoized per (file sig, limit, teams sig).
@@ -450,6 +452,9 @@ class Orchestrator extends EventEmitter {
   // Account one finished run: agent counters, session totals, persisted history.
   record(rec) {
     const a = this.agent(rec.nodeId);
+    // Wake runs keep who woke them after the run ends (t_634c6702): callers null a.activity right
+    // after the run unwinds, so stamp the waker onto the persisted record here while it is still set.
+    if (rec.kind === 'agent' && !rec.taskId && a.activity && a.activity.trigger === 'message') rec.fromNodeId = a.activity.fromNodeId || null;
     for (const k of ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheCreationTokens']) a[k] += rec[k];
     a.cacheTokens = a.cacheReadTokens + a.cacheCreationTokens; a.cost += rec.reportedCostUsd; this.totalCost += rec.reportedCostUsd;
     if (rec.billingSource === 'subscription') this.subCost = (this.subCost || 0) + rec.reportedCostUsd; else this.billedCost = (this.billedCost || 0) + rec.reportedCostUsd;
