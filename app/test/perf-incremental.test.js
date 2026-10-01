@@ -1,5 +1,5 @@
 // Perf (t_9d92c3d3): change-driven data — file-signature versions, tail readLogs, memoized
-// snapshot parts, incremental log tail, and the renderer's no-op-render signature keys.
+// snapshot parts, incremental log tail, and the renderer's no-op-render feed signature keys.
 const test = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
@@ -7,7 +7,6 @@ const os = require('os');
 const path = require('path');
 const { Store, pickChanged } = require('../src/store');
 const { Orchestrator } = require('../src/orchestrator');
-const O = require('../src/overview');
 const Chat = require('../src/chat');
 
 function tmpStore() {
@@ -129,29 +128,6 @@ test('versionSig(): stable when nothing changed, reacts to memory and file chang
   assert.notEqual(orch.versionSig(), sig2);
 });
 
-test('overviewKey: same inputs -> same key; any rendered change -> new key; unrendered fields ignored', () => {
-  const node = { id: 'a', x: 1, y: 2, name: 'A', role: 'Dev', runtime: 'claude', model: 'opus', capabilities: { big: 'blob' } };
-  const base = () => ({
-    projectId: 'p1', nodes: [{ ...node }], edges: [{ id: 'e1', from: 'a', to: 'b' }],
-    agents: { a: { status: 'idle' } }, tasks: [{ id: 't1', title: 'T', status: 'todo', assignee: 'a', updatedAt: 'x' }],
-    messages: [{ at: 5 }], logs: [{ at: 1 }, { at: 9 }], stuckMinutes: 5, selectedTask: '', bucket: 0,
-  });
-  assert.equal(O.overviewKey(base()), O.overviewKey(base()));
-  assert.equal(O.overviewKey(base()), O.overviewKey({ ...base(), nodes: [{ ...node, capabilities: { other: 1 } }] })); // unrendered field
-  assert.equal(O.overviewKey(base()), O.overviewKey({ ...base(), edges: [{ id: 'e1', from: 'a', to: 'b', type: 'assign' }] })); // default edge type
-  const diff = (mut) => assert.notEqual(O.overviewKey(base()), O.overviewKey(mut(base())), mut.toString());
-  diff((b) => ({ ...b, nodes: [{ ...node, x: 9 }] })); // node moved
-  diff((b) => ({ ...b, nodes: [{ ...node, name: 'B' }] })); // renamed
-  diff((b) => ({ ...b, agents: { a: { status: 'working' } } }));
-  diff((b) => ({ ...b, agents: { a: { status: 'idle', taskId: 't9' } } }));
-  diff((b) => ({ ...b, tasks: [{ id: 't1', title: 'T', status: 'done', assignee: 'a', updatedAt: 'x' }] }));
-  diff((b) => ({ ...b, messages: [{ at: 5 }, { at: 6 }] }));
-  diff((b) => ({ ...b, logs: [{ at: 1 }, { at: 9 }, { at: 10 }] }));
-  diff((b) => ({ ...b, projectId: 'p2' }));
-  diff((b) => ({ ...b, bucket: 1 }));
-  diff((b) => ({ ...b, selectedTask: 't1' }));
-});
-
 test('feedKey: same inputs -> same key; visible feed changes -> new key', () => {
   const base = () => ({
     projectId: 'p1', thread: null,
@@ -174,13 +150,6 @@ test('feedKey: same inputs -> same key; visible feed changes -> new key', () => 
   diff((b) => ({ ...b, agents: { a: { subagents: [{ id: 's1', status: 'done', tokens: { inputTokens: 5, outputTokens: 2 } }] } } })); // subagent status
   diff((b) => ({ ...b, agents: { a: { subagents: [{ id: 's1', status: 'running', tokens: { inputTokens: 9, outputTokens: 2 } }] } } })); // subagent tokens
   diff((b) => ({ ...b, runs: [{ subagents: [{ id: 's1', status: 'done' }] }] }));
-});
-
-test('overviewKey: subagent record changes produce a new key', () => {
-  const base = (sub) => ({ projectId: 'p', nodes: [], edges: [], agents: { a: { status: 'working', subagents: sub } }, tasks: [], messages: [], logs: [], stuckMinutes: 5, selectedTask: '', bucket: 0 });
-  const sub = [{ id: 's1', status: 'running', tokens: { inputTokens: 1, outputTokens: 1 } }];
-  assert.equal(O.overviewKey(base(sub)), O.overviewKey(base(sub.map((x) => ({ ...x })))));
-  assert.notEqual(O.overviewKey(base(sub)), O.overviewKey(base(sub.map((x) => ({ ...x, status: 'done' })))));
 });
 
 // ---- task-file cache (t_8d586961): listTasks must not re-read unchanged task files ----
