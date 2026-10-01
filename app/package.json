@@ -39,6 +39,8 @@
     "zod": "^4.6.5"
   },
   "devDependencies": {
+    "@dicebear/bottts-neutral": "^9",
+    "@dicebear/core": "^9",
     "electron": "^44.4.5"
   }
 }
