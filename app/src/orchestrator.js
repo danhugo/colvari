@@ -1012,7 +1012,7 @@ class Orchestrator extends EventEmitter {
       }
       this.nudgeDeferredLogged?.delete(rid);
       this.nudged.set(mk, key);
-      const m = this.store.sendMessage({ from: 'system', to: rid, text: n.text });
+      const m = this.store.sendMessage({ from: 'system', to: rid, text: kind === 'idle' || kind === 'stale' ? `${n.text}\n${IDLE.staffingSummary(team, tasks, this.agents)}` : n.text });
       this.log(rid, 'system', 'nudge: ' + n.text);
       const WHY = { stale: 'stale tasks', company: 'idle company with open work', 'review-stranded': 'review stranded', 'review-closeable': 'review closeable' };
       this.wakeForHuman(rid, [m], {

@@ -2,6 +2,28 @@
 // A PM (any node with an assign edge to others) with open goals gets nudged about its idle reports.
 const OPEN = (t) => t.status !== 'done';
 
+// A todo is blocked while any blockedBy task is not done.
+const isBlocked = (tasks, t) => (t.blockedBy || []).some((id) => { const b = tasks.find((x) => x.id === id); return b && b.status !== 'done'; });
+
+// Two short lines appended to PM wake texts (not part of the debounce key): ready todos per role
+// (unassigned = recruit signal), blocked count (incl. waiting_for_human), agents busy/idle per role.
+// ponytail: no "idle since" — agent state has no per-agent timestamp; add one if that signal is wanted.
+function staffingSummary(team, tasks, agents = {}) {
+  const nodes = team.nodes || [];
+  const st = agentStates(team, tasks, agents);
+  const role = (id) => (nodes.find((n) => n.id === id) || {}).role || 'agent';
+  const count = (m, k) => m.set(k, (m.get(k) || 0) + 1);
+  const ready = new Map(); let blocked = 0;
+  for (const t of tasks) {
+    if (t.status === 'waiting_for_human') blocked++;
+    else if (t.status === 'todo' && !t.awaitingApproval && !t.parkedForHuman) { if (isBlocked(tasks, t)) blocked++; else count(ready, t.assignee ? role(t.assignee) : 'unassigned'); }
+  }
+  const per = new Map();
+  for (const n of nodes) { const r = per.get(n.role || 'agent') || { busy: 0, idle: 0 }; r[st[n.id]]++; per.set(n.role || 'agent', r); }
+  const fmt = (m) => [...m].map(([k, v]) => `${k} ${v}`).join(', ') || 'none';
+  return `Ready: ${fmt(ready)} | Blocked: ${blocked}\nAgents: ${[...per].map(([k, v]) => `${k} ${v.busy} busy/${v.idle} idle`).join(', ')}`;
+}
+
 function agentStates(team, tasks, agents = {}) {
   const out = {};
   for (const n of team.nodes || []) {
@@ -50,7 +72,7 @@ function idleNudges(team, tasks, agents = {}, opts = {}) {
         && now - new Date(t.updatedAt).getTime() > staleMin * 60000);
       if (stale.length) {
         const mins = (t) => Math.max(1, Math.round((now - new Date(t.updatedAt).getTime()) / 60000));
-        const list = stale.slice(0, 4).map((t) => `"${String(t.title || t.id).slice(0, 40)}" (${mins(t)}m)`);
+        const list = stale.slice(0, 4).map((t) => `"${String(t.title || t.id).slice(0, 40)}" (${mins(t)}m, ${t.status === 'todo' && isBlocked(tasks, t) ? 'blocked' : 'ready'})`);
         res.push({ pmId: core.id, idle: [], taskIds: stale.map((t) => t.id), kind: 'stale', text: `${stale.length} task${stale.length > 1 ? 's' : ''} stale ${staleMin} min: ${list.join(', ')}${stale.length > 4 ? ` +${stale.length - 4} more` : ''}` });
       }
     }
@@ -70,7 +92,7 @@ function idleCompanyWakes(team, tasks, agents = {}) {
   if (!nodes.length) return [];
   const st = agentStates(team, tasks, agents);
   if (Object.values(st).some((s) => s === 'busy')) return [];
-  const blocked = (t) => (t.blockedBy || []).some((id) => { const b = tasks.find((x) => x.id === id); return b && b.status !== 'done'; });
+  const blocked = (t) => isBlocked(tasks, t);
   const skip = (t) => t.status === 'done' || t.status === 'review' || t.status === 'waiting_for_human' || t.awaitingApproval || t.parkedForHuman || (t.status === 'todo' && blocked(t));
   const open = tasks.filter((t) => !skip(t));
   if (!open.length) return [];
@@ -143,4 +165,4 @@ function boardGapNudges(team, tasks, agents = {}, opts = {}) {
   return res;
 }
 
-module.exports = { agentStates, idleNudges, idleCompanyWakes, boardGapNudges, coreNode };
+module.exports = { agentStates, idleNudges, staffingSummary, idleCompanyWakes, boardGapNudges, coreNode };
