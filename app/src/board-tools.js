@@ -217,7 +217,8 @@ function makeTools(store, nodeId) {
       return store.commentTask(taskId, nodeName(t, nodeId), text);
     },
     send_message({ to, text, taskId = null }) {
-      const t = me(); const target = resolve(t, to, 'recipient');
+      const t = me(); if (to === 'human') throw new Error('unknown recipient "human". To reply to the human, put the reply in your final answer, or use ask_human.');
+      const target = resolve(t, to, 'recipient');
       if (!canMessage(t, nodeId, target.id)) throw new Error(`scope violation: ${nodeName(t, nodeId)} cannot message ${target.name} (no message or assign edge)`);
       return store.sendMessage({ from: nodeId, to: target.id, text, taskId });
     },

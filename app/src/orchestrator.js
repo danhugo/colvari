@@ -178,7 +178,7 @@ function attachedFilesLines(atts) {
 
 // Prompt for a resumed run that delivers a human message (base is included when there is no session to resume).
 function humanPrompt(text, base = null, attachments = null) {
-  return [base, `Message from the human operator (answer or act on it, then continue your current task, if you have one):\n${text}`, 'Reply via chat; create_task only for real work.', attachedFilesLines(attachments)].filter(Boolean).join('\n\n');
+  return [base, `Message from the human operator (answer or act on it, then continue your current task, if you have one):\n${text}`, 'Reply via chat (your final answer is the reply). If the human asks to redo something ("do again"), act on it: re-create the tasks. create_task only for real work.', attachedFilesLines(attachments)].filter(Boolean).join('\n\n');
 }
 
 // Short 'continue' prompt for a stalled run resumed in the same session (the session already holds

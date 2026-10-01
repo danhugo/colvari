@@ -22,7 +22,9 @@ function deriveRuntimeProfile(bin, { exec, label, probe = true, askAgent = false
   if (hit && hit.version === version) return hit.profile;
   const id = String(bin).split(/[\\/]/).pop().replace(/\.(exe|sh)$/i, '').toLowerCase().replace(/[^a-z0-9_.-]/g, '_');
   const { profile } = introspectRuntime(bin, run, { id, label: label || id, probe, askAgent });
-  derivedProfiles.set(key, { version, profile });
+  // Binary not found (e.g. packaged app launched from Finder with a minimal PATH): do not cache the
+  // empty profile, or it would stick for the whole session. Re-derives next call (cheap: no run).
+  if (version) derivedProfiles.set(key, { version, profile });
   return profile;
 }
 
@@ -207,6 +209,8 @@ function parseProfileEvent(ev, profile) {
     return out;
   }
   const text = getPath(ev, em.textPath);
+  // Fail loud: a text event with no textPath means the profile derivation failed; never drop silently.
+  if (!em.textPath && (ev.type === 'text' || part.type === 'text')) out.logs.push(['error', `${profile.label}: runtime profile has no textPath (introspection failed; is "${profile.binary}" on PATH?). Reply text dropped.`]);
   if (typeof text === 'string' && text) { out.logs.push(['text', text]); out.result = text; }
   const sessionId = getPath(ev, em.sessionIdPath);
   // opencode-derived CLIs put the session id on every event: capture it silently, log only a
