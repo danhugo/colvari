@@ -329,14 +329,14 @@ header #wtdisk.wtwarn { background:var(--warning-soft); color:var(--warning-text
 /* In the Usage tab the same chips list EVERY provider — they may wrap there (no header squeeze). */
 .limitmeter.us-list { flex-wrap:wrap; overflow:visible; cursor:default; row-gap:4px; }
 /* At working window widths the tab icons are pure padding — labels carry the tabs, and every
-   freed pixel goes to the meter chips. Below 1200px there is no longer room for the fixed chip,
-   the cost pill AND 450px of tab labels (the pills may no longer squash), so the labels collapse
-   back to their icons — nothing is lost (icons + tooltips remain); only under 1000px does the
-   brand text hide too. The re-show rule MUST repeat the `header #tabs` prefix of the hide rule:
-   at lower specificity the max-1500 hide wins the cascade and the tabs render as empty buttons
-   (the blank 1100px header the Critic caught, t_8d8ec5f8). */
-@media (max-width:1500px) { header #tabs .navicon { display:none; } }
-@media (max-width:1200px) { header #tabs .navicon { display:inline-block; } header #tabs button .lbl { display:none; } header #tabs button { padding:3px 5px; } header #tabs button.sec { padding:3px 4px; } header #tabs .navsep { margin:3px 2px; } }
+   freed pixel goes to the meter chips. The One Team header (watchst/wtdisk pills) needs ~1420px
+   with labels once a run state and a pending-task pill show: at 1400px #runstate ellipsized and
+   at 1300px the page really overflowed (hdrprobe, t_e8671a96) — no room is left below ~1430px,
+   so labels collapse to their icons from 1500px down (icons + tooltips remain; brand text hides
+   only under 1000px). The header gap also tightens 6->4 here: the all-pills guard at 1100px was
+   13px over. Single block, so no hide/re-show cascade pair (the blank-tabs trap of the old
+   1200px rule, t_8d8ec5f8, cannot recur). */
+@media (max-width:1500px) { header { gap:4px; } header #tabs .navicon { display:inline-block; } header #tabs button .lbl { display:none; } header #tabs button { padding:3px 5px; } header #tabs button.sec { padding:3px 4px; } header #tabs .navsep { margin:3px 2px; } }
 /* Under 1000px even the icon strip no longer fits next to the fixed chip + cost pill (topbar suite
    overflow at 900px): the secondary tabs (Wiki/Logs/Usage) and the separator give way first; the
    four primary tabs stay as icons. */
