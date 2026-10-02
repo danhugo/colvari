@@ -920,11 +920,12 @@ class Store {
     if (filter.from) ms = ms.filter((m) => m.from === filter.from);
     return ms;
   }
-  sendMessage({ from, to, text, taskId = null, attachments = null }) {
+  sendMessage({ from, to, text, taskId = null, attachments = null, wake = false }) {
     if (!text) throw new Error('text required');
     const m = { id: id('m'), from, to, text, taskId, at: new Date().toISOString(), read: false };
     const atts = sanitizeAttachments(attachments);
     if (atts) m.attachments = atts;
+    if (wake) m.wake = true; // the one message kind that may wake an idle agent (see orchestrator.wakeUnread)
     this.update('messages', { messages: [] }, (d) => { d.messages.push(m); });
     return m;
   }

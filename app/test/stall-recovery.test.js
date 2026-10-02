@@ -94,7 +94,9 @@ test('hung run with no live child: stopped, resumed in the same session, task co
 });
 
 test('run with a live child process is not recovered', async () => {
-  const { node, orch } = setup();
+  // 5s timeout: the 5s backdate sits past the soft timeout but inside the hard cap (3x, t_600e630d) —
+  // above the cap even a live child no longer protects a silent run.
+  const { node, orch } = setup({ stallTimeoutMin: 1 / 12 });
   orch.runAlive = () => true; // live descendant: a long silent tool call
   orch.start();
   await waitFor(() => orch.agent(node.id).currentRun);
