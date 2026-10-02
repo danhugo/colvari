@@ -6,7 +6,7 @@
  * Boots an isolated throwaway instance of the REAL app (own temp data root, own userData,
  * synthetic stream-cli runtime — no model calls, never touches the live app), seeds state
  * through the Store, and samples app.getAppMetrics() once per second for a fixed window,
- * while the page counts Chat.feedKey / Chat.roomEvents / refresh / renderChat invocations
+ * while the page counts Chat.feedKey / Chat.roomEvents / refresh / renderChatBody invocations
  * and self-ms. Writes <PERF_OUT>/cpu-baseline.json + cpu-baseline.md.
  *
  * Knobs:
@@ -94,7 +94,7 @@ const INSTRUMENT = `
   timed(window.Chat, 'feedKey', 'feedCalls', 'feedMs', 'freezeFeed');
   timed(window.Chat, 'roomEvents', 'rebuilds', 'rebuildMs');
   timed(window, 'refresh', 'refreshCalls', 'refreshMs', 'freezePoll');
-  timed(window, 'renderChat', 'tickCalls', 'tickMs');
+  timed(window, 'renderChatBody', 'tickCalls', 'tickMs'); // the scheduler's draw target; renderChat itself is now a cheap epoch guard
   if (${jsq(ANIM)} === 'off') { const s = document.createElement('style'); s.textContent = '*,*::before,*::after{animation:none!important;transition:none!important}'; document.head.appendChild(s); }
   const sel = ${jsq(ANIM_OFF === 'all' ? Object.values(ANIM_SEL).join(', ') : (ANIM_SEL[ANIM_OFF] || ''))};
   if (sel) { const s = document.createElement('style'); s.textContent = sel + '{animation:none!important}'; document.head.appendChild(s); }
@@ -243,6 +243,6 @@ Seeds: ${r.env.seeds ? `${r.env.seeds.tasks} tasks / ${r.env.seeds.logs} logs / 
 | Chat.feedKey (every renderChat entry) | ${c.feedKeyPerSec} | ${c.feedKeyMsTotal} |
 | Chat.roomEvents (full feed rebuilds) | ${c.rebuildsPerSec} | ${c.rebuildMsTotal} |
 | refresh (2s poll) | ${c.refreshPerSec} | ${c.refreshMsTotal} |
-| renderChat via window (1s tick path) | ${c.tickPerSec} | ${c.tickMsTotal} |
+| renderChatBody (event-driven room draws) | ${c.tickPerSec} | ${c.tickMsTotal} |
 `;
 }

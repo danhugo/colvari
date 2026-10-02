@@ -106,6 +106,7 @@ async function refresh() {
   if (runsChanged) await loadRuns(); // runs.json (796KB) is re-read only when its file actually changed
   await Promise.all([loadLogs(ctx.p), loadSelfUpdate(), loadCoreState()]); // three independent round-trips, overlapped
   syncRtu(); // banner follows the snapshot across reloads / missed pushes
+  chatBump(); // applied changes may cover the sections deltas do not carry (team/nodes) — the chat epoch must follow
   try { localStorage.setItem('ctx', JSON.stringify(ctx)); } catch {}
   renderAll();
 }
@@ -1078,7 +1079,7 @@ function startWatchDrag(ev, n) {
 // (that is where its updates land), the #company room otherwise.
 const openNodeInChat = (id) => {
   const a = S.orch.agents[id] || {}; const t = a.taskId ? S.tasks.find((x) => x.id === a.taskId) : null;
-  CH.thread = t ? t.id : null; showTab('chat'); renderChat();
+  CH.thread = t ? t.id : null; showTab('chat'); chatSched.force();
 };
 function applyTeamModeChrome() {
   const tc = teamCan(); const on = (sel, dis) => { const b = $(sel); if (b) b.disabled = !!dis; };
@@ -2706,22 +2707,35 @@ function updateNewPill() { const btn = $('#chat-newpill'); const n = CH.pendingN
 $('#chat-newpill').onclick = () => { const room = $('#chat-room'); room.scrollTop = room.scrollHeight; CH.pendingNew = 0; updateNewPill(); };
 // Windowing (t_fb193107): only the last Chat.PAGE events are in the DOM; scrolling near the top
 // prepends the next older page (anchored, no jump), and returning to the bottom shrinks again.
-const chatGrow = () => { CH.win = (CH.win || Chat.PAGE) + Chat.PAGE; chatSig = null; renderChat(); };
+const chatGrow = () => { CH.win = (CH.win || Chat.PAGE) + Chat.PAGE; chatSched.force(); };
 $('#chat-room').addEventListener('scroll', () => { const room = $('#chat-room');
-  if (room.scrollHeight - room.scrollTop - room.clientHeight < 40) { CH.pendingNew = 0; if ((CH.win || Chat.PAGE) > Chat.PAGE) { CH.win = Chat.PAGE; chatSig = null; renderChat(); } updateNewPill(); }
+  if (room.scrollHeight - room.scrollTop - room.clientHeight < 40) { CH.pendingNew = 0; if ((CH.win || Chat.PAGE) > Chat.PAGE) { CH.win = Chat.PAGE; chatSched.force(); } updateNewPill(); }
   else if (room.scrollTop < 80 && CH.ev && CH.ev.length > (CH.win || Chat.PAGE)) chatGrow(); });
-// Skip-no-op renders (t_9d92c3d3): the feed signature is checked BEFORE the expensive roomEvents walk,
-// so an unchanged room costs no DOM work at all. chatSig is reset to force a redraw (send, team
-// switch, older-page grow) — plain activation keeps it, so revisiting an unchanged room is free.
-let chatSig = null;
+// Skip-no-op renders (t_9d92c3d3), counters since t_e116438b: the room redraws only when a
+// chat-relevant event moved the epoch — an O(1) integer check in place of the old per-call
+// Chat.feedKey signature (a JSON.stringify over every log/task/message/inbox/node/agent/run,
+// O(feed), which the old fixed 1s tick rebuilt even when nothing changed). Sources that bump:
+// chat-relevant delta sections (task/messages/inbox/orch/runs), same-project log pushes, any
+// refresh() that applied changes (covers the team/nodes data the delta sections do not carry),
+// and the view-state changes below (thread, window, team scope) which force an immediate draw.
+// While events burst, draws coalesce to one room rebuild per 400ms (interleaved agent events
+// used to re-render the whole innerHTML room per delta batch at ~4/s — the #2 streaming CPU
+// cost after the sweep ring, Quinn t_09b11191).
+const chatSched = RenderSched.create({
+  minMs: 400,
+  hidden: () => document.hidden,
+  gate: () => !!$('#tab-chat.active'),
+  draw: () => renderChatBody(), // late-binding: e2e/perf harnesses wrap the global by name
+});
+const chatBump = () => chatSched.bump(); // event-source shorthand (log pushes, deltas, refresh)
 function renderChat() {
   if (!$('#tab-chat.active')) return;
+  chatSched.drawIfCurrent();
+}
+function renderChatBody() {
   fillTeamSelect($('#chatteam'), sel.chatTeam, (S.project && S.project.teams) || []);
   const working = new Set(Object.keys(S.orch.agents || {}).filter((id) => S.orch.agents[id].status === 'working'));
   const L = projLogs();
-  const sig = Chat.feedKey({ projectId: ctx.p, thread: CH.thread, logs: L, tasks: S.tasks, messages: S.messages, inbox: S.inbox, nodes: S.allNodes, working, agents: S.orch.agents, runs: RUNS }) + '|' + (sel.chatTeam || '');
-  if (sig === chatSig) return;
-  chatSig = sig;
   let ev = Chat.roomEvents(L, S.tasks, S.messages, S.inbox, Chat.MAX, subRecOf); // capped to the last Chat.MAX (500) events
   if (sel.chatTeam) { ev = ev.filter(chatInScope); for (const e of ev) e._tb = crossTeamOf(e); } // team scope + cross-team badges (t_1158f757)
   CH.ev = ev;
@@ -2746,8 +2760,8 @@ function renderChat() {
   const th = $('#chat-thread'); const t = S.tasks.find((x) => x.id === CH.thread); th.classList.toggle('hidden', !t);
   if (t) { const tev = ev.filter((e) => e.taskId === t.id);
     th.innerHTML = `<div class="chat-head"><b>🧵 ${esc(t.title)}</b><span class="role">${esc(t.status)}</span><span class="spacer"></span><button id="ch-close" title="Close thread">✕</button></div><div id="chat-threadroom">${tev.length ? renderGroups(tev, workingT) : '<p class="muted" style="padding:16px">Nothing in this thread yet.</p>'}</div>`;
-    $('#ch-close').onclick = () => { CH.thread = null; renderChat(); }; }
-  document.querySelectorAll('#tab-chat [data-thread]').forEach((b) => b.onclick = () => { CH.thread = b.dataset.thread; renderChat(); });
+    $('#ch-close').onclick = () => { CH.thread = null; chatSched.force(); }; }
+  document.querySelectorAll('#tab-chat [data-thread]').forEach((b) => b.onclick = () => { CH.thread = b.dataset.thread; chatSched.force(); });
   document.querySelectorAll('#tab-chat .bubble.question').forEach((d) => {
     const answer = (v) => act(async () => { if (!v) return; await call('answerInbox', d.dataset.iid, v); refresh(); })();
     d.querySelectorAll('.ch-choice').forEach((b) => b.onclick = () => answer(b.dataset.v)); d.querySelector('.ch-send').onclick = () => answer(d.querySelector('.ch-ans').value.trim());
@@ -2775,7 +2789,7 @@ async function chatSend() {
   } catch (err) { i.value = draft; chatPreview(); throw err; } // send failed: hand the draft back
   for (const a of chatAtts) if (a.url) URL.revokeObjectURL(a.url);
   chatAtts.length = 0; renderChatAtts();
-  chatSig = null; refresh();
+  refresh();
 }
 $('#chat-input').addEventListener('input', chatPreview);
 $('#chat-input').addEventListener('keydown', (e) => {
@@ -2785,13 +2799,13 @@ $('#chat-input').addEventListener('keydown', (e) => {
   else if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); act(chatSend)(); }
 });
 $('#chat-send').onclick = act(chatSend);
-// Chat activation goes through the shared tab-click handler (TAB_RESIG keeps the signature, so a
-// revisit of an unchanged room is a no-op — the DOM from the last visit is still correct).
+// Chat activation goes through the shared tab-click handler: the scheduler's gate keeps the tab
+// check, so a revisit of an unchanged room (epoch unmoved) is a no-op — the DOM from the last
+// visit is still correct — and a revisit after events drew while hidden draws once, immediately.
 // Chat team scope (t_1158f757): one select in the header, left of the typing indicator; index.html
 // is out of scope for this task so the control is injected here.
 document.querySelector('#tab-chat .chat-head .spacer').insertAdjacentHTML('beforebegin', '<select id="chatteam" title="Scope #company to one team, or show all teams"></select>');
-$('#chatteam').onchange = () => { sel.chatTeam = $('#chatteam').value; chatSig = null; renderChat(); };
-setInterval(renderChat, 1000);
+$('#chatteam').onchange = () => { sel.chatTeam = $('#chatteam').value; chatSched.force(); };
 
 // ---------- composer attachments (t_993822cf): paste / drop / attach button, chips, lazy thumbs ----------
 // A chip is added optimistically (local object-URL preview for images), saved in the background via
@@ -2887,6 +2901,7 @@ squad.on('runtime-available', onRtaPush); squad.on('runtimeAvailable', onRtaPush
 // and, while the view is pinned to the live tail with trivial filters, append only the new rows.
 let logFlushQueued = false;
 function scheduleLogRender() {
+  if (document.hidden) return; // hidden window: rAF is stalled and the fallback would only build DOM nobody sees; the catch-up refresh on visible redraws the tail
   if (logFlushQueued) return; logFlushQueued = true;
   let fired = false; const flush = () => { if (fired) return; fired = true; logFlushQueued = false; flushLogTail(); };
   requestAnimationFrame(flush);
@@ -2936,7 +2951,7 @@ function appendLogTail() {
   box.scrollTop = box.scrollHeight;
   return true;
 }
-squad.on('log', (l) => { l._seq = ++logSeq; logs.push(l); if (logs.length > 8000) logs.splice(0, 1000); scheduleLogRender(); });
+squad.on('log', (l) => { l._seq = ++logSeq; logs.push(l); if (logs.length > 8000) logs.splice(0, 1000); if (l.projectId === ctx.p) chatBump(); scheduleLogRender(); });
 // In-app toast for orchestrator notifications (desktop notifications are shown by the main process).
 squad.on('notify', (n) => {
   if (n.projectId && n.projectId !== ctx.p) return;
@@ -2975,15 +2990,26 @@ squad.on('delta', (b) => {
   if (DeltaClient.plan(lastDeltaSeq, b).op === 'resync') { lastDeltaSeq = null; lastV = null; refresh(); return; }
   lastDeltaSeq = b.seq;
   for (const d of b.deltas) {
-    if (d.type === 'runs') { RUNS = d.set; continue; } // module binding, not an S section
+    if (d.type === 'runs') { RUNS = d.set; chatBump(); continue; } // module binding, not an S section
     if (d.type === 'resync') { lastDeltaSeq = null; lastV = null; refresh(); return; }
     DeltaClient.patch(S, d);
+    // Chat reads task/messages/inbox/orch/runs: bump its epoch so the event-driven redraw
+    // (chatSched) picks the change up; wiki/board-only deltas leave the room alone.
+    if (d.type === 'task' || d.type === 'messages' || d.type === 'inbox' || d.type === 'orch') chatBump();
   }
   if (b.v && lastV) Object.assign(lastV, b.v); // keep the version poll quiet about what we already applied
   if (!deltaRaf) deltaRaf = requestAnimationFrame(() => { deltaRaf = 0; renderAll(); });
 });
 squad.on('state', (st) => { if (st.projectId && st.projectId !== ctx.p) { clearTimeout(pendingP); pendingP = setTimeout(async () => { P = await call('listProjects'); renderSidebar(); }, 200); return; } clearTimeout(pending); }); // same-project state arrives as deltas now; cancel a pending pull instead of scheduling one
-setInterval(() => { if (S.orch.running) refresh(); }, 2000); // pick up board changes made by agents
+// Pause-when-hidden (t_e116438b): while the window is hidden the schedulers arm nothing (rAF is
+// stalled anyway, and DOM built in the dark is wasted work) and the backstop poll sleeps; on show,
+// one catch-up pull plus a chat bump redraw whatever moved while dark. Deltas keep patching S and
+// leave a pending rAF, so every view (not just chat) is current again by the frame after show.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') { chatSched.hide(); return; }
+  chatBump(); refresh();
+});
+setInterval(() => { if (S.orch.running && !document.hidden) refresh(); }, 2000); // backstop for the sections deltas do not carry (team/nodes/nstat); version-gated inside refresh, paused while hidden
 refresh().then(() => syncRecovery()); // recovery banner needs a settled ctx.p (t_6911ba60)
 $('#help').onclick = () => $('#helpdlg').showModal();
 

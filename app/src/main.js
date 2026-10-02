@@ -434,10 +434,10 @@ async function guiE2E() {
     const L = (ago, nodeId, kind, text) => `logs.push({ projectId: ctx.p, nodeId: '${nodeId}', kind: '${kind}', text: ${JSON.stringify(text)}, at: Date.now() - ${ago} });`;
     await ex(`$('#tabs button[data-tab=chat]').click(); ${L(90000, b.id, 'system', '▶ ' + b.name + ' starts "Chat demo" in /x')}${L(80000, b.id, 'text', 'I will add a chat view with bubbles and tool chips.')}
       ${L(70000, b.id, 'tool', 'Read {"file_path":"renderer/app.js"}')}${L(69000, b.id, 'tool_result', '587 lines')}${L(60000, b.id, 'tool', 'Bash {"command":"npm test"}')}${L(59000, b.id, 'tool_result', 'pass 78 fail 0')}
-      await refresh(); chatSig = null; renderChat(); await w(300); document.querySelector('#chat-room .cchip').open = true; await w(200);`);
+      await refresh(); chatSched.force(); await w(300); document.querySelector('#chat-room .cchip').open = true; await w(200);`);
     const room = await ex(`return { groups: document.querySelectorAll('#chat-room .cgroup').length, avatars: document.querySelectorAll('#chat-room .avatar').length, chips: document.querySelectorAll('#chat-room .cchip').length, question: !!document.querySelector('#chat-room .bubble.question .ch-choice'), roles: document.querySelectorAll('#chat-room .role').length, defaultTab: !!$('#tabs button[data-tab=chat]') && TABS[0] === 'chat' }`);
     expect('chat: room with bubbles, avatars, role badges, tool chips, inline question', room.groups >= 2 && room.chips >= 2 && room.question && room.roles >= 2 && room.defaultTab, room);
-    await ex(`await refresh(); chatSig = null; renderChat(); document.querySelector('#chat-room .cchip').open = true; await w(200);`); await shot('17-chat-room');
+    await ex(`await refresh(); chatSched.force(); document.querySelector('#chat-room .cchip').open = true; await w(200);`); await shot('17-chat-room');
     await ex(`document.documentElement.dataset.theme = 'dark'; await w(200);`); await shot('17b-chat-room-dark'); await ex(`document.documentElement.dataset.theme = 'light'; await w(100);`);
     await ex(`document.querySelector('#chat-room [data-thread="${t.id}"]').click(); await w(300);`);
     const th = await ex(`return { open: !$('#chat-thread').classList.contains('hidden'), title: $('#chat-thread .chat-head').textContent, items: document.querySelectorAll('#chat-threadroom .bubble, #chat-threadroom .cchip').length }`);
@@ -450,7 +450,7 @@ async function guiE2E() {
     // runState rides the seed (t_ac25444e pill contract): running and runState.state==='running'
     // always co-occur in real snapshots, so the synthetic state must carry both. Seed and read in
     // ONE evaluation so no tick or wake can interleave between seeding and reading.
-    const seedWorking = `S.orch = { ...S.orch, running: true, runState: { state: 'running' }, runs: 1, agents: { '${b.id}': { status: 'working', taskId: '${t.id}' } } }; renderHeader(); chatSig = null; renderChat();`;
+    const seedWorking = `S.orch = { ...S.orch, running: true, runState: { state: 'running' }, runs: 1, agents: { '${b.id}': { status: 'working', taskId: '${t.id}' } } }; renderHeader(); chatSched.force();`;
     await ex(`window._refresh = refresh; refresh = async () => {}; if (!$('#tab-chat.active')) $('#tabs button[data-tab=chat]').click();`);
     // Re-seed on every read (idempotent): a stray render tick can repaint the room between
     // seeding and reading, so each sample re-asserts the synthetic state before measuring it.
@@ -473,7 +473,7 @@ async function guiE2E() {
     // @Name! stays the explicit task form.
     await ex(`const i = $('#chat-input'); i.value = '@${b.name}! add a dark theme toggle'; i.dispatchEvent(new Event('input')); await w(200); $('#chat-send').click(); await w(800);`); api.run = origRun;
     const made = ps.listTasks().find((x) => x.title === 'add a dark theme toggle');
-    await ex(`await refresh(); chatSig = null; renderChat(); const b = [...document.querySelectorAll('#chat-room .ch-choice')].find((x) => x.dataset.v === 'dark'); b && b.click(); await w(800);`);
+    await ex(`await refresh(); chatSched.force(); const b = [...document.querySelectorAll('#chat-room .ch-choice')].find((x) => x.dataset.v === 'dark'); b && b.click(); await w(800);`);
     const cm = { mention, preview: pv, msg: sentMsg && { from: sentMsg.from, to: sentMsg.to }, task: made && { assignee: made.assignee, createdBy: made.createdBy }, answered: ps.getInboxItem(q.id).answer };
     console.log('[gui-e2e] chat', JSON.stringify({ room, thread: th, typing, ...cm }));
     expect('chat: @mention autocomplete + preview + @Name sends a message (no auto task)', mention.includes(b.name) && pv.includes('message to ' + b.name) && sentMsg && sentMsg.from === 'human' && noTaskYet, cm);
@@ -547,7 +547,7 @@ async function guiE2E() {
     expect('agentimage: comment_task stores the copy too', cmt && cmt.attachments && cmt.attachments.length === 1 && cmt.attachments[0].path.startsWith(path.join(ps.attachmentsDir(), '')), cmt && cmt.attachments);
     const raw = fs.readFileSync(path.join(ps.dir, 'messages.json'), 'utf8');
     expect('agentimage: no worktree path and no base64 in messages.json', !raw.includes(wt) && !raw.includes('iVBOR'), wt);
-    await ex(`$('#tabs button[data-tab=chat]').click(); await refresh(); chatSig = null; renderChat(); await w(300);`);
+    await ex(`$('#tabs button[data-tab=chat]').click(); await refresh(); chatSched.force(); await w(300);`);
     const thumbs = await waitFor(`return [...document.querySelectorAll('#chat-room .att-thumb')].filter((i) => i.naturalWidth > 0).length >= 2`, 8000);
     expect('agentimage: message and comment thumbnails render as loaded file:// images', thumbs, { thumbs });
     await shot('agentimage-chat');
@@ -601,11 +601,11 @@ async function guiE2E() {
     await ex(`${L(5000, dev.id, 'text', 'Tiny fix: ' + longUrl + ' should wrap, not scroll the room.')}
       ${L(4000, dev.id, 'text', longWord)}
       ${L(3000, dev.id, 'text', fenceText)}
-      $('#tabs button[data-tab=chat]').click(); await refresh(); chatSig = null; renderChat(); await w(300);`);
+      $('#tabs button[data-tab=chat]').click(); await refresh(); chatSched.force(); await w(300);`);
     const seeded = await ex(`const t = $('#chat-room').textContent; return { groups: document.querySelectorAll('#chat-room .cgroup').length, url: t.includes('https://example.com/'), word: t.includes('QQQQ'), fence: !!document.querySelector('#chat-room .cmd-pre') }`);
     expect('chatwidth: long URL, long word and code fence seeded', seeded.groups >= 1 && seeded.url && seeded.word && seeded.fence, seeded);
     for (const [w, h, tag] of [[900, 800, 'narrow'], [1900, 900, 'wide']]) for (const th of ['light', 'dark']) {
-      win.setSize(w, h); require('electron').nativeTheme.themeSource = th; await ex(`chatSig = null; renderChat(); await w(400);`);
+      win.setSize(w, h); require('electron').nativeTheme.themeSource = th; await ex(`chatSched.force(); await w(400);`);
       const m = await ex(`const room = $('#chat-room'), bodies = [...document.querySelectorAll('#chat-room .cbody')];
         return { docX: document.documentElement.scrollWidth, winX: window.innerWidth, roomX: room.scrollWidth, roomC: room.clientWidth,
           body: Math.max(...bodies.map((b) => b.getBoundingClientRect().width)), room: room.getBoundingClientRect().width }`);
@@ -626,8 +626,8 @@ async function guiE2E() {
       if (!window.__winseed) { window.__winseed = true; const N = 5000, now = Date.now();
         for (let i = 0; i < N; i++) logs.push({ projectId: ctx.p, nodeId: i % 7 ? 'b' : 'a', kind: ['text','tool','tool_result','text','text'][i % 5], text: 'line-' + i + ' windowing fixture row', at: now - (N - i) * 1000 }); }`);
     // Chat: latest page only + older bar; render time (median of 5) reported.
-    await ex(`$('#tabs button[data-tab=chat]').click(); await w(200); chatSig = null; renderChat(); await w(200);`);
-    const chat = await ex(`const times = []; for (let i = 0; i < 6; i++) { chatSig = null; const t0 = performance.now(); renderChat(); times.push(performance.now() - t0); }
+    await ex(`$('#tabs button[data-tab=chat]').click(); await w(200); chatSched.force(); await w(200);`);
+    const chat = await ex(`const times = []; for (let i = 0; i < 6; i++) { chatSched.force(); const t0 = performance.now(); renderChatBody(); times.push(performance.now() - t0); }
       return { med: Math.round([...times.slice(1)].sort((x, y) => x - y)[2] * 10) / 10, bubbles: document.querySelectorAll('#chat-room .bubble').length, nodes: document.querySelectorAll('#chat-room *').length, older: ($('#chat-older') || {}).textContent || '' }`);
     expect('chat windowing: 5k messages but DOM bounded to the latest page with an older bar', chat.bubbles > 0 && chat.bubbles <= 140 && /earlier/.test(chat.older), chat);
     // Scroll to the top: older page prepended (older count drops by one page), view anchored (not clamped at 0).
@@ -636,7 +636,7 @@ async function guiE2E() {
     const olderCount = (t) => +(/(\d+)/.exec(t || '') || [])[1];
     expect('chat windowing: scroll-up loads older pages and keeps the scroll anchor', chatUp.bubbles > chat.bubbles && chatUp.top > 500 && olderCount(chat.older) - olderCount(chatUp.older) === 100, { chat, chatUp });
     // New messages while reading history: view stays put, "N new" pill appears; at the bottom it autoscrolls and the window shrinks back.
-    await ex(`const now = Date.now(); for (let i = 0; i < 3; i++) logs.push({ projectId: ctx.p, nodeId: 'b', kind: 'text', text: 'fresh-' + i, at: now + i }); chatSig = null; renderChat(); await w(200);`);
+    await ex(`const now = Date.now(); for (let i = 0; i < 3; i++) logs.push({ projectId: ctx.p, nodeId: 'b', kind: 'text', text: 'fresh-' + i, at: now + i }); chatSched.force(); await w(200);`);
     const chatKeep = await ex(`return { pill: !$('#chat-newpill').classList.contains('hidden'), top: Math.round($('#chat-room').scrollTop), bubbles: document.querySelectorAll('#chat-room .bubble').length }`);
     await ex(`$('#chat-room').scrollTop = $('#chat-room').scrollHeight; await w(500);`);
     const chatBottom = await ex(`return { pill: !$('#chat-newpill').classList.contains('hidden'), bubbles: document.querySelectorAll('#chat-room .bubble').length, atEnd: $('#chat-room').textContent.includes('fresh-2') }`);
@@ -2046,7 +2046,7 @@ async function guiE2E() {
     const task = ps.createTask({ title: 'Busy wake demo', assignee: dev.id });
     ps.updateTask(task.id, { status: 'in_progress' });
     await ex(`await refresh(); await w(200);`); // pick up the seeded task before injecting wake state
-    const seed = (onTask) => `S.orch.agents = { '${dev.id}': { status: 'working', activity: { trigger: 'message', messageId: 'm1', fromNodeId: '${pmN.id}', excerpt: 'Please look at the failing test', taskId: null, count: 2, startedAt: Date.now() }${onTask ? `, taskId: '${task.id}'` : ''} } }; renderIdle(); renderGraph(); renderChat();`;
+    const seed = (onTask) => `S.orch.agents = { '${dev.id}': { status: 'working', activity: { trigger: 'message', messageId: 'm1', fromNodeId: '${pmN.id}', excerpt: 'Please look at the failing test', taskId: null, count: 2, startedAt: Date.now() }${onTask ? `, taskId: '${task.id}'` : ''} } }; renderIdle(); renderGraph(); chatSched.force();`;
     await ex(`$('#tabs button[data-tab=team]').click(); await w(200);`);
     const team = await ex(`${seed(false)} await w(100); return { badge: !!document.querySelector('#graph .wakerunbadge'), chip: !!document.querySelector('#presence .pchip.wake'), typing: '', txt: (document.querySelector('#graph .wakerunbadge text') || {}).textContent || '' }`);
     expect('wakebusy: wake badge shows despite the in_progress task (was bare working), visible text keeps the sender', team.badge && team.chip && team.txt.includes('Pia'), team);
@@ -2107,7 +2107,7 @@ async function guiE2E() {
     for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`$('#tabs button[data-tab=team]').click(); await w(400);`); await shot(`33-subagents-team-${t}`); }
     const counts = await ex(`return [...document.querySelectorAll('#graph .subbadge')].map((b) => ({ txt: b.querySelector('text') ? b.querySelector('text').textContent : '', full: b.querySelector('title') ? b.querySelector('title').textContent : '' }))`);
     expect('subagents: per-agent count badge (2) on both cards, claude totals as a breakdown of the parent', counts.length === 2 && counts.every((c) => /2/.test(c.txt)) && counts.some((c) => /2 subagents · 20 in \/ 8 out tok/.test(c.full)), counts);
-    const chat = await ex(`$('#tabs button[data-tab=chat]').click(); await w(300); await refresh(); CH.key = ''; renderChat(); await w(400); return [...document.querySelectorAll('#chat-room details.cchip.subagent')].map((d) => d.querySelector('summary') ? d.querySelector('summary').textContent : '')`);
+    const chat = await ex(`$('#tabs button[data-tab=chat]').click(); await w(300); await refresh(); chatSched.force(); await w(400); return [...document.querySelectorAll('#chat-room details.cchip.subagent')].map((d) => d.querySelector('summary') ? d.querySelector('summary').textContent : '')`);
     expect('subagents: Chat shows a nested subagent chip per spawn with its own tokens', chat.length >= 2 && chat.every((s) => /10 \/ 4 tok/.test(s)), chat);
     require('electron').nativeTheme.themeSource = 'system';
     await shot('34-subagents-chat');
@@ -2338,7 +2338,7 @@ async function guiE2E() {
         const th = await ex(`return { disp: $('#chat-thread').getClientRects().length > 0, w: Math.round($('#chat-thread').getBoundingClientRect().width), cm: Math.round($('#tab-chat.active .chat-main').getBoundingClientRect().right) }`);
         expect(`topbar: opened thread pane is displayed with width > 0 at 1400px (chat right ${th.cm} = window ${m.iw} - thread ${th.w})`, th.disp && th.w > 0 && th.cm <= m.iw - th.w + 1, th);
         await shot('topbar-1400-thread');
-        await ex(`CH.thread = null; chatSig = null; renderChat(); await w(200);`);
+        await ex(`CH.thread = null; chatSched.force(); await w(200);`);
         const m2 = await ex(`return ${measure}`);
         expect(`topbar: chat pane reaches the right edge again after closing the thread at 1400px (chat right ${m2.cm} vs window ${m2.iw})`, m2.cm >= m2.iw - 1 && !m2.thDisp, m2);
       }
