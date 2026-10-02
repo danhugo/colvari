@@ -172,55 +172,6 @@ header .pill { font-variant-numeric:tabular-nums; } .pill.quiet { color:var(--mu
 .cap-row { display:flex; align-items:center; gap:6px; font-size:12px; }
 .cap-row code { font-size:11px; }
 
-#ov-graph-wrap { flex:1; min-height:260px; min-width:0; overflow:auto; cursor:default; background-color:var(--bg-surface); background-image:radial-gradient(circle, var(--border-strong) 1px, transparent 1.2px); background-size:22px 22px; }
-#ov-graph { display:block; }
-#ov-graph text { fill:var(--fg-primary); font-family:var(--font-sans); pointer-events:none; }
-#ov-graph .node .card { fill:var(--bg-raised); stroke:var(--border-strong); stroke-width:1; filter:drop-shadow(0 1px 2px rgba(16,20,40,.10)); }
-#ov-graph .node.working .card, #ov-graph .node.st-working .card { animation:glow 1.4s ease-in-out infinite; }
-#ov-graph .node.stuck .card { stroke:var(--warning-strong); stroke-width:2; animation:none; }
-#ov-graph .avtext { fill:#fff; font-size:11px; font-weight:var(--fw-bold); } #ov-graph .nname { font-size:13px; font-weight:var(--fw-semibold); } #ov-graph .nrole { font-size:11px; fill:var(--fg-muted); }
-#ov-graph .node.stuck .nrole { fill:var(--warning-strong); }
-/* Collapsed group cards mirror the Team graph's clusters (t_345af163) */
-#ov-graph .node.cluster .card { fill:var(--bg-raised); } #ov-graph .node.cluster .stack1, #ov-graph .node.cluster .stack2 { fill:var(--bg-hover); filter:none; }
-#ov-graph .node.cluster.st-working .card:not(.stack1):not(.stack2) { fill:var(--success-soft); }
-#ov-graph .mdot { fill:var(--fg-muted); opacity:.5; } #ov-graph .mdot.s-working { fill:var(--success); opacity:1; } #ov-graph .mdot.s-needs-human { fill:var(--warning-strong); opacity:1; }
-#ov-graph .clsum { fill:var(--fg-secondary); font-size:11px; }
-#ov-graph .status circle { fill:none; stroke:var(--fg-muted); stroke-width:2; } #ov-graph .status.s-working circle, #ov-graph .status.s-needs-human circle { stroke:none; } #ov-graph .status.s-working circle { fill:var(--success); } #ov-graph .status.s-needs-human circle { fill:var(--warning-strong); }
-#ov-graph .edge { fill:none; stroke:var(--edge); stroke-width:1.75; }
-#ov-graph .edge-assign { stroke:var(--accent); } #ov-graph .edge-message { stroke:var(--info); } #ov-graph .edge-review { stroke:var(--warning-strong); }
-#ov-graph .arrow-assign { fill:var(--accent); } #ov-graph .arrow-message { fill:var(--info); } #ov-graph .arrow-review { fill:var(--warning-strong); }
-#ov-graph .edge.flash { stroke:var(--acc); stroke-width:3; animation:flash 1s ease-in-out infinite; }
-@keyframes glow { 50% { filter:drop-shadow(0 0 8px var(--success)); } } @keyframes flash { 50% { opacity:.4; } }
-#ov-timelinewrap { background:var(--card); border:1px solid var(--line); border-radius:var(--radius-md); box-shadow:var(--shadow-sm); padding:8px 10px 4px; }
-.ovtl-head { display:flex; align-items:center; justify-content:space-between; margin-bottom:4px; } .ovtl-head label { font-weight:var(--fw-semibold); font-size:var(--text-xs); text-transform:uppercase; letter-spacing:.04em; color:var(--fg-muted); }
-.ovtl-legend { display:flex; gap:12px; font-size:var(--text-xs); color:var(--fg-muted); }
-.dot-leg { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:4px; vertical-align:middle; }
-.dot-leg.run { background:var(--success); opacity:.6; } .dot-leg.mark { background:var(--accent); } .dot-leg.tick { background:var(--warning); border-radius:2px; width:2px; height:11px; }
-#ov-timeline { height:160px; overflow:auto; } #ov-timeline text { fill:var(--fg); font-size:12px; }
-#ov-timeline .axisline { stroke:var(--line); stroke-width:1; opacity:.6; }
-#ov-timeline .run { fill:var(--ok); opacity:.35; } #ov-timeline .run.live { opacity:.6; } #ov-timeline .tick { stroke:var(--warning-strong,#8a5a00); stroke-width:2; } #ov-timeline .mark { fill:var(--acc); } #ov-timeline .lane.stuck { fill:rgba(199,131,26,.15); }
-#ov-timeline .lane.attn-blocked { fill:rgba(199,60,26,.15); } #ov-timeline .lane.attn-error { fill:rgba(199,26,26,.18); }
-#ov-timeline .tl-hatch-line { stroke:var(--warning-strong,#c7831a); stroke-width:2; }
-#ov-timeline .ovtl-note { color:var(--fg-muted); font-size:var(--text-xs); padding:2px 2px 6px; }
-#ov-timeline .ovtl-empty { text-align:center; color:var(--fg-muted); padding:40px 8px; margin:0; }
-#ov-stuck:empty { display:none; } .stuckbar { border:1px solid var(--warn); color:var(--warn); border-radius:6px; padding:4px 8px; margin-bottom:4px; display:flex; gap:8px; align-items:center; }
-#ov-threadhead:empty { display:none; }
-.ovth-title { font-weight:var(--fw-semibold); font-size:var(--text-md); margin-bottom:6px; }
-.ovth-meta { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:10px; padding-bottom:10px; border-bottom:1px solid var(--border); }
-.ovth-status { border-radius:var(--radius-full); padding:2px 9px; font-size:var(--text-xs); font-weight:var(--fw-medium); border:1px solid var(--line); color:var(--fg-muted); }
-.ovth-status.in_progress { background:var(--accent-soft); color:var(--accent-text); border-color:transparent; }
-.ovth-status.review { background:var(--warning-soft); color:var(--warning-text); border-color:transparent; }
-.ovth-status.done { background:var(--success-soft); color:var(--success-text); border-color:transparent; }
-.ovth-assignee { display:inline-flex; align-items:center; gap:5px; font-size:var(--text-xs); color:var(--fg-secondary); }
-.ovth-av { width:18px; height:18px; border-radius:50%; display:inline-flex; align-items:center; justify-content:center; color:#fff; font-size:9px; font-weight:var(--fw-bold); flex:none; }
-#ov-thread { display:flex; flex-direction:column; gap:5px; }
-#ov-thread .comment { border:none; border-left:3px solid var(--border-strong); background:var(--bg-app); border-radius:0 var(--radius-sm) var(--radius-sm) 0; padding:5px 9px; margin:0; }
-#ov-thread .comment.msg { border-left-color:var(--acc); }
-#ov-thread .comment small { margin-left:6px; }
-#ov-thread .empty { text-align:center; color:var(--fg-muted); padding:26px 8px; }
-#ov-thread .chip { display:block; font:11px ui-monospace,monospace; background:var(--bg); border:1px solid var(--line); border-radius:10px; padding:1px 8px; margin:3px 0; }
-#ov-thread details pre { white-space:pre-wrap; word-break:break-word; font-size:11px; margin:2px 0 6px; }
-
 .badge { display:inline-block; min-width:16px; padding:0 5px; border-radius:8px; background:var(--danger); color:var(--fg-on-accent); font-size:11px; text-align:center; } .badge:empty { display:none; }
 .inboxitem { border:1px solid var(--accent); border-radius:6px; padding:8px; margin:0 0 8px; } .inboxitem textarea { width:100%; }
 #guide { position: fixed; right: 16px; bottom: 16px; width: 380px; max-height: 80vh; overflow: auto; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; box-shadow: var(--shadow-lg); z-index: 50; }
@@ -264,7 +215,7 @@ button, input, select, textarea { border-radius:var(--radius-sm); transition:bor
 button:hover { background:var(--bg-hover); } button.primary:hover { background:color-mix(in srgb, var(--accent) 88%, black); }
 button:focus-visible, input:focus, select:focus, textarea:focus { outline:none; border-color:var(--accent); box-shadow:var(--ring); }
 .pill { border-radius:var(--radius-full); } .pill.on { background:var(--success-soft); color:var(--success-text); border-color:transparent; }
-.panel, .col, .stat, #graph, #ov-graph-wrap, #ov-timeline { border-radius:var(--radius-md); box-shadow:var(--shadow-sm); }
+.panel, .col, .stat, #graph { border-radius:var(--radius-md); box-shadow:var(--shadow-sm); }
 #sidebar { background:var(--bg-sidebar); padding:var(--space-3) var(--space-2); }
 #sidebar h4 { font-size:var(--text-xs); letter-spacing:.06em; font-weight:var(--fw-semibold); padding:0 var(--space-2); }
 #projectlist div, #teamlist div { border-radius:var(--radius-sm); transition:background var(--dur-fast); } #projectlist div:hover, #teamlist div:hover { background:var(--bg-hover); }
@@ -421,6 +372,12 @@ header #wtdisk.wtwarn { background:var(--warning-soft); color:var(--warning-text
 .gtoolbar { gap:var(--space-2); } .gtoolbar .tgroup { display:flex; gap:2px; padding:2px; background:var(--bg-surface); border:1px solid var(--border); border-radius:var(--radius-sm); }
 .gtoolbar .tgroup > * { border:none; background:none; } .gtoolbar .tgroup > button.primary { background:var(--accent); } .gtoolbar .tgroup > button:hover:not(.primary) { background:var(--bg-hover); }
 .gtoolbar button.icon { min-width:30px; } .gtoolbar #hint { font-size:var(--text-xs); margin-left:auto; }
+/* One Team view (wiki decision-one-team-view): Watch/Edit mode chip + running note */
+.gmode button { padding:3px 10px; font-size:var(--text-xs); font-weight:var(--fw-medium); color:var(--fg-muted); border-radius:var(--radius-sm); }
+.gmode button.on { background:var(--accent-soft); color:var(--accent-text); }
+.gmode button:not(.on):not(:disabled):hover { color:var(--fg-primary); background:var(--bg-hover); }
+.modenote { font-size:var(--text-xs); color:var(--warning-text); background:var(--warning-soft); border:1px solid var(--warning); border-radius:var(--radius-sm); padding:2px 8px; white-space:nowrap; }
+#graph.watch { cursor:default; } #graph.watch .node { cursor:pointer; } #graph.watch .node .qacts, #graph.watch .handle { display:none; }
 .canvas { position:relative; flex:1; min-width:0; display:flex; }
 #graph { flex:1; cursor:grab; user-select:none; border:1px solid var(--border); border-radius:var(--radius-md); box-shadow:var(--shadow-sm);
   background-color:var(--bg-surface); background-image:radial-gradient(circle, var(--border-strong) 1px, transparent 1.2px); background-size:22px 22px; }
@@ -478,6 +435,19 @@ header #wtdisk.wtwarn { background:var(--warning-soft); color:var(--warning-text
 .ctxmenu button.def { font-weight:var(--fw-semibold); } .ctxmenu button.danger { color:var(--danger); } .ctxmenu hr { border:none; border-top:1px solid var(--border); margin:3px 0; width:100%; }
 .ctxmenu.edgepop button small { display:block; color:var(--fg-muted); font-size:var(--text-xs); margin-left:21px; }
 #nodeform { width:320px; padding:var(--space-4); } #nodeform h3 { margin:0 0 var(--space-2); font-size:var(--text-lg); display:flex; align-items:center; gap:var(--space-2); }
+/* Selected-node live card (wiki decision-one-team-view): the inspector in Watch, atop the editor in Edit */
+.livecard { border:1px solid var(--border); border-radius:var(--radius-md); background:var(--bg-surface); padding:10px; margin-bottom:var(--space-3); }
+.lc-head { display:flex; align-items:center; gap:8px; }
+.lc-face { width:32px; height:32px; border-radius:50%; flex:none; }
+.lc-id { min-width:0; } .lc-id b { display:block; } .lc-role { font-size:var(--text-xs); color:var(--fg-muted); }
+.lc-live { margin-left:auto; flex:none; font-size:var(--text-xs); }
+.lc-working { color:var(--success-text); background:var(--success-soft); border-color:transparent; }
+.lc-needs-human { color:var(--warning-text); background:var(--warning-soft); border-color:transparent; }
+.lc-idle { color:var(--fg-muted); }
+.lc-task { margin-top:8px; font-size:var(--text-sm); overflow-wrap:anywhere; }
+.lc-tstatus { font-size:var(--text-xs); color:var(--fg-muted); margin-left:6px; }
+.lc-last { margin-top:8px; font-size:var(--text-xs); color:var(--fg-secondary); border-left:3px solid var(--border-strong); padding-left:8px; overflow-wrap:anywhere; }
+.lc-actions { margin-top:10px; display:flex; }
 #nodeform label { font-size:var(--text-xs); text-transform:uppercase; letter-spacing:.04em; font-weight:var(--fw-semibold); margin-top:var(--space-3); }
 #nodeform input, #nodeform select, #nodeform textarea { background:var(--bg-app); border-color:var(--border); } #nodeform input:focus, #nodeform select:focus, #nodeform textarea:focus { border-color:var(--accent); box-shadow:var(--ring); outline:none; }
 #guide.mini { width:auto; padding:var(--space-1) var(--space-2); display:flex; gap:var(--space-1); align-items:center; border-radius:999px; }
@@ -547,29 +517,29 @@ header #wtdisk.wtwarn { background:var(--warning-soft); color:var(--warning-text
 .recoverybar .rb-txt { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .recoverybar .rb-x { background:none; border:none; color:inherit; cursor:pointer; font:inherit; padding:0 2px; opacity:.7; } .recoverybar .rb-x:hover, .recoverybar .rb-x:focus-visible { opacity:1; }
 .pchip.wake { border-color:var(--accent); } .pchip.wake .muted { color:var(--accent-text); }
-#graph .wakerunbadge, #ov-graph .wakerunbadge { cursor:default; }
-#graph .wakerunbadge rect, #ov-graph .wakerunbadge rect { fill:var(--accent-soft); stroke:var(--accent); }
-#graph .wakerunbadge text, #ov-graph .wakerunbadge text { fill:var(--accent-text); font-size:9px; font-weight:var(--fw-semibold); }
-#graph .wakerunbadge.linked, #ov-graph .wakerunbadge.linked { cursor:pointer; }
+#graph .wakerunbadge { cursor:default; }
+#graph .wakerunbadge rect{ fill:var(--accent-soft); stroke:var(--accent); }
+#graph .wakerunbadge text{ fill:var(--accent-text); font-size:9px; font-weight:var(--fw-semibold); }
+#graph .wakerunbadge.linked { cursor:pointer; }
 /* stalled / recovering / recovery-failed: amber strip while recovering, red once recovery failed */
-#graph .stallbadge, #ov-graph .stallbadge { cursor:default; }
-#graph .stallbadge rect, #ov-graph .stallbadge rect { fill:var(--warning-soft); stroke:var(--warning-text); }
-#graph .stallbadge text, #ov-graph .stallbadge text { fill:var(--warning-text); font-size:9px; font-weight:var(--fw-semibold); }
-#graph .stallbadge.fail rect, #ov-graph .stallbadge.fail rect { fill:var(--danger-soft); stroke:var(--danger); }
-#graph .stallbadge.fail text, #ov-graph .stallbadge.fail text { fill:var(--danger); }
-#graph .stallbadge.linked, #ov-graph .stallbadge.linked { cursor:pointer; }
+#graph .stallbadge { cursor:default; }
+#graph .stallbadge rect{ fill:var(--warning-soft); stroke:var(--warning-text); }
+#graph .stallbadge text{ fill:var(--warning-text); font-size:9px; font-weight:var(--fw-semibold); }
+#graph .stallbadge.fail rect{ fill:var(--danger-soft); stroke:var(--danger); }
+#graph .stallbadge.fail text{ fill:var(--danger); }
+#graph .stallbadge.linked { cursor:pointer; }
 .tag.stall { background:var(--warning-soft); color:var(--warning-text); border-color:transparent; }
 .tag.stall.fail { background:var(--danger-soft); color:var(--danger); border-color:transparent; }
 /* pending wake (messages held by the wake gap): calm dashed neutral — information, not an alarm */
-#graph .pendingwakebadge, #ov-graph .pendingwakebadge { cursor:default; }
-#graph .pendingwakebadge rect, #ov-graph .pendingwakebadge rect { fill:var(--bg); stroke:var(--border-strong); stroke-dasharray:3,2; }
-#graph .pendingwakebadge text, #ov-graph .pendingwakebadge text { fill:var(--fg-muted); font-size:9px; font-weight:var(--fw-semibold); }
+#graph .pendingwakebadge { cursor:default; }
+#graph .pendingwakebadge rect{ fill:var(--bg); stroke:var(--border-strong); stroke-dasharray:3,2; }
+#graph .pendingwakebadge text{ fill:var(--fg-muted); font-size:9px; font-weight:var(--fw-semibold); }
 /* runtime unavailable (t_d33685f3): red paused strip under the card + dimmed, dashed-red card */
-#graph .rtubadge, #ov-graph .rtubadge { cursor:default; }
-#graph .rtubadge rect, #ov-graph .rtubadge rect { fill:var(--danger-soft); stroke:var(--danger); }
-#graph .rtubadge text, #ov-graph .rtubadge text { fill:var(--danger); font-size:9px; font-weight:var(--fw-semibold); }
-#graph .node.rtpaused .card, #ov-graph .node.rtpaused .card { stroke:var(--danger); stroke-width:1.5; stroke-dasharray:4,3; }
-#graph .node.rtpaused .avatar, #ov-graph .node.rtpaused .avatar { filter:grayscale(1); opacity:.55; }
+#graph .rtubadge { cursor:default; }
+#graph .rtubadge rect{ fill:var(--danger-soft); stroke:var(--danger); }
+#graph .rtubadge text{ fill:var(--danger); font-size:9px; font-weight:var(--fw-semibold); }
+#graph .node.rtpaused .card{ stroke:var(--danger); stroke-width:1.5; stroke-dasharray:4,3; }
+#graph .node.rtpaused .avatar{ filter:grayscale(1); opacity:.55; }
 /* self-update: header status chip + restart history (t_506c0cb0) */
 .pill.upd-pending, .pill.upd-draining { color:var(--warn); border-color:var(--warn); }
 .pill.upd-testing { color:var(--acc); border-color:var(--acc); }
@@ -628,7 +598,7 @@ header .pill.watchst { cursor:pointer; }
 .uv-meta { color:var(--fg-muted); } .uv-meta code { font-family:var(--font-mono); }
 .uv-note { color:var(--warning-text); background:var(--warning-soft); border-radius:var(--radius-xs); padding:3px 7px; }
 
-/* ---------- subagents: nested collapsible blocks in Logs/Overview/Chat + agent-card badge (t_d716779d) ---------- */
+/* ---------- subagents: nested collapsible blocks in Logs/Chat + agent-card badge (t_d716779d) ---------- */
 /* Logs: a subagent call renders as one block (header + its child rows); nested subagents indent. */
 .subblock { border:1px solid var(--line); border-left:3px solid var(--acc); border-radius:var(--radius-sm, 6px); margin:3px 0; background:color-mix(in srgb, var(--acc) 3%, transparent); }
 .subblock .subblock { margin-left:14px; }
@@ -664,14 +634,6 @@ header .pill.watchst { cursor:pointer; }
 .loglist .substatus.ss-failed { color:var(--term-red); background:rgba(239,107,115,.12); }
 .loglist .substatus.ss-aborted { color:var(--term-dim); background:rgba(255,255,255,.05); }
 
-/* Overview task thread variant: native <details> so open state survives the 1s re-render */
-#ov-thread .subthread, #ov-thread details.subthread { border:1px solid var(--line); border-left:3px solid var(--acc); border-radius:var(--radius-sm, 6px); margin:4px 0; background:color-mix(in srgb, var(--acc) 3%, transparent); }
-#ov-thread .subthread.d1 { margin-left:14px; background:var(--card); }
-#ov-thread .subthread > summary { list-style:none; cursor:pointer; display:flex; align-items:center; gap:6px; padding:4px 8px; font-size:12px; }
-#ov-thread .subthread > summary::-webkit-details-marker { display:none; }
-#ov-thread .subthread > summary:hover { background:color-mix(in srgb, var(--acc) 6%, transparent); }
-#ov-thread .subthread .subrows { padding:2px 6px 6px 10px; }
-#ov-thread .subthread .chip { margin:3px 0; }
 
 /* Chat: one compact collapsible chip per subagent — never a flood of child tool bubbles */
 .cchip.subagent > summary { display:inline-flex; align-items:center; gap:6px; flex-wrap:wrap; max-width:100%; color:var(--acc); }
@@ -680,16 +642,12 @@ header .pill.watchst { cursor:pointer; }
 .cchip.subagent .sev + .sev { border-top:1px dashed var(--line); }
 .cchip.subagent .sev-tool { color:var(--term-yellow); }
 
-/* Agent cards (Team graph + Overview): count + tokens chip, bottom-right inside the card */
-#graph .subbadge rect, #ov-graph .subbadge rect { fill:var(--bg-code); stroke:var(--border-strong); }
-#graph .subbadge text, #ov-graph .subbadge text { font-size:9px; fill:var(--fg-secondary); font-family:var(--font-mono); }
+/* Agent cards (Team graph): count + tokens chip, bottom-right inside the card */
+#graph .subbadge rect{ fill:var(--bg-code); stroke:var(--border-strong); }
+#graph .subbadge text{ font-size:9px; fill:var(--fg-secondary); font-family:var(--font-mono); }
 .cchip.subagent.child { margin-left:14px; }
 .cchip.subagent.child > summary { color:var(--fg-secondary); }
 .cchip.subagent .sev-res { color:var(--term-green); }
-#ov-graph-wrap { position:relative; cursor:grab; } #ov-graph-wrap.panning { cursor:grabbing; user-select:none; }
-.ov-legend { position:sticky; float:left; margin:10px 0 -30px 12px; z-index:1; }
-.ov-sw-flash { box-shadow:0 0 6px var(--accent, #6b7cff); }
-.ov-purpose { margin:0 0 6px; font-size:var(--text-xs); }
 /* usage page: hero + share bars */
 .us-hero { display:grid; grid-template-columns:minmax(260px,1fr) 2fr; gap:12px; margin:8px 0 12px; align-items:stretch; }
 .us-kpis { display:grid; grid-template-columns:1fr 1fr; gap:8px; align-content:start; }
@@ -759,8 +717,6 @@ header > strong.brand { display:flex; align-items:center; gap:6px; font-weight:7
 #taskdetail .td-close { position:absolute; top:10px; right:10px; background:none; border:none; color:var(--fg-muted); font-size:13px; line-height:1; padding:3px 7px; border-radius:var(--radius-sm); }
 #taskdetail .td-close:hover { color:var(--fg-primary); background:var(--bg-hover); }
 #taskdetail .td-inner h3 { padding-right:26px; } /* long titles wrap before reaching the close button */
-/* t_831325b9: Overview sweep - hide empty thread panel, drop always-on explainer (kept as tooltip) */
-#ov-threadpanel[hidden] { display:none; } .ov-purpose { display:none; }
 
 /* t_36c96112: weakness-sweep fixes */
 .seg { display:inline-flex; gap:2px; padding:2px; margin:8px 0; background:var(--bg-surface); border:1px solid var(--border); border-radius:var(--radius-sm); }
@@ -770,8 +726,6 @@ header > strong.brand { display:flex; align-items:center; gap:6px; font-weight:7
 .us-groups table { width:100%; }
 .sb-more > summary { cursor:pointer; list-style:none; font-size:var(--text-xs); text-transform:uppercase; letter-spacing:.06em; font-weight:var(--fw-semibold); color:var(--muted); padding:0 var(--space-2); border-radius:var(--radius-xs); } .sb-more > summary::-webkit-details-marker { display:none; } .sb-more > summary::before { content:'▸'; display:inline-block; width:12px; } .sb-more[open] > summary::before { content:'▾'; } .sb-more > summary:hover { color:var(--fg-primary); background:var(--bg-hover); }
 .sb-more[open] > summary { margin-bottom:var(--space-2); } .sb-more select { width:100%; }
-#ov-timeline .lane.attn-blocked, #ov-timeline .lane.attn-error { fill:color-mix(in srgb, var(--danger) 6%, transparent); }
-#ov-timeline .lane.stuck { fill:color-mix(in srgb, var(--warning) 6%, transparent); }
 .cchip:not(.subagent) > summary { list-style:none; cursor:pointer; color:var(--fg-muted); font-family:var(--font-sans, inherit); font-size:var(--text-xs); max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .cchip:not(.subagent) > summary:hover { color:var(--fg-secondary); }
 .cchip:not(.subagent) > pre { background:var(--bg-code); border-radius:var(--radius-sm); padding:6px 8px; font-size:11.5px; white-space:pre-wrap; }
@@ -849,7 +803,6 @@ details.evrun .evrow { padding-left:0; }
 .composer .row { position:relative; } .composer textarea { padding-right:36px; }
 .composer #chat-attach { position:absolute; right:88px; bottom:4px; border:0; background:none; margin:0; min-width:0; padding:4px; }
 
-#ov-thread .comment > .ovth-av { display:inline-flex; width:18px; height:18px; border-radius:50%; align-items:center; justify-content:center; color:#fff; font-size:9px; font-weight:var(--fw-bold); margin-right:6px; vertical-align:middle; } #ov-thread .ovth-av.sys { background:var(--fg-muted); }
 
 .wk-meta { display:block; font-size:12px; line-height:16px; color:var(--fg-secondary); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .wk-editor { display:flex; flex-direction:column; flex:1; min-height:0; }
@@ -866,7 +819,7 @@ header > strong.brand { font-family: var(--font-display); font-weight: var(--fw-
 .set-pagetitle, .wk-emptystate h3, .cempty b, #helpdlg h3, #nodeform h3 { font-family: var(--font-display); letter-spacing: -.01em; }
 .stat b, .us-kpis b { font-family: var(--font-display); font-weight: var(--fw-bold); font-variant-numeric: tabular-nums; letter-spacing: -.01em; }
 /* Depth: raised surfaces get the top-edge highlight layered over their shadow. */
-.panel, .col, .stat, .gcontrols, #minimap, #ov-timelinewrap, .us-kpis > div, .us-chart, .us-card, #goalpop { box-shadow: var(--hl), var(--shadow-sm); }
+.panel, .col, .stat, .gcontrols, #minimap, .us-kpis > div, .us-chart, .us-card, #goalpop { box-shadow: var(--hl), var(--shadow-sm); }
 .card:hover { box-shadow: var(--hl), var(--shadow-md); }
 .card.sel, .card.approval { box-shadow: var(--ring), var(--hl), var(--shadow-md); }
 /* Signature primary: teal gradient with a deep border and a pressed state. */
@@ -888,12 +841,6 @@ button, .pchip, .tag, .badge, .pill, .avatar, .cchip summary, .lvchip, .asswitch
 .cempty svg, .wk-emptystate svg { color: var(--accent); opacity: .85; }
 .us-empty, .hint-first { border-style: dashed; }
 .col:not(:has(.card)):not(:has(.hint-first))::after { content:'Nothing here yet'; font-style: italic; letter-spacing: .01em; }
-/* Overview cards must read at 100% (Vex audit #3): ≥12px on node labels, only the Overview graph. */
-#ov-graph .nname { font-size: 14px; }
-#ov-graph .nrole { font-size: 12px; }
-#ov-graph .avtext { font-size: 12px; }
-#ov-graph .chip text { font-size: 11px; }
-#ov-graph .ctxpct { font-size: 10.5px; }
 /* Chat: sticky translucent room header (depth without a hard line). */
 .chat-head { position: sticky; top: 0; z-index: 3; background: color-mix(in srgb, var(--bg-surface) 86%, transparent); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); }
 /* Text selection picks up the accent. */
@@ -908,18 +855,16 @@ button, .pchip, .tag, .badge, .pill, .avatar, .cchip summary, .lvchip, .asswitch
 .wk-toolbar #wk-new { background: transparent; border-color: transparent; color: var(--fg-muted); font-weight: var(--fw-medium); box-shadow: none; }
 .wk-toolbar #wk-new:hover { background: var(--bg-hover); color: var(--fg-primary); }
 
-/* Node status states (Overview + Team graphs): idle is a HOLLOW disc — a ring in the agent's
+/* Node status states (Team graph): idle is a HOLLOW disc — a ring in the agent's
    team hue, no fill, full opacity — so "not working" reads at a glance and stays legible on
    dark (the old 42–50% opacity dimming all but vanished there). Working keeps a solid disc
    with a pulsing success ring; stuck gets a warning ring. --av carries the hue from markup. */
-#ov-graph .node .avatar, #graph .node .avatar { transition: opacity var(--dur-base) var(--ease-out); }
-#ov-graph .node.st-idle:not(.stuck) .avatar, #graph .node.st-idle:not(.sel):not(.stuck) .avatar { fill: none !important; stroke: var(--av, var(--fg-muted)); stroke-width: 2.5; filter: none; opacity: 1; }
-#ov-graph .node.st-idle:not(.stuck) .avtext, #graph .node.st-idle:not(.stuck) .avtext { fill: var(--fg-secondary); opacity: 1; }
-#ov-graph .node.stuck .avatar, #graph .node.stuck .avatar { opacity: 1; stroke: var(--warning); stroke-width: 2.5; }
-#ov-graph .node.working .avatar, #graph .node.working .avatar { stroke: var(--success); stroke-width: 2.5; animation: avpulse 2.2s var(--ease-out) infinite; }
+#graph .node .avatar { transition: opacity var(--dur-base) var(--ease-out); }
+#graph .node.st-idle:not(.sel):not(.stuck) .avatar { fill: none !important; stroke: var(--av, var(--fg-muted)); stroke-width: 2.5; filter: none; opacity: 1; }
+#graph .node.st-idle:not(.stuck) .avtext { fill: var(--fg-secondary); opacity: 1; }
+#graph .node.stuck .avatar { opacity: 1; stroke: var(--warning); stroke-width: 2.5; }
+#graph .node.working .avatar { stroke: var(--success); stroke-width: 2.5; animation: avpulse 2.2s var(--ease-out) infinite; }
 @keyframes avpulse { 0%, 100% { stroke-opacity: 1; } 50% { stroke-opacity: .4; } }
-#ov-graph .leadstar, #graph .leadstar { font-size: 11px; fill: var(--accent); stroke: var(--bg-surface); stroke-width: 3px; paint-order: stroke; font-weight: var(--fw-bold); }
-.glegend .leadkey { font-style: normal; color: var(--accent); font-weight: var(--fw-bold); }
 /* Sidebar team rows wear their team hue so the avatar palette is legible at a glance. */
 #teamlist > div { display: flex; align-items: center; gap: 7px; }
 .teamdot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
@@ -950,14 +895,6 @@ button, .pchip, .tag, .badge, .pill, .avatar, .cchip summary, .lvchip, .asswitch
 #themebtn .icon-moon { display: block; }
 [data-theme="dark"] #themebtn .icon-moon, :root:not([data-theme="light"]) #themebtn .icon-moon { display: none; }
 [data-theme="dark"] #themebtn .icon-sun, :root:not([data-theme="light"]) #themebtn .icon-sun { display: block; }
-@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) #themebtn .icon-moon { display: none; } :root:not([data-theme="light"]) #themebtn .icon-sun { display: block; } }
-/* The Overview SVG is sized exactly to the wrap by auto-fit; as inline-replaced content it
-   would add a baseline descender gap and phantom scrollbars. Block it. */
-#ov-graph { display: block; }
-
-/* Overview legend: absolutely pinned inside the wrap — the sticky float below a block-level
-   svg extended the scrollable area and produced phantom scrollbars. */
-#ov-graph-wrap .ov-legend { position: absolute; left: 12px; bottom: 10px; top: auto; float: none; margin: 0; }
 
 /* Usage: one sub-tab at a time, legible chips, 2-col limits grid, equal stat cards */
 .us-anchors button { padding:2px 12px; border:0; border-radius:var(--radius-full); background:transparent; color:var(--fg-secondary); font-size:var(--text-sm,13px); cursor:pointer; }

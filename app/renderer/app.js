@@ -113,7 +113,7 @@ const nodeName = (id) => (S.allNodes.find((n) => n.id === id) || {}).name || (id
 // Tab-scoped rendering (t_8d586961): renderAll draws the always-visible chrome plus ONLY the
 // active tab's heavy view. Hidden tabs keep their DOM and render signature, so a revisit costs
 // nothing when nothing changed, an incremental tail-append when only new lines arrived (obs), and
-// a full rebuild only when the content really moved. Board / usage / overview reset their
+// a full rebuild only when the content really moved. Board / usage reset their
 // signature on activation (TAB_RESIG below) so size-measuring views always redraw once visible.
 // Same pixels on screen; state events stop paying for the tabs you cannot see.
 const TAB_VIEW = {
@@ -122,7 +122,6 @@ const TAB_VIEW = {
   wiki: renderWiki,
   obs: () => { renderObs(); flushLogTail(); },
   usage: renderUsage,
-  overview: renderOverview,
   settings: renderSettings,
   inbox: renderInbox,
   chat: renderChat,
@@ -487,7 +486,7 @@ $('#importfile').onchange = act(async (e) => {
 // Every element with data-tab switches tabs — the header nav, the sidebar Inbox row and the
 // Settings gear all share the one active-state treatment (t_db67859d).
 // Views that measure their size draw once per activation even when nothing changed while hidden:
-// activation resets their render signature (t_9315f18a; board/usage/overview, t_8d586961) so they
+// activation resets their render signature (t_9315f18a; board/usage, t_8d586961) so they
 // never size against a hidden (0-width) layout. obs and chat keep their signatures instead: their
 // DOM stays valid across the hide, so a revisit is a no-op when nothing moved, an incremental
 // tail-append when only new log lines arrived (flushLogTail), and a full rebuild only on real
@@ -496,7 +495,6 @@ const TAB_RESIG = {
   board: () => { boardSig = null; },
   obs: () => { obsSig = null; },
   usage: () => { usageSig = null; },
-  overview: () => { ovSig = null; },
 };
 document.querySelectorAll('button[data-tab]').forEach((b) => b.onclick = () => {
   document.querySelectorAll('button[data-tab]').forEach((x) => x.classList.toggle('active', x === b));
@@ -804,7 +802,8 @@ async function renderLimitMeter(st) {
   m.classList.toggle('hidden', !hot);
   m.innerHTML = hot ? `<button type="button" class="lm-part lm-${cls}" aria-label="Claude ${esc(worst.label)} limit ${pct}%" title="${esc(title)}">Limits: ${state} <b>${esc(worst.label)}</b><i class="lm-bar"><i class="lm-fill" style="width:${pct}%"></i></i>${ms > 0 ? `<small>↻${fmtCountdown(ms)}</small>` : ''}</button>` : '';
 }
-function showTab(name) { document.querySelector(`button[data-tab="${name}"]`)?.click(); }
+function showTab(name) { if (name === 'overview') name = 'team'; // legacy id: Overview merged into Team (wiki decision-one-team-view)
+  document.querySelector(`button[data-tab="${name}"]`)?.click(); }
 // New goal composer (t_db67859d): the goal box lives in a popover off the "New goal" button, so the
 // header holds context + actions only and nothing in it can truncate. Run keeps its id — the chat
 // flow and the first-run guide set #goal and click #run programmatically (also gui-e2e autorun).
@@ -1044,8 +1043,42 @@ function edgeGeom(a, b, off, obs = [], seed = 0) {
   return { d: orthPath(r.pts.map(P)), mid: P(r.mid), n: flip ? [r.n[1], r.n[0]] : r.n };
 }
 const overlaps = (r, q) => r.x < q.x + q.w && q.x < r.x + r.w && r.y < q.y + q.h && q.y < r.y + r.h;
+// ---------- team watch/edit modes (wiki decision-one-team-view) ----------
+// One Team view: Watch (read-only, default whenever any agent is running) and Edit (explicit
+// toggle, `E` shortcut). The user's explicit choice sticks — no auto-return to Watch.
+let teamModePref = null; // null = follow the default (TeamModes.resolveMode)
+const teamRunning = () => runningIds().length > 0;
+const teamMode = () => TeamModes.resolveMode(teamModePref, teamRunning());
+const teamCan = () => TeamModes.can(teamMode());
+function setTeamMode(m) {
+  if (teamModePref === m) return;
+  teamModePref = m;
+  renderGraph(); renderNodeForm(); // re-gate the graph + swap the inspector to/from the live card
+}
+// Deep-link from the graph screen into Chat: the agent's current task thread when it has one
+// (that is where its updates land), the #company room otherwise.
+const openNodeInChat = (id) => {
+  const a = S.orch.agents[id] || {}; const t = a.taskId ? S.tasks.find((x) => x.id === a.taskId) : null;
+  CH.thread = t ? t.id : null; showTab('chat'); renderChat();
+};
+function applyTeamModeChrome() {
+  const tc = teamCan(); const on = (sel, dis) => { const b = $(sel); if (b) b.disabled = !!dis; };
+  on('#addnode', !tc.add); on('#connect', !tc.connect); on('#edgetype', !tc.connect); on('#delsel', !tc.del); on('#autolayout', !tc.layout);
+  const gm = teamMode();
+  $('#mode-watch').classList.toggle('on', gm === 'watch'); $('#mode-edit').classList.toggle('on', gm === 'edit');
+  $('#mode-watch').setAttribute('aria-pressed', String(gm === 'watch')); $('#mode-edit').setAttribute('aria-pressed', String(gm === 'edit'));
+  const note = $('#mode-note'); if (note) note.classList.toggle('hidden', !(gm === 'edit' && teamRunning())); // inline note, no modal
+  const hint = $('#hint'); if (hint) hint.textContent = tc.menu
+    ? 'Drag a node\'s handle to connect · right-click for actions · scroll to pan, ⌘/pinch to zoom'
+    : 'Watch mode — live status only · click a node for its live card · scroll to pan, ⌘/pinch to zoom';
+  $('#graph').classList.toggle('watch', !tc.menu);
+  const an = $('#addnode'); if (an) an.title = tc.add ? 'Add agent (or right-click the canvas)' : 'Switch to Edit team to add agents';
+}
+$('#mode-watch').onclick = () => setTeamMode('watch');
+$('#mode-edit').onclick = () => setTeamMode('edit');
 function renderGraph() {
   if (!$('#tab-team').classList.contains('active')) return; // hidden tab: redrawn on activation (renderAll / TAB_RESIG)
+  const tc = teamCan(); applyTeamModeChrome();
   const svg = $('#graph'); svg.innerHTML = ''; buildView();
   if (vpTeam !== ctx.t) { vpTeam = ctx.t; vpCount = 0; } // first open always re-fits (once visible, see below) — a persisted viewport can be stale (tiny/panned away)
   const defs = el('defs', {}, svg);
@@ -1082,9 +1115,11 @@ function renderGraph() {
       return pg;
     })() : null;
     edgeLayout.per.push({ e, a, b, off, geo: g, pw: 0, ph: 0, hit, path: ep, pill: pg });
-    hit.onclick = pick; if (pg) pg.onclick = pick;
-    hit.oncontextmenu = (ev) => { pick(ev); ev.preventDefault(); edgeMenu(ev, e); };
-    if (pg) pg.oncontextmenu = hit.oncontextmenu;
+    if (tc.menu) { // Watch: edges are not selectable/editable
+      hit.onclick = pick; if (pg) pg.onclick = pick;
+      hit.oncontextmenu = (ev) => { pick(ev); ev.preventDefault(); edgeMenu(ev, e); };
+      if (pg) pg.oncontextmenu = hit.oncontextmenu;
+    }
   }
   for (const n of nodes) {
     if (n.ghost) { const g = el('g', { class: 'ghost', transform: `translate(${n.x},${n.y})` }, nL); el('rect', { width: W, height: H, rx: 12 }, g); el('text', { x: 14, y: 28, class: 'nname' }, g).textContent = clipText(n.name, 22); el('text', { x: 14, y: 46, class: 'nrole' }, g).textContent = 'in another team'; continue; }
@@ -1155,25 +1190,26 @@ function renderGraph() {
       el('rect', { class: 'ctxbar-fill ctx-' + cls, width: W * pct / 100, height: 4 }, ctxg);
       el('title', {}, ctxg).textContent = `${Math.round(pct)}% ctx · ${fmtTok(ns.contextTokens || 0)} / ${fmtTok(ns.contextWindow || 0)} tokens`;
     }
-    // hover quick actions (Delete hidden on protected nodes — unprotect in the editor first)
-    const qacts = [['✎', 'Edit', () => selectNode(n.id)], ['⧉', 'Duplicate', () => duplicateNode(n)], ['→', 'Connect from here', () => startConnect(n)], ...(!n.protected ? [['✕', 'Delete', () => deleteNode(n)]] : [])];
-    const qa = el('g', { class: 'qacts', transform: `translate(${W - qacts.length * 26},-30)` }, g);
-    qacts.forEach(([ic, tip, fn], k) => {
-      const b = el('g', { class: 'qa', transform: `translate(${k * 26},0)` }, qa); el('rect', { width: 24, height: 22, rx: 6 }, b); el('text', { x: 12, y: 15.5, 'text-anchor': 'middle' }, b).textContent = ic; el('title', {}, b).textContent = tip;
-      b.onmousedown = (ev) => ev.stopPropagation(); b.onclick = (ev) => { ev.stopPropagation(); fn(); };
-    });
-    const h = el('circle', { class: 'handle', cx: W, cy: H / 2, r: 6 }, g); el('title', {}, h).textContent = 'Drag to connect';
-    h.onmousedown = (ev) => startLink(ev, n);
+    // hover quick actions (edit-only; Delete hidden on protected nodes — unprotect in the editor first)
+    if (tc.rename) {
+      const qacts = [['✎', 'Edit', () => selectNode(n.id)], ['⧉', 'Duplicate', () => duplicateNode(n)], ['→', 'Connect from here', () => startConnect(n)], ...(!n.protected ? [['✕', 'Delete', () => deleteNode(n)]] : [])];
+      const qa = el('g', { class: 'qacts', transform: `translate(${W - qacts.length * 26},-30)` }, g);
+      qacts.forEach(([ic, tip, fn], k) => {
+        const b = el('g', { class: 'qa', transform: `translate(${k * 26},0)` }, qa); el('rect', { width: 24, height: 22, rx: 6 }, b); el('text', { x: 12, y: 15.5, 'text-anchor': 'middle' }, b).textContent = ic; el('title', {}, b).textContent = tip;
+        b.onmousedown = (ev) => ev.stopPropagation(); b.onclick = (ev) => { ev.stopPropagation(); fn(); };
+      });
+    }
+    if (tc.connect) { const h = el('circle', { class: 'handle', cx: W, cy: H / 2, r: 6 }, g); el('title', {}, h).textContent = 'Drag to connect'; h.onmousedown = (ev) => startLink(ev, n); }
     const hl = (on) => { svg.classList.toggle('focusing', on); for (const it of edgeLayout.per) if (it.a === n || it.b === n) it.path.classList.toggle('hl', on); g.classList.toggle('hl', on); };
     g.onmouseenter = () => hl(true); g.onmouseleave = () => hl(false);
-    g.onmousedown = (ev) => { if (ev.button === 0) startDrag(ev, n, g); else if (ev.button === 2) { ev.stopPropagation(); selectNode(n.id); nodeMenu(ev, n); } };
-    g.oncontextmenu = (ev) => { ev.preventDefault(); ev.stopPropagation(); if ($('#ctxmenu').classList.contains('hidden')) { selectNode(n.id); nodeMenu(ev, n); } };
+    g.onmousedown = (ev) => { if (ev.button === 0) { if (tc.drag) startDrag(ev, n, g); else { ev.stopPropagation(); selectNode(n.id); } } else if (ev.button === 2) { ev.stopPropagation(); selectNode(n.id); nodeMenu(ev, n); } };
+    g.oncontextmenu = (ev) => { ev.preventDefault(); ev.stopPropagation(); if (tc.menu && $('#ctxmenu').classList.contains('hidden')) { selectNode(n.id); nodeMenu(ev, n); } };
   }
   // First open of a team, or new nodes landing outside the view (e.g. added in bulk) -> fit/refit so nothing is cut off.
   if (nodes.length > vpCount && svg.getBoundingClientRect().width) { (vpCount ? fitIfClipped : fitView)(); vpCount = nodes.length; } // only once visible (hidden tab has 0 width)
   applyVP();
   svg.onmousedown = (ev) => { if (ev.button === 0) startPan(ev); };
-  svg.oncontextmenu = (ev) => { ev.preventDefault(); canvasMenu(ev); };
+  svg.oncontextmenu = (ev) => { ev.preventDefault(); if (tc.menu) canvasMenu(ev); };
   svg.onwheel = (ev) => { ev.preventDefault(); if (ev.ctrlKey || ev.metaKey || Math.abs(ev.deltaY) > 40 && !ev.deltaX) zoomAt(Math.exp(-ev.deltaY * (ev.ctrlKey ? 0.01 : 0.002)), ev.clientX, ev.clientY); else { VP.x -= ev.deltaX; VP.y -= ev.deltaY; applyVP(); saveVP(); } };
 }
 function renderMinimap() {
@@ -1236,6 +1272,10 @@ const hideMenus = () => { const m = $('#ctxmenu'); if (m) m.className = 'ctxmenu
 const menuItems = (items) => items.map((it, i) => it === '-' ? '<hr>' : `<button data-i="${i}" class="${it[2] || ''}">${it[0]}</button>`).join('');
 function bindMenu(items) { document.querySelectorAll('#ctxmenu button[data-i]').forEach((b) => b.onclick = act(async () => { hideMenus(); await items[b.dataset.i][1](); })); }
 function nodeMenu(ev, n) {
+  if (!teamCan().menu) { // Watch: read-only — the menu deep-links into Chat instead of editing
+    const ro = [['Open in Chat', () => openNodeInChat(n.id)]];
+    showMenu(ev.clientX, ev.clientY, `<div class="mhead">${esc(n.name)}</div>` + menuItems(ro)); bindMenu(ro); return;
+  }
   const items = [['Edit', () => selectNode(n.id)], ['Connect from here', () => startConnect(n)], ['Duplicate', () => duplicateNode(n)], ['Test agent', () => testAgents([n.id])], '-', ...(!n.protected ? [['Delete', () => deleteNode(n), 'danger']] : [])];
   showMenu(ev.clientX, ev.clientY, `<div class="mhead">${esc(n.name)}</div>` + menuItems(items)); bindMenu(items);
 }
@@ -1300,25 +1340,47 @@ $('#delsel').onclick = async () => {
   else { const n = S.team.nodes.find((x) => x.id === sel.node); if (n) await deleteNode(n); }
 };
 document.addEventListener('keydown', (e) => {
-  if ((e.key === 'Delete' || e.key === 'Backspace') && !e.target.closest('input,textarea,select,[contenteditable]') && $('#delsel').offsetParent) { e.preventDefault(); $('#delsel').click(); }
+  if ((e.key === 'Delete' || e.key === 'Backspace') && !e.target.closest('input,textarea,select,[contenteditable]') && teamCan().del && $('#delsel').offsetParent) { e.preventDefault(); $('#delsel').click(); }
 });
+// Compact live card for the selected node (wiki decision-one-team-view): status, current task,
+// last event, Open in Chat. Shown in both modes — it IS the inspector in Watch, and it sits atop
+// the editor in Edit. Replaces the old graph-screen task-thread panel (dropped: it duplicated Chat).
+function nodeLiveCard(n) {
+  const a = S.orch.agents[n.id] || {}; const t = a.taskId ? S.tasks.find((x) => x.id === a.taskId) : null;
+  const live = nodeLive(n); const isStuck = !!stallState(n.id);
+  const lastEv = [...logs].reverse().find((l) => l.projectId === ctx.p && l.nodeId === n.id);
+  const liveTxt = live === 'working' ? '● Working' : live === 'needs-human' ? '● Needs you' : '○ Idle';
+  return `<div class="livecard">
+    <div class="lc-head"><img class="lc-face" src="${faceUri(n.id)}" alt="" style="background:${roleBg(n.role)}"><div class="lc-id"><b>${esc(n.name)}</b><span class="lc-role">${esc(n.role)}${isLeadRole(n.role) ? ' ★' : ''}</span></div><span class="pill lc-live lc-${live}" title="${isStuck ? 'stalled — no output for a while · ' : ''}${esc(live)}">${isStuck ? '⚠ stuck · ' : ''}${liveTxt}</span></div>
+    <div class="lc-task">${t ? `▸ <b>${esc(clipText(t.title, 60))}</b><span class="lc-tstatus">${esc(t.status)}</span>` : '<span class="muted">No current task</span>'}</div>
+    <div class="lc-last">${lastEv ? `<small class="muted">${new Date(lastEv.at).toLocaleTimeString()}</small> ${esc(clipText(lastEv.text, 120))}` : '<span class="muted">No activity yet</span>'}</div>
+    <div class="lc-actions"><button id="lc-chat" class="primary">Open in Chat</button></div>
+  </div>`;
+}
+const wireLiveCard = (n) => { const lc = $('#lc-chat'); if (lc) lc.onclick = () => openNodeInChat(n.id); };
 function renderNodeForm() {
   if (!$('#tab-team').classList.contains('active')) return; // hidden tab: redrawn on activation (renderAll)
+  const tc = teamCan();
   const f = $('#nodeform'); const n = S.team.nodes.find((x) => x.id === sel.node);
   f.classList.toggle('hidden', !n && !S.team.edges.some((x) => x.id === sel.edge)); // collapse the help panel when nothing is selected
   if (!n) {
     const e = S.team.edges.find((x) => x.id === sel.edge);
-    if (!e) { f.innerHTML = '<h3>Team</h3><p class="muted">Select an agent to edit it. Edge A → B: <b>assign</b> = A can create tasks for B (and message B), <b>message</b> = A can message B, <b>review</b> = B reviews A\'s tasks (can move them to review/done).</p>'; return; }
+    if (!e) { f.innerHTML = '<h3>Team</h3><p class="muted">Select an agent to see its live card (status, current task, last event, Open in Chat). In <b>Edit team</b> (E) selecting an agent opens its editor. Edge A → B: <b>assign</b> = A can create tasks for B (and message B), <b>message</b> = A can message B, <b>review</b> = B reviews A\'s tasks (can move them to review/done).</p>'; return; }
     const type = e.type || 'assign';
+    if (!tc.rename) { f.innerHTML = `<h3>Edge</h3><p>${esc(nodeName(e.from))} → ${esc(nodeName(e.to))}</p><p class="muted">Read-only in Watch — switch to Edit team (E) to change this edge.</p>`; return; }
     f.innerHTML = `<h3>Edge</h3><p>${esc(nodeName(e.from))} → ${esc(nodeName(e.to))}</p>
       <label>Type</label><select id="ef-type">${S.config.edgeTypes.map((t) => `<option ${t === type ? 'selected' : ''}>${t}</option>`).join('')}</select>
       <p class="muted" id="ef-desc">${esc(type === 'review' ? `${nodeName(e.to)} reviews the tasks of ${nodeName(e.from)} and can move them to review/done.` : `${nodeName(e.from)} ${EDGE_DESC[type]} ${nodeName(e.to)}.`)}</p>`;
     $('#ef-type').onchange = act(async (ev) => { await call('updateEdge', e.id, { type: ev.target.value }); refresh(); });
     return;
   }
+  if (!tc.rename) { // Watch: the live card IS the inspector — no editor fields
+    f.innerHTML = nodeLiveCard(n) + '<p class="muted">Read-only in Watch — switch to <b>Edit team</b> (E) to change this agent.</p>';
+    wireLiveCard(n); return;
+  }
   const a = S.orch.agents[n.id] || {}; const C = S.config; const off = new Set(n.disabledBoardTools || []);
   const presets = S.settings.rolePresets || [];
-  f.innerHTML = `<h3>Agent <span class="pill pf-${pfState(n)}" id="nf-pfbadge">${PF_LABEL[pfState(n)]}</span></h3>
+  f.innerHTML = nodeLiveCard(n) + `<h3>Agent <span class="pill pf-${pfState(n)}" id="nf-pfbadge">${PF_LABEL[pfState(n)]}</span></h3>
     <div class="toolbar"><button id="nf-test" ${testing.has(n.id) ? 'disabled' : ''}>Test agent</button><span class="muted">saves first, then runs a cheap check</span></div>
     <div id="nf-pf">${pfDetail(n)}</div>
     <label>Name</label><input id="nf-name" value="${esc(n.name)}">
@@ -1373,6 +1435,7 @@ function renderNodeForm() {
     <p><button id="nf-save" class="primary">Save</button></p>
     ${a.budgetStop ? `<p class="warn">${esc(a.budgetStop)}</p>` : ''}<p class="muted">Status: ${a.status || 'idle'} · runs ${a.runs || 0} · ${fmtTok(a.inputTokens)} in / ${fmtTok(a.outputTokens)} out / ${fmtTok(a.cacheTokens)} cache tok${a.model ? ' · ' + esc(a.model) : ''}${a.billingSource ? ' · ' + a.billingSource : ''}</p>`;
   const BILL_NOTE = { auto: 'Detected per run from the CLI init event (apiKeySource) and env.', subscription: 'API keys and proxy/Bedrock/Vertex env vars are removed so the run uses your claude.ai login. ' + COST_NOTE.subscription + '.', api: 'Billed per token to the API key in the agent env vars (or inherited env).', proxy: 'Requests go to the base URL; the provider bills you. Reported cost is only an API-equivalent estimate.' };
+  wireLiveCard(n);
   const showCaps = () => {
     const rid = $('#nf-runtime').value; const r = allRuntimeOptions().find((x) => x.id === rid);
     $('#nf-caps').innerHTML = r ? ['tokens', 'cost', 'mcp', 'resume'].map((k) => `<span class="cap ${r.capabilities[k] ? 'on' : 'off'}">${r.capabilities[k] ? '✓' : '✗'} ${k}</span>`).join(' ') : '';
@@ -1438,7 +1501,7 @@ function runningIds() {
 }
 const presence = (id) => (S.orch.idle ? S.orch.idle.includes(id) : !runningIds().includes(id)) ? 'idle' : 'busy';
 // Wake-run: an agent running without an in_progress task because a message woke it. One selector so
-// Board, Team and Overview can't disagree. Reads the backend's live-run activity fields
+// Board, Team and Chat can't disagree. Reads the backend's live-run activity fields
 // (a.activity: {trigger:'message', fromNodeId, excerpt, taskId, count}); null when the run isn't a wake, the
 // agent isn't actually running, or the live run IS the task run (a.taskId set — the task badge wins; a
 // wake keeps taskId null even when an in_progress task sits assigned, so the wake label shows there).
@@ -1532,12 +1595,12 @@ let rtu = null;
 function setRtu(d) {
   if (!d || !d.runtime) return;
   rtu = { runtime: d.runtime, error: String(d.error || ''), agents: Array.isArray(d.agents) ? d.agents : null, at: +d.since || +d.at || Date.now() };
-  renderAlerts(); renderGraph(); renderOverview();
+  renderAlerts(); renderGraph(); renderNodeForm();
 }
 function clearRtu(runtime) {
   if (!rtu || (runtime && rtu.runtime !== runtime)) return;
   rtu = null;
-  renderAlerts(); renderGraph(); renderOverview();
+  renderAlerts(); renderGraph(); renderNodeForm();
 }
 // Is this agent affected? Core's agents list wins when present; otherwise affected = agent's runtime
 // (nstat overrides the node config, same precedence as the Team chip row) matches the broken runtime.
@@ -1593,7 +1656,7 @@ async function renderAlerts() {
     // Dev-only rows (restart pending, t_7fbee55f) hide when the backend says non-dev; upd.devMode
     // defaults true while stubbed (older backend), matching the self-update pill's convention.
     devMode: upd.devMode, updError: upd.state === 'idle' ? upd.lastError : '',
-    agents: S.orch.agents || {}, stuck: Overview.stuckAgents(S.orch.agents, logs, Date.now(), S.settings.stuckMinutes || 5),
+    agents: S.orch.agents || {}, stuck: Alerts.stuckAgents(S.orch.agents, logs, Date.now(), S.settings.stuckMinutes || 5),
     stalls, teamNodes: S.team.nodes, limits, stuckMinutes: S.settings.stuckMinutes || 5, now: Date.now(),
     nodeNames: Object.fromEntries(S.allNodes.map((n) => [n.id, n.name])),
     rtu: rtu ? { ...rtu, paused, label: runtimeLabel(rtu.runtime) } : null,
@@ -1640,7 +1703,7 @@ function renderAlertPanel(live) {
 async function runAlertOp(op, arg) {
   if (op === 'open-task') { if (!arg) return; sel.task = arg; showTab('board'); renderBoard(); }
   else if (op === 'open-usage') { showTab('usage'); setTimeout(() => $('#us-limits')?.scrollIntoView({ block: 'start' }), 80); }
-  else if (op === 'open-overview') showTab('overview');
+  else if (op === 'open-team') showTab('team');
   else if (op === 'restart-core') await rstAction('now');
   else if (op === 'resume-runtime') { try { await call('resumeRuntime', arg); clearRtu(arg); await refresh(); } catch (e) { alert(String(e.message || e).replace(/^Error invoking remote method 'api':\s*(Error:\s*)?/, '')); } }
   else if (op === 'retest') await testAgents(arg ? [arg] : []);
@@ -2028,7 +2091,7 @@ function renderLog() {
   const sa = document.getElementById('log-showall'); if (sa) sa.onclick = () => { logLevels.add('info'); logLevels.add('warn'); logLevels.add('error'); renderLogLevelChips(); renderLog(); };
   const ob = document.getElementById('log-older'); if (ob) ob.onclick = () => { logWin += LOG_PAGE; renderLog(); };
   bindSubToggles(renderLog);
-  document.querySelectorAll('#log [data-tasklink]').forEach((d) => d.onclick = () => { sel.task = d.dataset.tasklink; $('#ov-task').value = ''; showTab('overview'); });
+  document.querySelectorAll('#log [data-tasklink]').forEach((d) => d.onclick = () => { sel.task = d.dataset.tasklink; showTab('board'); renderBoard(); });
   if (atBottom && $('#logauto').checked) box.scrollTop = box.scrollHeight;
   else box.scrollTop = Chat.anchorScroll(prevTop, prevH, box.scrollHeight);
 }
@@ -2531,160 +2594,8 @@ function renderUpdSettings() {
     : `<p class="muted">No restarts yet.${upd.stub ? ' Self-update backend not merged yet — this page is a local stub until then.' : ''}</p>`);
 }
 
-// ---------- overview ----------
+// ---------- shared helpers (used by several views) ----------
 const projLogs = () => logs.filter((l) => l.projectId === ctx.p);
-// Nodes added without explicit positions default to the same (x,y); spread stacked duplicates out so every node stays visible.
-function spreadOverlaps(nodes) {
-  const seen = new Map(); return nodes.map((n) => {
-    const key = `${n.x},${n.y}`; const k = seen.get(key) || 0; seen.set(key, k + 1);
-    return k === 0 ? n : { ...n, x: n.x + k * (W + 24), y: n.y };
-  });
-}
-// Skip-no-op renders (t_9d92c3d3): the 1s tick rebuilds the Overview (graph SVG + timeline + thread)
-// only when an input changed. ovLive remembers whether the last render drew time-visible state
-// (live run bars, edge flashes, stuck badges) — those keep a 2s cadence; a fully idle board freezes.
-let ovSig = null, ovLive = false;
-function renderOverview() {
-  if (!$('#tab-overview.active')) return;
-  const now = Date.now(); const L = projLogs();
-  const working = Object.values(S.orch.agents || {}).some((a) => a.status === 'working');
-  const bucket = working || ovLive ? Math.floor(now / 2000) : 0;
-  const sig = Overview.overviewKey({ projectId: ctx.p, nodes: S.team.nodes, edges: S.team.edges, agents: S.orch.agents, tasks: S.tasks, messages: S.messages, logs: L, stuckMinutes: S.settings.stuckMinutes, selectedTask: $('#ov-task').value || sel.task || '', bucket });
-  if (sig === ovSig) return;
-  ovSig = sig;
-  const stuck = new Set(Overview.stuckAgents(S.orch.agents, L, now, S.settings.stuckMinutes || 5));
-  const hot = Overview.edgeFlashes(L, S.team.edges, now);
-  // Same cluster collapse as the Team graph (t_345af163): past CLUSTER_MIN agents the Overview shows one
-  // card per lead group too. Collapsed views auto-arrange like the Team's auto-layout (head-stored
-  // positions would scatter the few cards arbitrarily); small teams keep their stored layout.
-  // Copies: the Overview never writes back node x/y (the Team graph owns stored/manual positions).
-  const cv = GraphView.clusterView(S.team.nodes, S.team.edges, expandedClusters);
-  let ovNodes = cv.nodes; const ovEdges = GraphView.mapEdges(S.team.edges, cv.remap);
-  if (cv.clustered && ovNodes.length) { ovNodes = ovNodes.map((n) => ({ ...n })); const p = treeLayout(ovNodes, ovEdges); for (const n of ovNodes) { n.x = p[n.id].x; n.y = p[n.id].y; } }
-  else ovNodes = spreadOverlaps(ovNodes);
-  const svg = $('#ov-graph'); svg.innerHTML = ''; const byId = Object.fromEntries(S.team.nodes.map((n) => [n.id, n]));
-  const visById = Object.fromEntries(ovNodes.map((n) => [n.id, n]));
-  const defs = el('defs', {}, svg);
-  for (const t of ['assign', 'message', 'review']) { const m = el('marker', { id: 'ovarr-' + t, viewBox: '0 0 10 10', refX: 9, refY: 5, markerWidth: 8, markerHeight: 8, markerUnits: 'userSpaceOnUse', orient: 'auto-start-reverse' }, defs); el('path', { d: 'M0,1 L9,5 L0,9 z', class: 'arrow arrow-' + t }, m); }
-  el('circle', { cx: 0.5, cy: 0.5, r: 0.5 }, el('clipPath', { id: 'avclip-ov', clipPathUnits: 'objectBoundingBox' }, defs));
-  // Same orthogonal geometry (and parallel-edge offsets) as the Team graph, so both views read alike.
-  const pk = (e) => [e.from, e.to].sort().join('|'); const pairN = {}, pairI = {}; ovEdges.forEach((e) => { pairN[pk(e)] = (pairN[pk(e)] || 0) + 1; });
-  // Glance view: plain elbows between facing sides (drawn under the cards), no obstacle detours — detours made long bus lines that ran off-canvas.
-  for (const e of ovEdges) {
-    const a = visById[e.from], b = visById[e.to]; if (!a || !b) continue; const type = e.type || 'assign';
-    const key = pk(e); const i = (pairI[key] = (pairI[key] ?? -1) + 1); const off = (i - (pairN[key] - 1) / 2) * 22 * (e.from < e.to ? 1 : -1);
-    el('path', { d: edgeGeom(a, b, off).d, class: `edge edge-${type}` + (hot.has(e.id) ? ' flash' : ''), 'marker-end': `url(#ovarr-${type})` }, svg);
-  }
-  for (const n of ovNodes) {
-    if (n.cluster) {
-      const g = el('g', { class: 'node cluster st-' + liveOf(n), transform: `translate(${n.x},${n.y})`, 'data-id': n.id }, svg);
-      drawClusterCard(g, n, () => { expandedClusters.add(n.head); ovSig = null; renderOverview(); });
-      continue;
-    }
-    const live = (S.orch.agents[n.id] || {}).status === 'working' ? 'working' : nodeLive(n); const isStuck = stuck.has(n.id);
-    const g = el('g', { class: 'node' + (live === 'working' ? ' working st-working' : ' st-' + live) + (isStuck ? ' stuck' : '') + (rtuFor(n.id) ? ' rtpaused' : ''), transform: `translate(${n.x},${n.y})`, 'data-id': n.id }, svg);
-    el('rect', { class: 'card', width: W, height: H, rx: 12 }, g);
-    el('rect', { class: 'stripe', width: 4, height: H - 20, x: 0, y: 10, rx: 2, style: `fill:${agentVar(n.id)}` }, g);
-    el('circle', { class: 'avatar', cx: 26, cy: 24, r: 13, style: `fill:${roleBg(n.role)};--av:${roleBg(n.role)}` }, g);
-    if (isLeadRole(n.role)) el('text', { x: 35.5, y: 34, class: 'leadstar', 'text-anchor': 'middle' }, g).textContent = '★';
-    el('image', { class: 'avface', href: faceUri(n.id), x: 13, y: 11, width: 26, height: 26, 'clip-path': 'url(#avclip-ov)' }, g);
-    el('text', { x: 47, y: 21, class: 'nname' }, g).textContent = clipText(n.name, 16);
-    el('text', { x: 47, y: 36, class: 'nrole' }, g).textContent = isStuck ? '⚠ stuck' : `${clipText(n.role, 14)} · ${live === 'working' ? 'Working' : humanStatus(live)}`;
-    el('text', { x: 47, y: 50, 'font-size': 10, opacity: 0.8, class: 'ov-vendor' }, g).textContent = clipText(`${VENDOR[n.runtime || 'claude'] || n.runtime} · ${n.model || 'default'}`, 26);
-    const st = stallState(n.id); const pu = rtuFor(n.id);
-    if (st) drawStallBadge(g, st, () => openWakeTask(st.taskId));
-    else if (pu) drawRtuBadge(g, pu);
-    else if (live === 'working') { const wk = wakeRun(n.id); if (wk) drawWakeBadge(g, wk, () => openWakeTask(wk.taskId)); }
-    else { const wp = wakePending(n.id); if (wp) drawPendingBadge(g, wp); }
-    drawSubBadge(g, S.orch.agents[n.id] || {});
-    const sg = el('g', { class: 'status s-' + live, transform: `translate(${W - 14},14)` }, g); el('circle', { r: 5 }, sg); el('title', {}, sg).textContent = live;
-    el('title', {}, g).textContent = `${n.name} (${n.role}) — ${isStuck ? 'stuck' : live}`;
-  }
-  // Fit the graph to the available canvas without ever shrinking node text below its authored (readable) size:
-  // fit the whole graph in the wrap (never clipped); shrink down to 0.6 before letting the wrap scroll, grow up to 1.3.
-  const gbox = graphBox(ovNodes), gpad = 28, bw = gbox.w + gpad * 2, bh = gbox.h + gpad * 2;
-  const wrap = svg.parentElement;
-  // clientWidth/Height (not the bounding rect): they exclude scrollbars, so sizing against them
-  // cannot re-introduce the scrollbar the sizing itself would prevent.
-  const r = { width: wrap.clientWidth, height: wrap.clientHeight };
-  // Auto-fit zooms small graphs to fill the canvas; the 0.85 floor keeps 12px labels >=10px
-  // effective (the original complaint was ~8px) while 24-agent graphs avoid a scrollbar.
-  // Genuinely huge graphs still pan/drag in the wrap.
-  const scale = clamp(r.width && r.height ? Math.min(r.width / bw, r.height / bh) : 1, 0.85, 1.6);
-  const vbw = Math.max(bw, r.width ? r.width / scale : bw), vbh = Math.max(bh, r.height ? r.height / scale : bh);
-  svg.setAttribute('viewBox', `${gbox.x - gpad - (vbw - bw) / 2} ${gbox.y - gpad - (vbh - bh) / 2} ${vbw} ${vbh}`);
-  svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
-  // Cap at the wrap size (minus 1px for rounding) — preserveAspectRatio 'meet' letterboxes the
-  // rest, so the svg can never overflow its wrap and phantom scrollbars can't appear.
-  svg.style.width = `${Math.min(vbw * scale, r.width - 1)}px`; svg.style.height = `${Math.min(vbh * scale, r.height - 1)}px`;
-  $('#ov-stuck').innerHTML = [...stuck].map((id) => `<div class="stuckbar">⚠ <b>${esc(nodeName(id))}</b> has produced no output for ${S.settings.stuckMinutes || 5}+ min<span class="spacer"></span><button data-ovstop="${id}">Stop</button><button data-ovnudge="${id}" title="System status check, not a human message. Waits for the current run; never interrupts it (only a stalled run is stopped, by the watchdog).">Nudge</button></div>`).join('');
-  document.querySelectorAll('[data-ovstop]').forEach((b) => b.onclick = act(async () => { await call('stopAgent', b.dataset.ovstop); refresh(); }));
-  document.querySelectorAll('[data-ovnudge]').forEach((b) => b.onclick = act(async () => { await call('sendToAgent', b.dataset.ovnudge, 'Status check: you have produced no output for a while. Reply with a short status (what you are doing, whether you are blocked), then continue or finish your task.', null, { from: 'system', interrupt: false }); refresh(); }));
-  // Timeline: last 15 minutes, one lane per agent (idle lanes with no recent activity collapsed), auto-scrolled to now.
-  const idsAll = Overview.sortByAttention(S.team.nodes.map((n) => n.id), S.orch.agents, S.tasks); const attn = Overview.laneAttention(idsAll, S.orch.agents, S.tasks);
-  const lanes = Overview.timeline(L, idsAll, now); const span = 15 * 60000, LW = 110, PX = Math.max(600, $("#ov-timeline").clientWidth - LW - 30), LH = 26;
-  const x = (t) => LW + Math.max(0, (t - (now - span)) / span * PX);
-  const active = (id) => attn[id] || lanes[id].runs.some((r) => r.end >= now - span) || lanes[id].ticks.some((k) => k.at >= now - span) || lanes[id].marks.some((m) => m.at >= now - span);
-  const ids = idsAll.filter(active); const hiddenCount = idsAll.length - ids.length;
-  const ATTN_BADGE = { waiting_for_human: '⏳', blocked: '⛔', error: '❗' };
-  const tlbox = $('#ov-timeline'); tlbox.innerHTML = '';
-  if (hiddenCount) { const note = document.createElement('div'); note.className = 'ovtl-note'; note.textContent = `${hiddenCount} idle lane${hiddenCount > 1 ? 's' : ''} hidden (no activity in the last 15m)`; tlbox.appendChild(note); }
-  if (!ids.length) { const empty = document.createElement('p'); empty.className = 'muted ovtl-empty'; empty.textContent = 'No activity in the last 15m'; tlbox.appendChild(empty); }
-  else {
-    const tl = el('svg', { width: LW + PX + 10, height: ids.length * LH + 18 }, null);
-    const defs = el('defs', {}, tl);
-    const hatch = el('pattern', { id: 'tl-hatch', width: 8, height: 8, patternUnits: 'userSpaceOnUse', patternTransform: 'rotate(45)' }, defs);
-    el('line', { x1: 0, y1: 0, x2: 0, y2: 8, class: 'tl-hatch-line' }, hatch);
-    for (let m = 0; m <= 15; m += 5) { const gx = x(now - m * 60000); el('line', { x1: gx, x2: gx, y1: 0, y2: ids.length * LH, class: 'axisline' }, tl); }
-    ids.forEach((id, i) => { const y = i * LH; const ln = lanes[id]; const at = attn[id];
-      el('rect', { x: 0, y, width: LW + PX, height: LH, class: 'lane' + (stuck.has(id) ? ' stuck' : '') + (at ? ' attn-' + at : ''), fill: at === 'waiting_for_human' ? 'url(#tl-hatch)' : 'transparent' }, tl);
-      el('text', { x: 4, y: y + 17 }, tl).textContent = (stuck.has(id) ? '⚠ ' : at ? ATTN_BADGE[at] + ' ' : '') + clipText(nodeName(id), 14);
-      for (const r of ln.runs) if (r.end >= now - span) el('title', {}, el('rect', { x: x(r.start), y: y + 5, width: Math.max(2, x(r.end) - x(r.start)), height: LH - 10, rx: 3, class: 'run' + (r.live ? ' live' : '') }, tl)).textContent = r.task;
-      for (const t of ln.ticks) if (t.at >= now - span) el('title', {}, el('line', { x1: x(t.at), x2: x(t.at), y1: y + 3, y2: y + LH - 3, class: 'tick' }, tl)).textContent = t.name;
-      for (const m of ln.marks) if (m.at >= now - span) el('title', {}, el('circle', { cx: x(m.at), cy: y + 5, r: 4, class: 'mark' }, tl)).textContent = '→ ' + m.status; });
-    for (let m = 0; m <= 15; m += 5) el('text', { x: x(now - m * 60000) - 14, y: ids.length * LH + 14 }, tl).textContent = m ? `-${m}m` : 'now';
-    tlbox.appendChild(tl); tlbox.scrollLeft = tlbox.scrollWidth;
-  }
-  // Readable task thread (capped to the latest 300 entries; older history stays on the Board).
-  const ts = $('#ov-task'); const activeTask = S.tasks.find((t) => t.status === 'in_progress');
-  const cur = ts.value || sel.task || (activeTask || S.tasks[S.tasks.length - 1] || {}).id || '';
-  ts.innerHTML = S.tasks.map((t) => `<option value="${t.id}">${esc(t.title)} (${t.status})</option>`).join(''); ts.value = cur;
-  const t = S.tasks.find((x) => x.id === ts.value); const open = new Set([...document.querySelectorAll('#ov-thread details[open]')].map((d) => d.dataset.k));
-  const head = $('#ov-threadhead'); $('#ov-threadpanel').hidden = !t;
-  if (!t) { head.innerHTML = ''; ts.classList.add('hidden'); }
-  else {
-    ts.classList.remove('hidden');
-    const as = byId[t.assignee];
-    head.innerHTML = `<div class="ovth-title">${esc(t.title)}</div><div class="ovth-meta"><span class="ovth-status ${esc(t.status)}">${esc(humanStatus(t.status))}</span>${as ? ((w) => `<span class="ovth-assignee"><span class="ovth-av" style="background:${avatarBg(w)}">${avatarBody(as.id, w)}</span>${esc(as.name)}</span>`)(who(as.id)) : '<span class="muted">Unassigned</span>'}</div>`;
-  }
-  function humanStatus(s) { const w = String(s || '').replaceAll('_', ' '); return w.charAt(0).toUpperCase() + w.slice(1); }
-  const ovAvatar = (id) => { const n = byId[id]; if (!n) return `<span class="ovth-av sys">${id === 'human' ? 'H' : '•'}</span>`; const w = who(id); return `<span class="ovth-av" style="background:${avatarBg(w)}">${avatarBody(id, w)}</span>`; };
-  // Collapsible nested block for a subagent's tool activity inside the task thread (native <details>,
-  // open state preserved via data-k like the tool chips).
-  const ovSubBlock = (it, depth) => {
-    const rec = subRecOf(it.rec.id) || it.rec || {}; const sid = rec.id; const key = `sub:${sid}`;
-    const isopen = open.has(key);
-    const inner = it.rows.map((x) => x.kind === 'sub' ? ovSubBlock(x, depth + 1) : x.l.type === 'tool'
-      ? `<details data-k="t:${esc(x.l.summary || x.l.at)}" ${open.has(`t:${x.l.summary || x.l.at}`) ? 'open' : ''}><summary class="chip">🔧 ${esc(x.l.summary)}</summary><pre>${esc(x.l.text)}</pre></details>`
-      : `<div class="comment"><small class="muted">${new Date(x.l.at).toLocaleTimeString()}</small><br>${esc(x.l.text)}</div>`).join('');
-    return `<details class="subthread d${depth}" data-k="${esc(key)}" data-sub="${esc(sid)}" ${isopen ? 'open' : ''}><summary><span class="subcaret">${isopen ? '▾' : '▸'}</span> 🤖 <b>${esc(rec.description || rec.toolName || 'Subagent')}</b> <span class="substatus ss-${esc(rec.status || 'unknown')}">${esc(rec.status || 'unknown')}</span> <span class="submeta">${esc(subMetaTxt(rec))}</span> <span class="subcount">${it.rows.length} event${it.rows.length === 1 ? '' : 's'}</span></summary><div class="subrows">${inner}</div></details>`;
-  };
-  // Task thread capped to the latest 300 entries before nesting; older history stays on the Board.
-  const threadItems = t ? Overview.taskThread(t, L, S.messages) : []; const cut = Math.max(0, threadItems.length - 300); const shown = cut ? threadItems.slice(-300) : threadItems;
-  $('#ov-thread').innerHTML = !t ? '<p class="muted empty">No tasks yet — create one on the Board and messages will appear here.</p>' : (cut ? `<p class="muted empty">${cut} earlier entries hidden — open the task on the Board for the full history.</p>` : '') + (Subagents.nestRows(shown, subRecOf, t.assignee).map((it, k) => it.kind === 'sub' ? ovSubBlock(it, 0) : it.l.type === 'tool'
-    ? `<details data-k="${k}" ${open.has(String(k)) ? 'open' : ''}><summary class="chip">🔧 ${esc(it.l.summary)}</summary><pre>${esc(it.l.text)}</pre></details>`
-    : `<div class="comment ${it.l.type === 'message' ? 'msg' : ''}">${ovAvatar(it.l.who)}<b>${esc(it.l.type === 'message' ? `${nodeName(it.l.who)} → ${nodeName(it.l.to)}` : it.l.who === 'human' || it.l.who === 'orchestrator' ? it.l.who : nodeName(it.l.who))}</b> <small class="muted">${new Date(it.l.at).toLocaleTimeString()}</small><br>${esc(it.l.text)}</div>`).join('') || '<p class="muted empty">No messages yet — the assignee\'s updates will appear here.</p>');
-  ovLive = stuck.size > 0 || hot.size > 0 || Object.values(lanes).some((l) => l.runs.some((r) => r.live));
-}
-$('#ov-task').onchange = renderOverview;
-// Drag the empty canvas to pan (the wrap scrolls), matching the Team graph's grab-to-move.
-{ const w = $('#ov-graph-wrap'); let d = null;
-  w.addEventListener('pointerdown', (ev) => { if (ev.button !== 0 || ev.target.closest('.node')) return; d = { x: ev.clientX, y: ev.clientY, l: w.scrollLeft, t: w.scrollTop }; w.classList.add('panning'); w.setPointerCapture(ev.pointerId); });
-  w.addEventListener('pointermove', (ev) => { if (d) { w.scrollLeft = d.l - (ev.clientX - d.x); w.scrollTop = d.t - (ev.clientY - d.y); } });
-  const end = () => { d = null; w.classList.remove('panning'); }; w.addEventListener('pointerup', end); w.addEventListener('pointercancel', end); }
-// Overview activation (sig reset + first draw) goes through the shared tab-click handler (TAB_RESIG).
-setInterval(renderOverview, 1000);
-
 // ---------- chat: #company room, task threads, working indicator, composer ----------
 const CH = { thread: null, key: '', mi: 0, asks: [] };
 // Chat team scope (t_1158f757): an event belongs to the selected team when its sender or
@@ -3009,7 +2920,7 @@ squad.on('notify', (n) => {
 });
 // Keyboard shortcuts: Ctrl/Cmd+1..7 tabs, ⌘, settings, ⌘I inbox, Ctrl/Cmd+Enter Run, Ctrl/Cmd+. Stop,
 // / goal composer, Esc clear selection / close, ? help.
-const TABS = ['chat', 'team', 'board', 'overview', 'wiki', 'obs', 'usage'];
+const TABS = ['chat', 'team', 'board', 'wiki', 'obs', 'usage'];
 document.addEventListener('keydown', (e) => {
   const mod = e.metaKey || e.ctrlKey; const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName);
   if (mod && e.key >= '1' && e.key <= '9') { e.preventDefault(); const t = TABS[+e.key - 1]; if (t) showTab(t); }
@@ -3020,6 +2931,7 @@ document.addEventListener('keydown', (e) => {
   else if (e.key === 'Escape' && !$('#askdlg').open) { if ($('#helpdlg').open) return; if (alertsOpen) return closeAlerts(); if (!$('#goalpop').classList.contains('hidden')) return $('#goalpop').classList.add('hidden'); if (typing) return document.activeElement.blur(); sel = { ...sel, node: null, edge: null, task: null }; connectMode = false; connectFrom = null; $('#connect').classList.remove('on'); renderGraph(); renderNodeForm(); renderBoard(); }
   else if (!typing && !mod && e.key === '?') $('#helpdlg').showModal();
   else if (!typing && !mod && e.key === 'n' && document.querySelector('#tab-board.active')) { e.preventDefault(); $('#nt-title').focus(); }
+  else if (!typing && !mod && (e.key === 'e' || e.key === 'E') && document.querySelector('#tab-team.active')) { e.preventDefault(); setTeamMode(teamMode() === 'edit' ? 'watch' : 'edit'); }
   else if (!typing && !mod && e.key === '/') { e.preventDefault(); openGoalPop(); }
 });
 // IPC deltas (t_39bf39ac, track 2): the main process pushes {type,id,patch} batches — one send per

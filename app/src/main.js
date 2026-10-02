@@ -292,58 +292,38 @@ async function guiE2E() {
   // Every check is asserted: a failed expectation makes gui-e2e exit 1 (it used to only log).
   const failures = []; const expect = (name, ok, info) => { if (!ok) { failures.push(name); console.error('[gui-e2e] CHECK FAILED:', name, info === undefined ? '' : JSON.stringify(info)); } };
   const waitFor = async (js, ms = 10000) => { for (let t = 0; t < ms; t += 200) { if (await ex(js)) return true; await new Promise((r) => setTimeout(r, 200)); } return false; };
-  // Overview screenshots (idle, active, stuck) from injected renderer state; no claude runs needed.
-  const overviewShots = async () => {
+  // One Team view (wiki decision-one-team-view): the merged Team graph's Watch/Edit modes, checked
+  // from injected renderer state; no claude runs needed. Replaces the old Overview shots.
+  const teamModesShots = async () => {
     // Seed into whatever project/team the renderer is showing (earlier steps may have switched it).
     await ex(`await refresh();`); const cur = await ex(`return { p: ctx.p, t: S.teamId }`);
     const ps = pm.store(cur.p || pid(), cur.t); let nodes = ps.getTeam().nodes;
     if (nodes.length < 2) { ps.addNode({ name: 'Pia', role: 'PM', x: 60, y: 60 }); ps.addNode({ name: 'Devon', role: 'Dev', x: 320, y: 160 }); nodes = ps.getTeam().nodes; }
     const [a, b] = nodes; if (!ps.getTeam().edges.some((e) => e.from === a.id && e.to === b.id)) ps.addEdge(a.id, b.id, 'assign');
-    const t = ps.createTask({ title: 'Overview demo', assignee: b.id }); ps.commentTask(t.id, a.id, 'Please build the overview.');
-    await ex(`$('#tabs button[data-tab=overview]').click(); await w(800);`);
-    await ex(`await refresh(); S.orch.agents = {}; renderOverview(); await w(300);`); await shot('11-overview-idle');
-    const L = (ago, nodeId, kind, text) => `logs.push({ projectId: ctx.p, nodeId: '${nodeId}', kind: '${kind}', text: ${JSON.stringify(text)}, at: Date.now() - ${ago} });`;
-    await ex(`${L(240000, a.id, 'system', '▶ Pia starts "Goal" in /x')}${L(200000, a.id, 'tool', 'mcp__board__create_task {"title":"Overview demo","assignee":"' + b.id + '"}')}${L(150000, a.id, 'tool', 'mcp__board__update_task_status {"status":"done"}')}${L(120000, a.id, 'result', 'success cost=$0 turns=3')}
-      ${L(3000, a.id, 'tool', 'mcp__board__send_message {"to":"' + b.id + '","text":"ping"}')}${L(100000, b.id, 'system', '▶ Devon starts "Overview demo" in /x')}${L(60000, b.id, 'tool', 'Write {"file_path":"src/overview.js"}')}${L(2000, b.id, 'tool', 'Bash {"command":"npm test"}')}
-      await w(600); S.orch.agents = { '${b.id}': { status: 'working', taskId: '${t.id}' } }; $('#ov-task').value = '${t.id}'; renderOverview();`);
+    const t = ps.createTask({ title: 'Team demo', assignee: b.id }); ps.commentTask(t.id, a.id, 'Please build the demo.');
+    await ex(`$('#tabs button[data-tab=team]').click(); await refresh(); await w(600);`);
+    // The Overview tab is gone; its legacy id routes to Team.
+    expect('team: no Overview button in the nav', await ex(`return !document.querySelector('#tabs button[data-tab=overview]')`));
+    expect('team: legacy overview id routes to Team', await ex(`showTab('overview'); await w(200); return $('#tab-team').classList.contains('active')`));
     // Checks inject orch state right before asserting: a background refresh() replaces S (and S.orch) at any time.
-    expect('overview: working node glows', await ex(`S.orch.agents = { '${b.id}': { status: 'working', taskId: '${t.id}' } }; renderOverview(); return !!document.querySelector('#ov-graph .node.working')`));
-    await shot('12-overview-active');
-    expect('overview: timeline lanes and thread chips', await ex(`return document.querySelectorAll('#ov-timeline .run').length >= 2 && document.querySelectorAll('#ov-thread .chip').length >= 1`));
-    await ex(`for (const l of logs) if (l.nodeId === '${b.id}') l.at -= 300000; await w(1500);`);
-    expect('overview: stuck badge with Stop and Nudge', await ex(`S.settings.stuckMinutes = 1; S.orch.agents = { '${b.id}': { status: 'working', startedAt: Date.now() - 600000 } }; renderOverview(); return !!document.querySelector('#ov-graph .node.stuck') && !!document.querySelector('[data-ovstop]') && !!document.querySelector('[data-ovnudge]')`));
-    await shot('13-overview-stuck');
-  };
-  // Nudge = system status check (t_a7254182): the stuck-bar button must send the sendToAgent extra
-  // {from:'system', interrupt:false} — never a human message that SIGTERMs the live run — and carry
-  // a tooltip saying it waits for the current run (stalled runs are the watchdog's job).
-  const nudgeShots = async () => {
-    await ex(`await refresh();`);
-    const cur = await ex(`return { p: ctx.p, t: S.teamId }`);
-    const ps = pm.store(cur.p || pid(), cur.t);
-    let nodes = ps.getTeam().nodes;
-    if (nodes.length < 2) { ps.addNode({ name: 'Pia', role: 'PM', x: 60, y: 60 }); ps.addNode({ name: 'Devon', role: 'Dev', x: 320, y: 160 }); nodes = ps.getTeam().nodes; }
-    const [, b] = nodes;
-    await ex(`$('#tabs button[data-tab=overview]').click(); await w(500); await refresh();`);
-    const orch2 = orchFor(cur.p || pid()); const origSend = orch2.sendToAgent; const calls = [];
-    orch2.sendToAgent = (...args) => { calls.push(args); return origSend.apply(orch2, args); };
-    // Inject + click in ONE evaluate: a background refresh() replaces S at any time and would drop the button.
-    let clicked = '';
-    try {
-      clicked = await ex(`window.alert = () => {}; S.settings.stuckMinutes = 1; S.orch.agents = { '${b.id}': { status: 'working', startedAt: Date.now() - 600000 } }; renderOverview(); const btn = document.querySelector('[data-ovnudge]'); if (!btn) return 'no-button'; window.__tooltip = btn.title; btn.click(); await w(600); return 'clicked'`);
-    } finally { orch2.sendToAgent = origSend; }
-    const tooltip = await ex(`return window.__tooltip || ''`);
-    const a = calls[0] || [];
-    expect('nudge: stuck bar renders the Nudge button', clicked === 'clicked', clicked);
-    expect('nudge: tooltip says no-interrupt and waiting for the run', /never interrupts/.test(tooltip) && /stalled/.test(tooltip), tooltip);
-    expect('nudge: click sends sendToAgent(id, Status check, null, {from:system, interrupt:false})', clicked === 'clicked' && calls.length === 1 && a.length === 4 && a[0] === b.id && /Status check/.test(a[1]) && a[2] === null && !!a[3] && a[3].from === 'system' && a[3].interrupt === false, { clicked, args: a });
-    // The click's refresh() drops the renderer-injected stuck bar, and the nudge's own stored message
-    // is FRESH output that un-sticks the agent (by design). Freeze refresh, clamp ALL of the node's
-    // logs to 10min old (the fresh '✉ message stored' log would otherwise win stuckAgents' Math.max),
-    // re-inject the working state, and settle before the shot.
-    await ex(`window._refresh = refresh; refresh = async () => {}; S.settings.stuckMinutes = 1; S.orch.agents = { '${b.id}': { status: 'working', startedAt: Date.now() - 600000 } }; for (const l of logs) if (l.nodeId === '${b.id}') l.at = Math.min(l.at, Date.now() - 600000); renderOverview(); await w(500)`);
-    await shot('nudge-stuck');
-    console.log('[gui-e2e] nudge', JSON.stringify({ clicked, tooltip, args: a }));
+    // nstat is injected too — the Team graph's nodeLive trusts the per-node live status the
+    // orchestrator pushes; orch.agents alone would read as idle (stale-nstat precedence).
+    const inject = `S.orch.agents = { '${b.id}': { status: 'working', taskId: '${t.id}' } }; S.nstat = { '${b.id}': { status: 'working' } };`;
+    expect('team: Watch is the default while an agent runs', await ex(`${inject} renderGraph(); renderNodeForm(); return $('#mode-watch').classList.contains('on') && $('#mode-edit').classList.contains('on') === false`));
+    await ex(`${inject} renderGraph(); await w(120);`); await shot('11-team-watch');
+    expect('team: watch node shows live status', await ex(`${inject} renderGraph(); return !!document.querySelector('#graph .node.st-working') && !!document.querySelector('#graph .node .status.s-working')`));
+    expect('team: watch disables editing affordances', await ex(`return $('#addnode').disabled && $('#connect').disabled && $('#delsel').disabled && !document.querySelector('#graph .node .handle') && !document.querySelector('#graph .node .qacts')`));
+    expect('team: watch inspector is the read-only live card', await ex(`${inject} selectNode('${b.id}'); return !!document.querySelector('#nodeform .livecard') && !document.querySelector('#nodeform #nf-name') && !!document.querySelector('#nodeform #lc-chat')`));
+    expect('team: live card shows current task and status', await ex(`${inject} renderNodeForm(); return document.querySelector('#nodeform .lc-task').textContent.includes('Team demo') && !!document.querySelector('#nodeform .lc-working')`));
+    await ex(`${inject} renderNodeForm(); renderGraph(); await w(120);`); await shot('12-team-watch-card');
+    expect('team: Open in Chat deep-links the task thread', await ex(`document.querySelector('#lc-chat').click(); await w(300); return $('#tab-chat').classList.contains('active') && CH.thread === '${t.id}'`));
+    // Edit is an explicit toggle; while the team runs it shows the inline note (no modal).
+    expect('team: Edit toggles on with the running note', await ex(`$('#tabs button[data-tab=team]').click(); ${inject} setTeamMode('edit'); await w(100); return $('#mode-edit').classList.contains('on') && !$('#mode-note').classList.contains('hidden') && !!document.querySelector('#nodeform #nf-name')`));
+    await ex(`${inject} renderNodeForm(); renderGraph(); await w(120);`); await shot('13-team-edit');
+    expect('team: edit enables editing affordances', await ex(`return !$('#addnode').disabled && !$('#connect').disabled && !!document.querySelector('#graph .node .handle')`));
+    expect('team: live status still on nodes in edit', await ex(`${inject} renderGraph(); return !!document.querySelector('#graph .node.st-working')`));
+    // No timeline, no task-thread panel on the graph screen (dropped with the merge).
+    expect('team: no timeline / thread panel', await ex(`return !document.querySelector('#ov-timeline') && !document.querySelector('#ov-threadpanel') && !document.querySelector('#ov-timelinewrap')`));
   };
   // First-run guide (steps 1-3) in a fresh project, then Human Inbox: ask_human with choices, answer, approval item.
   const firstrunInbox = async () => {
@@ -656,7 +636,7 @@ async function guiE2E() {
     for (const t of ['light', 'dark']) {
       require('electron').nativeTheme.themeSource = t;
       await ex(`$('#tabs button[data-tab=board]').click(); await refresh(); await w(300);`); await shot(`26-parallel-board-${t}`);
-      await ex(`$('#tabs button[data-tab=overview]').click(); await w(300);`); await shot(`27-parallel-overview-${t}`);
+      await ex(`$('#tabs button[data-tab=team]').click(); await w(300);`); await shot(`27-parallel-team-${t}`);
     }
     require('electron').nativeTheme.themeSource = 'system';
     expect('parallel: still Running (3) after shots', /Running \(3\)/.test(await ex(`await refresh(); return $('#runstate').textContent`)));
@@ -780,7 +760,7 @@ async function guiE2E() {
     s.saveSettings({ claudePath: prev.claudePath, maxConcurrency: prev.maxConcurrency });
     console.log('[gui-e2e] runidle', JSON.stringify({ first: s.getTask(first.id).status, running: o.running }));
   };
-  // Mixed vendors: Claude/Opus PM -> Codex Dev -> Claude/Haiku Reviewer finish a chain through the board (fake bins); graph runtime/model chips + overview.
+  // Mixed vendors: Claude/Opus PM -> Codex Dev -> Claude/Haiku Reviewer finish a chain through the board (fake bins); graph runtime/model chips + merged Team shots.
   const mixedShots = async () => {
     await waitFor(`return !!document.querySelector('#tpl-select option')`); await ex(`await refresh();`); const cur = await ex(`return { p: ctx.p, t: S.teamId }`);
     const p = cur.p || pid(); const ts = pm.store(p, cur.t); const s = pm.store(p); const tmp = require('os').tmpdir();
@@ -802,9 +782,7 @@ async function guiE2E() {
     const o = orchFor(p); const done = new Promise((r) => o.once('done', r)); o.start();
     for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`$('#tabs button[data-tab=team]').click(); await refresh(); renderGraph(); await w(400);`); await shot(`28-mixed-graph-${t}`); }
     await done;
-    for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`$('#tabs button[data-tab=overview]').click(); await refresh(); await w(400);`); await shot(`29-mixed-overview-${t}`); }
-    const ov = await ex(`return [...document.querySelectorAll('#ov-graph .ov-vendor')].map((t) => t.textContent)`);
-    expect('mixed: overview nodes show vendor · model', ov.join() === 'Claude · opus,Codex · gpt-5.6-terra,Claude · haiku', ov);
+    for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`$('#tabs button[data-tab=team]').click(); await refresh(); await w(400);`); await shot(`29-mixed-team-${t}`); }
     for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`$('#tabs button[data-tab=usage]').click(); await refresh(); await w(600);`); await shot(`30-mixed-usage-${t}`); }
     const us = await ex(`return [...document.querySelectorAll('#us-summary h4')].find((h) => h.textContent === 'By account').nextElementSibling.innerText`);
     // Per-key usage ledger (t_f8032a7d), re-grouped per account (t_b1115e48): the By-account table is
@@ -1540,7 +1518,7 @@ async function guiE2E() {
     require('electron').nativeTheme.themeSource = 'system'; await ex(`VP = { x: 20, y: 20, zoom: 1 }; applyVP();`); ps.setViewport({}); os.setViewport({});
   };
   // Critique evidence (t_110eda30): 24 agents in one team (the scale design/critique-views.md must-fix #2
-  // demands) plus 3 small peer teams for cross-team edges, at 1440x900. Shots of Overview, Timeline, Logs,
+  // demands) plus 3 small peer teams for cross-team edges, at 1440x900. Shots of Team, Logs,
   // Wiki and the Graph editor in light+dark. Checks: node names stay >=11px on screen at fit-to-view, or a
   // LOD collapsed-frame fallback is shown instead; edge stroke contrast is >=3:1 (WCAG 1.4.11); the minimap
   // hides once the view already fits the graph; a second edge popover replaces (does not stack on) the
@@ -1655,12 +1633,10 @@ async function guiE2E() {
       expect('critique: Logs new-lines pill hidden while already at the tail', hiddenAtTail, { pillSel });
     } else console.log('[gui-e2e] critique: Logs new-lines pill not shipped yet (Uma t_961b3b38 pending), skipping check');
     console.log('[gui-e2e] critique', JSON.stringify({ nameCheck, cLight, cDark, mmHidden, popovers, pillSel }));
-    // Shots: Overview, Timeline (cropped), Logs, Wiki, Graph editor -- light + dark.
+    // Shots: Team (merged view), Logs, Wiki -- light + dark.
     for (const t of ['light', 'dark']) {
       require('electron').nativeTheme.themeSource = t;
       await ex(`$('#tabs button[data-tab=team]').click(); await refresh(); renderGraph(); fitView(); await w(500);`); await shot(`critique-graph-${t}`);
-      await ex(`$('#tabs button[data-tab=overview]').click(); await refresh(); await w(500);`); await shot(`critique-overview-${t}`);
-      const tb = await ex(`const b = $('#ov-timelinewrap').getBoundingClientRect(); return { x: Math.round(b.x), y: Math.round(b.y), width: Math.round(b.width), height: Math.round(b.height) };`);
       fs.writeFileSync(path.join(out, `critique-timeline-${t}.png`), (await win.capturePage(tb)).toPNG());
       await ex(`$('#tabs button[data-tab=obs]').click(); await refresh(); renderLog(); renderObs(); await w(400);`); await shot(`critique-logs-${t}`);
       await ex(`$('#tabs button[data-tab=wiki]').click(); await refresh(); await w(400);`); await shot(`critique-wiki-${t}`);
@@ -1740,7 +1716,7 @@ async function guiE2E() {
   // Wake-run UI (t_03a0e1a0): feed S.orch.agents[id].activity exactly as the backend shapes it
   // (orchestrator wakeRun: {trigger:'message', messageId, fromNodeId, excerpt, taskId, count, startedAt};
   // count = unread msgs delivered this run, renderer maps it to "+N queued") and
-  // check the Board banner + presence chip, the Team and Overview node badges, then cleared again.
+  // check the Board banner + presence chip, the Team node badge, then cleared again.
   const wakeShots = async () => {
     await waitFor(`return !!document.querySelector('#tpl-select option')`); await ex(`await refresh();`);
     const cur = await ex(`return { p: ctx.p, t: S.teamId }`);
@@ -1750,7 +1726,7 @@ async function guiE2E() {
     const task = ps.createTask({ title: 'Wake demo', assignee: dev.id });
     await ex(`await refresh(); await w(200);`); // pick up the seeded nodes before injecting wake state
     // Re-seed right before every read: a background refresh() replaces S (and S.orch) at any time.
-    const seed = `S.orch.agents = { '${dev.id}': { status: 'working', activity: { trigger: 'message', messageId: 'm1', fromNodeId: '${pmN.id}', excerpt: 'Please look at the failing test', taskId: '${task.id}', startedAt: Date.now() } } }; renderIdle(); renderGraph(); renderOverview();`;
+    const seed = `S.orch.agents = { '${dev.id}': { status: 'working', activity: { trigger: 'message', messageId: 'm1', fromNodeId: '${pmN.id}', excerpt: 'Please look at the failing test', taskId: '${task.id}', startedAt: Date.now() } } }; renderIdle(); renderGraph();`;
     await ex(`$('#tabs button[data-tab=board]').click(); await w(200);`);
     const board = await ex(`${seed} await w(100); return { wakebar: !$('#wakebar').classList.contains('hidden'), text: ($('#wakebar .wakebar') || {}).textContent || '', chip: !!document.querySelector('#presence .pchip.wake') }`);
     expect('wake: Board banner shows woken-by-message with presence chip and task link', board.wakebar && board.text.includes('woken by message from Pia') && board.chip && board.text.includes('Wake demo'), board);
@@ -1758,58 +1734,15 @@ async function guiE2E() {
     await ex(`$('#tabs button[data-tab=team]').click(); await w(200);`);
     const team = await ex(`${seed} await w(100); return { badge: !!document.querySelector('#graph .wakerunbadge'), linked: !!document.querySelector('#graph .wakerunbadge.linked'), txt: (document.querySelector('#graph .wakerunbadge text') || {}).textContent || '' }`);
     expect('wake: Team node shows the linked wake badge, visible text keeps the sender after the clip (t_0cd29f4d)', team.badge && team.linked && team.txt.includes('Pia'), team);
-    await shot('wake-team-on');
-    await ex(`$('#tabs button[data-tab=overview]').click(); await w(200);`);
-    const ov = await ex(`${seed} await w(100); return { badge: !!document.querySelector('#ov-graph .wakerunbadge'), working: !!document.querySelector('#ov-graph .node.working'), txt: (document.querySelector('#ov-graph .wakerunbadge text') || {}).textContent || '' }`);
-    expect('wake: Overview node shows the wake badge while working, visible text keeps the sender', ov.badge && ov.working && ov.txt.includes('Pia'), ov);
     await shot('wake-overview-on');
     await ex(`$('#tabs button[data-tab=board]').click(); await w(200);`);
-    const off = await ex(`S.orch.agents = {}; renderIdle(); renderGraph(); renderOverview(); await w(100); return { wakebarHidden: $('#wakebar').classList.contains('hidden'), chip: !!document.querySelector('#presence .pchip.wake') }`);
+    const off = await ex(`S.orch.agents = {}; renderIdle(); renderGraph(); await w(100); return { wakebarHidden: $('#wakebar').classList.contains('hidden'), chip: !!document.querySelector('#presence .pchip.wake') }`);
     expect('wake: cleared activity hides the banner and chip', off.wakebarHidden && !off.chip, off);
     await shot('wake-board-cleared');
-    console.log('[gui-e2e] wake', JSON.stringify({ board, team, ov, off }));
+    console.log('[gui-e2e] wake', JSON.stringify({ board, team, off }));
   };
   // Timeline with a live task run and a message-wake run (t_59147edd, plan t_6e1bb175/(b)). The landed
   // fix (t_634c6702) is the data layer: orchestrator timeline() merges live working agents as open-ended
-  // bars and carries wakeFrom ("who woke it") on taskId-null runs — from live activity for in-flight
-  // wakes, from the stored run record's fromNodeId (stamped by record()) for ended ones. That data is
-  // not renderer-visible yet (getAll ships snapshotSlim(), which drops `timeline`, and the Overview
-  // DOM lanes are built from '▶ ... starts' log lines only), so the live bar is asserted in the DOM
-  // while the wake bar is asserted directly on the orchestrator. Seeds every real input channel:
-  // backend agent state via orchFor (the orchestrator agent()/wakeRun shapes), a stored runs.json wake
-  // record with fromNodeId, and the '▶' log lines the DOM lanes use.
-  const timelineLiveShots = async () => {
-    await waitFor(`return !!document.querySelector('#tpl-select option')`); await ex(`await refresh();`);
-    const cp = pm.create('Timeline Live'); const ps = pm.store(cp.id);
-    const stubCaps = { ok: true, probedAt: new Date().toISOString(), source: 'stub', slashCommands: [], commands: [], skills: [], modes: [], categorized: [] };
-    const pia = ps.addNode({ name: 'Pia', role: 'PM', x: 60, y: 60 });
-    const devon = ps.addNode({ name: 'Devon', role: 'Dev', x: 320, y: 120 });
-    const dana = ps.addNode({ name: 'Dana', role: 'Dev', x: 320, y: 240 });
-    ps.addEdge(pia.id, devon.id, 'assign'); ps.addEdge(pia.id, dana.id, 'message');
-    [pia, devon, dana].forEach((n) => ps.updateNode(n.id, { capabilities: stubCaps }));
-    const task = ps.createTask({ title: 'Fix the login redirect loop', assignee: devon.id });
-    ps._updateTask(task.id, { status: 'in_progress' });
-    // Backend agent state exactly as the orchestrator holds it while Devon runs the task and Dana
-    // handles a message wake — the seed below mirrors it renderer-side for the Overview lanes.
-    const orch = orchFor(cp.id);
-    const oa = orch.agent(devon.id); oa.status = 'working'; oa.taskId = task.id; oa.task = 'Fix the login redirect loop'; oa.activity = { trigger: 'task', startedAt: Date.now() };
-    const od = orch.agent(dana.id); od.status = 'working'; od.taskId = null; od.task = null; od.activity = { trigger: 'message', messageId: 'm1', fromNodeId: pia.id, taskId: null, count: 1, startedAt: Date.now() };
-    // Stored (ended) wake run with taskId null and the waker stamped, as orchestrator.record() writes it.
-    ps.addRun({ id: 'r_e2ewake', kind: 'agent', nodeId: dana.id, taskId: null, task: '', startedAt: Date.now() - 120000, endedAt: Date.now() - 60000, durationMs: 60000, model: 'stub', isError: false, fromNodeId: pia.id, inputTokens: 10, outputTokens: 10, cacheReadTokens: 0, cacheCreationTokens: 0, reportedCostUsd: 0, billingSource: 'api', sessionId: 'e2e-wake' });
-    await ex(`await switchTo({ p: '${cp.id}', t: '${pm.get(cp.id).teams[0].id}' }); await w(300);`);
-    const L = (ago, n, kind, text) => `logs.push({ projectId: '${cp.id}', nodeId: '${n.id}', kind: '${kind}', text: ${JSON.stringify(text)}, at: Date.now() - ${ago} });`;
-    const seed = `${L(120000, devon, 'system', '▶ Devon starts "Fix the login redirect loop" in /work [mode=once]')}${L(60000, devon, 'tool', 'Read {"file_path":"login.ts"}')}${L(60000, dana, 'system', '▶ Dana wakes to handle messages from Pia in /work')}`
-      + `S.orch.agents = { '${devon.id}': { status: 'working', taskId: '${task.id}', task: 'Fix the login redirect loop' }, '${dana.id}': { status: 'working', taskId: null, activity: { trigger: 'message', messageId: 'm1', messageIds: ['m1'], fromNodeId: '${pia.id}', excerpt: 'Please check the failing build', taskId: null, count: 1, startedAt: Date.now() } } }; renderIdle(); renderGraph(); renderOverview();`;
-    await ex(`$('#tabs button[data-tab=overview]').click(); await w(300);`);
-    const bars = await ex(`${seed} await w(200); return [...document.querySelectorAll('#ov-timeline rect.run')].map((r) => ({ live: r.classList.contains('live'), t: (r.querySelector('title') || {}).textContent || '' }));`);
-    expect('timelinelive: the in-flight task run renders as an open live bar', bars.some((b) => b.live && /login redirect/i.test(b.t)), bars);
-    // The re-scoped wake fix (5bbe2ba) lives in the renderer: the wake log line labels an open live bar 'wake: <who>'.
-    expect('timelinelive: the wake run renders as an open live bar labelled wake: Pia', bars.some((b) => b.live && b.t === 'wake: Pia'), bars);
-    const tb = await ex(`${seed} await w(100); const b = $('#ov-timelinewrap').getBoundingClientRect(); return { x: Math.round(b.x), y: Math.round(b.y), width: Math.round(b.width), height: Math.round(b.height) };`);
-    fs.writeFileSync(path.join(out, 'timelinelive-overview.png'), (await win.capturePage(tb)).toPNG());
-    await shot('timelinelive-overview-full');
-    console.log('[gui-e2e] timelinelive', JSON.stringify({ bars, crop: tb }));
-  };
   // Monitor log lines (t_43243765, plan t_a4ceb629/C): the core's watchdog decisions render as
   // accent "Monitor" rows — badge + action — reason with plain taskIds; a line persisted without
   // the structured fields falls back to its raw text.
@@ -1986,7 +1919,7 @@ async function guiE2E() {
     const task = ps.createTask({ title: 'Busy wake demo', assignee: dev.id });
     ps.updateTask(task.id, { status: 'in_progress' });
     await ex(`await refresh(); await w(200);`); // pick up the seeded task before injecting wake state
-    const seed = (onTask) => `S.orch.agents = { '${dev.id}': { status: 'working', activity: { trigger: 'message', messageId: 'm1', fromNodeId: '${pmN.id}', excerpt: 'Please look at the failing test', taskId: null, count: 2, startedAt: Date.now() }${onTask ? `, taskId: '${task.id}'` : ''} } }; renderIdle(); renderGraph(); renderOverview(); renderChat();`;
+    const seed = (onTask) => `S.orch.agents = { '${dev.id}': { status: 'working', activity: { trigger: 'message', messageId: 'm1', fromNodeId: '${pmN.id}', excerpt: 'Please look at the failing test', taskId: null, count: 2, startedAt: Date.now() }${onTask ? `, taskId: '${task.id}'` : ''} } }; renderIdle(); renderGraph(); renderChat();`;
     await ex(`$('#tabs button[data-tab=team]').click(); await w(200);`);
     const team = await ex(`${seed(false)} await w(100); return { badge: !!document.querySelector('#graph .wakerunbadge'), chip: !!document.querySelector('#presence .pchip.wake'), typing: '', txt: (document.querySelector('#graph .wakerunbadge text') || {}).textContent || '' }`);
     expect('wakebusy: wake badge shows despite the in_progress task (was bare working), visible text keeps the sender', team.badge && team.chip && team.txt.includes('Pia'), team);
@@ -1994,10 +1927,6 @@ async function guiE2E() {
     const chat = await ex(`$('#tabs button[data-tab=chat]').click(); await w(200); ${seed(false)} await w(100); return { typing: $('#chat-typing').textContent || '' }`);
     expect('wakebusy: chat header shows the wake reason, not bare "Name is working"', chat.typing.includes('woken by message from Pia') && !/^Devon is working/.test(chat.typing), chat);
     await shot('wakebusy-chat');
-    await ex(`$('#tabs button[data-tab=overview]').click(); await w(200);`);
-    const ov = await ex(`${seed(false)} await w(100); return { badge: !!document.querySelector('#ov-graph .wakerunbadge'), txt: (document.querySelector('#ov-graph .wakerunbadge text') || {}).textContent || '' }`);
-    expect('wakebusy: Overview shows the wake badge despite the in_progress task, visible text keeps the sender', ov.badge && ov.txt.includes('Pia'), ov);
-    await shot('wakebusy-overview');
     // The veto still applies when the live run IS the task run (a.taskId set): badge goes away.
     await ex(`$('#tabs button[data-tab=team]').click(); await w(200);`);
     const onTask = await ex(`${seed(true)} await w(100); return { badge: !!document.querySelector('#graph .wakerunbadge') }`);
@@ -2010,7 +1939,7 @@ async function guiE2E() {
   // task-tool parts) through the backend's own event parsers — no mocks, no model runs — then assert the
   // renderer nests child activity under the parent with own tokens ('n/a' when the CLI reports none) and a
   // per-agent count. Selector contract with Uma (t_d716779d): .subblock/.subhead/.subdesc/.submeta/
-  // .subrows (collapsed by default, [data-subtoggle]) in Logs, .subbadge on Team+Overview graphs,
+  // .subrows (collapsed by default, [data-subtoggle]) in Logs, .subbadge on the Team graph,
   // details.cchip.subagent in Chat; tokens label "N / M tok", "n/a" when the CLI reports none.
   const subagentShots = async () => {
     const { SubagentTracker } = require('./subagents');
@@ -2051,14 +1980,11 @@ async function guiE2E() {
     for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`$('#tabs button[data-tab=team]').click(); await w(400);`); await shot(`33-subagents-team-${t}`); }
     const counts = await ex(`return [...document.querySelectorAll('#graph .subbadge')].map((b) => ({ txt: b.querySelector('text') ? b.querySelector('text').textContent : '', full: b.querySelector('title') ? b.querySelector('title').textContent : '' }))`);
     expect('subagents: per-agent count badge (2) on both cards, claude totals as a breakdown of the parent', counts.length === 2 && counts.every((c) => /2/.test(c.txt)) && counts.some((c) => /2 subagents · 20 in \/ 8 out tok/.test(c.full)), counts);
-    const ovb = await ex(`$('#ov-task').value = '${tsk.id}'; $('#tabs button[data-tab=overview]').click(); await w(400); return [...document.querySelectorAll('#ov-graph .subbadge')].map((b) => b.querySelector('text') ? b.querySelector('text').textContent : '')`);
-    expect('subagents: Overview shows the count badges too', ovb.length >= 1, ovb);
-    for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`$('#tabs button[data-tab=overview]').click(); await w(400);`); await shot(`35-subagents-overview-${t}`); }
     const chat = await ex(`$('#tabs button[data-tab=chat]').click(); await w(300); await refresh(); CH.key = ''; renderChat(); await w(400); return [...document.querySelectorAll('#chat-room details.cchip.subagent')].map((d) => d.querySelector('summary') ? d.querySelector('summary').textContent : '')`);
     expect('subagents: Chat shows a nested subagent chip per spawn with its own tokens', chat.length >= 2 && chat.every((s) => /10 \/ 4 tok/.test(s)), chat);
     require('electron').nativeTheme.themeSource = 'system';
     await shot('34-subagents-chat');
-    console.log('[gui-e2e] subagents', JSON.stringify({ blocks, expand, counts, ovb, chat }));
+    console.log('[gui-e2e] subagents', JSON.stringify({ blocks, expand, counts, chat }));
   };
   // Dynamic team GUI (t_2054825d): core toggle in the node form, lock badge + recruited chip on the graph, maxAgents/teamChangeApproval settings.
   const dynamicTeamShots = async () => {
@@ -2385,8 +2311,7 @@ async function guiE2E() {
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'chatmsg') { await chatMsgShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'windowing') { await windowingShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'firstrun') { await firstrunInbox(); throw null; }
-    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'overview') { await overviewShots(); throw null; }
-    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'nudge') { await nudgeShots(); throw null; }
+    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'team') { await teamModesShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'teamscope') { await teamScopeShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'parallel') { await parallelShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'runidle') { await runIdleShots(); throw null; }
@@ -2439,7 +2364,6 @@ async function guiE2E() {
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'deletenode') { await deleteNodeShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'topbar') { await topbarShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'composerclear') { await composerClearShots(); throw null; }
-    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'timelinelive') { await timelineLiveShots(); throw null; }
     // project/team management through the UI: create a project from the Startup template, then a Solo team, then switch back.
     // The template select renders with the Settings view (tab-scoped rendering, t_8d586961), so open
     // Settings first and wait until the first refresh has filled it before choosing a template.
@@ -2596,7 +2520,7 @@ async function guiE2E() {
       expect('resumed runs are counted per run, not cumulatively', [...goalRuns, ...loopRuns].filter((r) => r.resumedFrom).every((r) => r.usageBasis === 'delta'), f7);
     }
     await firstrunInbox();
-    await overviewShots();
+    await teamModesShots();
     await chatShots();
     await windowingShots();
     if (!process.env.SKIP_GRAPH) await graphShots();
@@ -2604,7 +2528,7 @@ async function guiE2E() {
     const { nativeTheme } = require('electron');
     for (const theme of ['light', 'dark']) {
       nativeTheme.themeSource = theme; await ex(`await w(300);`);
-      for (const tab of ['chat', 'team', 'board', 'inbox', 'overview', 'wiki', 'obs']) { await ex(`$('#tabs button[data-tab=${tab}]').click(); await w(500);`); await shot(`main-${tab === 'obs' ? 'logs' : tab}-${theme}`); }
+      for (const tab of ['chat', 'team', 'board', 'inbox', 'wiki', 'obs']) { await ex(`$('#tabs button[data-tab=${tab}]').click(); await w(500);`); await shot(`main-${tab === 'obs' ? 'logs' : tab}-${theme}`); }
       await ex(`$('#tabs button[data-tab=team]').click(); $('#reopenguide').click(); await w(400);`); await shot(`main-firstrun-${theme}`);
       expect(`firstrun guide opens (${theme})`, await ex(`return !$('#guide').classList.contains('hidden')`));
       await ex(`$('#g-close').click(); await w(200);`); // real dismiss (resets forced/hidden state), not just a CSS class -- otherwise the next renderGuide() re-opens it full-size over later shots
