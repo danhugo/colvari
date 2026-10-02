@@ -58,8 +58,9 @@ const STREAM_SECONDS = Number(process.env.STREAM_SECONDS || 0) ||
   Math.ceil((WARM_MS + SAMPLE_MS) / 1000) + 25;             // keep agents alive past the window
 const STREAM_EPS = Number(process.env.STREAM_EPS || 6);
 const TRACE_MS = Number(process.env.PERF_TRACE_MS || 0);     // one-off CPU profile window
+const IDLE = !!process.env.PERF_IDLE; // t_6fb709f6: idle phase — seed and click with NO run started
 const TRACE_FNS = ['renderLog', 'renderGraph', 'renderBoard', 'renderChat', 'renderOverview', 'renderAll', 'JSON.parse', '(garbage collector)'];
-const TABS = ['chat', 'team', 'board', 'wiki', 'obs', 'usage', 'settings', 'overview', 'inbox'];
+const TABS = ['chat', 'team', 'board', 'wiki', 'obs', 'usage', 'settings', 'inbox']; // 'overview' is a legacy id (showTab maps it to team) — a no-target drop since it left the tab bar
 const WAIT = (ms) => new Promise((r) => setTimeout(r, ms));
 fs.mkdirSync(OUT, { recursive: true });
 const CLICK_BUDGET_MS = (CLICK_REPS * TABS.length + CARD_CLICKS) * 2600; // worst-case poll budget per click
@@ -243,6 +244,7 @@ const SUMMARY = `
   const settledByLabel = {}; for (const c of P.clicks) if (Number.isFinite(c.ms)) (settledByLabel[c.label] = (settledByLabel[c.label] || 0) + 1);
   return {
     windowSecs: +secs.toFixed(1),
+    clock: { perfNow: performance.now(), dateNow: Date.now() }, // converts clicks[].down (page perf clock) to wall time for main-stall correlation
     metric: 'quiet-paint v2 (t_fd3a15c4): first frame after the click dispatch whose interval starts no render/refresh work and by which all work started since the click has ended; legacy renderAll endpoint kept as statLegacy',
     rates: { statePushesPerSec: +(P.statePushes / secs).toFixed(2), logPushesPerSec: +(P.logPushes / secs).toFixed(2), renderAllPerSec: +((P.renders.renderAll || []).length / secs).toFixed(2), refreshPerSec: +(P.refreshMs.length / secs).toFixed(2) },
     renderAll: renders.renderAll || { n: 0 }, renders,
@@ -308,7 +310,8 @@ function bulkSeed(dir, nodes) {
     run.startedAt = new Date(started).toISOString();
     store.addRun(U.finishRun(run, { code: 0, env: {}, billingMode: 'auto', startedMs: started }));
   }
-  return { seededTasks: seeded + TASKS * 6, seededLogs: SEED_LOGS, seededRuns: SEED_RUNS };
+  const lt = store.createTask({ title: 'perf load target (writer churn)', description: 'Target task for external board-writer churn during the load phase.', assignee: nodes[0], createdBy: nodes[0] });
+  return { seededTasks: seeded + TASKS * 6, seededLogs: SEED_LOGS, seededRuns: SEED_RUNS, loadTarget: lt.id };
 }
 
 // One real input click at [x,y] (webContents coordinates), timed input-dispatch -> paint.
@@ -418,13 +421,17 @@ async function main() {
   const LOAD_MID = os.loadavg();
   console.log('[perf] instrumented', JSON.stringify(inst));
 
-  await ex(`await call('run')`);
   let working = 0;
-  for (let t = 0; t < 250 && working < Math.min(2, AGENTS); t++) { await WAIT(100); working = await ex(`return Object.values(S.orch.agents || {}).filter(a => a.status === 'working').length`) || 0; }
-  console.log(`[perf] ${working}/${AGENTS} agents working, streaming ${STREAM_EPS} ev/s for ~${STREAM_SECONDS}s`);
-  if (!working) {
-    const diag = await ex(`return { agents: S.orch.agents, logs: logs.slice(-40).map(l => l.kind + ': ' + String(l.text).slice(0, 160)), tasks: S.tasks.filter(t => ['todo','in_progress'].includes(t.status)).map(t => t.id + ' ' + t.status + ' -> ' + t.assignee) }`);
-    throw new Error('no agent started streaming — diagnostics: ' + JSON.stringify(diag, null, 2));
+  if (IDLE) {
+    console.log('[perf] IDLE phase: board seeded, NO run started (PERF_IDLE=1)');
+  } else {
+    await ex(`await call('run')`);
+    for (let t = 0; t < 250 && working < Math.min(2, AGENTS); t++) { await WAIT(100); working = await ex(`return Object.values(S.orch.agents || {}).filter(a => a.status === 'working').length`) || 0; }
+    console.log(`[perf] ${working}/${AGENTS} agents working, streaming ${STREAM_EPS} ev/s for ~${STREAM_SECONDS}s`);
+    if (!working) {
+      const diag = await ex(`return { agents: S.orch.agents, logs: logs.slice(-40).map(l => l.kind + ': ' + String(l.text).slice(0, 160)), tasks: S.tasks.filter(t => ['todo','in_progress'].includes(t.status)).map(t => t.id + ' ' + t.status + ' -> ' + t.assignee) }`);
+      throw new Error('no agent started streaming — diagnostics: ' + JSON.stringify(diag, null, 2));
+    }
   }
 
   await WAIT(WARM_MS);
@@ -472,6 +479,7 @@ async function main() {
   summary.rates.logPushesPerSecMain = pushes.log.perSec;
 
   summary.env = {
+    phase: IDLE ? 'idle (board seeded, no run)' : 'load (streaming run + external board writers)',
     platform: `${os.platform()} ${os.arch()} cpus=${os.cpus().length} loadavg1m=${os.loadavg()[0].toFixed(2)}`,
     load: {
       start1m: +LOAD_START[0].toFixed(2), mid1m: +LOAD_MID[0].toFixed(2), end1m: +os.loadavg()[0].toFixed(2),
@@ -501,7 +509,7 @@ async function main() {
   console.log('\n' + renderMd(summary));
   console.log(`[perf] wrote ${path.join(OUT, 'baseline.json')} and baseline.md`);
 
-  await ex(`await call('stop')`);
+  if (!IDLE) await ex(`await call('stop')`);
   await WAIT(1200);
 }
 
