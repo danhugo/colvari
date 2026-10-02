@@ -193,7 +193,7 @@ img.avface { width:100%; height:100%; display:block; border-radius:inherit; }
 .cchip pre { white-space:pre-wrap; word-break:break-word; background:var(--bg-code); border-radius:6px; padding:6px 8px; font-size:11px; margin:4px 0; max-width:min(720px, 100%); }
 .bubble.question { border:1px solid var(--accent); background:var(--accent-soft); border-radius:8px; padding:8px 10px; } .bubble.question textarea { width:100%; margin-top:6px; background:var(--bg-surface); color:var(--fg-primary); border-color:var(--border-strong); }
 .bubble.question button, .composer button { margin:6px 6px 0 0; }
-#chat-typing { color:var(--success); font-size:12px; } #chat-typing .dots::after { content:'…'; animation:blink 1.2s infinite; } @keyframes blink { 50% { opacity:.2; } }
+#chat-typing { color:var(--success); font-size:12px; } #chat-typing .dots::after { content:'…'; }
 .composer { border-top:1px solid var(--border); padding:8px 16px 12px; } .composer .row { display:flex; gap:8px; align-items:flex-end; } .composer textarea { flex:1; background:var(--bg-raised); color:var(--fg-primary); border:1px solid var(--border-strong); border-radius:8px; resize:none; }
 #chat-preview { min-height:16px; font-size:11px; margin-bottom:4px; } #chat-preview.task { color:var(--accent-text); } #chat-preview.message { color:var(--success); } #chat-preview.goal { color:var(--term-yellow); } #chat-preview.error { color:var(--term-red); }
 #chat-mentions { margin:0 16px; background:var(--bg-raised); border:1px solid var(--border-strong); border-radius:8px; padding:4px; } #chat-mentions div { padding:4px 8px; border-radius:6px; cursor:pointer; display:flex; gap:8px; align-items:center; }
@@ -220,8 +220,7 @@ button:focus-visible, input:focus, select:focus, textarea:focus { outline:none; 
 #sidebar h4 { font-size:var(--text-xs); letter-spacing:.06em; font-weight:var(--fw-semibold); padding:0 var(--space-2); }
 #projectlist div, #teamlist div { border-radius:var(--radius-sm); transition:background var(--dur-fast); } #projectlist div:hover, #teamlist div:hover { background:var(--bg-hover); }
 #projectlist div.sel, #teamlist div.sel { background:var(--bg-active); color:var(--accent-text); }
-.dot { width:8px; height:8px; box-shadow:0 0 0 0 color-mix(in srgb, var(--success) 60%, transparent); animation:pulse 1.6s var(--ease-out) infinite; }
-@keyframes pulse { 70% { box-shadow:0 0 0 6px transparent; } 100% { box-shadow:0 0 0 0 transparent; } }
+.dot { width:8px; height:8px; }
 .col { background:var(--bg-sidebar); border-color:transparent; } .col h3 { font-size:var(--text-xs); letter-spacing:.06em; }
 /* t_3d00e0d2: board cards unboxed — surface + shadow only, selection/approval via focus rings */
 .card { background:var(--bg-surface); border-color:transparent; border-radius:var(--radius-md); padding:var(--space-2) var(--space-3); box-shadow:var(--shadow-sm); transition:transform var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast); }
@@ -291,14 +290,10 @@ button:focus-visible, input:focus, select:focus, textarea:focus { outline:none; 
 .avatar.human { background:transparent !important; border:2px solid var(--human); border-radius:50%; }
 .avatar.human::before { content:''; width:10px; height:10px; border-radius:50%; background:var(--human); }
 .cgroup.self .cname { color:var(--fg-primary); }
-/* Presence by shape: working = spinning ring, needs-you = "!" badge. */
-@property --sweep { syntax:'<angle>'; inherits:false; initial-value:0deg; }
-.avatar.working::after { content:''; position:absolute; inset:-4px; width:auto; height:auto; border-radius:inherit; padding:2px; background:conic-gradient(from var(--sweep), transparent 0 60%, var(--success)); -webkit-mask:linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite:xor; mask-composite:exclude; animation:sweep 1.2s linear infinite; box-shadow:none; border:0; }
-@keyframes sweep { to { --sweep:360deg; } }
-@media (prefers-reduced-motion: reduce) { .avatar.working::after { background:var(--success); opacity:.5; box-shadow:0 0 8px var(--success); } }
+/* Presence by shape, no motion (t_e116438b): working = static ring, needs-you = "!" badge. */
+.avatar.working::after { content:''; position:absolute; inset:-4px; width:auto; height:auto; border-radius:inherit; padding:2px; background:var(--success); opacity:.55; box-shadow:0 0 8px var(--success); -webkit-mask:linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite:xor; mask-composite:exclude; border:0; }
 .avatar.ask::before { content:'!'; position:absolute; top:-5px; right:-5px; width:14px; height:14px; border-radius:50%; background:var(--warning); color:var(--fg-primary); font:700 10px/14px var(--font-sans); text-align:center; border:2px solid var(--bg-app); }
-@keyframes spin { to { transform:rotate(360deg); } }
-.typing { display:inline-flex; align-items:center; gap:5px; } .typing .spin { width:10px; height:10px; border-radius:50%; border:2px solid var(--success); border-right-color:transparent; animation:spin 1s linear infinite; }
+.typing { display:inline-flex; align-items:center; gap:5px; } .typing .spin { width:10px; height:10px; border-radius:50%; border:2px solid var(--success); border-right-color:transparent; }
 /* Sticky "Your turn" bar above the composer. */
 #chat-yourturn { position:sticky; bottom:0; margin:0 var(--space-4) var(--space-2); border:1px solid var(--warning); border-left:4px solid var(--warning); background:var(--warning-soft); border-radius:var(--radius-md); padding:var(--space-2) var(--space-3); box-shadow:var(--shadow-md); }
 .yt-head { display:flex; gap:var(--space-2); align-items:center; color:var(--warning-text); margin-bottom:4px; }
@@ -364,10 +359,10 @@ header #wtdisk.wtwarn { background:var(--warning-soft); color:var(--warning-text
 .limitmeter .lm-chip.lm-idle { opacity:.55; }
 .tlink { font-size:10.5px; opacity:.8; } .bubble { font-size:var(--text-sm); }
 
-/* Idle/busy by shape: idle = hollow ring, busy = spinning arc. */
+/* Idle/busy by shape, no motion (t_e116438b): idle = hollow ring, busy = arc with a gap. */
 .pres { display:inline-flex; width:12px; height:12px; flex:none; } .pres i { flex:1; border-radius:50%; border:2px solid var(--fg-muted); }
-.pres.busy i { border-color:var(--success); border-right-color:transparent; animation:spin 1s linear infinite; }
-#graph .pres circle { fill:none; stroke-width:2; stroke:var(--fg-muted); } #graph .pres.busy circle { transform-box:fill-box; transform-origin:center; stroke:var(--success); stroke-dasharray:22 10; animation:spin 1s linear infinite; }
+.pres.busy i { border-color:var(--success); border-right-color:transparent; }
+#graph .pres circle { fill:none; stroke-width:2; stroke:var(--fg-muted); } #graph .pres.busy circle { stroke:var(--success); stroke-dasharray:22 10; }
 .presence { display:flex; flex-wrap:wrap; gap:6px; margin:0 0 8px; } .pchip { display:inline-flex; align-items:center; gap:5px; padding:2px 8px; border:1px solid var(--border); border-radius:var(--radius-full); font-size:12px; }
 /* ---- Team graph editor ---- */
 .gtoolbar { gap:var(--space-2); } .gtoolbar .tgroup { display:flex; gap:2px; padding:2px; background:var(--bg-surface); border:1px solid var(--border); border-radius:var(--radius-sm); }
@@ -614,11 +609,10 @@ header .pill.watchst { cursor:pointer; }
 .subcount { color:var(--muted); font-size:11px; background:var(--bg-code); border:1px solid var(--line); border-radius:var(--radius-full); padding:0 7px; white-space:nowrap; }
 .substatus { font-size:10px; border-radius:var(--radius-full); padding:1px 7px; border:1px solid var(--line); color:var(--muted); text-transform:uppercase; letter-spacing:.4px; white-space:nowrap; }
 .substatus.ss-running { color:var(--warning-text); background:var(--warning-soft); border-color:transparent; }
-.substatus.ss-running::before { content:''; display:inline-block; width:6px; height:6px; margin-right:4px; border-radius:50%; background:var(--warning); animation:subpulse 1.2s ease-in-out infinite; }
+.substatus.ss-running::before { content:''; display:inline-block; width:6px; height:6px; margin-right:4px; border-radius:50%; background:var(--warning); }
 .substatus.ss-completed { color:var(--success-text); background:var(--success-soft); border-color:transparent; }
 .substatus.ss-failed { color:var(--danger); background:var(--danger-soft); border-color:transparent; }
 .substatus.ss-aborted { color:var(--fg-muted); background:var(--bg-code); border-color:transparent; text-decoration:line-through; }
-@keyframes subpulse { 0%,100% { opacity:.25; } 50% { opacity:1; } }
 .subrows { padding:1px 4px 4px 8px; }
 .subrows .logrow { font-size:11.5px; }
 .subrows .logtime, .subrows .logagent { display:none; } /* keep nested rows compact: the block header carries who/when */
@@ -861,24 +855,22 @@ button, .pchip, .tag, .badge, .pill, .avatar, .cchip summary, .lvchip, .asswitch
 /* Node status states (Team graph): idle is a HOLLOW disc — a ring in the agent's
    team hue, no fill, full opacity — so "not working" reads at a glance and stays legible on
    dark (the old 42–50% opacity dimming all but vanished there). Working keeps a solid disc
-   with a pulsing success ring; stuck gets a warning ring. --av carries the hue from markup. */
+   with a static success ring (no motion, t_e116438b); stuck gets a warning ring. --av carries
+   the hue from markup. */
 #graph .node .avatar { transition: opacity var(--dur-base) var(--ease-out); }
 #graph .node.st-idle:not(.sel):not(.stuck) .avatar { fill: none !important; stroke: var(--av, var(--fg-muted)); stroke-width: 2.5; filter: none; opacity: 1; }
 #graph .node.st-idle:not(.stuck) .avtext { fill: var(--fg-secondary); opacity: 1; }
 #graph .node.stuck .avatar { opacity: 1; stroke: var(--warning); stroke-width: 2.5; }
-#graph .node.working .avatar { stroke: var(--success); stroke-width: 2.5; animation: avpulse 2.2s var(--ease-out) infinite; }
-@keyframes avpulse { 0%, 100% { stroke-opacity: 1; } 50% { stroke-opacity: .4; } }
+#graph .node.working .avatar { stroke: var(--success); stroke-width: 2.5; }
 /* Sidebar team rows wear their team hue so the avatar palette is legible at a glance. */
 #teamlist > div { display: flex; align-items: center; gap: 7px; }
 .teamdot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
-/* Team graph readability (t_2aaf566c): hierarchy (assign) edges stay solid; message/review edges are ghosts until a node/edge is hovered or selected; edges into working agents flow. */
+/* Team graph readability (t_2aaf566c): hierarchy (assign) edges stay solid; message/review edges are ghosts until a node/edge is hovered or selected; edges into working agents are green. */
 #graph .edge.secondary { opacity:.14; stroke-width:1.25; transition:opacity var(--dur-fast); }
 #graph .edge.hl, #graph .edge.secondary.sel { opacity:1; stroke-width:2.5; }
 #graph.focusing .edge.primary:not(.hl) { opacity:.3; }
 #graph .edge.primary { stroke-width:2; }
-#graph .edge.active { stroke:var(--success); stroke-dasharray:8 6; animation:edgeflow .8s linear infinite; }
-@keyframes edgeflow { to { stroke-dashoffset:-14; } }
-@media (prefers-reduced-motion: reduce) { #graph .edge.active { animation:none; } }
+#graph .edge.active { stroke:var(--success); stroke-dasharray:8 6; }
 #graph .node.st-working .card { stroke-width:2.5; }
 
 /* Team graph: working vs idle readable without hover; cluster cards */
