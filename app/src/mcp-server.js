@@ -25,6 +25,9 @@ const coreNow = !!(callerNode && callerNode.core === true);
 const server = new McpServer({ name: 'board', version: '0.1.0' });
 const STATUS = z.enum(['todo', 'in_progress', 'review', 'done', 'waiting_for_human']);
 const PRIORITY = z.enum(['P0', 'P1', 'P2', 'P3']);
+// Optional image attachments (t_6628894d): paths are resolved inside the caller's working
+// directory (the worktree), copied into the project store, and stored as references only.
+const ATTACHMENTS = z.array(z.object({ path: z.string().describe('image path inside your working directory') })).max(5).optional().describe('optional image attachments (png/jpg/jpeg/gif/webp, <=10 MB each, inside your working directory; max 5)');
 
 const reg = (name, description, shape) => enabled.has(name) && server.tool(name, description, shape, async (args) => {
   try { return { content: [{ type: 'text', text: JSON.stringify(await tools[name](args || {}), null, 2) }] }; }
@@ -36,8 +39,8 @@ reg('list_tasks', 'List board tasks visible to you. Excludes done tasks and trim
 reg('create_task', 'Create a task assigned to yourself or a teammate you have an outgoing edge to (id or name). Use blockedBy to make it wait for other tasks.', { title: z.string(), description: z.string().optional(), assignee: z.string().optional(), parentId: z.string().optional(), blockedBy: z.array(z.string()).optional().describe('ids of tasks that must be done before this one starts'), priority: PRIORITY.optional().describe('P0 (highest) .. P3 (lowest); default P2') });
 reg('reassign_task', 'PM only: give a todo task to another teammate you can assign to (id or name). Keeps worktree and comments. Only for todo tasks.', { taskId: z.string(), assignee: z.string() });
 reg('update_task_status', 'Change a task status (todo, in_progress, review, done). Reviewers may move tasks of agents they review to review/done.', { taskId: z.string(), status: STATUS, priority: PRIORITY.optional().describe('optionally re-prioritize the task (P0 highest .. P3 lowest)') });
-reg('comment_task', 'Add a comment to a task.', { taskId: z.string(), text: z.string() });
-reg('send_message', 'Send a direct message to a teammate you have a message or assign edge to (id or name).', { to: z.string(), text: z.string(), taskId: z.string().optional() });
+reg('comment_task', 'Add a comment to a task.', { taskId: z.string(), text: z.string(), attachments: ATTACHMENTS });
+reg('send_message', 'Send a direct message to a teammate you have a message or assign edge to (id or name).', { to: z.string(), text: z.string(), taskId: z.string().optional(), attachments: ATTACHMENTS });
 reg('read_messages', 'Read your inbox (messages from teammates with an edge to you, and from the human). Marks them read. Default: unread only, newest 20.', { unreadOnly: z.boolean().optional().describe('default true: only unread'), from: z.string().optional(), limit: z.number().int().positive().optional().describe('newest N messages, default 20') });
 reg('ask_human', 'Ask the human a question and WAIT for the answer (blocks until answered in the Inbox). Your task goes to waiting_for_human meanwhile. Returns {answer}.', { question: z.string(), choices: z.array(z.string()).optional().describe('optional answer buttons'), taskId: z.string().optional() });
 reg('read_wiki', 'Read a wiki page by title, or list page titles when title is omitted.', { title: z.string().optional() });
