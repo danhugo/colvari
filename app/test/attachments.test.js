@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert');
-const fs = require('fs'); const path = require('path');
+const fs = require('fs'); const os = require('os'); const path = require('path');
 const { Store } = require('../src/store');
 const { buildPrompt, Orchestrator, attachedFilesLines } = require('../src/orchestrator');
 const { buildClaudeArgs } = require('../src/agent-config');
