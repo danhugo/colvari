@@ -474,6 +474,43 @@ async function guiE2E() {
     await shot('chatmsg-reply');
     console.log('[gui-e2e] chatmsg', JSON.stringify({ pv, msg: !!msg, woken: !!promptArgs, reply }));
   };
+  // Agent image attachments (t_6628894d): the real board tools (makeTools — the exact surface the
+  // MCP server registers) copy a worktree png into the project store on send_message/comment_task,
+  // the chat room renders both as lazy file:// thumbs, and no agent path reaches messages.json.
+  const agentImageShots = async () => {
+    const { makeTools } = require('./board-tools');
+    await waitFor(`return !!document.querySelector('#tpl-select option')`); await ex(`await refresh();`);
+    const cur = await ex(`return { p: ctx.p, t: S.teamId }`);
+    const ps = pm.store(cur.p || pid(), cur.t);
+    let nodes = ps.getTeam().nodes;
+    if (nodes.length < 2) { ps.addNode({ name: 'Pia', role: 'PM', x: 60, y: 60 }); ps.addNode({ name: 'Devon', role: 'Dev', x: 320, y: 160 }); nodes = ps.getTeam().nodes; }
+    const [a, b] = nodes; if (!ps.getTeam().edges.some((e) => e.from === a.id && e.to === b.id && e.kind === 'message')) ps.addEdge(a.id, b.id, 'message');
+    // The "worktree": the png the agent posts must live inside its cwd, never in the store.
+    // 16x16 checkerboard so the review shot shows an actual image, not a solid upscaled pixel.
+    const wt = fs.mkdtempSync(path.join(require('os').tmpdir(), 'squad-imgwt-'));
+    const pngShot = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAJUlEQVR4nGN41PIfiPRsKoCIGDYDyRqIVwphk65h1A+jfqCSHwBRLqOQWccwggAAAABJRU5ErkJggg==', 'base64');
+    fs.writeFileSync(path.join(wt, 'shot.png'), pngShot);
+    const prevCwd = process.cwd();
+    let msg = null, cmt = null;
+    try {
+      process.chdir(wt);
+      const tools = makeTools(ps, a.id);
+      msg = tools.send_message({ to: b.id, text: 'Here is the screenshot.', attachments: [{ path: 'shot.png' }] });
+      const t = ps.createTask({ title: 'Agent image demo', assignee: b.id, createdBy: a.id });
+      cmt = tools.comment_task({ taskId: t.id, text: 'Same image on the task.', attachments: [{ path: 'shot.png' }] });
+    } finally { process.chdir(prevCwd); }
+    expect('agentimage: send_message copied the png and stored only the 4-field reference', msg && msg.attachments && msg.attachments.length === 1
+      && msg.attachments[0].path.startsWith(path.join(ps.attachmentsDir(), '') ) && fs.readFileSync(msg.attachments[0].path).equals(pngShot)
+      && Object.keys(msg.attachments[0]).sort().join(',') === 'mime,name,path,size', msg && msg.attachments);
+    expect('agentimage: comment_task stores the copy too', cmt && cmt.attachments && cmt.attachments.length === 1 && cmt.attachments[0].path.startsWith(path.join(ps.attachmentsDir(), '')), cmt && cmt.attachments);
+    const raw = fs.readFileSync(path.join(ps.dir, 'messages.json'), 'utf8');
+    expect('agentimage: no worktree path and no base64 in messages.json', !raw.includes(wt) && !raw.includes('iVBOR'), wt);
+    await ex(`$('#tabs button[data-tab=chat]').click(); await refresh(); chatSig = null; renderChat(); await w(300);`);
+    const thumbs = await waitFor(`return [...document.querySelectorAll('#chat-room .att-thumb')].filter((i) => i.naturalWidth > 0).length >= 2`, 8000);
+    expect('agentimage: message and comment thumbnails render as loaded file:// images', thumbs, { thumbs });
+    await shot('agentimage-chat');
+    console.log('[gui-e2e] agentimage', JSON.stringify({ msg: !!msg, cmt: !!cmt, thumbs }));
+  };
   // Composer clear-on-send (t_ada3fae8): the input empties the moment Send is pressed, before the
   // bridge answers; a failed send hands the draft back. Success path is real (fake CLI), failure
   // path patches orch.sendToAgent to throw.
@@ -2326,6 +2363,7 @@ async function guiE2E() {
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'graph') { await graphShots(); for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`$('#tabs button[data-tab=team]').click(); await w(500);`); await shot(`graph-${t}`); } require('electron').nativeTheme.themeSource = 'system'; throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'chat') { await chatShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'chatmsg') { await chatMsgShots(); throw null; }
+    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'agentimage') { await agentImageShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'windowing') { await windowingShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'firstrun') { await firstrunInbox(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'team') { await teamModesShots(); throw null; }
