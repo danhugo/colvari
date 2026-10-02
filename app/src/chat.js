@@ -65,7 +65,7 @@
     for (const m of messages || []) ev.push({ at: ms(m.at), who: m.from, to: m.to, type: 'message', text: m.text, atts: m.attachments || null, taskId: m.taskId || null });
     for (const t of tasks || []) {
       if (t.createdBy) ev.push({ at: ms(t.createdAt), who: t.createdBy, to: t.assignee, type: 'handoff', text: t.title, taskId: t.id });
-      for (const c of t.comments || []) ev.push({ at: ms(c.at), who: c.author, type: 'comment', text: c.text, taskId: t.id });
+      for (const c of t.comments || []) ev.push({ at: ms(c.at), who: c.author, type: 'comment', text: c.text, atts: c.attachments || null, taskId: t.id });
     }
     for (const i of inbox || []) if (i.kind === 'question') ev.push({ at: ms(i.at), who: i.nodeId, type: 'question', text: i.question, choices: i.choices || [], inboxId: i.id, taskId: i.taskId || null });
     return ev.sort((a, b) => a.at - b.at).slice(-max);

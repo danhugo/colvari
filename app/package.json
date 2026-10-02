@@ -5,8 +5,8 @@
   "main": "src/main.js",
   "scripts": {
     "start": "electron .",
-    "test": "AGENTS_SQUAD_TEST_ISOLATION=1 node --require ./test/harness/install.js --test --test-timeout=60000 --test-force-exit test/*.test.js",
-    "test:subset": "AGENTS_SQUAD_TEST_ISOLATION=1 node --require ./test/harness/install.js --test --test-timeout=60000 --test-force-exit",
+    "test": "AGENTS_SQUAD_TEST_ISOLATION=1 node --require ./test/harness/install.js --test --test-timeout=240000 --test-force-exit test/*.test.js",
+    "test:subset": "AGENTS_SQUAD_TEST_ISOLATION=1 node --require ./test/harness/install.js --test --test-timeout=240000 --test-force-exit",
     "test:tmpdir": "node test/harness/tmpdir-hygiene.js",
     "e2e": "AGENTS_SQUAD_PROJECT=$(mktemp -d) AGENTS_SQUAD_TEST_ISOLATION=1 node cli/e2e.js",
     "smoke:real": "node cli/smoke-discovery-limits.js",

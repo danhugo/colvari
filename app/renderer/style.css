@@ -262,7 +262,7 @@ button:focus-visible, input:focus, select:focus, textarea:focus { outline:none; 
 .chat { background:var(--bg-app); color:var(--fg-primary); } .chat .muted { color:var(--fg-muted); }
 .chat-head { border-bottom-color:var(--border); background:var(--bg-surface); padding:var(--space-2) var(--space-4); }
 #chat-room { padding:var(--space-2) 0; } .cgroup { padding:var(--space-1) var(--space-4); transition:background var(--dur-fast); } .cgroup:hover { background:var(--bg-hover); }
-.cbody { max-width:78ch; } .avatar { border-radius:var(--radius-md); flex-basis:32px; height:32px; }
+.avatar { border-radius:var(--radius-md); flex-basis:32px; height:32px; }
 .role { background:var(--bg-hover); color:var(--fg-secondary); border-radius:var(--radius-xs); } .cname time { color:var(--fg-muted); }
 .bubble { line-height:var(--lh-body); margin:1px 0; } .bubble.thought { color:var(--fg-secondary); } .bubble.action, .bubble.handoff { color:var(--accent-text); } .bubble.error { color:var(--danger); }
 .tlink { color:var(--accent-text); }
@@ -280,8 +280,9 @@ button:focus-visible, input:focus, select:focus, textarea:focus { outline:none; 
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation:none !important; transition:none !important; } }
 /* ===== Chat: prototype port (critique must-fix 2-5) ===== */
 /* Flat, dense messages: plain text under the name, no bubbles/rails. */
+/* Messages use the full pane width: the .cbody ch caps (78/72) are gone on purpose (t_34cb6983). */
 #chat-room { padding:var(--space-1) 0; } .cgroup { gap:var(--space-2); padding:3px var(--space-4); margin-top:4px; } .cgroup:hover { background:var(--bg-hover); }
-.cbody { max-width:72ch; } .cname { font-weight:var(--fw-semibold); line-height:1.3; } .cname time { font-size:var(--text-xs); }
+.cname { font-weight:var(--fw-semibold); line-height:1.3; } .cname time { font-size:var(--text-xs); }
 .bubble { margin:0; padding:0; background:none; border:0; line-height:1.4; } .bubble + .bubble, .cchip + .bubble { margin-top:1px; }
 .cchip { margin:1px 0; } .cchip summary { padding:0 8px; font-size:var(--text-xs); } .cchip + br { display:none; }
 .avatar { flex:0 0 28px; height:28px; font-size:11px; border-radius:var(--radius-sm); margin-top:2px; }
@@ -377,7 +378,9 @@ header #wtdisk.wtwarn { background:var(--warning-soft); color:var(--warning-text
 .gmode button.on { background:var(--accent-soft); color:var(--accent-text); }
 .gmode button:not(.on):not(:disabled):hover { color:var(--fg-primary); background:var(--bg-hover); }
 .modenote { font-size:var(--text-xs); color:var(--warning-text); background:var(--warning-soft); border:1px solid var(--warning); border-radius:var(--radius-sm); padding:2px 8px; white-space:nowrap; }
-#graph.watch { cursor:default; } #graph.watch .node { cursor:pointer; } #graph.watch .node .qacts, #graph.watch .handle { display:none; }
+/* Watch: locked nodes keep the grab affordance — the first blocked drag explains itself via toast
+   (t_d8e41e6a); the canvas still pans on drag-from-background. */
+#graph.watch { cursor:default; } #graph.watch .node { cursor:grab; } #graph.watch .node:active { cursor:grabbing; } #graph.watch .node .qacts, #graph.watch .handle { display:none; }
 .canvas { position:relative; flex:1; min-width:0; display:flex; }
 #graph { flex:1; cursor:grab; user-select:none; border:1px solid var(--border); border-radius:var(--radius-md); box-shadow:var(--shadow-sm);
   background-color:var(--bg-surface); background-image:radial-gradient(circle, var(--border-strong) 1px, transparent 1.2px); background-size:22px 22px; }
@@ -883,6 +886,9 @@ button, .pchip, .tag, .badge, .pill, .avatar, .cchip summary, .lvchip, .asswitch
 #graph .node.st-idle:not(.sel) .card { fill:var(--bg-app); stroke-dasharray:none; }
 #graph .node.st-idle .nname { fill:var(--fg-secondary); }
 #graph .stpill rect { fill:var(--bg-hover); stroke:var(--border-strong); stroke-width:1; } #graph .stpill text { fill:var(--fg-secondary); font-size:11px; font-weight:var(--fw-semibold); }
+/* Scale-invariant status (t_d8e41e6a): the pill grows by the same LOD factor as node names, so its
+   on-screen size — and the status text — stay readable at Fit zoom instead of shrinking to ~6px. */
+#graph .stpillin { transform-box:fill-box; transform-origin:center; transform:scale(var(--nz, 1)); }
 #graph .stpill.sp-working rect { fill:var(--success); stroke:none; } #graph .stpill.sp-working text { fill:#fff; }
 #graph .stpill.sp-needs-human rect { fill:var(--warning-strong); stroke:none; } #graph .stpill.sp-needs-human text { fill:#fff; }
 #graph .node.cluster .card { fill:var(--bg-raised); } #graph .node.cluster .stack1, #graph .node.cluster .stack2 { fill:var(--bg-hover); filter:none; }

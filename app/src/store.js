@@ -887,10 +887,13 @@ class Store {
     if (t) { this.commentTask(t.id, 'human', `Q: ${it.question}\nA: ${answer}`); if (t.status === 'waiting_for_human') this.updateTask(t.id, { status: 'in_progress' }); }
     return this.getInboxItem(iid);
   }
-  commentTask(tid, author, text) {
+  commentTask(tid, author, text, attachments = null) {
     return this._withTasks((tasks) => {
       const t = tasks.find((x) => x.id === tid); if (!t) throw new Error('no task ' + tid);
-      const c = { author, text, at: new Date().toISOString() }; t.comments.push(c); t.updatedAt = c.at; return c;
+      const c = { author, text, at: new Date().toISOString() };
+      const atts = sanitizeAttachments(attachments);
+      if (atts) c.attachments = atts;
+      t.comments.push(c); t.updatedAt = c.at; return c;
     });
   }
 
