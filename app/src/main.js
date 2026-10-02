@@ -1,4 +1,5 @@
 const { app, BrowserWindow, ipcMain, Notification, nativeTheme } = require('electron');
+if (process.env.AGENTS_SQUAD_PERF_HOOK) require('./perf-hook'); // t_b6a28b60 measurement hook: must load before anything registers IPC or requires delta-pump
 const path = require('path');
 // Test instances (gui-e2e / smoke) must never leave fake-CLI children behind: install procguard
 // before the orchestrator loads so every spawn it makes is tracked and reaped (t_92c31037).
