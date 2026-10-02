@@ -159,7 +159,7 @@ function buildPrompt(team, node, task, extra = {}) {
     task.description ? `Description:\n${task.description}` : '',
     task.attachments && task.attachments.length ? attachedFilesLines(task.attachments) : '',
     (task.blockedBy || []).length ? `This task depended on: ${task.blockedBy.join(', ')} (all done now; read their comments with list_tasks if useful).` : '',
-    task.comments.length ? `Comments so far:\n${task.comments.map((c) => `- ${c.author}: ${c.text}`).join('\n')}` : '',
+    task.comments.length ? `Comments so far:\n${task.comments.map((c) => ['- ' + c.author + ': ' + c.text, attachedFilesLines(c.attachments)].filter(Boolean).join('\n')).join('\n')}` : '',
     '',
     `Board files: every task is one pretty-JSON file at .squad/board/tasks/<id>.json and every wiki page one markdown file at .squad/wiki/<slug>.md${extra.boardDir ? ` — this project's store dir: ${extra.boardDir}` : ''}. Read them freely with cat/grep/jq; write only via the board tools — never create or edit these files directly. Private data (direct messages, inbox) is kept outside .squad/.`,
     `Never pkill/killall/pgrep-kill by name (Electron, electron, agents-squad, node) — patterns match the user's live app and its helper processes, not just yours. To stop your own background job, kill the PID you started ($!, or kill the process group) or use your tool's job stop.`,

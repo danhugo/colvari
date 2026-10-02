@@ -143,3 +143,86 @@ test('wakeRun passes attachDir when its messages carry attachments, and not othe
     assert.equal(seen[1].attachDir, undefined, 'plain wake run gets no dir');
   } finally { RT.getRuntime = orig; }
 });
+
+// ---- Agent-posted attachments (t_6628894d): send_message/comment_task copy {path} files into the
+// store and keep only the reference. The allowed root is the caller's cwd (the agent's worktree).
+const { makeTools } = require('../src/board-tools');
+
+const agentPair = () => {
+  const s = tmp();
+  const a = s.addNode({ name: 'Dev A', role: 'Dev' });
+  const b = s.addNode({ name: 'Dev B', role: 'Dev' });
+  s.addEdge(a.id, b.id, 'message');
+  // wt sits inside a sibling-parent dir so '../' escape targets exist on disk next to it.
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'squad-wtp-'));
+  const wt = path.join(parent, 'wt');
+  fs.mkdirSync(wt);
+  return { s, a, b, wt, parent };
+};
+const inWt = (wt, fn) => { const prev = process.cwd(); process.chdir(wt); try { return fn(); } finally { process.chdir(prev); } };
+const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+test('send_message with a worktree png: copy saved, only the 4-field reference stored', () => {
+  const { s, a, b, wt } = agentPair();
+  fs.writeFileSync(path.join(wt, 'shot.png'), PNG);
+  const m = inWt(wt, () => makeTools(s, a.id).send_message({ to: b.id, text: 'see shot', attachments: [{ path: 'shot.png' }] }));
+  assert.equal(m.attachments.length, 1);
+  const att = m.attachments[0];
+  assert.deepEqual(pick4(att), { path: att.path, name: 'shot.png', mime: 'image/png', size: PNG.length });
+  assert.ok(att.path.startsWith(path.join(s.dir, 'attachments') + path.sep), 'the copy lives in the store');
+  assert.notEqual(att.path, path.join(wt, 'shot.png'), 'the stored path is the copy, not the agent file');
+  assert.equal(fs.readFileSync(att.path).toString('hex'), PNG.toString('hex'), 'exact bytes copied');
+  const raw = fs.readFileSync(path.join(s.dir, 'messages.json'), 'utf8');
+  assert.ok(!raw.includes(wt), 'the agent-provided worktree path never reaches messages.json');
+});
+
+test('comment_task accepts attachments; the task prompt carries the copy path', () => {
+  const { s, a, wt } = agentPair();
+  fs.writeFileSync(path.join(wt, 'ui.png'), PNG.subarray(0, 4));
+  const t = s.createTask({ title: 'polish ui', assignee: a.id, createdBy: a.id });
+  const c = inWt(wt, () => makeTools(s, a.id).comment_task({ taskId: t.id, text: 'screenshot attached', attachments: [{ path: './ui.png' }] }));
+  assert.deepEqual(c.attachments.map(pick4), [{ path: c.attachments[0].path, name: 'ui.png', mime: 'image/png', size: 4 }]);
+  assert.ok(c.attachments[0].path.startsWith(path.join(s.dir, 'attachments') + path.sep), 'copied into the store');
+  const team = s.getTeam(); const node = team.nodes.find((x) => x.id === a.id);
+  assert.ok(buildPrompt(team, node, s.getTask(t.id)).includes(`Attached files: ${c.attachments[0].path} (image/png, 4 bytes)`), 'prompt line for comment attachments');
+  assert.equal(s.commentTask(t.id, a.id, 'plain').attachments, undefined, 'no attachments key without them');
+});
+
+test('attachment rejections: ../ escape, absolute outside, symlink escape, svg, oversize, missing', () => {
+  const { s, a, b, wt, parent } = agentPair();
+  const t = s.createTask({ title: 'x', assignee: a.id, createdBy: a.id });
+  const call = (atts, which) => inWt(wt, () => makeTools(s, a.id)[which](
+    which === 'send_message' ? { to: b.id, text: 'x', attachments: atts } : { taskId: t.id, text: 'x', attachments: atts }));
+  // ../ escape: the file exists one level up the worktree, realpath lands outside the root.
+  const outside = path.join(parent, 'secret.png');
+  fs.writeFileSync(outside, PNG);
+  fs.writeFileSync(path.join(wt, 'inside.png'), PNG);
+  fs.symlinkSync(outside, path.join(wt, 'trap.png'));
+  assert.throws(() => call([{ path: '../secret.png' }], 'send_message'), /outside your working directory/);
+  assert.throws(() => call([{ path: outside }], 'send_message'), /outside your working directory/);
+  assert.throws(() => call([{ path: 'trap.png' }], 'send_message'), /outside your working directory|not found/, 'symlink escape');
+  // SVG is scriptable: rejected by the extension allowlist (not found vs unsupported are both fine).
+  fs.writeFileSync(path.join(wt, 'evil.svg'), '<svg/>');
+  assert.throws(() => call([{ path: 'evil.svg' }], 'send_message'), /unsupported attachment/);
+  assert.throws(() => call([{ path: 'notes.txt' }], 'send_message'), /unsupported attachment/);
+  // Size checked by stat BEFORE reading: an over-limit file is refused without a copy.
+  fs.writeFileSync(path.join(wt, 'big.png'), Buffer.alloc(10 * 1024 * 1024 + 1));
+  assert.throws(() => call([{ path: 'big.png' }], 'send_message'), /too large.*10 MB/);
+  assert.throws(() => call([{ path: 'ghost.png' }], 'send_message'), /attachment not found/);
+  assert.throws(() => call([{}], 'send_message'), /each attachment needs/);
+  assert.throws(() => call([{ path: 'inside.png' }, { path: 'inside.png' }, { path: 'inside.png' }, { path: 'inside.png' }, { path: 'inside.png' }, { path: 'inside.png' }], 'send_message'), /max 5 per call/);
+  // Nothing was copied and no message/comment row holds an attachment.
+  try { assert.equal(fs.readdirSync(s.attachmentsDir()).length, 0, 'rejected calls never copied anything'); } catch { assert.ok(!fs.existsSync(s.attachmentsDir()), 'nothing copied (no attachments dir at all)'); }
+  assert.equal(s.listMessages({ to: b.id }).length, 0, 'no message stored when a ref fails');
+  assert.equal(s.getTask(t.id).comments.length, 0, 'no comment stored when a ref fails');
+});
+
+test('all-or-nothing: one bad ref among good ones rejects the call and copies nothing', () => {
+  const { s, a, b, wt } = agentPair();
+  fs.writeFileSync(path.join(wt, 'good1.png'), PNG);
+  fs.writeFileSync(path.join(wt, 'good2.png'), PNG);
+  fs.writeFileSync(path.join(wt, 'evil.svg'), '<svg/>');
+  assert.throws(() => inWt(wt, () => makeTools(s, a.id).send_message({ to: b.id, text: 'x', attachments: [{ path: 'good1.png' }, { path: 'good2.png' }, { path: 'evil.svg' }] })), /unsupported attachment/);
+  try { assert.equal(fs.readdirSync(s.attachmentsDir()).length, 0, 'validated good files were NOT copied'); } catch { assert.ok(!fs.existsSync(s.attachmentsDir()), 'no attachments dir at all'); }
+  assert.equal(s.listMessages({ to: b.id }).length, 0, 'no message row');
+});
