@@ -10,7 +10,7 @@
     "smoke:real": "node cli/smoke-discovery-limits.js",
     "smoke": "AGENTS_SQUAD_SMOKE=1 electron .",
     "gui-e2e": "mkdir -p e2e-shots && AGENTS_SQUAD_PROJECT=$(mktemp -d) AGENTS_SQUAD_GUI_E2E=$PWD/e2e-shots electron .",
-    "gui-e2e:overview": "mkdir -p e2e-shots && AGENTS_SQUAD_PROJECT=$(mktemp -d) AGENTS_SQUAD_GUI_E2E=$PWD/e2e-shots AGENTS_SQUAD_GUI_E2E_ONLY=overview electron .",
+    "gui-e2e:team": "mkdir -p e2e-shots && AGENTS_SQUAD_PROJECT=$(mktemp -d) AGENTS_SQUAD_GUI_E2E=$PWD/e2e-shots AGENTS_SQUAD_GUI_E2E_ONLY=team electron .",
     "gui-e2e:chat": "mkdir -p e2e-shots && AGENTS_SQUAD_PROJECT=$(mktemp -d) AGENTS_SQUAD_GUI_E2E=$PWD/e2e-shots AGENTS_SQUAD_GUI_E2E_ONLY=chat electron .",
     "gui-e2e:graph": "mkdir -p e2e-shots && AGENTS_SQUAD_PROJECT=$(mktemp -d) AGENTS_SQUAD_GUI_E2E=$PWD/e2e-shots AGENTS_SQUAD_GUI_E2E_ONLY=graph electron .",
     "gui-e2e:parallel": "mkdir -p e2e-shots && AGENTS_SQUAD_PROJECT=$(mktemp -d) AGENTS_SQUAD_GUI_E2E=$PWD/e2e-shots AGENTS_SQUAD_GUI_E2E_ONLY=parallel electron .",

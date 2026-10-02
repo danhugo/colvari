@@ -7,7 +7,7 @@
 <header>
   <strong class="brand"><svg class="brandmark" viewBox="0 0 32 32" aria-hidden="true"><path class="bm-arc" d="M23 9A10 10 0 1 0 23 23" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/><g class="bm-dots" fill="currentColor"><circle cx="23" cy="9" r="3.6"/><circle cx="6" cy="16" r="3.6"/><circle cx="23" cy="23" r="3.6"/></g></svg>colvari</strong>
   <nav id="tabs">
-    <button data-tab="chat" class="active"><svg class="navicon" viewBox="0 0 24 24"><path d="M4 5h16v11H8l-4 4V5Z"/></svg><span class="lbl">Chat</span></button><button data-tab="team"><svg class="navicon" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><circle cx="17" cy="9" r="2.4"/><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6M14 14.2c2.9.3 5 2.6 5 5.8"/></svg><span class="lbl">Team</span></button><button data-tab="board"><svg class="navicon" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="1.5"/><path d="M9 4v16M15 4v16"/></svg><span class="lbl">Board</span></button><button data-tab="overview"><svg class="navicon" viewBox="0 0 24 24"><rect x="3" y="3" width="8" height="8" rx="1"/><rect x="13" y="3" width="8" height="5" rx="1"/><rect x="13" y="10" width="8" height="11" rx="1"/><rect x="3" y="13" width="8" height="8" rx="1"/></svg><span class="lbl">Overview</span></button><span class="navsep"></span><button data-tab="wiki" class="sec" title="Wiki"><svg class="navicon" viewBox="0 0 24 24"><path d="M4 4.5C4 4 5 3.5 7 3.5s3.5.5 3.5.5v15S9.5 18.5 7 18.5 4 19 4 19.5v-15ZM10.5 4s1.5-.5 3.5-.5 3 .5 3 1v15S15.5 19 13.5 19s-3 .5-3 .5v-15Z"/></svg><span class="lbl">Wiki</span></button><button data-tab="obs" class="sec" title="Observability (logs)"><svg class="navicon" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="1.5"/><path d="m6.5 9 3 3-3 3M12 15h5.5"/></svg><span class="lbl">Logs</span></button><button data-tab="usage" class="sec" title="Usage"><svg class="navicon" viewBox="0 0 24 24"><path d="M4 20V10M11 20V4M18 20v-7"/></svg><span class="lbl">Usage</span></button>
+    <button data-tab="chat" class="active"><svg class="navicon" viewBox="0 0 24 24"><path d="M4 5h16v11H8l-4 4V5Z"/></svg><span class="lbl">Chat</span></button><button data-tab="team"><svg class="navicon" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><circle cx="17" cy="9" r="2.4"/><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6M14 14.2c2.9.3 5 2.6 5 5.8"/></svg><span class="lbl">Team</span></button><button data-tab="board"><svg class="navicon" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="1.5"/><path d="M9 4v16M15 4v16"/></svg><span class="lbl">Board</span></button><span class="navsep"></span><button data-tab="wiki" class="sec" title="Wiki"><svg class="navicon" viewBox="0 0 24 24"><path d="M4 4.5C4 4 5 3.5 7 3.5s3.5.5 3.5.5v15S9.5 18.5 7 18.5 4 19 4 19.5v-15ZM10.5 4s1.5-.5 3.5-.5 3 .5 3 1v15S15.5 19 13.5 19s-3 .5-3 .5v-15Z"/></svg><span class="lbl">Wiki</span></button><button data-tab="obs" class="sec" title="Observability (logs)"><svg class="navicon" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="1.5"/><path d="m6.5 9 3 3-3 3M12 15h5.5"/></svg><span class="lbl">Logs</span></button><button data-tab="usage" class="sec" title="Usage"><svg class="navicon" viewBox="0 0 24 24"><path d="M4 20V10M11 20V4M18 20v-7"/></svg><span class="lbl">Usage</span></button>
   </nav>
   <span class="spacer"></span>
   <div id="limitmeter" class="limitmeter hidden" title="Usage limits"></div>
@@ -52,7 +52,7 @@
     </div><aside id="chat-thread" class="hidden"></aside></div>
   </section>
   <section id="tab-team" class="tab">
-    <div class="toolbar gtoolbar"><div class="tgroup"><button id="addnode" class="primary" title="Add agent (or right-click the canvas)">＋ Agent</button><button id="testteam" title="Run a cheap preflight check on every agent">Test team</button></div><div class="tgroup"><button id="connect" class="icon" title="Connect mode: click source then target (or drag from a node's right handle)">⤳</button><select id="edgetype" title="Type for click-connect edges"><option>assign</option><option>message</option><option>review</option></select><button id="delsel" class="icon" title="Delete selected (⌫)">✕</button></div><span id="pf-summary" class="pill"></span><span id="hint" class="muted">Drag a node's handle to connect · right-click for actions · scroll to pan, ⌘/pinch to zoom</span></div>
+    <div class="toolbar gtoolbar"><div class="tgroup gmode" id="gmode" role="group" aria-label="Team view mode"><button id="mode-watch" class="on" title="Watch: live status only — the team can't be changed (default while agents run)">◉ Watch</button><button id="mode-edit" title="Edit the team (E)">✎ Edit team</button></div><span id="mode-note" class="modenote hidden" role="status">Team is running — changes apply on next turn</span><div class="tgroup"><button id="addnode" class="primary" title="Add agent (or right-click the canvas)">＋ Agent</button><button id="testteam" title="Run a cheap preflight check on every agent">Test team</button></div><div class="tgroup"><button id="connect" class="icon" title="Connect mode: click source then target (or drag from a node's right handle)">⤳</button><select id="edgetype" title="Type for click-connect edges"><option>assign</option><option>message</option><option>review</option></select><button id="delsel" class="icon" title="Delete selected (⌫)">✕</button></div><span id="pf-summary" class="pill"></span><span id="hint" class="muted">Drag a node's handle to connect · right-click for actions · scroll to pan, ⌘/pinch to zoom</span></div>
     <div class="split"><div class="canvas"><svg id="graph"></svg>
       <div class="gcontrols"><button id="zoomout" title="Zoom out">−</button><span id="zoomlvl">100%</span><button id="zoomin" title="Zoom in">＋</button><span class="gsep"></span><button id="fit" title="Fit view: centre the whole graph at ≤100% zoom">Fit</button><button id="autolayout" title="Auto-layout: arrange agents in layers">Layout</button></div>
       <svg id="minimap" preserveAspectRatio="xMidYMid meet"></svg>
@@ -91,28 +91,22 @@
     <div id="us-limits"></div>
     <div class="scroll" id="us-runs-wrap"><table id="us-runs"></table></div>
   </section>
-  <section id="tab-overview" class="tab">
-    <p class="ov-purpose muted">Live monitor: who is working right now, who is stuck, and where work is flowing. Arrows are the team’s reporting lines; one glows when a task or message just travelled along it. Edit the team in <b>Team</b>.</p>
-    <div id="ov-stuck"></div>
-    <div class="split"><div id="ov-graph-wrap"><svg id="ov-graph"></svg><div class="glegend ov-legend"><span><i class="sw sw-assign"></i>assigns tasks</span><span><i class="sw sw-message"></i>messages</span><span><i class="sw sw-review"></i>reviews</span><span><i class="sw sw-assign ov-sw-flash"></i>glowing = active just now</span><span><i class="dot-leg run"></i>green card = working</span><span><i class="leadkey">★</i>lead</span></div></div><aside class="panel" id="ov-threadpanel"><div id="ov-threadhead"></div><label>Task thread</label><select id="ov-task"></select><div id="ov-thread"></div></aside></div>
-    <div id="ov-timelinewrap"><div class="ovtl-head"><label>Timeline <span class="muted">(last 15m)</span></label><div class="ovtl-legend"><span><i class="dot-leg run"></i>running</span><span><i class="dot-leg mark"></i>status change</span><span><i class="dot-leg tick"></i>tool call</span></div></div>
-    <div id="ov-timeline"></div></div>
-  </section>
   <section id="tab-inbox" class="tab"><div id="inboxlist" class="scroll"></div></section>
   <section id="tab-settings" class="tab"><div class="panel" id="settingsform"></div></section>
 </main>
 </div>
 <dialog id="askdlg"><form method="dialog"><p id="ask-title"></p><input id="ask-input" style="width:280px"><p><button value="cancel">Cancel</button> <button id="ask-ok" value="ok" class="primary">OK</button></p></form></dialog>
 <dialog id="helpdlg"><form method="dialog"><h3>Keyboard shortcuts</h3><table>
-  <tr><td>Ctrl/Cmd + 1…7</td><td>Chat, Team, Board, Overview, Wiki, Logs, Usage</td></tr>
+  <tr><td>Ctrl/Cmd + 1…6</td><td>Chat, Team, Board, Wiki, Logs, Usage</td></tr>
   <tr><td>Ctrl/Cmd + ,</td><td>Settings</td></tr><tr><td>Ctrl/Cmd + I</td><td>Inbox (also in the sidebar)</td></tr>
+  <tr><td>E</td><td>Edit team / Watch (Team tab)</td></tr>
   <tr><td>Ctrl/Cmd + Enter</td><td>Run</td></tr><tr><td>Ctrl/Cmd + .</td><td>Stop all agents</td></tr>
   <tr><td>/</td><td>Open the goal composer</td></tr><tr><td>n</td><td>New task (Board tab)</td></tr>
   <tr><td>Esc</td><td>Clear selection / leave a field</td></tr><tr><td>?</td><td>This help</td></tr></table>
   <p><button id="reopenguide" value="close">Open first-run guide</button> <button value="close" class="primary">Close</button></p></form></dialog>
 <div id="guide" class="hidden"></div>
 <div id="toasts"></div>
-<script src="../src/overview.js"></script>
+<script src="../src/team-modes.js"></script>
 <script src="../src/graph-view.js"></script>
 <script src="../src/chat.js"></script>
 <script src="../src/subagent-view.js"></script>
