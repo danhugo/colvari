@@ -233,6 +233,119 @@ test('master health sweep: startup check runs the suite on base and lands the re
   assert.strictEqual(MG.readHealth(d2).state, 'red', 'red recorded');
 });
 
+// t_b9ed7fa3: two app instances watched one store and both started the done->merge gate in the
+// same second; the lock's old age-only steal rule let the second waiter steal from the live
+// holder mid-suite and a second npm test ran in the same worktree ("could not run"). Pinned
+// here: only a stale lock with a provably dead holder is stealable, and two simultaneous
+// same-task gates across processes run the suite exactly once.
+test('merge lock steal rule: only a stale lock with a dead holder is stealable (t_b9ed7fa3)', { skip: SKIP }, () => {
+  const d = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'mgate-lock-')));
+  fs.mkdirSync(path.join(d, '.squad'), { recursive: true });
+  const lock = path.join(d, '.squad', 'merge.lock');
+  const back = (ms) => { const t = new Date(Date.now() - ms); fs.utimesSync(lock, t, t); };
+
+  fs.mkdirSync(lock); fs.writeFileSync(path.join(lock, 'pid'), String(process.pid));
+  assert.strictEqual(MG.lockStealable(lock), false, 'a fresh live holder is never stealable');
+  fs.writeFileSync(path.join(lock, 'pid'), '999999999');
+  assert.strictEqual(MG.lockStealable(lock), false, 'a fresh lock is not stolen even with a dead pid (grace window)');
+  back(10 * 60_000);
+  fs.writeFileSync(path.join(lock, 'pid'), String(process.pid));
+  assert.strictEqual(MG.lockStealable(lock), false, 'a stale lock with a live holder is not stolen by age');
+  fs.writeFileSync(path.join(lock, 'pid'), '999999999');
+  assert.strictEqual(MG.lockStealable(lock), true, 'a stale lock with a dead holder is stolen');
+  fs.rmSync(path.join(lock, 'pid'));
+  back(10 * 60_000); // removing the pid file bumps the dir mtime — backdate again
+  assert.strictEqual(MG.lockStealable(lock), true, 'a stale pid-less lock falls back to the age rule');
+});
+
+test('merge gate: a live lock holder is waited for, a dead one is stolen immediately (t_b9ed7fa3)', { skip: SKIP }, async () => {
+  const { d, wts } = repoWithTasks('t_mg8a', 't_mg8b');
+  commitWork(wts.t_mg8a, 'b.txt', 'held\n');
+  commitWork(wts.t_mg8b, 'c.txt', 'held too\n');
+  const lock = path.join(d, '.squad', 'merge.lock');
+  const back = () => { const t = new Date(Date.now() - 10 * 60_000); fs.utimesSync(lock, t, t); };
+
+  // Live holder with a 10-min-old mtime: the old rule stole at the age check and a second suite
+  // ran in this worktree; now the gate waits for release and proceeds. THIS process is the
+  // holder (a spawned holder child would zombie on exit and kill(pid,0) still sees zombies, so
+  // a wait on it is indistinguishable from a live one) — the gate runs in a child, which waits
+  // out the hold and merges only after release.
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'mgate-held-'));
+  const driver = path.join(scratch, 'driver.js');
+  fs.writeFileSync(driver, `
+    const MG = require(process.env.MG_MODULE);
+    const [wt, branch] = process.argv.slice(2);
+    process.stdout.write(JSON.stringify(MG.gateMerge(
+      { id: branch.slice(6), worktreePath: wt, worktreeBranch: branch },
+      { runTests: () => ({ ok: true, output: '' }) })));
+  `);
+  fs.mkdirSync(path.join(d, '.squad'), { recursive: true });
+  fs.mkdirSync(lock);
+  fs.writeFileSync(path.join(lock, 'pid'), String(process.pid));
+  back();
+  const t0 = Date.now();
+  const kid = spawn(process.execPath, [driver, wts.t_mg8a.worktreePath, wts.t_mg8a.worktreeBranch], { env: { ...process.env, MG_MODULE: require.resolve('../src/merge-gate') } });
+  let out = ''; kid.stdout.on('data', (c) => (out += c));
+  setTimeout(() => { try { fs.rmSync(lock, { recursive: true, force: true }); } catch {} }, 1200).unref();
+  const kidCode = await new Promise((res) => kid.on('close', res));
+  assert.strictEqual(kidCode, 0, 'gate child exited cleanly');
+  assert.ok(Date.now() - t0 >= 1100, `waited for the live holder instead of stealing (took ${Date.now() - t0}ms)`);
+  assert.strictEqual(JSON.parse(out).merged, true, out);
+  assert.ok(!fs.existsSync(lock), 'lock released after the gate');
+
+  // Dead holder: the stale lock is stolen on the first poll, not waited out.
+  const dead = spawn(process.execPath, ['-e', '']);
+  await new Promise((res) => dead.on('close', res));
+  fs.mkdirSync(lock, { recursive: true });
+  fs.writeFileSync(path.join(lock, 'pid'), String(dead.pid));
+  back();
+  const t1 = Date.now();
+  const r2 = MG.gateMerge(T(wts.t_mg8b), { runTests: () => ({ ok: true, output: '' }) });
+  assert.strictEqual(r2.merged, true, JSON.stringify(r2));
+  assert.ok(Date.now() - t1 < 10_000, `dead holder stolen immediately (took ${Date.now() - t1}ms)`);
+});
+
+test('merge gate: two simultaneous gates on one task across processes run the suite exactly once (t_b9ed7fa3)', { skip: SKIP }, async () => {
+  const { d, wts } = repoWithTasks('t_mg9');
+  commitWork(wts.t_mg9, 'b.txt', 'once\n');
+
+  // Driver + probe live OUTSIDE the repo: untracked files in the main checkout would refuse
+  // the merge via the dirty check before the gate even runs.
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'mgate-dbl-'));
+  const logf = path.join(scratch, 'suites.jsonl');
+  const probe = path.join(scratch, 'probe.js');
+  fs.writeFileSync(probe, `
+    const fs = require('fs');
+    setTimeout(() => fs.appendFileSync(process.argv[2], JSON.stringify({ pid: process.pid }) + '\\n'), 1000);
+  `);
+  const driver = path.join(scratch, 'driver.js');
+  fs.writeFileSync(driver, `
+    const MG = require(process.env.MG_MODULE);
+    const [wt, branch, logf, probe] = process.argv.slice(2);
+    const r = MG.gateMerge(
+      { id: branch.slice(6), worktreePath: wt, worktreeBranch: branch },
+      { testCmd: process.execPath + ' ' + JSON.stringify(probe) + ' ' + JSON.stringify(logf) }
+    );
+    process.stdout.write(JSON.stringify(r));
+  `);
+
+  const env = { ...process.env, MG_MODULE: require.resolve('../src/merge-gate') };
+  const w = wts.t_mg9;
+  const kids = [0, 1].map(() =>
+    spawn(process.execPath, [driver, w.worktreePath, w.worktreeBranch, logf, probe], { env }));
+  const outs = await Promise.all(kids.map((p) => new Promise((res, rej) => {
+    let buf = ''; p.stdout.on('data', (c) => (buf += c));
+    p.on('close', (code) => (code === 0 ? res(buf) : rej(new Error('gate driver exited ' + code))));
+  })));
+  const rs = outs.map((o) => JSON.parse(o));
+  assert.strictEqual(rs.filter((r) => r.merged).length, 1, `exactly one gate merged: ${outs.join('|')}`);
+  const loser = rs.find((r) => !r.merged);
+  assert.strictEqual(loser.gate && loser.gate.state, 'skipped', `loser took the neutral no-commits path: ${JSON.stringify(loser)}`);
+  assert.strictEqual(fs.readFileSync(logf, 'utf8').split('\n').filter(Boolean).length, 1, 'suite ran exactly once across both gates');
+  assert.ok(fs.existsSync(path.join(d, 'b.txt')), 'the work landed in base');
+  g(d, 'merge-base', '--is-ancestor', 'squad/t_mg9', 'main');
+});
+
 // npm install in a worktree must never resolve through a stale shared symlink into the main
 // checkout (t_0fd83668): once the branch's package files differ from main, the gate drops the
 // link and installs into a real local dir; a matching share stays untouched.
