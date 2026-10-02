@@ -12,7 +12,11 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const DIR = path.join(os.tmpdir(), 'agents-squad-procguard');
+// The pidfile dir must sit in the REAL system tmpdir, not the run's private one (t_4f2ff7cc):
+// pidfiles are how a run that died hard gets its children reaped by the NEXT run, so they have
+// to survive the private dir's teardown. test/harness/tmpdir.js exports AGENTS_SQUAD_REAL_TMP
+// for exactly this; without it (e2e, gui-e2e) this is plain os.tmpdir() as before.
+const DIR = path.join(process.env.AGENTS_SQUAD_REAL_TMP || os.tmpdir(), 'agents-squad-procguard');
 const STARTED_AT = Date.now();
 const PIDFILE = path.join(DIR, `p${process.pid}-${STARTED_AT}.json`);
 const LEAK_GRACE_MS = 2000; // SIGKILL is asynchronous in effect; wait before declaring a leak
