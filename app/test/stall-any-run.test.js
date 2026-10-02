@@ -1,6 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs'); const os = require('os'); const path = require('path');
+const { execFile } = require('child_process');
 const { Store } = require('../src/store');
 const { Orchestrator, STALL } = require('../src/orchestrator');
 
@@ -49,19 +50,34 @@ esac
 // can exit as soon as the assertions hold.
 function disarm(orch) { for (const t of orch._stallKill.values()) clearTimeout(t); }
 
-function waitFor(predicate, timeout = 8000, name = 'condition') {
+// 100ms cadence: several predicates here spawn `ps -axo` (procTable), and node --test runs test
+// files in parallel — a 10ms ps storm starves the other files' timing tests (seen live: the
+// self-update group-kill deadline test failed only when this file polled at 10ms).
+function waitFor(predicate, timeout = 8000, name = 'condition', intervalMs = 100) {
   const started = Date.now();
   return new Promise((resolve, reject) => {
-    const check = () => {
-      try { if (predicate()) return resolve(); } catch (e) { return reject(e); }
+    const check = async () => {
+      try { if (await predicate()) return resolve(); } catch (e) { return reject(e); }
       if (Date.now() - started > timeout) return reject(new Error('timed out waiting for ' + name));
-      setTimeout(check, 10);
+      setTimeout(check, intervalMs);
     };
     check();
   });
 }
 
-const findProc = (orch, re) => (orch.procTable() || []).find((r) => re.test(r.command || ''));
+// ASYNC ps for wait predicates: procTable() is execFileSync (blocks this process's event loop up to
+// its 4s timeout per call when ps is slow under parallel suite load) — polling it starves the very
+// timers and close events the test waits for. The async form keeps the loop free.
+function procTableAsync() {
+  return new Promise((resolve) => {
+    execFile('ps', ['-axo', 'pid=,ppid=,state=,time=,command='], { timeout: 4000 }, (err, out) => {
+      if (err) return resolve([]);
+      resolve(String(out).split('\n').map((l) => l.trim().split(/\s+/)).filter((p) => p.length >= 3)
+        .map((p) => ({ pid: Number(p[0]), ppid: Number(p[1]), state: p[2], cpuMs: p[3], command: p.slice(4).join(' ') })));
+    });
+  });
+}
+const findProcAsync = async (re) => (await procTableAsync()).find((r) => re.test(r.command || ''));
 const logText = (store) => store.readLogs().map((l) => l.text || '').join('\n');
 
 test('silent task run with a live sleeping child: protected below the hard cap, killed past it, recovered', async () => {
@@ -69,7 +85,7 @@ test('silent task run with a live sleeping child: protected below the hard cap, 
   const task = store.createTask({ title: 'hung task', assignee: node.id });
   orch.start(); // real runAlive on purpose: the sleeping grandchild is genuine liveness
   await waitFor(() => orch.agent(node.id).currentRun && orch.agent(node.id).currentRun.sessionId === 'sess-1', 8000, 'init event parsed');
-  await waitFor(() => findProc(orch, /sleep 251/), 8000, 'sleeping child visible in ps');
+  await waitFor(async () => findProcAsync(/sleep 251/), 8000, 'sleeping child visible in ps');
   const a = orch.agent(node.id);
   const events = [];
   orch.on('run.stalled', (e) => events.push(['stalled', e]));
@@ -87,7 +103,9 @@ test('silent task run with a live sleeping child: protected below the hard cap, 
   assert.match(logText(store), /killing despite live child processes/);
   assert.match(logText(store), /sleep 251/, 'the log names the process that pinned liveness');
   // The kill is a real kill: the recovery resumes the same session and gets a success result.
-  await waitFor(() => events.map(([k]) => k).join(',') === 'stalled,recovering', 8000, 'stalled+recovering events');
+  // 30s: the sweep's real-ps runAlive/stallLiveKids calls run synchronously and can take seconds
+  // each under parallel suite load, delaying the close and the recovery decision.
+  await waitFor(() => events.map(([k]) => k).join(',') === 'stalled,recovering', 30000, 'stalled+recovering events');
   assert.equal(events[1][1].attempt, 1);
   assert.equal(events[1][1].max, 2);
   assert.equal(store.getTask(task.id).sessions[`${node.id}:claude`], 'sess-1');
@@ -117,7 +135,7 @@ test('incident repro: system nudge wakes an idle agent, the hung wake run is cap
   assert.equal(a.activity && a.activity.trigger, 'message');
   // The incident shape: a ready task lands while the wake run hangs, blocked by the single-run slot.
   const task = store.createTask({ title: 'fast-blocked behind the hung wake', assignee: node.id });
-  await waitFor(() => findProc(orch, /sleep 263/), 8000, 'sleeping child visible in ps');
+  await waitFor(async () => findProcAsync(/sleep 263/), 8000, 'sleeping child visible in ps');
   a.lastActivityAt = Date.now() - 3500; // 1s timeout, past the 3s hard cap
   let stalledEvent = null;
   orch.on('run.stalled', (e) => { stalledEvent = e; });
@@ -127,9 +145,11 @@ test('incident repro: system nudge wakes an idle agent, the hung wake run is cap
   assert.match(logText(store), /killing despite live child processes/);
   // The cap kill reaches the whole process group: the sleeping helper dies with the CLI, so no
   // orphan is left behind (spawnRun's detached child.kill is a group kill).
-  await waitFor(() => !findProc(orch, /sleep 263/), 8000, 'sleeping child gone after group kill');
-  // Slot freed: the ready task the hung wake used to block dispatches on the next tick.
-  await waitFor(() => orch.agent(node.id).taskId === task.id && store.getTask(task.id).status === 'in_progress', 8000, 'ready task dispatched');
+  await waitFor(async () => !(await findProcAsync(/sleep 263/)), 8000, 'sleeping child gone after group kill');
+  // Slot freed: the ready task the hung wake used to block dispatches on the next tick. The fake
+  // task run exits at once and the orchestrator hands the finished task to review — either state
+  // proves the dispatch happened ('todo' would mean the hung run still blocks it).
+  await waitFor(() => ['in_progress', 'review'].includes(store.getTask(task.id).status), 8000, 'ready task dispatched');
   await wakeP;
   assert.equal(wakeErr, null);
   disarm(orch); orch.stop();
