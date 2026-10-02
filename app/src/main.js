@@ -262,10 +262,20 @@ function createWindow() {
     if (process.env.AGENTS_SQUAD_AUTORUN) return autorun(process.env.AGENTS_SQUAD_AUTORUN);
     if (!process.env.AGENTS_SQUAD_SMOKE) return;
     // UI smoke test: add two agents, create a task, check the DOM, then quit.
+    // Interact only after the initial state load settles, and count on the owning tab:
+    // the graph only draws on Team, board cards only on Board. The board follows the current
+    // team (t_ce954427) so the task must be assigned — unassigned tasks hide from a team scope.
+    win.webContents.setBackgroundThrottling(false); // occluded windows throttle rAF; tab redraws would never fire
     const js = `(async () => { const w = (ms) => new Promise(r => setTimeout(r, ms));
-      document.querySelector('#addnode').click(); await w(300); document.querySelector('#addnode').click(); await w(300);
-      document.querySelector('#nt-title').value = 'Smoke goal'; document.querySelector('#nt-add').click(); await w(400);
-      return { nodes: document.querySelectorAll('#graph .node').length, cards: document.querySelectorAll('.card').length, agentsRows: document.querySelectorAll('#agenttable tr').length }; })()`;
+      await w(600); if (typeof refresh === 'function') await refresh();
+      document.querySelector('#tabs button[data-tab="team"]').click(); await w(500);
+      document.querySelector('#addnode').click(); await w(400); document.querySelector('#addnode').click(); await w(400);
+      const nodes = document.querySelectorAll('#graph .node').length;
+      document.querySelector('#tabs button[data-tab="board"]').click(); await w(500);
+      document.querySelector('#nt-title').value = 'Smoke goal';
+      const a = document.querySelector('#nt-assignee'); if (a && a.options.length) a.value = a.options[0].value;
+      document.querySelector('#nt-add').click(); await w(500);
+      return { nodes, cards: document.querySelectorAll('#columns .card').length }; })()`;
     try { console.log('[smoke]', JSON.stringify(await win.webContents.executeJavaScript(js))); } catch (e) { console.error('[smoke] failed', e); }
     if (procguard) procguard.reapAll();
     app.exit(0);
