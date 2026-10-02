@@ -1,8 +1,9 @@
 const test = require('node:test');
 const assert = require('node:assert');
-const fs = require('fs'); const os = require('os'); const path = require('path');
+const fs = require('fs'); const path = require('path');
 const { Store } = require('../src/store');
 const { Orchestrator } = require('../src/orchestrator');
+const { mktemp } = require('./harness/tmp');
 
 // ---- harness (same fake-CLI shape as scheduling.test.js) ----
 
@@ -24,7 +25,7 @@ function blockingPreflight(o) {
 }
 
 function setup(script) {
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'squad-autoresume-'));
+  const d = mktemp('squad-autoresume-');
   const argsLog = path.join(d, 'args.txt');
   const count = path.join(d, 'calls');
   const fake = fakeClaude(d, `n=$(cat ${count} 2>/dev/null || echo 0); n=$((n+1)); echo $n > ${count}\necho "$*" >> ${argsLog}\n${script}`);

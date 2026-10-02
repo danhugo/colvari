@@ -1,10 +1,11 @@
 const test = require('node:test');
 const assert = require('node:assert');
-const fs = require('fs'); const os = require('os'); const path = require('path');
+const fs = require('fs'); const path = require('path');
 const { execFileSync } = require('child_process');
 const { Store } = require('../src/store');
 const { Orchestrator } = require('../src/orchestrator');
 const C = require('../src/controls');
+const { mktemp, mktempReal } = require('./harness/tmp');
 
 function fakeClaude(dir, script) {
   const f = path.join(dir, 'fake-claude.sh');
@@ -15,7 +16,7 @@ function fakeClaude(dir, script) {
 const RESULT = (extra = '') => `echo '{"type":"result","subtype":"success","total_cost_usd":0,"num_turns":1,"usage":{}}'\n${extra}`;
 
 function setup(script = RESULT()) {
-  const r = fs.mkdtempSync(path.join(os.tmpdir(), 'squad-sched-'));
+  const r = mktemp('squad-sched-');
   const s = new Store(path.join(r, 'data'));
   s.saveSettings({ claudePath: fakeClaude(r, script), maxConcurrency: 1 });
   return { r, s };
@@ -150,7 +151,7 @@ test("orchestrator: stop() with no running agents emits 'done' right away", asyn
 // Repo-backed store with worktrees on and an agent script that commits real work, so the
 // auto-merge consequences of a status change are observable in the repo.
 function setupRepo(script = RESULT()) {
-  const repo = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'squad-exitrev-')));
+  const repo = mktempReal('squad-exitrev-');
   const g = (cwd, ...a) => execFileSync('git', ['-c', 'user.email=a@b', '-c', 'user.name=a', ...a], { cwd, stdio: 'pipe' }).toString().trim();
   g(repo, 'init', '-q', '-b', 'main');
   fs.writeFileSync(path.join(repo, 'base.txt'), 'base\n');
@@ -203,7 +204,7 @@ const SRESULT = (sid) => `echo '{"type":"result","subtype":"success","total_cost
 const readCalls = (argsLog) => fs.readFileSync(argsLog, 'utf8').split(/(?=^-p )/m).filter((x) => x.trim());
 
 function setupArgsLog(script) {
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'squad-sesskey-'));
+  const d = mktemp('squad-sesskey-');
   const argsLog = path.join(d, 'args.txt');
   const fake = fakeClaude(d, `echo "$*" >> ${argsLog}\n${script}`);
   const s = new Store(path.join(d, 'p'));
@@ -242,7 +243,7 @@ test('orchestrator: lastSession is keyed by runtime, not just assignee', () => {
 });
 
 test('orchestrator: stale resume failing with "No conversation found" retries once from a fresh session', async () => {
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'squad-sessretry-'));
+  const d = mktemp('squad-sessretry-');
   const argsLog = path.join(d, 'args.txt');
   const count = path.join(d, 'calls');
   const fake = fakeClaude(d, `n=$(cat ${count} 2>/dev/null || echo 0); n=$((n+1)); echo $n > ${count}

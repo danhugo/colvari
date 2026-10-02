@@ -7,6 +7,9 @@ const { Store } = require('../src/store');
 const { Orchestrator } = require('../src/orchestrator');
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'squad-e2e-'));
+// No $TMPDIR debris (t_8170a988): procguard's exit hook (registered first) kills the spawned CLIs
+// before this rm runs; the whole fake home/project lives under this one root.
+process.on('exit', () => { try { fs.rmSync(root, { recursive: true, force: true, maxRetries: 3 }); } catch {} });
 const work = path.join(root, 'work');
 const store = new Store(path.join(root, 'project'));
 store.saveSettings({ maxRuns: 8 });

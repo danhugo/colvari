@@ -51,7 +51,7 @@ if (TEST_MODE) {
   app.setPath('userData', path.join(testRoot, 'userData'));
   console.log(`[agents-squad] test instance pid=${process.pid} data root=${testRoot}`);
   const timeoutMs = Number(process.env.AGENTS_SQUAD_TEST_TIMEOUT_MS) || 30 * 60 * 1000;
-  setTimeout(() => { console.error(`[agents-squad] test instance exceeded ${timeoutMs} ms — force exit (pid ${process.pid}, data root ${testRoot})`); procguard.reapAll(); app.exit(1); }, timeoutMs);
+  setTimeout(() => { console.error(`[agents-squad] test instance exceeded ${timeoutMs} ms — force exit (pid ${process.pid}, data root ${testRoot})`); try { cleanupTestTmpDirs(); } catch {} procguard.reapAll(); app.exit(1); }, timeoutMs);
 }
 
 // Single instance (live profile): a second launch must focus the running window, not fork a second
@@ -239,6 +239,12 @@ async function autorun(file) {
 
 // App-wide UI prefs (theme: 'system' | 'light' | 'dark') persisted in <root>/prefs.json.
 const fs = require('fs');
+// Temp dirs made by the gui-e2e/smoke scenario endpoints (t_8170a988): tracked and removed when
+// the test process ends — src/ test code leaves no $TMPDIR debris behind either.
+const TEST_TMP_DIRS = [];
+process.on('exit', () => cleanupTestTmpDirs());
+function cleanupTestTmpDirs() { for (const d of TEST_TMP_DIRS.splice(0)) { try { fs.rmSync(d, { recursive: true, force: true, maxRetries: 3 }); } catch {} } }
+function ttmp(prefix) { const d = fs.mkdtempSync(path.join(require('os').tmpdir(), prefix)); TEST_TMP_DIRS.push(d); return d; }
 const prefsFile = () => path.join(pm.root, 'prefs.json');
 function getPrefs() { try { return { theme: 'system', ...JSON.parse(fs.readFileSync(prefsFile(), 'utf8')) }; } catch { return { theme: 'system' }; } }
 function setPrefs(patch) { const next = { ...getPrefs(), ...patch }; fs.mkdirSync(pm.root, { recursive: true }); fs.writeFileSync(prefsFile(), JSON.stringify(next, null, 2)); applyTheme(next.theme); return next; }
@@ -374,7 +380,7 @@ async function guiE2E() {
   // First-run guide (steps 1-3) in a fresh project, then Human Inbox: ask_human with choices, answer, approval item.
   const firstrunInbox = async () => {
     const fp = pm.create('First run'); const fstore = pm.store(fp.id); const forch = orchFor(fp.id);
-    const work = fs.mkdtempSync(path.join(require('os').tmpdir(), 'squad-fr-'));
+    const work = ttmp('squad-fr-');
     const origPick = api.pickDir; api.pickDir = async () => work;
     await ex(`window.confirm = () => true; $('#tabs button[data-tab=team]').click(); P = await call('listProjects'); renderSidebar(); document.querySelector('#projectlist [data-pid="${fp.id}"]').click(); await w(800); $('#reopenguide').click(); await w(300);`);
     const guideShown = await ex(`return !$('#guide').classList.contains('hidden') && !!$('#g-team')`);
@@ -487,7 +493,7 @@ async function guiE2E() {
     const coreId = await ex(`return (S.team.nodes.find((n) => isLeadRole(n.role)) || S.team.nodes[0] || {}).id`);
     const core = ps.getTeam().nodes.find((n) => n.id === coreId);
     expect('chatmsg: a core agent exists for the composer target', !!core, coreId);
-    const d = fs.mkdtempSync(path.join(require('os').tmpdir(), 'squad-chatmsg-'));
+    const d = ttmp('squad-chatmsg-');
     const argsLog = path.join(d, 'args.txt');
     const fake = path.join(d, 'fake-claude.sh');
     fs.writeFileSync(fake, '#!/bin/sh\necho "$*" >> ' + argsLog + '\necho \'{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"Hi! Idle and ready — nothing to create."}]}}\'\necho \'{"type":"result","subtype":"success","session_id":"sess-chatmsg","total_cost_usd":0.001,"num_turns":1,"usage":{"input_tokens":10,"output_tokens":10}}\'\n');
@@ -558,7 +564,7 @@ async function guiE2E() {
     const coreId = await ex(`return (S.team.nodes.find((n) => isLeadRole(n.role)) || S.team.nodes[0] || {}).id`);
     const core = ps.getTeam().nodes.find((n) => n.id === coreId);
     expect('composerclear: a core agent exists for the composer target', !!core, coreId);
-    const d = fs.mkdtempSync(path.join(require('os').tmpdir(), 'squad-ccl-'));
+    const d = ttmp('squad-ccl-');
     const fake = path.join(d, 'fake-claude.sh');
     fs.writeFileSync(fake, '#!/bin/sh\necho "$*" >> /dev/null\necho \'{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"Idle and ready — nothing to create."}]}}\'\necho \'{"type":"result","subtype":"success","session_id":"sess-ccl","total_cost_usd":0.001,"num_turns":1,"usage":{"input_tokens":10,"output_tokens":10}}\'\n');
     fs.chmodSync(fake, 0o755);
@@ -1786,7 +1792,7 @@ async function guiE2E() {
     await waitFor(`return !!document.querySelector('#tpl-select option')`); await ex(`await refresh();`); const cur = await ex(`return { p: ctx.p, t: S.teamId }`);
     const p = cur.p || pid(); const s = pm.store(p);
     const { execFileSync } = require('child_process'); const g = (cwd, ...a) => execFileSync('git', ['-c', 'user.email=a@b', '-c', 'user.name=a', ...a], { cwd, stdio: 'pipe' }).toString().trim();
-    const repo = fs.mkdtempSync(path.join(require('os').tmpdir(), 'squad-conflict-repo-'));
+    const repo = ttmp('squad-conflict-repo-');
     g(repo, 'init', '-q', '-b', 'main'); fs.writeFileSync(path.join(repo, 'a.txt'), 'base\n'); g(repo, 'add', '.'); g(repo, 'commit', '-q', '-m', 'init');
     const { ensureWorktree } = require('./worktree'); const wt = ensureWorktree(repo, 'conflictdemo');
     let nodes = s.getTeam().nodes; if (!nodes.length) { s.addNode({ name: 'Devon', role: 'Dev', x: 60, y: 60 }); nodes = s.getTeam().nodes; }
@@ -2589,7 +2595,7 @@ async function guiE2E() {
     // resumed session), loop and workflow modes configured through the agent panel.
     if (gp) {
       const gpid = gp.id; const gorch = orchFor(gpid); const gstore = pm.store(gpid);
-      const work = fs.mkdtempSync(path.join(require('os').tmpdir(), 'squad-gui7-'));
+      const work = ttmp('squad-gui7-');
       fs.mkdirSync(path.join(work, '.claude', 'commands'), { recursive: true });
       fs.writeFileSync(path.join(work, '.claude', 'commands', 'e2ecmd.md'), 'Write a file cmd.txt in the current directory whose content is exactly: CMD-RAN $ARGUMENTS\nThen stop.\n');
       await ex(`document.querySelector('#tabs button[data-tab=team]').click(); document.querySelector('#projectlist [data-pid="${gpid}"]').click(); await w(800);`);
@@ -2692,6 +2698,7 @@ async function guiE2E() {
     console.log('[gui-e2e]', JSON.stringify({ edges: store.getTeam().edges.length, tasks: tasks.map((t) => [t.title, t.status, t.iterations || 0, !!t.sessions]), cost: orch.snapshot().totalCost }));
   } catch (e) { if (e !== null) { console.error('[gui-e2e] failed', e); failures.push('exception: ' + e.message); } }
   console.log(failures.length ? `[gui-e2e] FAIL (${failures.length}): ${failures.join('; ')}` : '[gui-e2e] PASS');
+  cleanupTestTmpDirs(); // app.exit skips 'exit' hooks — remove the scenario temp dirs here (t_8170a988)
   if (procguard) procguard.reapAll();
   app.exit(failures.length ? 1 : 0);
 }

@@ -4,8 +4,9 @@ const fs = require('fs'); const os = require('os'); const path = require('path')
 const { Store } = require('../src/store');
 const { buildPrompt, Orchestrator, attachedFilesLines } = require('../src/orchestrator');
 const { buildClaudeArgs } = require('../src/agent-config');
+const { mktemp } = require('./harness/tmp');
 
-const tmp = () => new Store(fs.mkdtempSync(path.join(os.tmpdir(), 'squad-att-')));
+const tmp = () => new Store(mktemp('squad-att-'));
 
 test('saveAttachment writes bytes under <store>/attachments and returns the 4 fields', () => {
   const s = tmp();

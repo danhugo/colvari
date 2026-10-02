@@ -19,6 +19,7 @@ const IDLE = require('./idle');
 const WT = require('./worktree');
 const MG = require('./merge-gate');
 const RT = require('./runtimes');
+const { removePerRunMcpDirs } = require('./profile-runner');
 const CAP = require('./capabilities');
 const { SubagentTracker, isSubagentTool } = require('./subagents');
 const FQ = require('./failures');
@@ -1622,6 +1623,7 @@ class Orchestrator extends EventEmitter {
       child.on('close', (code) => {
         run.done = true;
         run.stderr = errbuf.trim();
+        try { removePerRunMcpDirs(env); } catch {} // per-run board config was read at child startup (t_8170a988)
         if (a.currentRun === run) a.currentRun = null;
         try {
           if (buf.trim()) this.onEvent(node, buf.trim(), run, rt.id);

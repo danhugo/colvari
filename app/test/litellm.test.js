@@ -1,10 +1,10 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 const U = require('../src/usage');
 const L = require('../src/litellm');
+const { mktemp } = require('./harness/tmp');
 
 const fixture = () => JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'litellm-prices.json'), 'utf8'));
 
@@ -16,7 +16,7 @@ test('reportedCostOf distinguishes absent, direct zero, and proxy-unpriced zero'
 });
 
 test('PriceBook loads fixture prices, keeps missing models unknown, and honors overrides', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'prices-'));
+  const dir = mktemp('prices-');
   const cachePath = path.join(dir, 'prices.json');
   fs.writeFileSync(cachePath, JSON.stringify({ fetchedAt: new Date().toISOString(), prices: fixture() }));
   const book = new L.PriceBook({ cachePath, overrides: { 'zai/glm-5.2': { input_cost_per_token: 1e-6, output_cost_per_token: 3e-6 } } });
@@ -48,7 +48,7 @@ test('proxy spend replaces an estimated/unknown ledger entry once', () => {
 
 // a book whose disk cache IS the fixture (finishRun reads cached() without a refresh)
 const bookFromFixture = (over = {}) => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'prices-'));
+  const dir = mktemp('prices-');
   const cachePath = path.join(dir, 'prices.json');
   fs.writeFileSync(cachePath, JSON.stringify({ fetchedAt: new Date().toISOString(), prices: fixture() }));
   return new L.PriceBook({ cachePath, ...over });
@@ -88,7 +88,7 @@ test('an unknown model with tokens flowing stays unknown, never a guessed $0', (
 });
 
 test('a missing price list degrades to unknown, and a fresh fetch repopulates the disk cache', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'prices-'));
+  const dir = mktemp('prices-');
   const r = U.newRun({ runtime: 'claude', model: 'zai/glm-5.2' });
   U.applyEvent(r, glmResult());
   U.finishRun(r, { code: 0, env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:4000/v1', ANTHROPIC_AUTH_TOKEN: 'sk' }, billingMode: 'api', priceBook: new L.PriceBook({ cachePath: path.join(dir, 'none.json') }) });
@@ -108,7 +108,7 @@ test('a missing price list degrades to unknown, and a fresh fetch repopulates th
 test('resolveProxyCost joins spend logs after close, once per request id', async () => {
   const { Store } = require('../src/store');
   const { Orchestrator } = require('../src/orchestrator');
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'proxycost-'));
+  const dir = mktemp('proxycost-');
   const s = new Store(path.join(dir, 'p'));
   const logs = [{ request_id: 'req-1', model: 'zai/glm-5.2', spend: 0.07, prompt_tokens: 1000, completion_tokens: 200, metadata: { session_id: 'sesG' } }];
   const o = new Orchestrator(s, { fetchSpendLogs: async () => ({ ok: true, logs }), priceBook: new L.PriceBook({}) });

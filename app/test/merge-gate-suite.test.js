@@ -13,6 +13,7 @@ const { execFileSync } = require('child_process');
 const { Store } = require('../src/store');
 const WT = require('../src/worktree');
 const MG = require('../src/merge-gate');
+const { mktemp, mktempReal } = require('./harness/tmp');
 
 const g = (cwd, ...a) => execFileSync('git', ['-c', 'user.email=a@b', '-c', 'user.name=a', ...a], { cwd, stdio: 'pipe' }).toString().trim();
 
@@ -21,8 +22,8 @@ const PASS_TEST = "const t=require('node:test');t.test('ok',()=>{});\n";
 // A repo whose app/ holds a real (tiny) test suite, plus a task worktree on squad/<id> and a
 // Store OUTSIDE the repo (a store inside would dirty the main checkout and refuse every merge).
 function fixture(id, { pkg = true } = {}) {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'squad-gate-repo-')));
-  const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'squad-gate-store-'));
+  const root = mktempReal('squad-gate-repo-');
+  const storeDir = mktemp('squad-gate-store-');
   fs.writeFileSync(path.join(root, '.gitignore'), '.squad/\nnode_modules/\n');
   fs.writeFileSync(path.join(root, 'README.md'), 'base\n');
   if (pkg) {

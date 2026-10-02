@@ -6,3 +6,6 @@
 // crashed runs still leave their pids reappable across runs. See docs/testing.md.
 require('./tmpdir').install();
 require('./procguard').install();
+// Every mkdtemp in a test-file process is tracked and removed at exit (t_8170a988). Loaded after
+// procguard so its exit hook (which kills spawned children) runs before the removal.
+require('./tmp').installGlobal();

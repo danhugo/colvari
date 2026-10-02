@@ -1,21 +1,21 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
 const { Store } = require('../src/store');
 const { ensureWorktree } = require('../src/worktree');
+const { mktemp, mktempReal } = require('./harness/tmp');
 
 // Sets up a git repo (base branch `main`) plus a Store whose task carries a worktree
 // pointing at squad/<taskId> inside that repo.
 function setup(taskId) {
-  const repo = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'am-repo-')));
+  const repo = mktempReal('am-repo-');
   const g = (cwd, ...a) => execFileSync('git', ['-c', 'user.email=a@b', '-c', 'user.name=a', ...a], { cwd, stdio: 'pipe' }).toString().trim();
   g(repo, 'init', '-q', '-b', 'main'); fs.writeFileSync(path.join(repo, 'a.txt'), 'base\n'); fs.writeFileSync(path.join(repo, '.gitignore'), '.squad/\n');
   g(repo, 'add', '.'); g(repo, 'commit', '-q', '-m', 'init');
   const w = ensureWorktree(repo, taskId);
-  const s = new Store(fs.mkdtempSync(path.join(os.tmpdir(), 'am-store-')));
+  const s = new Store(mktemp('am-store-'));
   let task = s.createTask({ title: 'do the thing', assignee: 'n_dev' });
   task = s._updateTask(task.id, { worktreePath: w.worktreePath, worktreeBranch: w.worktreeBranch });
   return { repo, g, s, task, worktreePath: w.worktreePath };
