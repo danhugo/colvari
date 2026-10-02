@@ -1,12 +1,12 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 const { Store } = require('../src/store');
 const { ProjectManager } = require('../src/projects');
 const { BoardCache } = require('../src/board-cache');
 const { spawnSync } = require('child_process');
+const { mktemp } = require('./harness/tmp');
 
 // Slow hints / no automatic reconcile: each test controls exactly which path (watch hint vs
 // reconcile backstop) is under test.
@@ -20,7 +20,7 @@ const mkTask = (id, patch = {}) => JSON.stringify({ id, title: 't ' + id, status
 const until = async (fn, ms = 2000) => { for (let t = 0; t < ms; t += 25) { if (fn()) return true; await new Promise((r) => setTimeout(r, 25)); } return fn(); };
 
 test('warm cache: list/get and the board sig hit no disk', () => {
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'bc-hit-'));
+  const d = mktemp('bc-hit-');
   const s = cachedStore(d);
   s.createTask({ title: 'one' });
   s.listTasks(); s.getTask(s.listTasks()[0].id); s.sigFile('board'); // warm
@@ -38,7 +38,7 @@ test('warm cache: list/get and the board sig hit no disk', () => {
 });
 
 test('own write: consistent immediately, exactly one delta, disk matches', async () => {
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'bc-own-'));
+  const d = mktemp('bc-own-');
   const s = cachedStore(d);
   const events = [];
   s.cache.on('change', (e) => events.push(e));
@@ -59,7 +59,7 @@ test('own write: consistent immediately, exactly one delta, disk matches', async
 });
 
 test('external edit via watch hint: adopted and reflected within ms', async () => {
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'bc-ext-'));
+  const d = mktemp('bc-ext-');
   const s = cachedStore(d);
   const t = s.createTask({ title: 'before' });
   atomicWrite(s.taskFile(t.id), mkTask(t.id, { title: 'after', status: 'review' }));
@@ -73,7 +73,7 @@ test('external edit via watch hint: adopted and reflected within ms', async () =
 });
 
 test('external write from a separate node process lands via hint or one reconcile (Cato a)', async () => {
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'bc-proc-'));
+  const d = mktemp('bc-proc-');
   const s = cachedStore(d);
   s.listTasks(); // warm + start watchers
   const fid = 't_extprocess1';
@@ -88,7 +88,7 @@ test('external write from a separate node process lands via hint or one reconcil
 });
 
 test('reconcile backstop adopts external edits and deletes when hints are lost', () => {
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'bc-rec-'));
+  const d = mktemp('bc-rec-');
   const s = cachedStore(d, { debounceMs: 3600_000 }); // watch hints never drain: reconcile is the only path
   const a = s.createTask({ title: 'a' });
   const b = s.createTask({ title: 'b' });
@@ -106,7 +106,7 @@ test('reconcile backstop adopts external edits and deletes when hints are lost',
 });
 
 test('partial write from another process: last good entry kept, never evicted, no delete (Cato c)', async () => {
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'bc-part-'));
+  const d = mktemp('bc-part-');
   const s = cachedStore(d, { debounceMs: 3600_000 });
   const t = s.createTask({ title: 'good' });
   const events = [];
@@ -124,7 +124,7 @@ test('partial write from another process: last good entry kept, never evicted, n
 });
 
 test('burst of 50 writes ends in the correct final state, one delta each (Cato d)', () => {
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'bc-burst-'));
+  const d = mktemp('bc-burst-');
   const s = cachedStore(d);
   const events = [];
   s.cache.on('change', (e) => events.push(e));
@@ -138,7 +138,7 @@ test('burst of 50 writes ends in the correct final state, one delta each (Cato d
 });
 
 test('delete: external unlink evicts and emits delete only when the file is really gone', async () => {
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'bc-del-'));
+  const d = mktemp('bc-del-');
   const s = cachedStore(d);
   const t = s.createTask({ title: 'gone soon' });
   await new Promise((r) => setTimeout(r, 250)); // let FSEvents flush the create first (it folds create+delete otherwise)
@@ -154,7 +154,7 @@ test('delete: external unlink evicts and emits delete only when the file is real
 });
 
 test('wiki: own write visible immediately without a duplicate delta; external edit adopted', async () => {
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'bc-wiki-'));
+  const d = mktemp('bc-wiki-');
   const s = cachedStore(d);
   const events = [];
   s.cache.on('change', (e) => { if (e.section === 'wiki') events.push(e); });
@@ -173,7 +173,7 @@ test('wiki: own write visible immediately without a duplicate delta; external ed
 });
 
 test('project close closes the watchers: no deltas after close (Cato e)', async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bc-close-'));
+  const root = mktemp('bc-close-');
   const pm = new ProjectManager(root);
   const pid = pm.list()[0].id;
   pm.create('spare'); // remove() refuses to delete the last project
@@ -192,7 +192,7 @@ test('project close closes the watchers: no deltas after close (Cato e)', async 
 });
 
 test('uncached Stores (MCP shape) keep reading disk and share nothing', async () => {
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'bc-plain-'));
+  const d = mktemp('bc-plain-');
   const s = cachedStore(d);
   const t = s.createTask({ title: 'shared' });
   const plain = new Store(d); // what mcp-server.js builds

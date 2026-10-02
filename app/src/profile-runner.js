@@ -49,12 +49,23 @@ function binConfigEnvKey(bin) {
 
 // Board MCP config for ONE run: written to a fresh temp dir — never the shared cwd, where concurrent
 // dispatches overwrite each other's --node binding and sessions lazily bind to the wrong node — and
-// passed to the CLI via <BIN>_CONFIG in env (mutated in place when provided).
+// passed to the CLI via <BIN>_CONFIG in env (mutated in place when provided). The dir is removed
+// when the run's child exits (removePerRunMcpDirs from the run's close path); the exit hook only
+// backstops dirs whose owning process died first (t_8170a988). The CLI reads the config at startup,
+// so removal after exit is safe.
+const perRunMcpDirs = new Map(); // env object -> dir written for it
+process.on('exit', () => { for (const d of perRunMcpDirs.values()) { try { fs.rmSync(d, { recursive: true, force: true }); } catch {} } });
+function removePerRunMcpDirs(env) {
+  const dir = perRunMcpDirs.get(env);
+  if (!dir) return;
+  perRunMcpDirs.delete(env);
+  try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
+}
 function writePerRunMcpConfig(bin, filename, mcpConfig, env) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-squad-mcp-'));
   writeFileMcpConfig(dir, filename, mcpConfig);
   const cfgPath = path.join(dir, filename);
-  if (env) env[binConfigEnvKey(bin)] = cfgPath;
+  if (env) { env[binConfigEnvKey(bin)] = cfgPath; perRunMcpDirs.set(env, dir); }
   return cfgPath;
 }
 
@@ -99,7 +110,7 @@ function runProfile(profile, opts = {}, spawnFn = spawn) {
   return new Promise((resolve, reject) => {
     let child;
     try { child = spawnFn(p.binary, args, { cwd: opts.cwd, env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] }); }
-    catch (e) { reject(e); return; }
+    catch (e) { removePerRunMcpDirs(childEnv); reject(e); return; }
     let buf = ''; let stderr = '';
     child.stdout.on('data', (d) => {
       buf += d.toString();
@@ -114,6 +125,7 @@ function runProfile(profile, opts = {}, spawnFn = spawn) {
     child.stderr.on('data', (d) => { stderr += d.toString(); });
     child.on('error', reject);
     child.on('close', (code) => {
+      removePerRunMcpDirs(childEnv); // config was read at child startup; the run's temp dir is done
       if (buf.trim()) { try { const ev = JSON.parse(buf.trim()); applyProfileEvent(run, ev, p.eventMapping); if (opts.onEvent) opts.onEvent(ev, run); } catch { /* trailing partial line */ } }
       run.exitCode = code; run.endedAt = new Date().toISOString(); run.durationMs = Date.now() - startedMs;
       run.isError = code !== 0; run.stderr = stderr;
@@ -122,4 +134,4 @@ function runProfile(profile, opts = {}, spawnFn = spawn) {
   });
 }
 
-module.exports = { buildProfileArgs, applyProfileEvent, runProfile, mcpArgs, writeFileMcpConfig, writePerRunMcpConfig, binConfigEnvKey, getPath };
+module.exports = { buildProfileArgs, applyProfileEvent, runProfile, mcpArgs, writeFileMcpConfig, writePerRunMcpConfig, removePerRunMcpDirs, binConfigEnvKey, getPath };

@@ -15,12 +15,12 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { spawn } = require('child_process');
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 const MG = require('../src/merge-gate');
 const BS = require('../src/bootstate');
 const { Store } = require('../src/store');
 const { runPidsDir } = require('../src/orchestrator');
+const { mktemp } = require('./harness/tmp');
 
 const ENTRY = path.join(__dirname, 'harness', 'qa-app-entry.js');
 const STUB = path.join(__dirname, 'perf', 'stream-cli.js'); // --help/--version/models + long stream
@@ -55,7 +55,7 @@ function bootApp(root, stage, extra = {}) {
 const readState = (f) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return null; } };
 const pidAlive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 
-const root = fs.mkdtempSync(path.join(os.tmpdir(), 'squad-qa-kill-'));
+const root = mktemp('squad-qa-kill-');
 let app1 = null, seed = null, stubPid = null, task1 = null;
 
 test('kill -9 the app pid only: the detached stub agent group dies within 10s', async () => {

@@ -1,9 +1,9 @@
 const test = require('node:test');
 const assert = require('node:assert');
-const fs = require('fs'); const os = require('os'); const path = require('path');
 const { Store } = require('../src/store');
+const { mktemp } = require('./harness/tmp');
 
-const tmp = () => new Store(fs.mkdtempSync(path.join(os.tmpdir(), 'squad-')));
+const tmp = () => new Store(mktemp('squad-'));
 
 test('team nodes and edges', () => {
   const s = tmp();
@@ -115,8 +115,7 @@ test('sessions: grouped from runs, paginated log scoped to the session window', 
 
 test('changing an agent role to a preset fills its empty prompt, tools and permission mode', () => {
   const { Store } = require('../src/store');
-  const fs = require('fs'); const os = require('os'); const path = require('path');
-  const s = new Store(fs.mkdtempSync(path.join(os.tmpdir(), 'squad-role-')));
+  const s = new Store(mktemp('squad-role-'));
   s.savePreset({ name: 'Auditor', systemPrompt: 'Audit.', allowedTools: 'Read, Grep', disallowedTools: 'Bash', permissionMode: 'plan' });
   const n = s.addNode({ name: 'A', role: 'Dev' });
   const u = s.updateNode(n.id, { role: 'auditor', systemPrompt: '' });
@@ -145,9 +144,8 @@ test('switching a node runtime drops its rate-limit snapshot (readings are runti
 });
 
 test('human inbox: ask_human blocks until answered, approvals create items', async () => {
-  const os = require('os'); const fs = require('fs'); const path = require('path');
   const { Store } = require('../src/store'); const { makeTools } = require('../src/board-tools');
-  const s = new Store(fs.mkdtempSync(path.join(os.tmpdir(), 'inbox-')));
+  const s = new Store(mktemp('inbox-'));
   const n = s.addNode({ name: 'Dev', role: 'Dev' });
   const t = s.createTask({ title: 'x', assignee: n.id }); s.updateTask(t.id, { status: 'in_progress' });
   const p = makeTools(s, n.id).ask_human({ question: 'Which DB?', choices: ['pg', 'sqlite'], pollMs: 10 });
@@ -162,7 +160,7 @@ test('human inbox: ask_human blocks until answered, approvals create items', asy
 });
 
 test('parent task auto-completes when all subtasks are done', () => {
-  const s = new Store(fs.mkdtempSync(path.join(os.tmpdir(), 'sq-')));
+  const s = new Store(mktemp('sq-'));
   const root = s.createTask({ title: 'goal' });
   const p = s.createTask({ title: 'p', parentId: root.id });
   const a = s.createTask({ title: 'a', parentId: p.id });

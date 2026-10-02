@@ -1,11 +1,12 @@
 const test = require('node:test');
 const assert = require('node:assert');
-const fs = require('fs'); const os = require('os'); const path = require('path');
+const path = require('path');
 const { Store } = require('../src/store');
 const { makeTools } = require('../src/board-tools');
+const { mktemp } = require('./harness/tmp');
 
 function setup() {
-  const s = new Store(fs.mkdtempSync(path.join(os.tmpdir(), 'squad-')));
+  const s = new Store(mktemp('squad-'));
   const pm = s.addNode({ name: 'PM', role: 'PM' });
   const dev = s.addNode({ name: 'Dev', role: 'Dev' });
   const qa = s.addNode({ name: 'QA', role: 'QA' });

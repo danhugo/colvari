@@ -69,6 +69,9 @@ const CLICK_BUDGET_MS = (CLICK_REPS * TABS.length + CARD_CLICKS) * 2600; // wors
 // smoke/guiE2E scenarios never run; TEST_MODE itself stays active.
 process.env.AGENTS_SQUAD_SMOKE = '1';
 process.env.AGENTS_SQUAD_PROJECT = fs.mkdtempSync(path.join(os.tmpdir(), 'squad-perf-root-'));
+// No $TMPDIR debris (t_8170a988): the throwaway data root dies with the run (the perf app's own
+// exit hooks run first). PERF_OUT above is a declared artifact dir and stays.
+process.on('exit', () => { try { fs.rmSync(process.env.AGENTS_SQUAD_PROJECT, { recursive: true, force: true, maxRetries: 3 }); } catch {} });
 // Isolation self-check (t_490eeee8 audit): a regression above would boot the perf instance on
 // the live app's data root — refuse instead of clobbering it.
 if (!process.env.AGENTS_SQUAD_PROJECT.startsWith(os.tmpdir())) throw new Error('[perf] AGENTS_SQUAD_PROJECT must be an isolated temp root — refusing to run against shared data');

@@ -205,7 +205,12 @@ function sandboxEnv(env = process.env) {
 }
 let sandboxDir = null;
 function getSandboxDir() {
-  if (!sandboxDir) sandboxDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-squad-introspect-'));
+  if (!sandboxDir) {
+    sandboxDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-squad-introspect-'));
+    // The sandbox lives as long as the process (probe cwd), so removal rides the exit hook
+    // (t_8170a988) — probes are synchronous, so nothing can be using it when exit runs.
+    process.on('exit', () => { try { fs.rmSync(sandboxDir, { recursive: true, force: true }); } catch {} });
+  }
   return sandboxDir;
 }
 

@@ -1,10 +1,11 @@
 const test = require('node:test');
 const assert = require('node:assert');
-const fs = require('fs'); const os = require('os'); const path = require('path');
+const fs = require('fs'); const path = require('path');
 const M = require('../src/agent-modes');
 const { buildClaudeArgs, normalizeNode } = require('../src/agent-config');
 const { Store } = require('../src/store');
 const { Orchestrator } = require('../src/orchestrator');
+const { mktemp } = require('./harness/tmp');
 
 test('normalizeMode defaults and clamping', () => {
   assert.deepStrictEqual(M.normalizeMode({}), { ...M.MODE_DEFAULTS });
@@ -64,7 +65,7 @@ test('buildClaudeArgs adds --resume', () => {
 
 // Fake claude: logs each invocation's args; agent runs emit a session id; judge runs report met on the 2nd check.
 function setup(node) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'squad-modes-'));
+  const dir = mktemp('squad-modes-');
   const logf = path.join(dir, 'calls.log');
   const fake = path.join(dir, 'fake-claude.js');
   fs.writeFileSync(fake, `#!/usr/bin/env node
@@ -183,7 +184,7 @@ test('continueSession resumes the previous task session', async () => {
 
 test('buildPrompt keeps node id and lists outgoing teammates', () => {
   const { buildPrompt } = require('../src/orchestrator');
-  const s = new Store(fs.mkdtempSync(path.join(os.tmpdir(), 'squad-bp-')));
+  const s = new Store(mktemp('squad-bp-'));
   const a = s.addNode({ name: 'Pam', role: 'PM' }); const b = s.addNode({ name: 'Dave', role: 'Dev' }); s.addEdge(a.id, b.id);
   const p = buildPrompt(s.getTeam(), s.getTeam().nodes[0], s.createTask({ title: 'x', assignee: a.id }));
   assert.match(p, new RegExp(`node id: ${a.id}`)); assert.match(p, /assign tasks to: Dave/);
@@ -191,7 +192,7 @@ test('buildPrompt keeps node id and lists outgoing teammates', () => {
 
 test('buildPrompt worktree rule: only when the run actually got a worktree', () => {
   const { buildPrompt } = require('../src/orchestrator');
-  const s = new Store(fs.mkdtempSync(path.join(os.tmpdir(), 'squad-bp-')));
+  const s = new Store(mktemp('squad-bp-'));
   const a = s.addNode({ name: 'Pam', role: 'Dev' });
   const t = s.createTask({ title: 'x', assignee: a.id });
   const team = s.getTeam(); const node = team.nodes.find((n) => n.id === a.id);

@@ -9,12 +9,12 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
 const MG = require('../src/merge-gate');
+const { mktempReal } = require('./harness/tmp');
 
-const tmpRoot = (label) => { const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'squad-pid-' + label + '-'))); fs.mkdirSync(path.join(root, '.squad'), { recursive: true }); return root; };
+const tmpRoot = (label) => { const root = mktempReal('squad-pid-' + label + '-'); fs.mkdirSync(path.join(root, '.squad'), { recursive: true }); return root; };
 // Poll asynchronously: a blocked event loop never reaps this process' own children, so a sync
 // kill(pid, 0) loop would see zombies as alive forever.
 const until = async (fn, ms = 4000) => { const end = Date.now() + ms; for (;;) { if (fn()) return true; if (Date.now() > end) return fn(); await new Promise((r) => setTimeout(r, 50)); } };
