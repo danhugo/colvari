@@ -18,6 +18,46 @@ function enabledTools(node, devMode) {
   return list.filter((t) => !off.has(t));
 }
 
+// Agent-posted attachments (t_6628894d): {path} refs the agent passes to send_message/comment_task.
+// Never trusted: the file is copied into <store>/attachments via saveAttachment and only the copy's
+// {path,name,mime,size} is stored — the agent-provided path and the bytes never reach messages.json.
+// Allowed root is this process's cwd (the board MCP server runs in the agent's worktree); root and
+// file are both realpath'd so ../ and symlink escapes fail the prefix check (root's realpath +
+// path.sep, so a sibling directory "/wt-evil" can never match "/wt"). Images only, by extension
+// allowlist (SVG can carry script), mime derived from the extension; size is checked by stat BEFORE
+// the file is read; max 5 files per call. Two phases (Critic): every ref is validated first — one
+// bad file rejects the whole call — then all copies happen, rolled back if a copy itself fails.
+const AGENT_IMAGE_MIMES = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp' };
+function saveAgentAttachments(store, refs) {
+  if (refs == null) return null;
+  if (!Array.isArray(refs) || !refs.length) throw new Error('attachments must be a non-empty array of {path}');
+  if (refs.length > 5) throw new Error(`too many attachments (${refs.length}); max 5 per call`);
+  let root;
+  try { root = fs.realpathSync(process.cwd()); } catch (e) { throw new Error('cannot resolve the working directory: ' + e.message); }
+  const ok = refs.map((r) => {
+    const raw = r && typeof r === 'object' && r.path != null ? String(r.path) : '';
+    if (!raw) throw new Error('each attachment needs {path}');
+    const mime = AGENT_IMAGE_MIMES[path.extname(raw).toLowerCase()];
+    if (!mime) throw new Error(`unsupported attachment "${raw}" (images only: png, jpg, jpeg, gif, webp)`);
+    let real, st;
+    try { real = fs.realpathSync(path.resolve(root, raw)); st = fs.statSync(real); } catch { throw new Error(`attachment not found: ${raw}`); }
+    if (!st.isFile()) throw new Error(`attachment is not a regular file: ${raw}`);
+    if (!real.startsWith(root + path.sep)) throw new Error(`attachment outside your working directory: ${raw}`);
+    if (st.size > 10 * 1024 * 1024) throw new Error(`attachment too large: ${raw} is ${(st.size / 1048576).toFixed(1)} MB (limit is 10 MB)`);
+    return { raw, real, mime };
+  });
+  const out = [];
+  for (const { raw, real, mime } of ok) {
+    const saved = store.saveAttachment({ name: path.basename(real), mime, bytes: fs.readFileSync(real) });
+    if (saved.error) {
+      for (const prev of out) { try { fs.unlinkSync(prev.path); } catch {} }
+      throw new Error(`attachment "${raw}" rejected: ${saved.error}`);
+    }
+    out.push(saved);
+  }
+  return out;
+}
+
 function makeTools(store, nodeId) {
   const team = () => store.getTeam();
   const nodeName = (t, id) => (t.nodes.find((n) => n.id === id) || {}).name || id;
@@ -210,17 +250,17 @@ function makeTools(store, nodeId) {
       const r = store.updateTask(taskId, priority !== undefined ? { ...g, priority } : g);
       return g.awaitingApproval ? { ...r, note: 'Moved to review: a human must approve this task before it is done.' } : r;
     },
-    comment_task({ taskId, text }) {
+    comment_task({ taskId, text, attachments }) {
       const t = me(); const tk = store.getTask(taskId);
       if (!tk) throw new Error('no task ' + taskId);
       if (!visibleTask(t, nodeId, tk)) throw new Error('scope violation: task not visible');
-      return store.commentTask(taskId, nodeName(t, nodeId), text);
+      return store.commentTask(taskId, nodeName(t, nodeId), text, saveAgentAttachments(store, attachments));
     },
-    send_message({ to, text, taskId = null }) {
+    send_message({ to, text, taskId = null, attachments }) {
       const t = me(); if (to === 'human') throw new Error('unknown recipient "human". To reply to the human, put the reply in your final answer, or use ask_human.');
       const target = resolve(t, to, 'recipient');
       if (!canMessage(t, nodeId, target.id)) throw new Error(`scope violation: ${nodeName(t, nodeId)} cannot message ${target.name} (no message or assign edge)`);
-      return store.sendMessage({ from: nodeId, to: target.id, text, taskId });
+      return store.sendMessage({ from: nodeId, to: target.id, text, taskId, attachments: saveAgentAttachments(store, attachments) });
     },
     // Inbox: messages to me from nodes that (still) have a message/assign edge to me. Marks them read.
     read_messages({ unreadOnly = true, from, limit = 20 } = {}) {

@@ -1865,7 +1865,7 @@ function renderBoard() {
     <div id="td-deps" class="checks deps">${S.tasks.filter((x) => x.id !== t.id).map((x) => `<label class="${deps.has(x.id) && x.status !== 'done' ? 'open' : ''}"><input type="checkbox" value="${x.id}" ${deps.has(x.id) ? 'checked' : ''}> ${esc(x.title)} <span class="muted">(${x.status})</span></label>`).join('') || '<span class="muted">no other tasks</span>'}</div>
     <label>Description</label><div class="comment">${esc(t.description) || '<span class="muted">none</span>'}</div>
     ${t.sessionId ? `<p class="muted">Session <code>${esc(t.sessionId)}</code>${t.iterations ? ` · ${t.iterations} iteration(s)` : ''}</p>` : ''}
-    <label>Comments</label>${(cmtCut ? `<p class="muted">${cmtCut} earlier comments hidden</p>` : '') + cmts.map((c) => `<div class="comment"><b>${esc(c.author)}</b>: ${esc(c.text)}</div>`).join('') || '<p class="muted">none</p>'}
+    <label>Comments</label>${(cmtCut ? `<p class="muted">${cmtCut} earlier comments hidden</p>` : '') + cmts.map((c) => `<div class="comment"><b>${esc(c.author)}</b>: ${esc(c.text)}${Chat.attThumbs(c.attachments)}</div>`).join('') || '<p class="muted">none</p>'}
     <textarea id="td-comment" rows="2" placeholder="Add comment"></textarea>
     ${orphanedTasks().includes(t) ? `<div class="stuckbar">⚠ Stopped with a problem: no live worker.<span class="spacer"></span>${stuckBtn(t.id)}</div>` : ''}
     <p><button id="td-addc">Comment</button> <button id="td-del">Delete task</button>${t.worktreePath ? ` <button id="td-diff">Diff</button> <button id="td-merge">Merge</button> <button id="td-discard">Discard</button>` : ''}</p><div id="td-diffbox"></div></div>`;
@@ -2634,7 +2634,10 @@ function bubble(e) {
   const ico = (p) => `<svg viewBox="0 0 24 24" aria-hidden="true">${p}</svg>`;
   const IC = { handoff: '<path d="M5 12h14M13 6l6 6-6 6"/>', message: '<path d="M4 6h16v12H4zM4 7l8 6 8-6"/>', comment: '<path d="M4 5h16v11H8l-4 4z"/>' };
   if (IC[e.type]) { const t = e.type === 'handoff' ? `assigned “${e.text}” to @${who(e.to).name}` : e.type === 'message' ? `@${who(e.to).name} ${e.text}` : e.text;
-    return `<div class="bubble evrow ${e.type}${link ? ' linked' : ''}"${link}>${ico(IC[e.type])}<span>${esc(t)}</span>${e._tb ? teamBadge(e._tb) : ''}${tl}${rep}</div>`; }
+    // attThumbs rides the span: the evrow branch took over message/comment bubbles after the
+    // attachments feature and silently dropped their thumbs (t_6628894d) — '' when none, so
+    // plain rows are unchanged.
+    return `<div class="bubble evrow ${e.type}${link ? ' linked' : ''}"${link}>${ico(IC[e.type])}<span>${esc(t)}${Chat.attThumbs(e.atts)}</span>${e._tb ? teamBadge(e._tb) : ''}${tl}${rep}</div>`; }
   const text = e.text;
   const attsHtml = Chat.attThumbs(e.atts);
   return `<div class="bubble ${e.type}${link ? ' linked' : ''}"${link}>${chatMd(text)}${attsHtml}${tl}${e._tb ? teamBadge(e._tb) : ''}${rep}</div>`;
