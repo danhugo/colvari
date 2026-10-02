@@ -11,6 +11,7 @@
     "e2e": "AGENTS_SQUAD_PROJECT=$(mktemp -d) AGENTS_SQUAD_TEST_ISOLATION=1 node cli/e2e.js",
     "smoke:real": "node cli/smoke-discovery-limits.js",
     "smoke": "AGENTS_SQUAD_SMOKE=1 electron .",
+    "profile:renderer": "node cli/profile-renderer.js",
     "gui-e2e": "mkdir -p e2e-shots && AGENTS_SQUAD_PROJECT=$(mktemp -d) AGENTS_SQUAD_GUI_E2E=$PWD/e2e-shots electron .",
     "gui-e2e:team": "mkdir -p e2e-shots && AGENTS_SQUAD_PROJECT=$(mktemp -d) AGENTS_SQUAD_GUI_E2E=$PWD/e2e-shots AGENTS_SQUAD_GUI_E2E_ONLY=team electron .",
     "gui-e2e:chat": "mkdir -p e2e-shots && AGENTS_SQUAD_PROJECT=$(mktemp -d) AGENTS_SQUAD_GUI_E2E=$PWD/e2e-shots AGENTS_SQUAD_GUI_E2E_ONLY=chat electron .",
