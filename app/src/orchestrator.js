@@ -102,7 +102,10 @@ const isBoardHelper = (r) => !!r.command && /mcp-server\.js/.test(r.command) && 
 
 // Stall watchdog: how often a working agent is checked for silence, how long a SIGTERM'd stalled run
 // gets to exit before SIGKILL, and the max automatic stop+resume recoveries per task (persisted there).
-const STALL = { SWEEP_MS: 5000, SIGKILL_GRACE_MS: 8000, MAX_RECOVERIES: 2 };
+// HARD_CAP_MULT: silence for MULT x stallTimeoutMin kills the run even when runAlive() sees live
+// descendants — a runtime's own long-lived helpers (helpycode MCP servers) used to pin liveness
+// true forever (t_1f75efd8: a wake run hung 3h11m).
+const STALL = { SWEEP_MS: 5000, SIGKILL_GRACE_MS: 8000, MAX_RECOVERIES: 2, HARD_CAP_MULT: 3 };
 
 // Dispatch sweep: task changes written outside this process (an agent's own board MCP calls create,
 // unblock or move tasks) carry no in-process event to tick on — without this cadence a ready todo
@@ -555,19 +558,25 @@ class Orchestrator extends EventEmitter {
   // Human -> agent message. Stored in the agent's inbox; if the agent is running, the current run is
   // interrupted and resumed in the same session with the message as the next prompt. extra.attachments
   // are already-saved files ({path,name,mime,size}); only the records travel, never the bytes.
+  // The system status check (extra.from === 'system') is labelled a status check, never a human
+  // message; with extra.interrupt === false it never SIGTERMs a live run — the message waits for the
+  // next wake. Its wake flag keeps just that one message kind eligible in wakeUnread, so an idle
+  // agent is still woken by it (plain system messages never wake anyone).
   sendToAgent(nodeId, text, taskId = null, extra = null) {
     if (!String(text || '').trim()) throw new Error('text required');
     const a = this.agent(nodeId);
-    const m = this.store.sendMessage({ from: 'human', to: nodeId, text: String(text).trim(), taskId: taskId || a.taskId || null, attachments: extra && extra.attachments });
-    const live = a.status === 'working' && this.procs.has(nodeId) && this.running;
-    if (live) { a.pendingHuman.push(m); this.log(nodeId, 'system', `✉ human message queued; interrupting to deliver: ${m.text.slice(0, 200)}`); this.procs.get(nodeId).kill('SIGTERM'); }
-    else this.log(nodeId, 'system', `✉ human message stored in inbox: ${m.text.slice(0, 200)}`);
+    const system = !!(extra && extra.from === 'system');
+    const queued = system && extra.interrupt === false;
+    const m = this.store.sendMessage({ from: system ? 'system' : 'human', to: nodeId, text: String(text).trim(), taskId: taskId || a.taskId || null, attachments: extra && extra.attachments, wake: queued });
+    const live = !queued && a.status === 'working' && this.procs.has(nodeId) && this.running;
+    if (live) { a.pendingHuman.push(m); this.log(nodeId, 'system', `${system ? 'Status check (system)' : '✉ human message'} queued; interrupting to deliver: ${m.text.slice(0, 200)}`); this.procs.get(nodeId).kill('SIGTERM'); }
+    else this.log(nodeId, 'system', `${system ? 'Status check (system)' : '✉ human message'} stored in inbox: ${m.text.slice(0, 200)}`);
     this.changed();
     // Free signal (plan t_76da3303 C): a human message/answer to the agent also triggers ONE auto
     // retest+resume of a stuck task (team-answers delivers ask answers through here, so both count).
     // Fire-and-forget: this call must not wait on the preflight.
     try { this.autoResumeStuck((this.store.getTeam().nodes.find((n) => n.id === nodeId) || {}).runtime || 'claude', 'human message', taskId || null); } catch {}
-    return { ...m, delivered: live ? 'interrupt' : 'inbox' };
+    return { ...m, delivered: live ? 'interrupt' : queued ? 'queued' : 'inbox' };
   }
 
   // ---- wake on message: an idle agent that receives a send_message is dispatched with its unread
@@ -613,10 +622,11 @@ class Orchestrator extends EventEmitter {
     } catch (e) { this.log(null, 'error', 'wake sweep: ' + e.message); }
   }
   // Unread messages for a node from teammates or the human operator (system senders have their own
-  // delivery paths and never wake anyone).
+  // delivery paths and never wake anyone — except the queued status-check nudge, whose wake flag
+  // opts exactly that one message kind into waking an idle agent, like the human message it replaced).
   wakeUnread(nodeId, team = this.store.getTeam()) {
     return this.store.listMessages({ to: nodeId })
-      .filter((m) => !m.read && m.from !== nodeId && m.from !== 'system' && (m.from === 'human' || team.nodes.some((n) => n.id === m.from)));
+      .filter((m) => !m.read && m.from !== nodeId && (m.from !== 'system' || m.wake) && (m.from === 'human' || m.from === 'system' || team.nodes.some((n) => n.id === m.from)));
   }
   async dispatchWake(nodeId) {
     const team = this.store.getTeam();
@@ -631,11 +641,12 @@ class Orchestrator extends EventEmitter {
     const now = Date.now();
     const senders = [...new Set(msgs.map((m) => m.from))];
     // The human operator is never pair-capped (a chat message must always reach an idle agent);
-    // the cap only guards agent->agent ping-pong between two autonomous senders.
-    const capped = (f) => { if (f === 'human') return false; const e = this.wakePairs.get(f + '>' + nodeId); return e && now - e.since < WAKE.PAIR_WINDOW_MS && e.count >= WAKE.MAX_PER_PAIR; };
+    // neither is the system status check (the nudge button replaced a human message — same rule).
+    // The cap only guards agent->agent ping-pong between two autonomous senders.
+    const capped = (f) => { if (f === 'human' || f === 'system') return false; const e = this.wakePairs.get(f + '>' + nodeId); return e && now - e.since < WAKE.PAIR_WINDOW_MS && e.count >= WAKE.MAX_PER_PAIR; };
     if (senders.every(capped)) return; // ping-pong loop: every sender pair is at its cap, stay quiet
     for (const f of senders) {
-      if (f === 'human') continue;
+      if (f === 'human' || f === 'system') continue;
       const k = f + '>' + nodeId; const e = this.wakePairs.get(k);
       if (!e || now - e.since >= WAKE.PAIR_WINDOW_MS) this.wakePairs.set(k, { count: 1, since: now });
       else { e.count++; if (e.count === WAKE.MAX_PER_PAIR) this.log(nodeId, 'system', `wake cap reached for messages from ${f}: no more auto-wakes from this pair for a while`); }
@@ -644,7 +655,7 @@ class Orchestrator extends EventEmitter {
     a.wakePending = null;
     this.store.markMessagesRead(msgs.map((m) => m.id)); // delivered verbatim in the prompt below
     this.emit('woken_by_message', { nodeId, by: senders, messageIds: msgs.map((m) => m.id) });
-    const nameOf = (id) => (team.nodes.find((n) => n.id === id) || {}).name || id;
+    const nameOf = (id) => (id === 'system' ? 'the system status check' : (team.nodes.find((n) => n.id === id) || {}).name || id);
     this.log(nodeId, 'system', `✉ woken by message from ${senders.map(nameOf).join(', ')}: ${msgs[0].text.slice(0, 200)}`);
     await this.wakeRun(node, msgs, team, settings);
   }
@@ -743,46 +754,56 @@ class Orchestrator extends EventEmitter {
   // ---- stall watchdog: a run that has emitted nothing AND has no live child/descendant process for
   // stallTimeoutMin (setting, default 10) is stalled. Task runs are stopped and resumed in the same
   // session (runTask's r.stalled branch) with a short continue prompt, max 2 recoveries per task.
-  // Wake runs (no task) are only stopped: the sweep re-delivers what still matters, and holding the
-  // agent's single-run slot forever on a hung wake is never right. Manual interrupts (stopAgent, a
-  // queued human message) always take precedence and are never recovered over. ----
+  // EVERY run kind is watched (t_600e630d): task runs and every no-task run (wake, loop, watchdog)
+  // of every runtime — a hung run must never hold the agent's single-run slot. No-task runs are only
+  // stopped: the sweep re-delivers what still matters. Hard cap: silence for HARD_CAP_MULT x the
+  // timeout kills any run even with live descendants (runtimes whose own helpers pin runAlive()
+  // forever). Manual interrupts (stopAgent, a queued human message) always take precedence. ----
   sweepStalls() {
     if (this.userStopped) return;
-    // Task-run recovery is the Run's business (it re-dispatches through runTask), but a wake run can
-    // be live with the Run over (dispatchWake does not require it) — those still get watched, since a
-    // hung wake run must not hold the agent's single-run slot forever.
+    // Task-run recovery is the Run's business (it re-dispatches through runTask), but a no-task run
+    // can be live with the Run over (dispatchWake does not require it) — those still get watched.
     let runOver = false;
     if (!this.running) {
       runOver = true;
-      let hasWake = false;
+      let hasNoTaskRun = false;
       for (const [nodeId] of this.procs) {
         const a = this.agents[nodeId];
-        if (a && a.status === 'working' && !a.taskId && a.activity && a.activity.trigger === 'message') hasWake = true;
+        if (a && a.status === 'working' && !a.taskId) hasNoTaskRun = true;
       }
-      if (!hasWake) return;
+      if (!hasNoTaskRun) return;
     }
     const timeoutMin = Number(this.store.getSettings().stallTimeoutMin ?? 10);
     if (!(timeoutMin > 0)) return;
     const now = Date.now();
+    const hardCapMs = timeoutMin * STALL.HARD_CAP_MULT * 60000;
     for (const [nodeId, child] of [...this.procs]) {
       const a = this.agents[nodeId];
       const run = a && a.currentRun;
       if (!a || a.status !== 'working' || !run || run.done || run.stalled) continue;
-      // Cover both run kinds: task runs (a.taskId) and wake runs (no task, message-triggered activity).
-      const isWake = !a.taskId && !!(a.activity && a.activity.trigger === 'message');
-      if (!a.taskId && !isWake) continue;
+      // Every run kind: task runs (a.taskId) and every no-task run — the activity trigger no longer
+      // gates the sweep (t_600e630d: no-task runs without a 'message' trigger were skipped).
+      const isWake = !a.taskId;
       if (runOver && !isWake) continue;
       if (a.stopRequested || a.pendingHuman.length) continue;
-      if (now - (a.lastActivityAt || 0) < timeoutMin * 60000) continue;
-      if (this.runAlive(nodeId, child)) continue;
+      const idleMs = now - (a.lastActivityAt || 0);
+      if (idleMs < timeoutMin * 60000) continue;
+      // A live descendant (long silent tool call) protects the run — up to the hard cap, where
+      // silence wins: the cap is what recovers runs whose runtime keeps helpers alive forever.
+      const alive = this.runAlive(nodeId, child);
+      const capped = alive && idleMs >= hardCapMs;
+      if (alive && !capped) continue;
       // One-way claim on the run object: whichever sweep flips .stalled owns the recovery, so a tick
       // racing a manual stop or a queued message can never double-fire (compare-and-set on the run).
       run.stalled = true;
       a.stall = { state: 'stalled' };
-      const idleMin = Math.round((now - (a.lastActivityAt || 0)) / 60000);
-      this.log(nodeId, 'error', isWake
-        ? `stall: wake run silent with no live child process for ${idleMin} min; stopping it (messages still pending re-wake the agent)`
-        : `stall: no events and no live child process for ${idleMin} min; stopping the run to recover`);
+      const idleMin = Math.round(idleMs / 60000);
+      const kids = capped ? this.stallLiveKids(child) : null;
+      this.log(nodeId, 'error', capped
+        ? `stall: no output for ${idleMin} min (${STALL.HARD_CAP_MULT}x the ${timeoutMin} min timeout) — killing despite live child processes: ${kids.length ? kids.slice(0, 3).map((k) => `pid ${k.pid} ${String(k.command).slice(0, 80)}`).join('; ') + (kids.length > 3 ? `; +${kids.length - 3} more` : '') : 'none found'}`
+        : isWake
+          ? `stall: wake run silent with no live child process for ${idleMin} min; stopping it (messages still pending re-wake the agent)`
+          : `stall: no events and no live child process for ${idleMin} min; stopping the run to recover`);
       this.emit('run.stalled', { nodeId, taskId: a.taskId || null, idleMin, kind: isWake ? 'wake' : 'task' });
       try { child.kill('SIGTERM'); } catch {}
       this._stallKill.set(nodeId, setTimeout(() => {
@@ -794,6 +815,24 @@ class Orchestrator extends EventEmitter {
       }, STALL.SIGKILL_GRACE_MS));
       this.changed();
     }
+  }
+
+  // Live (non-zombie) descendants of the run's CLI, for the hard-cap log: they show what kept a
+  // silent run "alive" (board MCP helpers excluded, same scan as runAlive).
+  stallLiveKids(child) {
+    const rows = this.procTable();
+    if (!rows || !child || !child.pid) return [];
+    const kids = new Map();
+    for (const r of rows) { if (!kids.has(r.ppid)) kids.set(r.ppid, []); kids.get(r.ppid).push(r); }
+    const out = []; const queue = [child.pid]; const seen = new Set(queue);
+    while (queue.length) {
+      for (const r of kids.get(queue.pop()) || []) {
+        if (seen.has(r.pid) || isBoardHelper(r)) continue;
+        seen.add(r.pid); queue.push(r.pid);
+        if (r.state[0] !== 'Z') out.push({ pid: r.pid, command: r.command });
+      }
+    }
+    return out;
   }
 
   // Liveness beyond emitted events: a live (non-zombie) descendant of the run's CLI process counts as
@@ -1739,14 +1778,17 @@ class Orchestrator extends EventEmitter {
           this.log(node.id, 'system', '↻ resume failed (session not found): retrying once from a fresh session');
           continue;
         }
-        // A run that got through (exit 0) is real progress: the stall counter resets (persisted on the task,
-        // so it survives app restarts — otherwise a restart would re-arm the recovery budget).
-        if (code === 0) { const tp = this.store.getTask(task.id); if (tp && tp.stallRecoveries) this.store.updateTask(task.id, { stallRecoveries: 0 }); }
-        // Stalled run confirmed exited (the watchdog killed it after the run.stalled claim): resume the
-        // same session with a continue prompt, at most STALL.MAX_RECOVERIES times per task (persisted
-        // counter), then park the task for a human. Only when the orchestrator is still running and no
-        // manual stop interleaved.
-        if (r.stalled && code !== 0 && this.running && !a.stopRequested) {
+        // A run that got through (exit 0, no stall claim) is real progress: the stall counter resets
+        // (persisted on the task, so it survives app restarts — otherwise a restart would re-arm the
+        // recovery budget). A code 0 under an active stall claim is NOT progress — the watchdog killed
+        // a run whose CLI trapped TERM and exited 0; resetting there would disarm the max-2 limit.
+        if (code === 0 && !r.stalled) { const tp = this.store.getTask(task.id); if (tp && tp.stallRecoveries) this.store.updateTask(task.id, { stallRecoveries: 0 }); }
+        // Stalled run confirmed exited (the watchdog killed it after the run.stalled claim) — whatever
+        // the exit code: a trapping CLI can exit 0 on its kill signal, and that still needs the same
+        // recovery. Resume the same session with a continue prompt, at most STALL.MAX_RECOVERIES times
+        // per task (persisted counter), then park the task for a human. Only when the orchestrator is
+        // still running and no manual stop interleaved.
+        if (r.stalled && this.running && !a.stopRequested) {
           const ts = this.store.getTask(task.id);
           const attempt = ((ts && ts.stallRecoveries) || 0) + 1;
           if (attempt > STALL.MAX_RECOVERIES) {
