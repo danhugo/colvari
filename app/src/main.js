@@ -842,7 +842,7 @@ async function guiE2E() {
     // fed into orch.subscriptionRateLimits off the CLI's init event), not only the local run-derived count —
     // other clients sharing the same subscription window aren't reflected in this project's local runs.
     o.subscriptionRateLimits = { [pm1.id]: { fiveHour: { pct: 0.97, resetsAt: new Date(Date.now() + 3600000).toISOString() } } };
-    await ex(`await refresh(); await w(400);`);
+    await ex(`usAt = 0; await refresh(); await w(300);`); // bust usageStatusOnce's 1s cache or the meter re-renders stale
     const cli = await ex(`return ${meterQ}`);
     expect('usage limits: #limitmeter prefers the higher CLI-reported rate-limit % (97%) over the 60% local count', cli.pct === '97%' && cli.warn && !cli.pause, cli);
     o.subscriptionRateLimits = {};
@@ -850,11 +850,11 @@ async function guiE2E() {
     for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`await w(200);`); await shot(`limits-meter-${t}`); }
     // Cross the warn line (80%), then the pause line (100%) — both computed straight off the same stubbed runs.
     s.saveSettings({ usageLimits: { fiveHourLimit: 7, weeklyLimit: 0, tokenLimit: 0, costLimit: 0, warnPct: 80 } });
-    await ex(`await refresh(); await w(400);`);
+    await ex(`usAt = 0; await refresh(); await w(300);`);
     const warn = await ex(`return ${meterQ}`);
     expect('usage limits: 6/7 = 86% crosses the warn line', warn.pct === '86%' && warn.warn, warn);
     s.saveSettings({ usageLimits: { fiveHourLimit: 6, weeklyLimit: 0, tokenLimit: 0, costLimit: 0, warnPct: 80 } });
-    await ex(`await refresh(); await w(400);`);
+    await ex(`usAt = 0; await refresh(); await w(300);`);
     const pause = await ex(`return ${meterQ}`);
     expect('usage limits: 6/6 = 100% crosses the pause line', pause.pct === '100%' && pause.pause, pause);
     await shot('limits-pause-banner');
@@ -2197,7 +2197,7 @@ async function guiE2E() {
     expect('topbar: cost pill populated (tokens pill removed; cost visible)', await ex(`return !$('#totalcost').classList.contains('hidden') && !/no cost yet/.test($('#totalcost').textContent) && !document.querySelector('#totaltokens')`));
     // Regime (t_bc19b2f5, t_57421101 round 3; goal popover in t_db67859d): the meter and the cost
     // pill are FIXED — they may never shrink or clip, at any width. #updst/#runstate ellipsize as
-    // the last valves, and below 1200px the brand text hides and the tab labels collapse to icons.
+    // the last valves, and below 1500px the tab labels collapse to icons (brand text hides under 1000px).
     // The header holds only fixed-size chrome now: the goal composer lives in a popover off the
     // "New goal" button, asserted to open focused and fully on-screen at 1400px below.
     const measure = `(async () => { const h = document.querySelector('header'); const d = document.documentElement; const vis = (s) => { const e = document.querySelector(s); if (!e || e.getClientRects().length === 0) return false; const r = e.getBoundingClientRect(); return r.width > 0 && r.left >= 0 && r.right <= window.innerWidth && r.top >= 0 && r.bottom <= window.innerHeight; };
@@ -2302,13 +2302,13 @@ async function guiE2E() {
     const flagGrab = `(async () => { const m2 = document.querySelector('#limitmeter'); const c = m2.querySelector('.lm-chip'); return { kids: m2.children.length, cls: c ? c.className : '', txt: c ? c.textContent.trim() : '', flagEl: !!m2.querySelector('.lm-flag'), w: c ? Math.round(c.getBoundingClientRect().width) : null }; })()`;
     win.setContentSize(1400, Math.max(600, Math.min(prevSize[1], 800))); await new Promise((r) => setTimeout(r, 350));
     o6.subscriptionRateLimits[nodes6[0].id] = { fiveHour: rl(1, 1), weekly: rl(0.13, 72), runtime: 'claude' };
-    await ex(`await refresh(); await w(500);`);
+    await ex(`usAt = 0; await refresh(); await w(300);`); // bust usageStatusOnce's 1s cache or the chip re-renders stale
     const pf6 = await ex(`return ${flagGrab}`);
     expect('topbar-6[paused]: flag lives inside the one chip — meter stays one element, no .lm-flag element, chip says "paused"', pf6.kids === 1 && pf6.cls.includes('lm-danger') && /paused/.test(pf6.txt) && !pf6.flagEl, pf6);
     await shot('topbar-6-paused');
     await ex(`await switchTo(${JSON.stringify(prevCtx6)}); await w(300);`);
     o.subscriptionRateLimits[nodes[0].id] = { fiveHour: rl(1, 1), weekly: rl(0.13, 72) };
-    await ex(`await refresh(); await w(500);`);
+    await ex(`usAt = 0; await refresh(); await w(300);`);
     const pf2 = await ex(`return ${flagGrab}`);
     expect('topbar[paused]: same in-chip flag on the 2-provider team', pf2.kids === 1 && pf2.cls.includes('lm-danger') && /paused/.test(pf2.txt) && !pf2.flagEl, pf2);
     expect(`topbar[paused]: equal-width holds with the flag shown (${pf6.w}px vs ${pf2.w}px)`, pf6.w != null && pf2.w != null && Math.abs(pf6.w - pf2.w) <= 1, { six: pf6, two: pf2 });
