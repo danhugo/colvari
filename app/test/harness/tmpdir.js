@@ -79,11 +79,16 @@ function sweepRuns(dir = REAL_TMP) {
 // Chooses this process's relationship to the run: the root (no run dir in env yet) creates the
 // private dir under the system tmpdir, points TMPDIR/TEMP/TMP at it, moves AGENTS_SQUAD_PROJECT
 // inside (the old package.json `$(mktemp -d)` leaked one dir per run) and records both env vars
-// for descendants; a descendant adopts the inherited dir and does nothing else.
+// for descendants; a descendant adopts the inherited dir and does nothing else. The dir name is
+// literally squad-test-<pid> — the name encodes the owning pid on purpose (the sweep judges run
+// dirs by pid liveness and the rm guard matches the exact shape), so mkdtemp's random suffix is
+// out; a dir of the same name can only be debris from a dead previous owner of this pid.
 function createRun(env = process.env) {
   if (env[RUN_DIR_ENV]) return { dir: env[RUN_DIR_ENV], owner: false, project: env.AGENTS_SQUAD_PROJECT || null };
   sweepRuns();
-  const dir = fs.mkdtempSync(path.join(REAL_TMP, RUN_PREFIX));
+  const dir = path.join(REAL_TMP, RUN_PREFIX + process.pid);
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.mkdirSync(dir, { recursive: true });
   const project = path.join(dir, 'project');
   fs.mkdirSync(project, { recursive: true });
   env[REAL_TMP_ENV] = REAL_TMP;
