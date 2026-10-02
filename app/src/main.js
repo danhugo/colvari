@@ -718,6 +718,13 @@ async function guiE2E() {
     await ex(`$('#tabs button[data-tab=chat]').click(); await w(300);`); await shot('31-runidle-running-chat');
     // The stub leaves the task in review; the PM's review pickup closes it, then the board drains.
     expect('runidle: first task closes done through the review pickup', await until(() => s.getTask(first.id).status === 'done', 30000), s.getTask(first.id).status);
+    // t_2ec513c4: once the work is done and no agent proc is left, no view may still show '.working' (stale nstat used to pin it).
+    await until(() => o.procs.size === 0, 15000);
+    for (const tab of ['team', 'chat']) { // hidden tabs keep their DOM until activated, so check each tab once visible
+      await ex(`$('#tabs button[data-tab=${tab}]').click(); await w(2500);`); // no refresh(): the delta path alone must keep views current
+      const left = await ex(`return [...document.querySelectorAll('.tab.active .node.working, .tab.active .avatar.working')].map((e) => e.getAttribute('data-id') || e.className)`);
+      expect(`runidle: no .working left on ${tab} after the run finished`, left.length === 0, left);
+    }
     // The gate must be deterministic: right after done, running is transiently true before the core
     // drain-stop lands (t_b2273507), so sampling it here raced the stop underneath the idle branch.
     // Settle first — the run either actually stops, or survives 2s straight with zero procs (core

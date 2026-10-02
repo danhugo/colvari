@@ -887,7 +887,8 @@ const roleBg = (role) => { const r = String(role || '');
   if (/\b(dev|engineer)\b/i.test(r)) return 'var(--agent-5-text)';
   return 'var(--fg-muted)'; };
 const edgeSeed = (e) => { let h = 0; for (const c of String(e.id || '')) h = (h * 31 + c.charCodeAt(0)) >>> 0; return h; };
-const nodeLive = (n) => ((S.nstat || {})[n.id] || {}).status || ((S.orch.agents[n.id] || {}).status === 'working' ? 'working' : 'idle');
+// S.orch.agents is patched by every delta; S.nstat only by refresh() (which the delta path keeps quiet) — so 'working' comes from the live agents, nstat only adds needs-human.
+const nodeLive = (n) => (S.orch.agents[n.id] || {}).status === 'working' ? 'working' : ((S.nstat || {})[n.id] || {}).status === 'needs-human' ? 'needs-human' : 'idle';
 const applyVP = () => { const v = $('#graph > g.viewport'); if (v) v.setAttribute('transform', `translate(${VP.x},${VP.y}) scale(${VP.zoom})`); const gs = $('#graph'); if (gs) { gs.classList.toggle('lod-far', VP.zoom < 0.6); gs.style.setProperty('--nz', Math.max(1, 12 / (13 * VP.zoom)).toFixed(3)); } renderMinimap(); $('#zoomlvl') && ($('#zoomlvl').textContent = Math.round(VP.zoom * 100) + '%'); };
 const saveVP = () => { clearTimeout(vpSave); vpSave = setTimeout(() => call('setViewport', VP).catch(() => {}), 400); };
 const toWorld = (cx, cy) => { const r = $('#graph').getBoundingClientRect(); return [(cx - r.left - VP.x) / VP.zoom, (cy - r.top - VP.y) / VP.zoom]; };
