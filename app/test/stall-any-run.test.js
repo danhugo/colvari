@@ -16,7 +16,7 @@ const { Orchestrator, STALL } = require('../src/orchestrator');
 // would hold the run's pipes open and delay its close event.
 const RESULT = `printf '%s\\n' '{"type":"result","subtype":"success","session_id":"sess-1","total_cost_usd":0,"num_turns":1,"usage":{}}'`;
 
-function setup({ stallTimeoutMin = 1 / 60, hangCmd = 'sleep 251', fastTitle = null, trapLine = '' } = {}) {
+function setup({ stallTimeoutMin = 1 / 60, hangCmd = 'sleep 251', fastTitle = null, trapLine = '', resumeLine = RESULT } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'squad-stallany-'));
   const fake = path.join(root, 'fake-claude.sh');
   // fastTitle: a task title whose runs exit at once (only the init event) — lets one test hang its
@@ -32,9 +32,10 @@ function setup({ stallTimeoutMin = 1 / 60, hangCmd = 'sleep 251', fastTitle = nu
   // DESCENDANT (the cap-kill log names it), and the sh dies by the signal itself every time.
   // trapLine (t_1c3375c0): `trap 'exit 0' TERM` makes the CLI exit 0 on its kill — the foreground
   // sleeper dies from the same group signal, then the sh runs the trap. Deterministically exit 0.
+  // resumeLine: what a resumed run (`--resume`) does; default answers success.
   fs.writeFileSync(fake, `#!/bin/sh
 case "$*" in
-  *--resume*) ${RESULT} ;;
+  *--resume*) ${resumeLine} ;;
 ${fastLine}
   *)
     printf '%s\\n' '{"type":"system","subtype":"init","session_id":"sess-1"}'
@@ -235,5 +236,43 @@ test('a watchdog-killed run that traps TERM and exits 0 still recovers; the budg
   await waitFor(() => store.getTask(task.id).stallRecoveries === 0, 8000, 'budget reset after the clean resumed run');
   await waitFor(() => store.getTask(task.id).status === 'review', 8000, 'task handed off after the recovered run');
   assert.notEqual(store.getTask(task.id).status, 'waiting_for_human');
+  disarm(orch); orch.stop();
+});
+
+test('a trap-0 CLI that hangs on every resume parks for a human after the 2 recoveries (budget not reset by code-0 kills)', async () => {
+  // The Critic's item-2 proof (t_1c3375c0): every kill exits 0 under an active stall claim, so the
+  // `code === 0 && !r.stalled` guard must never reset the budget mid-chain — after MAX_RECOVERIES
+  // stop+resumes the task parks for a human instead of recovering forever.
+  const { store, node, orch } = setup({
+    hangCmd: 'sleep 237',
+    trapLine: `trap 'exit 0' TERM`,
+    resumeLine: `trap 'exit 0' TERM; sleep 239 >/dev/null 2>&1`, // the recovery run hangs the same way
+  });
+  const task = store.createTask({ title: 'trapping CLI, never recovers', assignee: node.id });
+  orch.start();
+  await waitFor(() => orch.agent(node.id).currentRun && orch.agent(node.id).currentRun.sessionId === 'sess-1', 8000, 'init event parsed');
+  await waitFor(() => findProcAsync(/sleep 237/), 8000, 'sleeping child visible in ps');
+  const a = orch.agent(node.id);
+  const evs = [];
+  orch.on('run.stalled', (e) => evs.push(e));
+  orch.on('run.recovering', (e) => evs.push(e));
+  orch.on('run.recovery_failed', (e) => evs.push(e));
+  // Cycle 1: kill -> exit 0 -> recovery 1/2 -> the resumed run hangs the same way.
+  a.lastActivityAt = Date.now() - 3500; // 1s timeout, past the 3s hard cap
+  orch.sweepStalls();
+  await waitFor(() => evs.length >= 2 && evs[1].attempt === 1, 30000, 'recovery 1/2 fired');
+  await waitFor(() => findProcAsync(/sleep 239/), 8000, 'resumed run 1 live');
+  // Cycle 2: kill -> exit 0 -> recovery 2/2 -> that resumed run hangs too.
+  a.lastActivityAt = Date.now() - 3500;
+  orch.sweepStalls();
+  await waitFor(() => evs.length >= 4 && evs[3].attempt === 2, 30000, 'recovery 2/2 fired');
+  await waitFor(() => findProcAsync(/sleep 239/), 8000, 'resumed run 2 live');
+  // Cycle 3: kill -> exit 0 -> budget spent: parked for a human, never a third resume.
+  a.lastActivityAt = Date.now() - 3500;
+  orch.sweepStalls();
+  await waitFor(() => store.getTask(task.id).status === 'waiting_for_human', 30000, 'parked after the 2 recoveries');
+  assert.equal(store.getTask(task.id).stallRecoveries, 3, 'no code-0 kill reset the budget along the chain');
+  assert.ok(evs.some((e) => e.final === true), 'run.recovery_failed fired');
+  assert.ok(store.getTask(task.id).comments.some((c) => /used up\. Parked for a human/.test(c.text)));
   disarm(orch); orch.stop();
 });
