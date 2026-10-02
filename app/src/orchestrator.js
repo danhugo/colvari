@@ -1778,14 +1778,17 @@ class Orchestrator extends EventEmitter {
           this.log(node.id, 'system', '↻ resume failed (session not found): retrying once from a fresh session');
           continue;
         }
-        // A run that got through (exit 0) is real progress: the stall counter resets (persisted on the task,
-        // so it survives app restarts — otherwise a restart would re-arm the recovery budget).
-        if (code === 0) { const tp = this.store.getTask(task.id); if (tp && tp.stallRecoveries) this.store.updateTask(task.id, { stallRecoveries: 0 }); }
-        // Stalled run confirmed exited (the watchdog killed it after the run.stalled claim): resume the
-        // same session with a continue prompt, at most STALL.MAX_RECOVERIES times per task (persisted
-        // counter), then park the task for a human. Only when the orchestrator is still running and no
-        // manual stop interleaved.
-        if (r.stalled && code !== 0 && this.running && !a.stopRequested) {
+        // A run that got through (exit 0, no stall claim) is real progress: the stall counter resets
+        // (persisted on the task, so it survives app restarts — otherwise a restart would re-arm the
+        // recovery budget). A code 0 under an active stall claim is NOT progress — the watchdog killed
+        // a run whose CLI trapped TERM and exited 0; resetting there would disarm the max-2 limit.
+        if (code === 0 && !r.stalled) { const tp = this.store.getTask(task.id); if (tp && tp.stallRecoveries) this.store.updateTask(task.id, { stallRecoveries: 0 }); }
+        // Stalled run confirmed exited (the watchdog killed it after the run.stalled claim) — whatever
+        // the exit code: a trapping CLI can exit 0 on its kill signal, and that still needs the same
+        // recovery. Resume the same session with a continue prompt, at most STALL.MAX_RECOVERIES times
+        // per task (persisted counter), then park the task for a human. Only when the orchestrator is
+        // still running and no manual stop interleaved.
+        if (r.stalled && this.running && !a.stopRequested) {
           const ts = this.store.getTask(task.id);
           const attempt = ((ts && ts.stallRecoveries) || 0) + 1;
           if (attempt > STALL.MAX_RECOVERIES) {

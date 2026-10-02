@@ -16,7 +16,7 @@ const { Orchestrator, STALL } = require('../src/orchestrator');
 // would hold the run's pipes open and delay its close event.
 const RESULT = `printf '%s\\n' '{"type":"result","subtype":"success","session_id":"sess-1","total_cost_usd":0,"num_turns":1,"usage":{}}'`;
 
-function setup({ stallTimeoutMin = 1 / 60, hangCmd = 'sleep 251', fastTitle = null } = {}) {
+function setup({ stallTimeoutMin = 1 / 60, hangCmd = 'sleep 251', fastTitle = null, trapLine = '' } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'squad-stallany-'));
   const fake = path.join(root, 'fake-claude.sh');
   // fastTitle: a task title whose runs exit at once (only the init event) — lets one test hang its
@@ -30,12 +30,15 @@ function setup({ stallTimeoutMin = 1 / 60, hangCmd = 'sleep 251', fastTitle = nu
   // boundary), and an exit-0 kill skips runTask's r.stalled recovery branch (code !== 0), so
   // run.recovering never fires at any timeout. A foreground sleeper is still a real live
   // DESCENDANT (the cap-kill log names it), and the sh dies by the signal itself every time.
+  // trapLine (t_1c3375c0): `trap 'exit 0' TERM` makes the CLI exit 0 on its kill — the foreground
+  // sleeper dies from the same group signal, then the sh runs the trap. Deterministically exit 0.
   fs.writeFileSync(fake, `#!/bin/sh
 case "$*" in
   *--resume*) ${RESULT} ;;
 ${fastLine}
   *)
     printf '%s\\n' '{"type":"system","subtype":"init","session_id":"sess-1"}'
+    ${trapLine}
     ${hangCmd} >/dev/null 2>&1
     ;;
 esac
@@ -203,5 +206,34 @@ test('nudge with interrupt:false never SIGTERMs a live run; a human message stil
   assert.equal(a.pendingHuman.length, 1);
   // The killed run resumes with the human message; the resume branch answers success, so the run ends.
   await waitFor(() => !orch.procs.has(node.id), 8000, 'run ended after human resume');
+  disarm(orch); orch.stop();
+});
+
+test('a watchdog-killed run that traps TERM and exits 0 still recovers; the budget resets only on real progress', async () => {
+  // The group SIGTERM kills the foreground sleeper; the sh then runs `trap 'exit 0' TERM` and the
+  // killed run exits 0. That must take the SAME recovery path as a signal death (t_1c3375c0: the
+  // old `code !== 0` guard parked trapping CLIs in review with no recovery), and the exit 0 under
+  // the stall claim must NOT reset the persisted recovery budget (else max-2 would never bind).
+  const { store, node, orch } = setup({ hangCmd: 'sleep 241', trapLine: `trap 'exit 0' TERM` });
+  const task = store.createTask({ title: 'trapping CLI', assignee: node.id });
+  orch.start();
+  await waitFor(() => orch.agent(node.id).currentRun && orch.agent(node.id).currentRun.sessionId === 'sess-1', 8000, 'init event parsed');
+  await waitFor(() => findProcAsync(/sleep 241/), 8000, 'sleeping child visible in ps');
+  const a = orch.agent(node.id);
+  const events = [];
+  orch.on('run.stalled', (e) => events.push(['stalled', e]));
+  orch.on('run.recovering', (e) => events.push(['recovering', e]));
+  a.lastActivityAt = Date.now() - 3500; // 1s timeout, past the 3s hard cap — the sleeper keeps runAlive true
+  orch.sweepStalls();
+  assert.equal(a.currentRun.stalled, true, 'the cap claims the run despite the live child');
+  assert.equal(store.getTask(task.id).status, 'in_progress');
+  // Recovery fires for the exit-0 kill exactly as for a signal death.
+  await waitFor(() => events.map(([k]) => k).join(',') === 'stalled,recovering', 30000, 'stalled+recovering events');
+  assert.equal(events[1][1].attempt, 1);
+  assert.equal(events[1][1].max, 2);
+  // The resumed run answers success WITHOUT a stall claim: only then does the budget reset.
+  await waitFor(() => store.getTask(task.id).stallRecoveries === 0, 8000, 'budget reset after the clean resumed run');
+  await waitFor(() => store.getTask(task.id).status === 'review', 8000, 'task handed off after the recovered run');
+  assert.notEqual(store.getTask(task.id).status, 'waiting_for_human');
   disarm(orch); orch.stop();
 });
