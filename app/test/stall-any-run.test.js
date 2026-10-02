@@ -25,13 +25,18 @@ function setup({ stallTimeoutMin = 1 / 60, hangCmd = 'sleep 251', fastTitle = nu
   const fastLine = fastTitle
     ? `  *"fast-${fastTitle}"*) printf '%s\\n' '{"type":"system","subtype":"init","session_id":"sess-1"}' ;;`
     : '';
+  // FOREGROUND hang (Reviewer, t_600e630d): `sleep N & wait` is a ~30% coin flip on macOS —
+  // /bin/sh often survives a group SIGTERM inside `wait` (reaps and exits 0 at the next command
+  // boundary), and an exit-0 kill skips runTask's r.stalled recovery branch (code !== 0), so
+  // run.recovering never fires at any timeout. A foreground sleeper is still a real live
+  // DESCENDANT (the cap-kill log names it), and the sh dies by the signal itself every time.
   fs.writeFileSync(fake, `#!/bin/sh
 case "$*" in
   *--resume*) ${RESULT} ;;
 ${fastLine}
   *)
     printf '%s\\n' '{"type":"system","subtype":"init","session_id":"sess-1"}'
-    ${hangCmd} >/dev/null 2>&1 & wait
+    ${hangCmd} >/dev/null 2>&1
     ;;
 esac
 `);
