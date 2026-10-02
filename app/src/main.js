@@ -507,6 +507,37 @@ async function guiE2E() {
     await shot('composerclear-kept');
     console.log('[gui-e2e] composerclear', JSON.stringify({ cleared, sent: !!msg, kept }));
   };
+  // Full-pane-width chat messages (t_34cb6983): with the .cbody ch caps removed, long content must
+  // wrap with no horizontal overflow and bodies must span the pane at wide sizes. Narrow+wide x
+  // light+dark, four shots.
+  const chatWidthShots = async () => {
+    await waitFor(`return !!document.querySelector('#tpl-select option')`); await ex(`await refresh();`);
+    const cur = await ex(`return { p: ctx.p, t: S.teamId }`);
+    const ps = pm.store(cur.p || pid(), cur.t);
+    if (!ps.getTeam().nodes.length) { ps.addNode({ name: 'Rhea', role: 'PM', x: 60, y: 60 }); ps.addNode({ name: 'Devon', role: 'Dev', x: 320, y: 160 }); }
+    const dev = ps.getTeam().nodes.find((n) => n.role === 'Dev') || ps.getTeam().nodes[0];
+    const longWord = 'Q'.repeat(400), longUrl = 'https://example.com/' + 'a/b?c=d&'.repeat(60) + 'tail=1';
+    const fenceText = 'Fenced config:\n```json\n{ "cmd": "' + 'x'.repeat(300) + '" }\n```';
+    const L = (ago, nodeId, kind, text) => `logs.push({ projectId: ctx.p, nodeId: '${nodeId}', kind: '${kind}', text: ${JSON.stringify(text)}, at: Date.now() - ${ago} });`;
+    await ex(`${L(5000, dev.id, 'text', 'Tiny fix: ' + longUrl + ' should wrap, not scroll the room.')}
+      ${L(4000, dev.id, 'text', longWord)}
+      ${L(3000, dev.id, 'text', fenceText)}
+      $('#tabs button[data-tab=chat]').click(); await refresh(); chatSig = null; renderChat(); await w(300);`);
+    const seeded = await ex(`const t = $('#chat-room').textContent; return { groups: document.querySelectorAll('#chat-room .cgroup').length, url: t.includes('https://example.com/'), word: t.includes('QQQQ'), fence: !!document.querySelector('#chat-room .cmd-pre') }`);
+    expect('chatwidth: long URL, long word and code fence seeded', seeded.groups >= 1 && seeded.url && seeded.word && seeded.fence, seeded);
+    for (const [w, h, tag] of [[900, 800, 'narrow'], [1900, 900, 'wide']]) for (const th of ['light', 'dark']) {
+      win.setSize(w, h); require('electron').nativeTheme.themeSource = th; await ex(`chatSig = null; renderChat(); await w(400);`);
+      const m = await ex(`const room = $('#chat-room'), bodies = [...document.querySelectorAll('#chat-room .cbody')];
+        return { docX: document.documentElement.scrollWidth, winX: window.innerWidth, roomX: room.scrollWidth, roomC: room.clientWidth,
+          body: Math.max(...bodies.map((b) => b.getBoundingClientRect().width)), room: room.getBoundingClientRect().width }`);
+      expect(`chatwidth: no page overflow (${tag}, ${th})`, m.docX <= m.winX + 1, m);
+      expect(`chatwidth: no room overflow (${tag}, ${th})`, m.roomX <= m.roomC + 1, m);
+      expect(`chatwidth: messages span the pane (${tag}, ${th})`, m.body >= m.room * 0.6, m);
+      await shot(`chatwidth-${tag}-${th}`);
+    }
+    require('electron').nativeTheme.themeSource = 'system';
+    console.log('[gui-e2e] chatwidth done');
+  };
   // Windowing (t_fb193107): 5k-message fixture, DOM bounded to the latest page, scroll-up prepends
   // older pages with the anchor held, auto-scroll only at the bottom. Injection-only, no real runs.
   const windowingShots = async () => {
@@ -2381,6 +2412,7 @@ async function guiE2E() {
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'deletenode') { await deleteNodeShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'topbar') { await topbarShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'composerclear') { await composerClearShots(); throw null; }
+    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'chatwidth') { await chatWidthShots(); throw null; }
     // project/team management through the UI: create a project from the Startup template, then a Solo team, then switch back.
     // The template select renders with the Settings view (tab-scoped rendering, t_8d586961), so open
     // Settings first and wait until the first refresh has filled it before choosing a template.
