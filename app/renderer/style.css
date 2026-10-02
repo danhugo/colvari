@@ -377,7 +377,9 @@ header #wtdisk.wtwarn { background:var(--warning-soft); color:var(--warning-text
 .gmode button.on { background:var(--accent-soft); color:var(--accent-text); }
 .gmode button:not(.on):not(:disabled):hover { color:var(--fg-primary); background:var(--bg-hover); }
 .modenote { font-size:var(--text-xs); color:var(--warning-text); background:var(--warning-soft); border:1px solid var(--warning); border-radius:var(--radius-sm); padding:2px 8px; white-space:nowrap; }
-#graph.watch { cursor:default; } #graph.watch .node { cursor:pointer; } #graph.watch .node .qacts, #graph.watch .handle { display:none; }
+/* Watch: locked nodes keep the grab affordance — the first blocked drag explains itself via toast
+   (t_d8e41e6a); the canvas still pans on drag-from-background. */
+#graph.watch { cursor:default; } #graph.watch .node { cursor:grab; } #graph.watch .node:active { cursor:grabbing; } #graph.watch .node .qacts, #graph.watch .handle { display:none; }
 .canvas { position:relative; flex:1; min-width:0; display:flex; }
 #graph { flex:1; cursor:grab; user-select:none; border:1px solid var(--border); border-radius:var(--radius-md); box-shadow:var(--shadow-sm);
   background-color:var(--bg-surface); background-image:radial-gradient(circle, var(--border-strong) 1px, transparent 1.2px); background-size:22px 22px; }
@@ -883,6 +885,9 @@ button, .pchip, .tag, .badge, .pill, .avatar, .cchip summary, .lvchip, .asswitch
 #graph .node.st-idle:not(.sel) .card { fill:var(--bg-app); stroke-dasharray:none; }
 #graph .node.st-idle .nname { fill:var(--fg-secondary); }
 #graph .stpill rect { fill:var(--bg-hover); stroke:var(--border-strong); stroke-width:1; } #graph .stpill text { fill:var(--fg-secondary); font-size:11px; font-weight:var(--fw-semibold); }
+/* Scale-invariant status (t_d8e41e6a): the pill grows by the same LOD factor as node names, so its
+   on-screen size — and the status text — stay readable at Fit zoom instead of shrinking to ~6px. */
+#graph .stpillin { transform-box:fill-box; transform-origin:center; transform:scale(var(--nz, 1)); }
 #graph .stpill.sp-working rect { fill:var(--success); stroke:none; } #graph .stpill.sp-working text { fill:#fff; }
 #graph .stpill.sp-needs-human rect { fill:var(--warning-strong); stroke:none; } #graph .stpill.sp-needs-human text { fill:#fff; }
 #graph .node.cluster .card { fill:var(--bg-raised); } #graph .node.cluster .stack1, #graph .node.cluster .stack2 { fill:var(--bg-hover); filter:none; }

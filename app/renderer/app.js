@@ -497,8 +497,10 @@ const TAB_RESIG = {
   usage: () => { usageSig = null; },
 };
 document.querySelectorAll('button[data-tab]').forEach((b) => b.onclick = () => {
+  const wasActive = b.classList.contains('active');
   document.querySelectorAll('button[data-tab]').forEach((x) => x.classList.toggle('active', x === b));
   document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.id === 'tab-' + b.dataset.tab));
+  if (b.dataset.tab === 'team') { if (!wasActive) pinTeamMode(); } else unpinTeamMode(); // mode decided once per Team visit (t_d8e41e6a)
   (TAB_RESIG[b.dataset.tab] || (() => {}))();
   renderChrome();
   drawActiveView(false);
@@ -1051,10 +1053,26 @@ let teamModePref = null; // null = follow the default (TeamModes.resolveMode)
 const teamRunning = () => runningIds().length > 0;
 const teamMode = () => TeamModes.resolveMode(teamModePref, teamRunning());
 const teamCan = () => TeamModes.can(teamMode());
+// Mode is decided ONCE per visit: pinned at team-tab entry from the then-running state, so an
+// agent starting/stopping mid-visit never flips the mode under the cursor (t_d8e41e6a). Leaving
+// the tab clears the pin so the next visit re-decides; only explicit chip/E clicks change it.
+function pinTeamMode() { teamModePref = TeamModes.resolveMode(null, teamRunning()); watchDragToasted = false; }
+function unpinTeamMode() { teamModePref = null; }
 function setTeamMode(m) {
   if (teamModePref === m) return;
   teamModePref = m;
   renderGraph(); renderNodeForm(); // re-gate the graph + swap the inspector to/from the live card
+}
+// Watch: a locked node must explain itself — the grab cursor invites the drag, and the FIRST
+// blocked attempt toasts once per visit (no spam, no modal); a plain click still selects.
+let watchDragToasted = false;
+const showToast = (title, body) => { const d = document.createElement('div'); d.className = 'toast'; d.innerHTML = (title ? `<b>${esc(title)}</b><br>` : '') + esc(body); d.onclick = () => d.remove(); $('#toasts').appendChild(d); setTimeout(() => d.remove(), 6000); };
+function startWatchDrag(ev, n) {
+  const sx = ev.clientX, sy = ev.clientY; let moved = false;
+  const mv = (e) => { if (moved || Math.abs(e.clientX - sx) + Math.abs(e.clientY - sy) <= 2) return; moved = true;
+    if (!watchDragToasted) { watchDragToasted = true; showToast('Watch mode', 'Press E to edit — the team can’t be changed while watching'); } };
+  const up = () => { window.removeEventListener('mousemove', mv); window.removeEventListener('mouseup', up); if (!moved) selectNode(n.id); };
+  window.addEventListener('mousemove', mv); window.addEventListener('mouseup', up);
 }
 // Deep-link from the graph screen into Chat: the agent's current task thread when it has one
 // (that is where its updates land), the #company room otherwise.
@@ -1156,7 +1174,7 @@ function renderGraph() {
     const cb = el('g', { class: 'capsdot caps-' + capsSt, transform: `translate(7,${H - 8})` }, g); el('circle', { r: 4 }, cb);
     el('title', {}, cb).textContent = capsSt === 'none' ? 'Capabilities not probed yet' : capsSt === 'error' ? 'Capability probe failed' : `Capabilities probed${n.capabilitiesProbedAt ? ' ' + new Date(n.capabilitiesProbedAt).toLocaleString() : ''}`;
     const sg = el('g', { class: 'status s-' + live, transform: `translate(${W - 16},16)` }, g); el('circle', { r: 6 }, sg); el('title', {}, sg).textContent = live;
-    const sp = el('g', { class: 'stpill sp-' + live, transform: `translate(${W - 78},-8)` }, g); el('rect', { width: 70, height: 16, rx: 8 }, sp); el('text', { x: 35, y: 12, 'text-anchor': 'middle' }, sp).textContent = live === 'working' ? '● Working' : live === 'needs-human' ? '● Needs you' : 'Idle';
+    const sp = el('g', { class: 'stpill sp-' + live, transform: `translate(${W - 78},-8)` }, g); const spi = el('g', { class: 'stpillin' }, sp); el('rect', { width: 70, height: 16, rx: 8 }, spi); el('text', { x: 35, y: 12, 'text-anchor': 'middle' }, spi).textContent = live === 'working' ? '● Working' : live === 'needs-human' ? '● Needs you' : 'Idle';
     const pres = el('g', { class: 'pres ' + presence(n.id), transform: `translate(${W - 16},16)` }, g); el('circle', { r: 8 }, pres);
     const pf = pfState(n);
     const badge = el('g', { class: 'pfbadge pf-' + pf, transform: `translate(${W - 34},16)` }, g);
@@ -1203,7 +1221,7 @@ function renderGraph() {
     if (tc.connect) { const h = el('circle', { class: 'handle', cx: W, cy: H / 2, r: 6 }, g); el('title', {}, h).textContent = 'Drag to connect'; h.onmousedown = (ev) => startLink(ev, n); }
     const hl = (on) => { svg.classList.toggle('focusing', on); for (const it of edgeLayout.per) if (it.a === n || it.b === n) it.path.classList.toggle('hl', on); g.classList.toggle('hl', on); };
     g.onmouseenter = () => hl(true); g.onmouseleave = () => hl(false);
-    g.onmousedown = (ev) => { if (ev.button === 0) { if (tc.drag) startDrag(ev, n, g); else { ev.stopPropagation(); selectNode(n.id); } } else if (ev.button === 2) { ev.stopPropagation(); selectNode(n.id); nodeMenu(ev, n); } };
+    g.onmousedown = (ev) => { if (ev.button === 0) { if (tc.drag) startDrag(ev, n, g); else { ev.stopPropagation(); startWatchDrag(ev, n); } } else if (ev.button === 2) { ev.stopPropagation(); selectNode(n.id); nodeMenu(ev, n); } };
     g.oncontextmenu = (ev) => { ev.preventDefault(); ev.stopPropagation(); if (tc.menu && $('#ctxmenu').classList.contains('hidden')) { selectNode(n.id); nodeMenu(ev, n); } };
   }
   // First open of a team, or new nodes landing outside the view (e.g. added in bulk) -> fit/refit so nothing is cut off.
@@ -1237,12 +1255,19 @@ function startPan(ev) {
 const clipText = (s, max) => (String(s).length > max ? String(s).slice(0, max - 1) + '…' : String(s));
 function selectNode(id) { hideMenus(); sel = { ...sel, node: id, edge: null }; renderGraph(); renderNodeForm(); }
 async function duplicateNode(n) { const { id, ...rest } = n; const c = await call('addNode', { ...rest, name: n.name + ' copy', x: n.x + 30, y: n.y + H + 30 }); sel.node = c.id; refresh(); }
+// Confirm body for deleting an agent: names the mid-run state explicitly (t_d8e41e6a) and lists
+// the open tasks that will move to its manager. Extracted so the e2e can assert the exact dialog
+// text without driving a modal.
+function deleteConfirmText(n, open) {
+  const list = open.length ? `\n\nOpen tasks (moved to its manager or the core):\n${open.map((t) => `• ${t.title} [${t.status}]`).join('\n')}` : '';
+  const runNote = nodeLive(n) === 'working' ? `\n\n${n.name} is currently running — changes apply on next turn.` : '';
+  return `Delete ${n.name}?${runNote}${list}`;
+}
 async function deleteNode(n) {
   if (n.core) { alert(`${n.name} is the core agent and cannot be deleted.`); return; }
   if (n.protected) { alert(`${n.name} is protected from retirement — clear "Protected" in its editor first.`); return; }
   const open = S.tasks.filter((t) => t.assignee === n.id && t.status !== 'done');
-  const list = open.length ? `\n\nOpen tasks (moved to its manager or the core):\n${open.map((t) => `• ${t.title} [${t.status}]`).join('\n')}` : '';
-  if (!confirm(`Delete ${n.name}?${list}`)) return;
+  if (!confirm(deleteConfirmText(n, open))) return;
   try { await call('removeNode', n.id); } catch (e) { alert(e.message); }
   sel.node = null; refresh();
 }

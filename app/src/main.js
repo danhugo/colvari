@@ -311,29 +311,64 @@ async function guiE2E() {
     if (nodes.length < 2) { ps.addNode({ name: 'Pia', role: 'PM', x: 60, y: 60 }); ps.addNode({ name: 'Devon', role: 'Dev', x: 320, y: 160 }); nodes = ps.getTeam().nodes; }
     const [a, b] = nodes; if (!ps.getTeam().edges.some((e) => e.from === a.id && e.to === b.id)) ps.addEdge(a.id, b.id, 'assign');
     const t = ps.createTask({ title: 'Team demo', assignee: b.id }); ps.commentTask(t.id, a.id, 'Please build the demo.');
-    await ex(`$('#tabs button[data-tab=team]').click(); await refresh(); await w(600);`);
+    // Working/nstat injection: nodeLive trusts the per-node live status the orchestrator pushes;
+    // orch.agents alone would read as idle (stale-nstat precedence).
+    const inject = `S.orch.agents = { '${b.id}': { status: 'working', taskId: '${t.id}' } }; S.nstat = { '${b.id}': { status: 'working' } };`;
+    // Watch AND needs-you at once (evidence for review): a needs the human, b works.
+    const inject2 = `S.orch.agents = { '${a.id}': { status: 'needs-human' }, '${b.id}': { status: 'working', taskId: '${t.id}' } }; S.nstat = { '${a.id}': { status: 'needs-human' }, '${b.id}': { status: 'working' } };`;
+    // Mode is decided once per visit (t_d8e41e6a): enter with nothing running -> Edit pinned,
+    // and an agent starting mid-visit must NOT flip it under the cursor.
+    const idleInject = `S.orch.running = false; S.orch.agents = {}; S.nstat = {};`;
+    await ex(`$('#tabs button[data-tab=chat]').click(); ${idleInject} $('#tabs button[data-tab=team]').click(); await refresh(); await w(600);`);
+    expect('team: entry with no agents running pins Edit', await ex(`return $('#mode-edit').classList.contains('on') && $('#mode-watch').classList.contains('on') === false`));
+    expect('team: mode pinned at entry — agent starting mid-visit does not flip Edit', await ex(`${inject} renderGraph(); renderNodeForm(); return $('#mode-edit').classList.contains('on') && $('#mode-watch').classList.contains('on') === false`));
+    // Leaving the tab clears the pin: re-entering while an agent runs re-decides to Watch.
+    expect('team: Watch is the default while an agent runs (re-decided on re-entry)', await ex(`${inject} $('#tabs button[data-tab=chat]').click(); await w(100); $('#tabs button[data-tab=team]').click(); await w(200); return $('#mode-watch').classList.contains('on') && $('#mode-edit').classList.contains('on') === false`));
     // The Overview tab is gone; its legacy id routes to Team.
     expect('team: no Overview button in the nav', await ex(`return !document.querySelector('#tabs button[data-tab=overview]')`));
     expect('team: legacy overview id routes to Team', await ex(`showTab('overview'); await w(200); return $('#tab-team').classList.contains('active')`));
     // Checks inject orch state right before asserting: a background refresh() replaces S (and S.orch) at any time.
-    // nstat is injected too — the Team graph's nodeLive trusts the per-node live status the
-    // orchestrator pushes; orch.agents alone would read as idle (stale-nstat precedence).
-    const inject = `S.orch.agents = { '${b.id}': { status: 'working', taskId: '${t.id}' } }; S.nstat = { '${b.id}': { status: 'working' } };`;
-    expect('team: Watch is the default while an agent runs', await ex(`${inject} renderGraph(); renderNodeForm(); return $('#mode-watch').classList.contains('on') && $('#mode-edit').classList.contains('on') === false`));
-    await ex(`${inject} renderGraph(); await w(120);`); await shot('11-team-watch');
-    expect('team: watch node shows live status', await ex(`${inject} renderGraph(); return !!document.querySelector('#graph .node.st-working') && !!document.querySelector('#graph .node .status.s-working')`));
+    await ex(`${inject2} renderGraph(); await w(120);`); await shot('11-team-watch');
+    expect('team: watch node shows live status', await ex(`${inject2} renderGraph(); return !!document.querySelector('#graph .node.st-working') && !!document.querySelector('#graph .node .status.s-working') && !!document.querySelector('#graph .stpill.sp-needs-human')`));
     expect('team: watch disables editing affordances', await ex(`return $('#addnode').disabled && $('#connect').disabled && $('#delsel').disabled && !document.querySelector('#graph .node .handle') && !document.querySelector('#graph .node .qacts')`));
+    // Blocked drag in Watch explains itself: grab cursor invites the drag, the FIRST blocked
+    // attempt toasts once (non-modal, no spam) — t_d8e41e6a.
+    const [nx, ny] = await ex(`const r = document.querySelector('#graph .node[data-id="${a.id}"]').getBoundingClientRect(); return [Math.round(r.x + r.width / 2), Math.round(r.y + r.height / 2)];`);
+    const blockedDrag = async () => { win.webContents.sendInputEvent({ type: 'mouseDown', x: nx, y: ny, button: 'left', clickCount: 1 }); for (let k = 1; k <= 3; k++) { win.webContents.sendInputEvent({ type: 'mouseMove', x: nx + k * 12, y: ny + k * 8, button: 'left' }); await new Promise((r) => setTimeout(r, 40)); } win.webContents.sendInputEvent({ type: 'mouseUp', x: nx + 36, y: ny + 24, button: 'left' }); await new Promise((r) => setTimeout(r, 250)); };
+    expect('team: locked node shows the grab affordance in Watch', await ex(`return getComputedStyle(document.querySelector('#graph .node[data-id="${a.id}"]')).cursor === 'grab'`));
+    await blockedDrag();
+    expect('team: first blocked drag in Watch toasts once, not a modal', await ex(`return document.querySelectorAll('#toasts .toast').length === 1 && document.querySelector('#toasts .toast').textContent.includes('Watch mode') && document.querySelector('#toasts .toast').textContent.includes('E to edit') && !document.querySelector('dialog[open]')`));
+    await blockedDrag();
+    expect('team: blocked-drag toast does not repeat (once per visit)', await ex(`return document.querySelectorAll('#toasts .toast').length === 1`));
+    await ex(`${inject2} renderGraph(); await w(120);`); await shot('team-watch-needsyou');
     expect('team: watch inspector is the read-only live card', await ex(`${inject} selectNode('${b.id}'); return !!document.querySelector('#nodeform .livecard') && !document.querySelector('#nodeform #nf-name') && !!document.querySelector('#nodeform #lc-chat')`));
     expect('team: live card shows current task and status', await ex(`${inject} renderNodeForm(); return document.querySelector('#nodeform .lc-task').textContent.includes('Team demo') && !!document.querySelector('#nodeform .lc-working')`));
     await ex(`${inject} renderNodeForm(); renderGraph(); await w(120);`); await shot('12-team-watch-card');
     expect('team: Open in Chat deep-links the task thread', await ex(`document.querySelector('#lc-chat').click(); await w(300); return $('#tab-chat').classList.contains('active') && CH.thread === '${t.id}'`));
+    // Back on Team (re-entry re-decides Watch): E is an explicit toggle, but the shortcut must not
+    // fire while the user is typing in the inspector (typing guard, t_d8e41e6a).
+    expect('team: E toggles Edit while not typing', await ex(`${inject} $('#tabs button[data-tab=team]').click(); await w(200); document.activeElement.blur(); document.dispatchEvent(new KeyboardEvent('keydown', { key: 'e' })); return $('#mode-edit').classList.contains('on')`));
+    expect('team: E guard — shortcut ignored while focus is in #nf-name', await ex(`${inject} selectNode('${b.id}'); $('#nf-name').focus(); document.dispatchEvent(new KeyboardEvent('keydown', { key: 'e' })); return $('#mode-edit').classList.contains('on') && document.activeElement === $('#nf-name') && !$('#mode-watch').classList.contains('on')`));
+    expect('team: E still works once focus leaves the field', await ex(`$('#nf-name').blur(); document.dispatchEvent(new KeyboardEvent('keydown', { key: 'e' })); return $('#mode-watch').classList.contains('on')`));
     // Edit is an explicit toggle; while the team runs it shows the inline note (no modal).
-    expect('team: Edit toggles on with the running note', await ex(`$('#tabs button[data-tab=team]').click(); ${inject} setTeamMode('edit'); await w(100); return $('#mode-edit').classList.contains('on') && !$('#mode-note').classList.contains('hidden') && !!document.querySelector('#nodeform #nf-name')`));
+    expect('team: Edit toggles on with the running note', await ex(`${inject} $('#mode-edit').click(); await w(100); return $('#mode-edit').classList.contains('on') && !$('#mode-note').classList.contains('hidden') && !!document.querySelector('#nodeform #nf-name')`));
     await ex(`${inject} renderNodeForm(); renderGraph(); await w(120);`); await shot('13-team-edit');
     expect('team: edit enables editing affordances', await ex(`return !$('#addnode').disabled && !$('#connect').disabled && !!document.querySelector('#graph .node .handle')`));
     expect('team: live status still on nodes in edit', await ex(`${inject} renderGraph(); return !!document.querySelector('#graph .node.st-working')`));
+    // Deleting a running agent must name it as mid-run in the confirm (t_d8e41e6a).
+    expect('team: delete confirm names the running agent', await ex(`${inject} const del = S.team.nodes.find((n) => n.id === '${b.id}'); const open = S.tasks.filter((t) => t.assignee === '${b.id}' && t.status !== 'done'); const txt = deleteConfirmText(del, open); return { ok: txt.includes('currently running — changes apply on next turn') && txt.includes('Team demo'), msg: String(txt).slice(0, 220) }`));
     // No timeline, no task-thread panel on the graph screen (dropped with the merge).
     expect('team: no timeline / thread panel', await ex(`return !document.querySelector('#ov-timeline') && !document.querySelector('#ov-threadpanel') && !document.querySelector('#ov-timelinewrap')`));
+    // Status stays readable at Fit zoom on a 10-node team (scale-invariant pill, t_d8e41e6a):
+    // grow to 10 nodes, force Fit (~53% here), and measure the pill's on-screen size.
+    const extras = []; for (let i = 0; i < 8; i++) extras.push(ps.addNode({ name: 'Extra ' + (i + 1), role: 'Dev', x: 40 + (i % 4) * 220, y: 260 + Math.floor(i / 4) * 140 }).id);
+    const injectFit = `S.orch.agents = { '${b.id}': { status: 'working', taskId: '${t.id}' }, '${extras[2]}': { status: 'needs-human' } }; S.nstat = { '${b.id}': { status: 'working' }, '${extras[2]}': { status: 'needs-human' } };`;
+    const fit = await ex(`await refresh(); ${injectFit} renderGraph(); await w(300); zoomAt(0.53 / VP.zoom); await w(150); const pills = [...document.querySelectorAll('#graph .stpill')].map((p) => p.querySelector('rect').getBoundingClientRect().height); return { zoom: VP.zoom, n: document.querySelectorAll('#graph .node').length, minh: Math.min(...pills), maxh: Math.max(...pills), needsyou: !!document.querySelector('#graph .stpill.sp-needs-human') }`);
+    console.log('[gui-e2e] team fit-zoom pills', JSON.stringify(fit));
+    expect('team: status pill readable at Fit zoom on a 10-node team (needs-you included)', fit.n >= 10 && fit.zoom < 0.6 && fit.minh >= 13 && fit.maxh <= 22 && fit.needsyou, fit);
+    await shot('team-fit-10');
+    for (const id of extras) ps.removeNode(id); // leave the demo team as we found it
+    await ex(`await refresh(); renderGraph(); fitView(); await w(200);`);
   };
   // First-run guide (steps 1-3) in a fresh project, then Human Inbox: ask_human with choices, answer, approval item.
   const firstrunInbox = async () => {
