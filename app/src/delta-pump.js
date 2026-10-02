@@ -54,6 +54,8 @@ class DeltaPump {
         deltas.push(k === 'messages' ? { type: 'messages', set: this.store.listMessages().slice(-200) }
           : k === 'inbox' ? { type: 'inbox', set: this.store.listInbox({ status: 'open' }) }
           : { type: 'runs', set: this.store.listRuns() });
+        // the ledger lives in the orch snapshot: v.orch below covers runs, so a runs change must carry a fresh orch too
+        if (k === 'runs' && !deltas.some((d) => d.type === 'orch')) { const o = this.orch && this.orch(); if (o && o.snapshotSlim) deltas.push({ type: 'orch', set: o.snapshotSlim() }); }
       } catch { this.cold[k] = null; } // torn read: keep the sig open so the next flush retries
     }
     if (deltas.length) {
