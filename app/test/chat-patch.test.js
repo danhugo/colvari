@@ -186,3 +186,15 @@ test('prepend: a same-author boundary merges into the room\'s first group', () =
   assert.deepEqual(env.CH.evFp, fps(feed));
   assert.equal(env.__renderCaptured, null, 'nothing else rendered: the slice fully merged');
 });
+
+test('append: a mutated first group re-renders the whole window once, no duplicates', () => {
+  const feed = [ev(1, 'a', 'tool', { result: 'late' }), ev(2, 'b'), ev(3, 'c'), ev(4, 'b')];
+  const groups = [makeGroup('a', 1), makeGroup('b', 1), makeGroup('c', 1), makeGroup('b', 1)];
+  const env = envFor(feed.map((e, i) => (i === 0 ? ev(1, 'a', 'tool') : e)), groups, 100, false);
+  const R = buildRenderer(env);
+  const plan = Chat.tailPlan(env.CH.evFp, feed, 100);
+  if (!plan) return; // a full render is also correct
+  assert.equal(R.applyChatAppend(feed, plan, new Set()), true);
+  assert.deepEqual(env.room.children.map((g) => g.dataset.who), ['a', 'b', 'c', 'b']);
+  assert.deepEqual(env.CH.evFp, fps(feed));
+});

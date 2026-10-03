@@ -2956,7 +2956,7 @@ function applyChatAppend(ev, plan, workingT) {
     const cnt = +g.dataset.cnt || 1; const end = off + cnt;
     if (end <= slide) { evicted += cnt; g.remove(); off = end; continue; }
     if (off < slide) { keptLen += cnt; off = end; continue; } // drift straddler: keep
-    if (off >= confFrom && end <= confTo) { keptLen += cnt; off = end; continue; }
+    if (cut < 0 && off >= confFrom && end <= confTo) { keptLen += cnt; off = end; continue; } // past `cut` everything re-renders
     if (cut < 0) cut = off - slide;
     off = end;
   }
