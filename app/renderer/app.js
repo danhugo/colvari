@@ -3148,17 +3148,34 @@ function syncThreadPanel(ev, workingT) {
   th.innerHTML = `<div class="chat-head"><b>🧵 ${esc(t.title)}</b><span class="role">${esc(t.status)}</span><span class="spacer"></span><button id="ch-close" title="Close thread">✕</button></div><div id="chat-threadroom">${tev.length ? renderGroups(tev, wt) : '<p class="muted" style="padding:16px">Nothing in this thread yet.</p>'}</div>`;
   $('#ch-close').onclick = () => { CH.thread = null; CH.thKey = null; chatSched.force(); };
 }
+// IME state of the composer (Vietnamese Telex and friends compose straight into the textarea):
+// while a composition is live, Enter/Tab/arrows belong to the IME, and acting on them sends
+// unfinalized text and clears the field out from under the IME — the IME's restored fragment then
+// goes out as a stray second message (t_h0a1c2fa: "đang làm gì v" followed by a lone "v" 52ms
+// later, straight from the real store). The wiring sits with the other input listeners below.
+let chatComposing = false;
 function chatPreview() {
-  const v = $('#chat-input').value; const p = Chat.parseComposer(v, S.team.nodes); const pv = $('#chat-preview');
-  pv.textContent = Chat.preview(p); pv.className = p ? p.kind : 'muted';
-  const ms = Chat.mentionMatches(v, S.team.nodes); const box = $('#chat-mentions'); box.classList.toggle('hidden', !ms || !ms.length);
-  CH.mi = Math.min(CH.mi, Math.max(0, (ms || []).length - 1));
-  box.innerHTML = (ms || []).map((n, i) => `<div data-name="${esc(n.name)}" class="${i === CH.mi ? 'sel' : ''}"><span class="avatar${isLeadRole(n.role) ? ' is-lead' : ''}" style="background:${roleBg(n.role)}">${avatarBody(n.id, who(n.id))}</span>${esc(n.name)} <span class="role">${esc(n.role)}</span></div>`).join('');
-  box.querySelectorAll('div').forEach((d) => d.onmousedown = (e) => { e.preventDefault(); pickMention(d.dataset.name); });
+  const i = $('#chat-input'); const v = i.value; const p = Chat.parseComposer(v, S.team.nodes); const pv = $('#chat-preview');
+  // Guarded writes: chatPreview runs on every keystroke AND mid-composition — same-value
+  // textContent/className assignments still dirty the composer's layout each keystroke, and a
+  // mentions-box rebuild the user can't see is churn on top (same finding as the header pills).
+  const ptxt = Chat.preview(p); if (pv.textContent !== ptxt) pv.textContent = ptxt;
+  const pcls = p ? p.kind : 'muted'; if (pv.className !== pcls) pv.className = pcls;
+  const ms = Chat.mentionMatches(v, S.team.nodes); const box = $('#chat-mentions'); const open = !!(ms && ms.length);
+  box.classList.toggle('hidden', !open);
+  if (open) {
+    CH.mi = Math.min(CH.mi, Math.max(0, ms.length - 1));
+    const html = ms.map((n, i) => `<div data-name="${esc(n.name)}" class="${i === CH.mi ? 'sel' : ''}"><span class="avatar${isLeadRole(n.role) ? ' is-lead' : ''}" style="background:${roleBg(n.role)}">${avatarBody(n.id, who(n.id))}</span>${esc(n.name)} <span class="role">${esc(n.role)}</span></div>`).join('');
+    if (box.innerHTML !== html) {
+      box.innerHTML = html;
+      box.querySelectorAll('div').forEach((d) => d.onmousedown = (e) => { e.preventDefault(); pickMention(d.dataset.name); });
+    }
+  }
 }
 function pickMention(name) { const i = $('#chat-input'); i.value = i.value.replace(/@(\w*)$/, '@' + name + ' '); i.focus(); CH.mi = 0; chatPreview(); }
 async function chatSend() {
-  const i = $('#chat-input'); const p = Chat.parseComposer(i.value, S.team.nodes); if (!p) return;
+  const i = $('#chat-input'); if (chatComposing) return; // the Send button can click mid-composition too — same stray-message risk as Enter
+  const p = Chat.parseComposer(i.value, S.team.nodes); if (!p) return;
   if (p.kind === 'error') return chatPreview();
   if (chatAtts.some((a) => !a.path)) return; // blocked until every chip saved (a failed chip must be removed first)
   const atts = chatAtts.length ? chatAtts.map(({ path, name, mime, size }) => ({ path, name, mime, size })) : null;
@@ -3173,7 +3190,10 @@ async function chatSend() {
   refresh();
 }
 $('#chat-input').addEventListener('input', chatPreview);
+$('#chat-input').addEventListener('compositionstart', () => { chatComposing = true; });
+$('#chat-input').addEventListener('compositionend', () => { chatComposing = false; chatPreview(); });
 $('#chat-input').addEventListener('keydown', (e) => {
+  if (e.isComposing || e.keyCode === 229) return; // IME composition: Enter commits the text, it must not also send it (t_h0a1c2fa)
   const box = $('#chat-mentions'); const open = !box.classList.contains('hidden'); const items = box.querySelectorAll('div');
   if (open && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) { e.preventDefault(); CH.mi = (CH.mi + (e.key === 'ArrowDown' ? 1 : items.length - 1)) % items.length; chatPreview(); }
   else if (open && (e.key === 'Tab' || e.key === 'Enter')) { e.preventDefault(); pickMention(items[CH.mi].dataset.name); }
