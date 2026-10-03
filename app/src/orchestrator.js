@@ -725,7 +725,11 @@ class Orchestrator extends EventEmitter {
       this.changed();
     } catch (e) {
       a.status = 'idle'; a.iteration = 0; a.activity = null;
-      this.log(node.id, 'error', `wake run crashed: ${e.message}`);
+      // The dispatch marked these messages read before the run started; a crash here means they
+      // were never delivered — back to the unread inbox so the next sweep retries (the pair cap
+      // still bounds an agent->agent retry loop).
+      try { this.store.markMessagesRead(msgs.map((m) => m.id), false); } catch {}
+      this.log(node.id, 'error', `wake run crashed: ${e.message}; its messages returned to the unread inbox`);
       this.changed();
     } finally {
       // Released however the bookkeeping above ends: a leaked slot leaves a self-update
