@@ -25,8 +25,12 @@ const isBoardHelper = (r) => !!r.command && /mcp-server\.js/.test(r.command) && 
 // HARD_CAP_MULT: silence for MULT x stallTimeoutMin kills the run even when runAlive() sees live
 // descendants — a runtime's own long-lived helpers (helpycode MCP servers) used to pin liveness
 // true forever (t_1f75efd8: a wake run hung 3h11m).
+// LIVE_RECHECK_MS: how long a run stays trusted-alive after one liveness probe — a silent run kept
+// alive by descendants (hung runtime with helpers) used to re-fork the blocking `ps` on every 5s
+// sweep forever. Verdicts are minutes-granular, so one probe per window is plenty; a probe is never
+// debounced past the hard cap, where the verdict decides a kill.
 // Shared with orchestrator.js by reference (tests shorten the timings in place).
-const STALL = { SWEEP_MS: 5000, SIGKILL_GRACE_MS: 8000, MAX_RECOVERIES: 2, HARD_CAP_MULT: 3 };
+const STALL = { SWEEP_MS: 5000, SIGKILL_GRACE_MS: 8000, MAX_RECOVERIES: 2, HARD_CAP_MULT: 3, LIVE_RECHECK_MS: 30000 };
 
 // Short 'continue' prompt for a stalled run resumed in the same session (the session already holds
 // the full task context; this only tells the agent the previous attempt was stopped and why).
@@ -139,12 +143,20 @@ function sweepStalls(orch) {
       if (idleMs < timeoutMin * 60000) continue;
       // A live descendant (long silent tool call) protects the run — up to the hard cap, where
       // silence wins: the cap is what recovers runs whose runtime keeps helpers alive forever.
+      // Debounce the probe (runAlive forks a blocking `ps` on the main loop): a run verified alive
+      // stays trusted-alive for LIVE_RECHECK_MS — only cap-eligible runs probe on every sweep,
+      // because there the verdict decides the kill and must read fresh data.
+      const cappedIdle = idleMs >= hardCapMs;
+      const probed = orch._stallProbe || (orch._stallProbe = new Map());
+      if (!cappedIdle && now - (probed.get(nodeId) || 0) < STALL.LIVE_RECHECK_MS) continue;
       const alive = orch.runAlive(nodeId, child, table());
-      const capped = alive && idleMs >= hardCapMs;
+      probed.set(nodeId, now);
+      const capped = alive && cappedIdle;
       if (alive && !capped) continue;
       // One-way claim on the run object: whichever sweep flips .stalled owns the recovery, so a tick
       // racing a manual stop or a queued message can never double-fire (compare-and-set on the run).
       run.stalled = true;
+      probed.delete(nodeId);
       a.stall = { state: 'stalled' };
       const idleMin = Math.round(idleMs / 60000);
       // Reporting is guarded: the sweep that made the claim owes the kill — a crashing log/emit must

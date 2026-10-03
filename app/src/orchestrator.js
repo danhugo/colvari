@@ -288,9 +288,11 @@ class Orchestrator extends EventEmitter {
       } catch {}
     }
     // Stall watchdog state: last seen cumulative CPU time of each run's CLI process (nodeId -> {pid, cpuMs}),
-    // and the pending SIGKILL grace timers for stalled runs that ignore SIGTERM.
+    // the pending SIGKILL grace timers for stalled runs that ignore SIGTERM, and the last liveness
+    // probe time per node (nodeId -> ts, the STALL.LIVE_RECHECK_MS debounce in sweepStalls).
     this._stallCpu = new Map();
     this._stallKill = new Map();
+    this._stallProbe = new Map();
     this._stallTimer = setInterval(() => this.sweepStalls(), STALL.SWEEP_MS);
     if (this._stallTimer.unref) this._stallTimer.unref();
     // Review watchdog state (sweepReviews): per review task, which link of the review chain is current
@@ -1482,6 +1484,7 @@ class Orchestrator extends EventEmitter {
         try { removePerRunMcpDirs(env); } catch {} // per-run board config was read at child startup (t_8170a988)
         if (a.currentRun === run) a.currentRun = null;
         this._stallCpu.delete(node.id); // drop the CPU snapshot: a recycled pid must not read as advancing CPU for the next run
+        this._stallProbe.delete(node.id); // and the probe stamp: the next run's first liveness check must be fresh
         try {
           if (buf.trim()) this.onEvent(node, buf.trim(), run, rt.id);
           if (run.subs && run.subs.records.length) {

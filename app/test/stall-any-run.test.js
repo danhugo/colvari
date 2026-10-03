@@ -185,6 +185,43 @@ test('no-task run with a non-message trigger (loop) is watched now, not skipped'
   disarm(orch);
 });
 
+test('a protected silent run is probed at most once per LIVE_RECHECK_MS; a cap-eligible run always probes fresh', async () => {
+  // Debounce (t_f53d6df8): runAlive forks a blocking `ps` on the main loop, so a run that stays
+  // alive below the cap (hung runtime with helpers) must not be re-probed on every sweep. The
+  // stub counts probes; the run here can never emit (lastActivityAt keeps being re-backdated).
+  const origRecheck = STALL.LIVE_RECHECK_MS;
+  STALL.LIVE_RECHECK_MS = 500; // the sweep cadence here is manual, so the window is what matters
+  try {
+    const { node, orch } = setup();
+    orch.running = true; // sweepStalls only runs while the orchestrator is up
+    let probes = 0;
+    orch.runAlive = () => { probes++; return true; }; // live descendant: a long silent tool call
+    const a = orch.agent(node.id);
+    a.status = 'working'; a.taskId = 't1'; a.activity = { trigger: 'task', startedAt: Date.now() };
+    const run = { done: false }; a.currentRun = run;
+    orch.procs.set(node.id, { pid: 123456, kill() {} });
+    a.lastActivityAt = Date.now() - 2000; // silent 2s: past the 1s timeout, below the 3s cap
+    orch.sweepStalls();
+    assert.equal(probes, 1, 'first sweep probes');
+    assert.equal(run.stalled, undefined);
+    orch.sweepStalls();
+    orch.sweepStalls();
+    assert.equal(probes, 1, 'sweeps inside the recheck window skip the probe entirely');
+    await new Promise((r) => setTimeout(r, STALL.LIVE_RECHECK_MS + 100));
+    a.lastActivityAt = Date.now() - 2000; // keep the run below the cap regardless of elapsed time
+    orch.sweepStalls();
+    assert.equal(probes, 2, 'the window only defers the probe, it never expires the run');
+    assert.equal(run.stalled, undefined);
+    a.lastActivityAt = Date.now() - 3500; // past the 3s hard cap: the kill path always probes fresh
+    orch.sweepStalls();
+    assert.equal(probes, 3, 'a cap-eligible run probes on every sweep');
+    assert.equal(run.stalled, true, 'the cap claims the run despite the (stubbed) live child');
+    disarm(orch);
+  } finally {
+    STALL.LIVE_RECHECK_MS = origRecheck;
+  }
+});
+
 test('nudge with interrupt:false never SIGTERMs a live run; a human message still does', async () => {
   const { store, node, orch } = setup({ hangCmd: 'sleep 257' });
   store.createTask({ title: 'live run', assignee: node.id });
