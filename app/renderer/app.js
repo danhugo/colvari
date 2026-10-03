@@ -631,10 +631,10 @@ const rstArmed = () => !!(rst.scheduledNow || rst.scheduledAfter);
 const clearRstToast = () => { if (rstToast) { const d = rstToast; rstToast = null; d.remove(); } };
 // The drain can outlast any auto-expiring toast, so "Restarting…" stays until the flow itself becomes
 // visible (updater leaves idle: veil/pill take over), the schedule disarms, or the user clicks it.
-function rstRestarting() {
+function rstRestarting(what) {
   clearRstToast();
   const d = document.createElement('div'); d.className = 'toast';
-  d.innerHTML = '<b>Restart</b><br><span class="spin"></span> Restarting…';
+  d.innerHTML = `<b>Restart</b><br><span class="spin"></span> ${esc(what || 'Restarting…')}`;
   d.onclick = () => { if (rstToast === d) rstToast = null; d.remove(); renderAlerts(); };
   $('#toasts').appendChild(d); rstToast = d;
   renderAlerts(); // the armed row's button flips to the spinner state at once
@@ -652,15 +652,18 @@ async function rstAction(kind) {
   rstBusy = null;
   if (!ok) { showToast('Restart failed', (err && err.message) || 'not available'); renderAlerts(); return; }
   const status = res && typeof res === 'object' ? res.status : null;
+  // sha comes from the result field when present; Devon's core (t_f6d37ca4) embeds it in the
+  // message instead ("already running abc1234 — nothing to restart onto"), so parse it back out.
+  const resSha = (r, m) => (typeof r.sha === 'string' && r.sha ? r.sha : (String(m || '').match(/\b[0-9a-f]{7,40}\b/i) || [])[0] || '');
   if (kind === 'now' && status === 'noop') {
-    rst = { ...rst, pendingCount: 0, scheduledAfter: null, scheduledNow: false }; // the chip clears at once; Devon's reset keeps the next push honest
-    const sha = typeof res.sha === 'string' && res.sha ? res.sha.slice(0, 7) : '';
+    rst = { ...rst, pendingCount: 0, scheduledAfter: null, scheduledNow: false }; // the chip clears at once; the core's pending-cleared push confirms
+    const sha = resSha(res, res.message).slice(0, 7);
     showToast('Restart', sha ? `Already running latest (${sha})` : (res.message || 'Already running latest'));
     renderAlerts();
   } else if (kind === 'now' && status === 'error') {
     showToast('Restart failed', res.message || 'restart failed');
   } else if (kind === 'now' && status === 'scheduled') {
-    rstRestarting();
+    rstRestarting(res.message || 'Restarting…');
   } else if (kind === 'cancel') {
     clearRstToast();
   }
