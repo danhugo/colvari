@@ -308,7 +308,7 @@ function attributeLongTasks(profile, traceStartWall, longTasks) {
   return longTasks.map((lt) => {
     const tally = new Map();
     for (const s of samps) if (s.wall >= lt.start && s.wall <= lt.start + lt.dur) tally.set(s.name, (tally.get(s.name) || 0) + 1);
-    const top = [...tally.entries()].sort((a, b) => b[1] - a[1]).slice(0, 4).map((x) => x.name);
+    const top = [...tally.entries()].sort((a, b) => b[1] - a[1]).slice(0, 4).map((x) => x[0]);
     return { startWall: Math.round(lt.start), durMs: lt.dur, during: top };
   }).sort((a, b) => b.durMs - a.durMs).slice(0, 24);
 }
