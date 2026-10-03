@@ -4,6 +4,7 @@ const path = require('path');
 // Test instances (gui-e2e / smoke) must never leave fake-CLI children behind: install procguard
 // before the orchestrator loads so every spawn it makes is tracked and reaped (t_92c31037).
 const procguard = (process.env.AGENTS_SQUAD_GUI_E2E || process.env.AGENTS_SQUAD_SMOKE) ? require('../test/harness/procguard').install() : null;
+const HS = require('./harness-sweep');
 const { Orchestrator, reapRunPids, interruptedFromReap } = require('./orchestrator');
 const BS = require('./bootstate');
 const { ProjectManager, TEMPLATES, isolateTestRoot } = require('./projects');
@@ -44,6 +45,13 @@ const runtimes = (settings) => (runtimesCache ||= RT.detectRuntimes(settings, { 
 // AGENTS_SQUAD_HOME (the live app's root) loses to an explicit AGENTS_SQUAD_PROJECT, with neither
 // set a throwaway temp root is created, and the whole run is bounded by a force-exit watchdog.
 const TEST_MODE = !!(process.env.AGENTS_SQUAD_GUI_E2E || process.env.AGENTS_SQUAD_SMOKE);
+// Harness runs (t_98eed830, plan t_b8a2f6c4): an Electron a harness starts — test/perf/* mains,
+// the ab-gate/profile drivers, gui-e2e/smoke — carries AGENTS_SQUAD_HARNESS_RUN (or self-marks in
+// TEST_MODE). The run records its own pidfile, arms a parent-death watchdog that quits when the
+// owning process disappears (drain cut, crash, SIGKILL — no exit handler can fire there), and the
+// boot sweep below reaps only pidfile-recorded orphans, identity-verified, never by name. A
+// production launch has no marker and never gets the watchdog.
+const HARNESS_RUN = process.env.AGENTS_SQUAD_HARNESS_RUN || (TEST_MODE ? HS.harnessRunId('harness') : null);
 if (TEST_MODE) {
   const testRoot = isolateTestRoot();
   // Own userData too (t_490eeee8 harness-isolation audit): the default path is shared with the
@@ -51,7 +59,18 @@ if (TEST_MODE) {
   app.setPath('userData', path.join(testRoot, 'userData'));
   console.log(`[agents-squad] test instance pid=${process.pid} data root=${testRoot}`);
   const timeoutMs = Number(process.env.AGENTS_SQUAD_TEST_TIMEOUT_MS) || 30 * 60 * 1000;
-  setTimeout(() => { console.error(`[agents-squad] test instance exceeded ${timeoutMs} ms — force exit (pid ${process.pid}, data root ${testRoot})`); try { cleanupTestTmpDirs(); } catch {} procguard.reapAll(); app.exit(1); }, timeoutMs);
+  setTimeout(() => { console.error(`[agents-squad] test instance exceeded ${timeoutMs} ms — force exit (pid ${process.pid}, data root ${testRoot})`); try { cleanupTestTmpDirs(); } catch {} try { if (HARNESS_RUN) HS.removeRun(HARNESS_RUN); } catch {} procguard.reapAll(); app.exit(1); }, timeoutMs);
+}
+if (HARNESS_RUN) {
+  const harnessQuit = (() => { let armed = false; return () => {
+    if (armed) return; armed = true;
+    try { app.quit(); } catch {}
+    setTimeout(() => { try { app.exit(0); } catch {} }, 5000).unref?.();
+  }; })();
+  try {
+    HS.recordRun({ runId: HARNESS_RUN, ownerPid: process.ppid, log: (m) => console.log(m) });
+    HS.armParentWatchdog({ runId: HARNESS_RUN, ownerPid: process.ppid, quit: harnessQuit, log: (m) => console.error(m) });
+  } catch (e) { console.error('[agents-squad] harness record/watchdog failed:', e.message); }
 }
 
 // Single instance (live profile): a second launch must focus the running window, not fork a second
@@ -2981,6 +3000,9 @@ function pollInbox(first) {
 
 app.whenReady().then(() => {
   if (!appLockHeld) return; // second launch: the running instance stays, this one exits
+  // Harness orphan sweep (t_98eed830): reap only pidfile-recorded harness runs whose owner died —
+  // identity-checked (start time + marker) and never by name, so live processes are untouched.
+  try { HS.sweep({ log: (m) => console.log(m) }); } catch (e) { console.error('[agents-squad] harness sweep failed:', e.message); }
   createWindow();
   probeUnprobedAgents();
   for (const p of pm.list()) pumpFor(p.id); // delta pumps stream every project's changes (t_39bf39ac)
@@ -3021,6 +3043,7 @@ app.on('window-all-closed', () => { for (const o of orchs.values()) if (o.runnin
 // Any exit we can still act on must stamp the breadcrumbs clean (t_2ca99830), or the next boot
 // shows a false "died silently". app.exit() skips 'will-quit' — relaunchApp marks clean itself.
 function markCleanExits() {
+  try { if (HARNESS_RUN) HS.removeRun(HARNESS_RUN); } catch {} // a clean quit needs no sweep record
   if (!appLockHeld) return;
   for (const p of pm.list()) { try { BS.writeAlive(pm.store(p.id).dir, { cleanExitAt: Date.now() }); } catch {} }
 }
