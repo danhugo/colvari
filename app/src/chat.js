@@ -130,9 +130,34 @@
   // keeps the previously-visible content in place. Clamped at 0 (content shrank / scrolled past top).
   const anchorScroll = (prevTop, prevHeight, newHeight) => Math.max(0, newHeight - prevHeight + prevTop);
 
+  // Append-only room update (t_fe51eee9, wiki paperclip-vs-us-perf #5): plan extending the room's
+  // DOM with the feed's new trailing events instead of rebuilding every group. prevDom is what the
+  // DOM was drawn from (the window events, oldest first), ev the fresh full feed, win the window
+  // size. Returns null whenever anything but a pure tail append happened — the caller must do the
+  // full render. On success: fresh = the new trailing events, keep = old events still inside the
+  // window (identity verified below), so the DOM should end up showing keep old + fresh.
+  function tailPlan(prevDom, ev, win) {
+    if (!prevDom || !prevDom.length || !ev.length) return null;
+    const tailAt = prevDom[prevDom.length - 1].at;
+    let delta = 0; // events appended strictly after the DOM's tail
+    for (let i = ev.length - 1; i >= 0 && ev[i].at > tailAt; i--) delta++;
+    if (!delta) return null;
+    const keep = Math.min(prevDom.length, Math.max(1, win | 0) - delta);
+    if (keep < 0) return null; // more new events than the window holds: rebuild
+    // Prefix stability: the kept events must be the very ones the DOM was drawn from. The
+    // fingerprint covers every field roomEvents mutates after creation (tool results, subagent
+    // totals/repeat counts) so a mutated older bubble falls back to the full render. Source-level
+    // label changes (node renames, task titles) heal on the next full render.
+    const fp = (e) => `${e.who}|${e.at}|${e.type}|${e.count || 1}|${e.result != null ? 1 : 0}|${e.total || 0}|${String(e.text || '').slice(0, 48)}`;
+    for (let i = 0; i < keep; i++) {
+      if (fp(ev[ev.length - delta - keep + i]) !== fp(prevDom[prevDom.length - keep + i])) return null;
+    }
+    return { fresh: ev.slice(ev.length - delta), keep };
+  }
+
   // Collapse consecutive identical messages (same type/target/text) from one author into one bubble + a ×N
   // badge at the end. Messages carrying attachments never collapse (each file needs its own thumbs).
   const collapseRepeats = (items) => items.reduce((out, it) => { const p = out[out.length - 1]; if (p && p.type === it.type && p.text === it.text && p.to === it.to && !p.atts && !it.atts && it.type !== 'tool' && it.type !== 'question' && it.type !== 'subagent') p.count = (p.count || 1) + 1; else out.push({ ...it }); return out; }, []);
-  return { avatarColor, initials, toolLabel, roomEvents, group, parseComposer, preview, mentionMatches, fmtSize, fileUrl, attThumbs, collapseRepeats, GROUP_MS, MAX, PAGE, pageOf, anchorScroll, feedKey };
+  return { avatarColor, initials, toolLabel, roomEvents, group, parseComposer, preview, mentionMatches, fmtSize, fileUrl, attThumbs, collapseRepeats, GROUP_MS, MAX, PAGE, pageOf, anchorScroll, tailPlan, feedKey };
 });
 

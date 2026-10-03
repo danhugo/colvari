@@ -648,6 +648,12 @@ async function guiE2E() {
     await ex(`$('#chat-room').scrollTop = $('#chat-room').scrollHeight; await w(500);`);
     const chatBottom = await ex(`return { pill: !$('#chat-newpill').classList.contains('hidden'), bubbles: document.querySelectorAll('#chat-room .bubble').length, atEnd: $('#chat-room').textContent.includes('fresh-2') }`);
     expect('chat windowing: history view holds with a new-pill, bottom autoscrolls and shrinks the window', chatKeep.pill && chatKeep.top > 500 && chatBottom.bubbles < chatUp.bubbles && chatBottom.atEnd && !chatBottom.pill, { chatKeep, chatBottom });
+    // Append-only tail (t_fe51eee9): pinned to the bottom, a new event must EXTEND the room (the
+    // last group node keeps its identity; only its body grows) instead of rebuilding every group.
+    const tailMark = await ex(`const gs = document.querySelectorAll('#chat-room .cgroup'); window.__tailG = gs[gs.length - 1]; const d = CH.evDom; return { groups: gs.length, domLen: d.length, lastWho: d[d.length - 1].who, last3: d.slice(-3).map((e) => e.who + ':' + e.at + ':' + e.type), lastGroupCls: gs[gs.length - 1].className }`);
+    await ex(`logs.push({ projectId: ctx.p, nodeId: 'b', kind: 'text', text: 'append-check', at: Date.now() + 50 }); chatSched.force(); await w(400);`);
+    const tailAfter = await ex(`const gs = [...document.querySelectorAll('#chat-room .cgroup')]; return { groups: gs.length, sameNode: gs[gs.length - 1] === window.__tailG, markedIdx: gs.indexOf(window.__tailG), shown: $('#chat-room').textContent.includes('append-check'), evDomLen: CH.evDom.length, path: window.__chatPath, plan: window.__chatPlan, bail: window.__appendBail, lastTxt: gs[gs.length - 1].textContent.slice(0, 80), markedTxt: window.__tailG && window.__tailG.textContent.slice(0, 80) } `);
+    expect('chat append-only: pinned tail extends the room without rebuilding groups', tailAfter.sameNode === true && tailAfter.shown, { tailMark, tailAfter });
     // Logs: same bounds, older bar, agent filter still applies before windowing. Pin to the tail
     // first — background renderLogs (watcher events) may have run while the tab was hidden, leaving
     // the box at the top, and scrollTop assignments on a hidden box are no-ops (no scroll event).
@@ -1784,20 +1790,37 @@ async function guiE2E() {
   // Board layout shots (t_95f4c836): 34 done tasks + a long blocked tag, light/dark, narrow/wide.
   const boardShots = async () => {
     await waitFor(`return !!document.querySelector('#tpl-select option')`); await ex(`await refresh();`); const cur = await ex(`return { p: ctx.p, t: S.teamId }`);
-    const s = pm.store(cur.p || pid()); let nodes = s.getTeam().nodes; if (!nodes.length) { s.addNode({ name: 'Devon', role: 'Dev', x: 60, y: 60 }); nodes = s.getTeam().nodes; }
+    const s = pm.store(cur.p || pid(), cur.t); let nodes = s.getTeam().nodes; if (!nodes.length) { s.addNode({ name: 'Devon', role: 'Dev', x: 60, y: 60 }); nodes = s.getTeam().nodes; }
     const dev = nodes[0]; const blocker = s.createTask({ title: 'Blocker with a very long unbreakable title_' + 'x'.repeat(40), assignee: dev.id });
     s.createTask({ title: 'Blocked demo', assignee: dev.id, blockedBy: [blocker.id] });
     for (let i = 0; i < 34; i++) { const t = s.createTask({ title: 'Done task ' + i, assignee: dev.id }); s.updateTask(t.id, { status: 'done' }); }
-    await ex(`$('#tabs button[data-tab=board]').click(); await refresh(); await w(300);`);
+    // The delta pump applies the seeded tasks and marks their versions seen, so a plain refresh()
+    // no-op-skips the team/nodes sections they do not carry — force a full pull instead.
+    await ex(`$('#tabs button[data-tab=board]').click(); lastV = null; await refresh(); await w(300);`);
     expect('board: done column shows 20 of 34', await ex(`return /20\\/34/.test($('#done-h').textContent)`));
     expect('board: no tag chip spills out of its card', await ex(`return [...document.querySelectorAll('.ctags .tag')].every((t) => t.scrollWidth <= t.clientWidth + 1 || getComputedStyle(t).textOverflow === 'ellipsis')`));
+    // Keyed patching (t_fe51eee9): editing one task must swap only its card node — untouched cards
+    // keep their DOM identity (hover/focus survive). The minute-bucket in the render key makes
+    // ago() labels redraw once a minute, so the identity claim only holds within the same minute.
+    const probe = await ex(`const c = document.querySelector('.card[data-id="${blocker.id}"]'); window.__cardProbe = c; return { ok: !!c, min: Math.floor(Date.now() / 6e4) }`);
+    const blockedId = s.listTasks().find((t) => t.title === 'Blocked demo').id;
+    s.updateTask(blockedId, { title: 'Blocked demo (edited)' });
+    await ex(`await refresh(); await w(250);`);
+    const probe2 = await ex(`const c = document.querySelector('.card[data-id="${blockedId}"]'); return { sameNode: window.__cardProbe === document.querySelector('.card[data-id="${blocker.id}"]'), newTitle: (c.querySelector('b') || {}).textContent || '', min: Math.floor(Date.now() / 6e4) }`);
+    expect('board keyed patch: edited task swaps its card, untouched cards keep their node', probe.ok && probe.min === probe2.min && probe2.sameNode === true && /edited/.test(probe2.newTitle), { probe, probe2 });
+    // Done fold through the delegated click: cards vanish, header flips, unfold restores the page.
+    await ex(`$('#done-h').click(); await w(200);`);
+    const folded = await ex(`return { head: $('#done-h').textContent, cards: document.querySelectorAll('.col.done .card').length, folded: document.querySelector('.col.done').classList.contains('folded') }`);
+    await ex(`$('#done-h').click(); await w(200);`);
+    const unfolded = await ex(`return { head: $('#done-h').textContent, cards: document.querySelectorAll('.col.done .card').length }`);
+    expect('board done fold: delegated click folds (no cards) and unfolds (20 cards)', /20\/34/.test(folded.head) && folded.cards === 0 && folded.folded && unfolded.cards === 20, { folded, unfolded });
     const size = win.getSize();
     for (const [w, h, tag] of [[900, 800, 'narrow'], [1900, 900, 'wide']]) for (const th of ['light', 'dark']) { win.setSize(w, h); require('electron').nativeTheme.themeSource = th; await ex(`await w(500);`); await shot(`board-${tag}-${th}`); }
     require('electron').nativeTheme.themeSource = 'system'; win.setSize(...size);
   };
   const conflictShots = async () => {
     await waitFor(`return !!document.querySelector('#tpl-select option')`); await ex(`await refresh();`); const cur = await ex(`return { p: ctx.p, t: S.teamId }`);
-    const p = cur.p || pid(); const s = pm.store(p);
+    const p = cur.p || pid(); const s = pm.store(p, cur.t);
     const { execFileSync } = require('child_process'); const g = (cwd, ...a) => execFileSync('git', ['-c', 'user.email=a@b', '-c', 'user.name=a', ...a], { cwd, stdio: 'pipe' }).toString().trim();
     const repo = ttmp('squad-conflict-repo-');
     g(repo, 'init', '-q', '-b', 'main'); fs.writeFileSync(path.join(repo, 'a.txt'), 'base\n'); g(repo, 'add', '.'); g(repo, 'commit', '-q', '-m', 'init');
@@ -1810,7 +1833,7 @@ async function guiE2E() {
     fs.writeFileSync(path.join(repo, 'a.txt'), 'ours\n'); g(repo, 'commit', '-qam', 'ours edit');
     task = s.updateTask(task.id, { status: 'done' });
     expect('conflict: guard parks the task as merge_conflict instead of done', task.status === 'merge_conflict', task);
-    await ex(`$('#tabs button[data-tab=board]').click(); await refresh(); await w(300);`);
+    await ex(`$('#tabs button[data-tab=board]').click(); lastV = null; await refresh(); await w(300);`); // full pull: deltas mark task versions seen, refresh would skip team/nodes
     const col = await ex(`return [...document.querySelectorAll('#columns h3')].map((h) => h.textContent)`);
     expect('conflict: Board shows a merge conflict column (task is not hidden)', col.some((h) => /merge conflict/.test(h)), col);
     const card = await ex(`return document.querySelector('.card[data-id="${task.id}"]')?.textContent || ''`);
