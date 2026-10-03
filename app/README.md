@@ -55,6 +55,8 @@ Each project has its own orchestrator, so different projects can run at the same
 
 ## Usage & billing
 
+Usage is tracked per account key `{runtime, provider, model}` in the usage ledger; `docs/usage-ledger.md` documents the data model, cost-resolution priority and migration. This section is the user-facing overview.
+
 Every `claude` run (agent runs and goal-check runs) is saved in `runs.json` of the project (`src/usage.js`): exact input, output, cache-read and cache-creation tokens (from the `result` event's `modelUsage`, falling back to `usage`), the model actually used (init `model` / `modelUsage` keys), turns, duration, exit code, session and the **billing source**. The source is detected from the init event's `apiKeySource` (`none` = claude.ai Pro/Max login) and the run env (`ANTHROPIC_BASE_URL` = proxy/provider, `CLAUDE_CODE_USE_BEDROCK` / `CLAUDE_CODE_USE_VERTEX`, `ANTHROPIC_API_KEY`).
 
 Resumed runs (`--resume`: goal iterations, loop passes, `continueSession`, human-message resumes): the CLI reports `modelUsage` and `total_cost_usd` cumulatively for the whole session, so the app stores each run's cumulative snapshot and records only the difference from the previous snapshot of that session (kept across restarts via `runs.json`). If no snapshot is known, the per-call `usage` is used and cost is recorded as 0 (`usageBasis: usage-no-baseline`). The live log shows "this run only; session total $X" for resumed runs.
