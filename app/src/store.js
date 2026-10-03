@@ -18,6 +18,7 @@ const { normalizeNode, normalizePatch, normalizePreset, applyPreset, EDGE_TYPES,
 const { defaultName } = require('./agent-name');
 const WT = require('./worktree');
 const MG = require('./merge-gate');
+const LI = require('./log-index');
 const { BoardCache } = require('./board-cache');
 
 // Bounce payload for a gate-blocked merge: failing test names + a capped output tail (#8).
@@ -97,11 +98,11 @@ function sanitizeAttachments(list) {
 // at most. Crash risk: a hard kill loses the last flush window of log lines — acceptable for a
 // diagnostic log (task files keep their sync writes). A normal exit flushes synchronously instead.
 const LOG_LIMITS = { flushBytes: 256 * 1024, rotateBytes: 3e6 }; // one object so tests can shrink them (same pattern as LOCK); not runtime configuration
-const LOG_BUFS = new Map(); // resolved dir -> { dir, store, lines, flying, bytes, size, armed, flushing }
+const LOG_BUFS = new Map(); // resolved dir -> { dir, store, lines, flying, bytes, size, armed, flushing, idxLive }
 function logBufState(dir, store) {
   const key = path.resolve(dir);
   let st = LOG_BUFS.get(key);
-  if (!st) { st = { dir: key, store, lines: [], flying: [], bytes: 0, size: null, armed: false, flushing: false }; LOG_BUFS.set(key, st); }
+  if (!st) { st = { dir: key, store, lines: [], flying: [], bytes: 0, size: null, armed: false, flushing: false, idxLive: null }; LOG_BUFS.set(key, st); }
   return st;
 }
 let _logExitHooked = false;
@@ -110,7 +111,7 @@ function hookLogExitFlush() {
   process.on('exit', () => {
     for (const st of LOG_BUFS.values()) {
       const lines = st.flying.concat(st.lines); st.flying = []; st.lines = []; st.bytes = 0;
-      if (lines.length) { try { fs.appendFileSync(path.join(st.dir, 'logs.jsonl'), lines.join('')); } catch {} }
+      if (lines.length) { try { fs.appendFileSync(path.join(st.dir, 'logs.jsonl'), lines.map((o) => o.s).join('')); } catch {} }
     }
   });
 }
@@ -1077,12 +1078,15 @@ class Store {
 
   // ---- persisted orchestrator log (logs.jsonl, rotated to logs.jsonl.1 past LOG_LIMITS.rotateBytes) ----
   // O(1) per call: queue the line and arm the tick-end flush (see the buffer note at the top).
+  // Each queued item also carries the index meta (at, nodeKey, byte length — log-index.js) the
+  // flush needs for the sidecar offset index, so the hot path never re-parses the line.
   appendLog(l) {
     hookLogExitFlush();
     const st = logBufState(this.dir, this);
-    const line = C.logLine(l) + '\n';
-    st.lines.push(line);
-    st.bytes += Buffer.byteLength(line);
+    const at = l.at || Date.now(); // stamped once, so the index meta matches the serialized line
+    const line = C.logLine({ ...l, at }) + '\n';
+    st.lines.push({ s: line, len: Buffer.byteLength(line), at, key: LI.nodeKeyOf(l.nodeId) });
+    st.bytes += st.lines[st.lines.length - 1].len;
     if (st.bytes >= LOG_LIMITS.flushBytes) this._flushLogs();
     else if (!st.armed && !st.flushing) {
       st.armed = true;
@@ -1095,12 +1099,14 @@ class Store {
   pendingLogLines() {
     const st = LOG_BUFS.get(path.resolve(this.dir));
     if (!st || (!st.flying.length && !st.lines.length)) return [];
-    try { return st.flying.concat(st.lines).map((s) => JSON.parse(s)); } catch { return []; }
+    try { return st.flying.concat(st.lines).map((o) => JSON.parse(o.s)); } catch { return []; }
   }
-  // One async append per batch. A batch in flight never blocks appendLog: lines landing during the
-  // await stay in st.lines for the tail re-flush. `flushing` also keeps two appends from racing
-  // into an out-of-order file. Errors requeue the batch (front, order preserved) and retry on the
-  // next flush — a failing disk must not take down the caller.
+  // One async append per batch, then the matching index records (log-index.js). A batch in flight
+  // never blocks appendLog: lines landing during the await stay in st.lines for the tail re-flush.
+  // `flushing` also keeps two appends from racing into an out-of-order file. st.flying is cleared
+  // only after the index append confirms, so an in-flight batch is never read twice (readers dedup
+  // the landed tail against the buffer; see getSessionLog). Errors requeue the batch (front, order
+  // preserved) and retry on the next flush — a failing disk must not take down the caller.
   _flushLogs() {
     const st = logBufState(this.dir, this);
     if (st.flushing) return;
@@ -1108,40 +1114,63 @@ class Store {
     st.flushing = true;
     st.flying = st.lines.splice(0); // handed to the write, still visible to readers until confirmed
     st.bytes = 0;
-    const data = st.flying.join('');
+    const batch = st.flying;
+    const data = batch.map((o) => o.s).join('');
     (async () => {
       try {
-        if (st.size == null) { try { st.size = (await fsp.stat(this.logFile())).size; } catch { st.size = 0; } }
-        await fsp.appendFile(this.logFile(), data);
-        st.flying = []; // confirmed on disk: readers switch to the file (sig moved with it)
-        st.size += Buffer.byteLength(data);
+        const file = this.logFile();
+        const size0 = await fsp.stat(file).then((s) => s.size, () => 0);
+        await fsp.appendFile(file, data);
+        await this._appendLogIndex(batch, size0); // records point at the bytes confirmed above
+        st.size = size0 + Buffer.byteLength(data);
         if (st.size >= LOG_LIMITS.rotateBytes) {
           // Our in-memory size under-counts what other processes append, so confirm against the
           // real file; a foreign rotation already shrank it. The rename itself goes under the lock.
-          try { st.size = (await fsp.stat(this.logFile())).size; } catch { st.size = 0; }
+          try { st.size = (await fsp.stat(file)).size; } catch { st.size = 0; }
           if (st.size >= LOG_LIMITS.rotateBytes) { this._rotateLogs(); st.size = 0; }
         }
+        st.flying = []; // fully confirmed (data + index): readers stop merging them from the buffer
       } catch {
         st.size = null; // unknown again: next flush re-stats
         st.lines = st.flying.concat(st.lines); // put the batch back, order preserved, retry next flush
         st.flying = [];
-        st.bytes = Buffer.byteLength(st.lines.join(''));
+        st.bytes = st.lines.reduce((a, o) => a + o.len, 0);
       } finally {
         st.flushing = false;
         if (st.lines.length) this._flushLogs();
       }
     })();
   }
+  // Best-effort tail append of the batch's index records. st.idxLive tracks whether the live
+  // index exists: false is re-checked every batch (a background rebuild may create it), and an
+  // append error drops the index — getSessionLog falls back to its gap scan and rebuilds.
+  async _appendLogIndex(batch, startOffset) {
+    const st = logBufState(this.dir, this);
+    const idxFile = LI.idxPath(this.logFile());
+    if (st.idxLive !== true) st.idxLive = await fsp.stat(idxFile).then(() => true, () => false);
+    if (!st.idxLive) return;
+    const flat = [];
+    let off = startOffset;
+    for (const o of batch) { flat.push(off, o.at, o.len, o.key); off += o.len; }
+    await LI.appendRows(this.logFile(), flat);
+  }
   // Rotation instead of the old read-and-rewrite trim: the full file becomes the single backup and
   // the live file starts empty. Under the lock because every Store process may rotate; the fresh
-  // stat inside decides (a foreign rotation already reset the size).
+  // stat inside decides (a foreign rotation already reset the size). The backup takes its index
+  // with it; a backup without one just gap-scans until its first read rebuilds an index.
   _rotateLogs() {
     this.withLock(() => {
       let size = 0;
       try { size = fs.statSync(this.logFile()).size; } catch { return; }
       if (size < LOG_LIMITS.rotateBytes) return;
       try { fs.rmSync(this.logFile() + '.1', { force: true }); } catch {}
-      try { fs.renameSync(this.logFile(), this.logFile() + '.1'); } catch {}
+      try { fs.rmSync(this.logFile() + '.1.idx', { force: true }); } catch {}
+      try { fs.renameSync(this.logFile(), this.logFile() + '.1'); } catch { return; }
+      try { fs.renameSync(LI.idxPath(this.logFile()), this.logFile() + '.1.idx'); } catch {}
+      const st = LOG_BUFS.get(path.resolve(this.dir));
+      if (st) st.idxLive = null; // the live index just moved away: re-check on the next flush
+      LI.dropIndex(this.logFile());
+      LI.dropIndex(this.logFile() + '.1');
     });
   }
   // level (info/warn/error, derived from kind via TL.levelOf) lets the UI default its filter to warn+error.
@@ -1160,10 +1189,10 @@ class Store {
         const flying = st.flying;
         if (flying.length && out.length >= flying.length) {
           const tail = out.slice(-flying.length);
-          if (flying.every((l, i) => JSON.stringify(tail[i]) === l.replace(/\n$/, ''))) out = out.slice(0, out.length - flying.length);
+          if (flying.every((o, i) => JSON.stringify(tail[i]) === o.s.replace(/\n$/, ''))) out = out.slice(0, out.length - flying.length);
         }
         if (flying.length || st.lines.length) {
-          try { out = out.concat(flying.concat(st.lines).map((s) => JSON.parse(s))); } catch {}
+          try { out = out.concat(flying.concat(st.lines).map((o) => JSON.parse(o.s))); } catch {}
         }
       }
       return out.slice(-limit).map((l) => ({ ...l, level: TL.levelOf(l.kind) }));
@@ -1189,9 +1218,10 @@ class Store {
   }
   clearLogs() {
     const st = LOG_BUFS.get(path.resolve(this.dir));
-    if (st) { st.lines = []; st.flying = []; st.bytes = 0; st.size = 0; }
-    try { fs.unlinkSync(this.logFile()); } catch {}
-    try { fs.unlinkSync(this.logFile() + '.1'); } catch {}
+    if (st) { st.lines = []; st.flying = []; st.bytes = 0; st.size = 0; st.idxLive = null; }
+    for (const f of [this.logFile(), this.logFile() + '.1', LI.idxPath(this.logFile()), this.logFile() + '.1.idx']) { try { fs.unlinkSync(f); } catch {} }
+    LI.dropIndex(this.logFile());
+    LI.dropIndex(this.logFile() + '.1');
   }
 
   // ---- sessions: claude sessions grouped from persisted runs (see usage.js newRun) ----
@@ -1212,17 +1242,92 @@ class Store {
     return [...byId.values()].sort((a, b) => String(b.startedAt).localeCompare(String(a.startedAt)));
   }
   // Full conversation/log for one session, paginated oldest-first: {total, offset, limit, entries}.
-  // Bounded by the session's runs' [startedAt, endedAt] window on that node (only one run is active per node at a time).
-  getSessionLog(sessionId, { offset = 0, limit = 200 } = {}) {
+  // Bounded by the session's runs' [startedAt, endedAt] window on that node (only one run is active
+  // per node at a time). Pages come from the <logs.jsonl>.idx byte-offset index (log-index.js):
+  // matching lines are located in the index without parsing the log, only the page's byte span is
+  // read, and the rotated backup tops up the older rows. This process's queued + in-flight lines
+  // merge last (read-through for a fresh append) with the landed-tail dedup described inside. A
+  // missing or stale index degrades that read to an async gap scan and repairs itself in the
+  // background; every line on a page is re-checked against the exact session window, so at worst a
+  // stale index skews `total`, never the returned lines.
+  async getSessionLog(sessionId, { offset = 0, limit = 200 } = {}) {
     const rs = this.listRuns().filter((r) => r.sessionId === sessionId);
     if (!rs.length) return { total: 0, offset, limit, entries: [] };
     const nodeId = rs[0].nodeId;
     const startMs = Math.min(...rs.map((r) => (r.startedAt ? Date.parse(r.startedAt) : Infinity)));
     const endsOpen = rs.some((r) => !r.endedAt);
     const endMs = endsOpen ? Infinity : Math.max(...rs.map((r) => Date.parse(r.endedAt)));
-    const all = this.readLogs(Infinity).filter((l) => l.nodeId === nodeId && l.at >= startMs && l.at <= endMs);
-    const entries = TL.logEntries(all.slice(offset, offset + limit));
-    return { total: all.length, offset, limit, entries };
+    const match = (l) => l.nodeId === nodeId && l.at >= startMs && l.at <= endMs;
+    // Synchronous snapshot of this process's queued + in-flight lines before any await: however
+    // the in-flight flush resolves during the reads below, disk + snapshot together contain every
+    // line (the dedup below drops the snapshot's copy of lines the reads saw on disk).
+    const st = LOG_BUFS.get(path.resolve(this.dir));
+    const buffered = st ? st.flying.concat(st.lines) : [];
+    const flyingCount = st ? st.flying.length : 0;
+    const backupFile = this.logFile() + '.1';
+    const liveFile = this.logFile();
+    // Append order across the rotation boundary: backup rows first, then live.
+    const backup = await LI.matchLogRecords(backupFile, nodeId, startMs, endMs);
+    const live = await LI.matchLogRecords(liveFile, nodeId, startMs, endMs);
+    const segs = [
+      { file: backupFile, pairs: backup.pairs, np: backup.pairs.length / 2, gap: backup.gapObjs },
+      { file: liveFile, pairs: live.pairs, np: live.pairs.length / 2, gap: live.gapObjs },
+    ];
+    const diskTotal = segs[0].np + segs[0].gap.length + segs[1].np + segs[1].gap.length;
+    // The in-flight batch may already be on disk (both writes confirmed, splice pending). Readers
+    // dedup it two ways: gap-scan hits drop by raw-string identity (data landed, its index records
+    // not read yet), and the indexed tail by parsed content — the last `flyingCount` disk rows are
+    // that batch once the index write confirms. Content comparison is the same heuristic readLogs
+    // uses: two byte-identical log lines can drop one copy in this window.
+    const gapStrings = new Set(backup.gapStrings);
+    for (const s of live.gapStrings) gapStrings.add(s);
+    let landed = null;
+    if (flyingCount && diskTotal >= flyingCount) {
+      const tail = await this._diskObjectsAt(segs, diskTotal - flyingCount, diskTotal, nodeId, startMs, endMs);
+      landed = new Set(tail.map((o) => JSON.stringify(o)));
+    }
+    const bufMatches = [];
+    for (let i = 0; i < buffered.length; i++) {
+      const o = buffered[i];
+      const raw = o.s.endsWith('\n') ? o.s.slice(0, -1) : o.s;
+      if (gapStrings.has(raw)) continue;
+      let l;
+      try { l = JSON.parse(raw); } catch { continue; }
+      if (!match(l)) continue;
+      if (landed && i < flyingCount && landed.has(JSON.stringify(l))) continue;
+      bufMatches.push(l);
+    }
+    const total = diskTotal + bufMatches.length;
+    const from = Math.max(0, offset), to = Math.min(total, offset + limit);
+    const page = [];
+    if (from < to) {
+      const dTo = Math.min(to, diskTotal);
+      if (from < dTo) page.push(...(await this._diskObjectsAt(segs, from, dTo, nodeId, startMs, endMs)));
+      if (dTo < to) page.push(...bufMatches.slice(Math.max(0, from - diskTotal), to - diskTotal));
+    }
+    return { total, offset, limit, entries: TL.logEntries(page) };
+  }
+  // Disk matches are laid out flat as [backup index rows | backup gap | live index rows | live gap];
+  // resolve #kFrom..#kTo (exclusive) to parsed objects: index rows via one byte-range read per
+  // file, gap objects directly (already parsed + exact-checked by the scan).
+  async _diskObjectsAt(segs, kFrom, kTo, nodeId, startMs, endMs) {
+    const key = LI.nodeKeyOf(nodeId);
+    const win = segs.map(() => null);
+    let k = 0;
+    for (let s = 0; s < segs.length; s++) {
+      const np = segs[s].np, ng = segs[s].gap.length;
+      win[s] = {
+        a: Math.max(0, Math.min(kFrom - k, np)), b: Math.max(0, Math.min(kTo - k, np)),
+        c: Math.max(0, Math.min(kFrom - k - np, ng)), d: Math.max(0, Math.min(kTo - k - np, ng)),
+      };
+      k += np + ng;
+    }
+    const pairObjs = await Promise.all(segs.map((seg, s) => (win[s].b > win[s].a
+      ? LI.readPageRows(seg.file, seg.pairs, win[s].a, win[s].b, key, startMs, endMs)
+      : Promise.resolve([]))));
+    const out = [];
+    for (let s = 0; s < segs.length; s++) { out.push(...pairObjs[s]); out.push(...segs[s].gap.slice(win[s].c, win[s].d)); }
+    return out;
   }
 
   // ---- settings ----
