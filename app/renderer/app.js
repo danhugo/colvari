@@ -511,7 +511,7 @@ $('#importfile').onchange = act(async (e) => {
 const TAB_RESIG = {
   board: () => { boardSig = null; },
   obs: () => { obsSig = null; },
-  usage: () => { usageSig = null; },
+  usage: () => { usageSig = null; usageSched.force(); }, // size-measuring view: rebuild now, not on the burst debounce
 };
 document.querySelectorAll('button[data-tab]').forEach((b) => b.onclick = () => {
   const wasActive = b.classList.contains('active');
@@ -2556,10 +2556,25 @@ function billingTable(rs) {
   const g = {}; for (const r of rs) { const k = r.billingSource || 'unknown'; (g[k] ||= { runs: 0, cost: 0 }); g[k].runs++; g[k].cost += r.reportedCostUsd || 0; }
   return `<div><h4>By billing source</h4><table><tr><th></th><th>Runs</th><th>Cost</th><th></th></tr>${Object.entries(g).sort((a, b) => b[1].cost - a[1].cost).map(([k, v]) => `<tr><td>${billTag(k)}</td><td class="num">${v.runs}</td><td class="num">$${v.cost.toFixed(4)}</td><td>${k === 'subscription' ? '<span class="costnote">covered by subscription — not billed per token</span>' : k === 'unknown' ? '<span class="costnote">billing source undetected</span>' : ''}</td></tr>`).join('')}</table></div>`;
 }
+// Debounced ledger draw (seed 491): with the Usage tab open during an agent burst every render
+// pass whose runs version moved rebuilt the whole ledger view (aggregation + every table) at
+// render rate. RenderSched coalesces those rebuilds to one per 400ms while the burst lasts — the
+// same contract as the chat room; the sig fast-path still makes unchanged renders free, and
+// user-driven draws (tab activation, filter change) force past the rate limit.
+const usageSched = RenderSched.create({
+  minMs: 400,
+  hidden: () => document.hidden,
+  gate: () => !!$('#tab-usage.active'),
+  draw: () => renderUsageBody(), // late-binding: e2e/perf harnesses wrap the global by name
+});
+const usageUkey = () => [S.v && S.v.runs, S.v && S.v.board, RUNS.length, $('#us-agent').value, $('#us-billing').value, S.allNodes.length].join('|');
 function renderUsage() {
   if (!$('#tab-usage').classList.contains('active')) return;
-  const ukey = [S.v && S.v.runs, S.v && S.v.board, RUNS.length, $('#us-agent').value, $('#us-billing').value, S.allNodes.length].join('|');
-  if (ukey === usageSig) return; usageSig = ukey;
+  if (usageUkey() === usageSig) return;
+  usageSched.bump(); // event burst: the trailing draw lands the final ledger state
+}
+function renderUsageBody() {
+  usageSig = usageUkey();
   const fa = $('#us-agent'); const cur = fa.value;
   fa.innerHTML = '<option value="">All</option>' + S.allNodes.map((n) => `<option value="${n.id}">${esc(n.name)}</option>`).join(''); fa.value = cur;
   const fb = $('#us-billing').value;
@@ -2679,7 +2694,7 @@ function usageSub(name) {
 }
 $('#us-anchors').onclick = (ev) => { const b = ev.target.closest('button[data-sub]'); if (b) usageSub(b.dataset.sub); };
 usageSub('summary');
-$('#us-agent').onchange = renderUsage; $('#us-billing').onchange = renderUsage;
+$('#us-agent').onchange = () => usageSched.force(); $('#us-billing').onchange = () => usageSched.force(); // user action: immediate redraw, no burst debounce
 const download = (name, text, type) => { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], { type })); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000); };
 $('#us-export').onclick = act(async () => download(`usage-${(S.project.name || 'project').replace(/[^\w-]+/g, '_')}.csv`, await call('usageCSV', false), 'text/csv'));
 $('#us-exportall').onclick = act(async () => download('usage-all-projects.csv', await call('usageCSV', true), 'text/csv'));
@@ -3548,8 +3563,8 @@ squad.on('state', (st) => { if (st.projectId && st.projectId !== ctx.p) { clearT
 // one catch-up pull plus a chat bump redraw whatever moved while dark. Deltas keep patching S and
 // bump deltaSched, so every view (not just chat) is current again within one render window of show.
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'hidden') { chatSched.hide(); return; }
-  chatBump(); deltaSched.bump(); refresh();
+  if (document.visibilityState === 'hidden') { chatSched.hide(); usageSched.hide(); return; }
+  chatBump(); deltaSched.bump(); usageSched.bump(); refresh();
 });
 setInterval(() => { if (S.orch.running && !document.hidden) refresh(); }, 2000); // backstop for the sections deltas do not carry (team/nodes/nstat); version-gated inside refresh, paused while hidden
 refresh().then(() => syncRecovery()); // recovery banner needs a settled ctx.p (t_6911ba60)
