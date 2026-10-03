@@ -38,8 +38,8 @@ function armWakeTimer(orch, nodeId, st, now) {
 
 // One idle agent's slice of the sweep: refresh its unread count (clearing a stale wakePending when
 // the inbox drained) and arm its debounce dispatch. Returns whether the agent had unread messages.
-function sweepAgent(orch, node, a, team, st, now) {
-  const unread = orch.wakeUnread(node.id, team);
+function sweepAgent(orch, node, a, team, st, now, mkey) {
+  const unread = orch.wakeUnread(node.id, team, mkey);
   if (!unread.length) {
     if (a.wakePending) { a.wakePending = null; orch.changed(); }
     return false;
@@ -70,11 +70,12 @@ function sweepWakes(orch) {
   try {
     const team = orch.store.getTeam();
     const now = Date.now();
+    const mkey = unreadKey(orch);
     for (const node of team.nodes) {
       const a = orch.agent(node.id);
       if (orch.procs.has(node.id) || a.status === 'working') continue;
       scanned++;
-      if (sweepAgent(orch, node, a, team, st, now)) withUnread++;
+      if (sweepAgent(orch, node, a, team, st, now, mkey)) withUnread++;
     }
   } catch (e) { orch.log(null, 'error', 'wake sweep: ' + e.message); }
   const sweepMs = Date.now() - sweepStart;
@@ -82,12 +83,38 @@ function sweepWakes(orch) {
   if (sweepMs > WAKE.SLOW_SWEEP_MS) orch.log(null, 'system', `wake sweep: checked ${scanned} idle agent(s), ${withUnread} with unread, ${st.armed} wake(s) armed total, in ${sweepMs}ms (max ${st.maxMs}ms)`);
 }
 
+// The sweep runs every SWEEP_MS and each idle agent's wakeUnread scans the whole messages file
+// (listMessages({to}) filters it) with an O(nodes) sender-scope check per message — O(messages ×
+// agents) per sweep on a grown board. The unread map is a pure function of the messages file and
+// the team roster, so build it in one pass and reuse it while the store's stat signatures for both
+// are unchanged — the same size:mtime contract as the store's own caches: our writes change the
+// file and bust it, so does an out-of-band edit. Memo lives on the orchestrator instance (tests
+// create one per case; stubbed wakeUnread never reaches this path). The key is rebuilt once per
+// sweep (unreadKey) and passed down — it costs two statSyncs plus a project.json parse, cheap at
+// 1 Hz but not once per idle agent.
+function unreadKey(orch) { return orch.store.sigFile('messages') + '|' + orch.store.teamsSig(); }
+function unreadMap(orch, team, key) {
+  key = key || unreadKey(orch);
+  const memo = orch._wakeUnreadMemo;
+  if (memo && memo.key === key) return memo.byNode;
+  const byNode = new Map();
+  const known = new Set(team.nodes.map((n) => n.id));
+  for (const m of orch.store.listMessages()) {
+    if (m.read || m.from === m.to) continue;
+    if (m.from === 'system' ? !m.wake : !(m.from === 'human' || known.has(m.from))) continue;
+    let arr = byNode.get(m.to);
+    if (arr) arr.push(m); else byNode.set(m.to, [m]);
+  }
+  orch._wakeUnreadMemo = { key, byNode };
+  return byNode;
+}
+
 // Unread messages for a node from teammates or the human operator (system senders have their own
 // delivery paths and never wake anyone — except the queued status-check nudge, whose wake flag
 // opts exactly that one message kind into waking an idle agent, like the human message it replaced).
-function wakeUnread(orch, nodeId, team = orch.store.getTeam()) {
-  return orch.store.listMessages({ to: nodeId })
-    .filter((m) => !m.read && m.from !== nodeId && (m.from !== 'system' || m.wake) && (m.from === 'human' || m.from === 'system' || team.nodes.some((n) => n.id === m.from)));
+// Returns a copy: the cached arrays are shared, callers must not mutate them.
+function wakeUnread(orch, nodeId, team = orch.store.getTeam(), key) {
+  return (unreadMap(orch, team, key).get(nodeId) || []).slice();
 }
 
 module.exports = { WAKE, sweepWakes, wakeUnread };

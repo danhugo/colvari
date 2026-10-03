@@ -591,7 +591,7 @@ class Orchestrator extends EventEmitter {
   // the delegation seam — the sweep reads through `orch.*` so tests stub runAlive-style on
   // instances (o.wakeUnread = ...), and the 1s timer dispatches through `this.sweepWakes()`. ----
   sweepWakes() { WS.sweepWakes(this); }
-  wakeUnread(nodeId, team = this.store.getTeam()) { return WS.wakeUnread(this, nodeId, team); }
+  wakeUnread(nodeId, team = this.store.getTeam(), key) { return WS.wakeUnread(this, nodeId, team, key); }
   async dispatchWake(nodeId) {
     const team = this.store.getTeam();
     const node = team.nodes.find((n) => n.id === nodeId);
