@@ -572,6 +572,10 @@ header #wtdisk.wtwarn { background:var(--warning-soft); color:var(--warning-text
 .al-who a:hover { text-decoration:underline; }
 .al-side { display:flex; align-items:center; gap:4px; }
 .al-act { height:22px; font-size:var(--text-xs); padding:0 8px; white-space:nowrap; }
+/* Restart feedback (t_f8897886): the ring is a STATIC marker on purpose — idle-budget gate
+   (test/idle-budget-gate.test.js, Quinn t_09b11191) ships zero infinite animations, so motion
+   is out; the "Restarting…" text carries the state, same idiom as the chat typing ring. */
+.toast .spin, .al-act .spin { display:inline-block; width:10px; height:10px; margin-right:5px; border:2px solid var(--accent); border-right-color:transparent; border-radius:50%; vertical-align:-1px; }
 .al-x { border:0; background:none; color:var(--fg-muted); font-size:13px; line-height:1; padding:0 2px; cursor:pointer; visibility:hidden; }
 .al-row:hover .al-x, .al-x:focus-visible { visibility:visible; }
 .al-x:hover { color:var(--fg-primary); }

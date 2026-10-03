@@ -622,20 +622,56 @@ const agoTxt = (ts) => { const a = ago(ts); return !a ? '' : a === 'now' ? 'just
 // The restart-pending pill and its blocker popover (t_42f310cf/t_ec59eefa) became a bell alert row
 // (t_6674705d); only the action survived. restartNow / cancelRestart (Devon, t_20d5a23c contract):
 // the state push re-renders the bell; if the push is missed we re-pull getRestartState.
+// Every click answers visibly (t_f8897886): the new-core result {status:'noop'|'scheduled'|'error',
+// message, sha?} drives a toast (or the persistent "Restarting…" spinner while the restart drains);
+// an old core without `status` gets the same feedback derived from the re-pulled state.
 let rstBusy = null;
+let rstToast = null; // the persistent "Restarting…" toast — outlives auto-expiring toasts, see rstRestarting()
+const rstArmed = () => !!(rst.scheduledNow || rst.scheduledAfter);
+const clearRstToast = () => { if (rstToast) { const d = rstToast; rstToast = null; d.remove(); } };
+// The drain can outlast any auto-expiring toast, so "Restarting…" stays until the flow itself becomes
+// visible (updater leaves idle: veil/pill take over), the schedule disarms, or the user clicks it.
+function rstRestarting() {
+  clearRstToast();
+  const d = document.createElement('div'); d.className = 'toast';
+  d.innerHTML = '<b>Restart</b><br><span class="spin"></span> Restarting…';
+  d.onclick = () => { if (rstToast === d) rstToast = null; d.remove(); renderAlerts(); };
+  $('#toasts').appendChild(d); rstToast = d;
+  renderAlerts(); // the armed row's button flips to the spinner state at once
+}
 async function rstAction(kind) {
   if (rstBusy || rst.stub) return;
   if (upd.devMode === false) return; // dev-only control (t_7fbee55f): no restart machinery outside dev mode, whatever the state says
   rstBusy = kind; renderAlerts();
   const names = kind === 'now' ? ['restartNow', 'restartPendingNow'] : ['cancelRestart', 'cancelScheduledRestart'];
-  let ok = false, err = null;
+  let ok = false, res = null, err = null;
   for (const nm of names) {
-    try { let r; try { r = await squad.call(nm, ctx); } catch { r = await squad.call(nm); } if (r && r.error) throw new Error(r.error); ok = true; break; }
+    try { let r; try { r = await squad.call(nm, ctx); } catch { r = await squad.call(nm); } if (r && r.error) throw new Error(r.error); ok = true; res = r; break; }
     catch (e) { err = e; }
   }
   rstBusy = null;
-  if (ok) { loadCoreState().then(() => { renderHeader(); renderAlerts(); }).catch(() => {}); }
-  else alert((err && err.message) || 'not available');
+  if (!ok) { showToast('Restart failed', (err && err.message) || 'not available'); renderAlerts(); return; }
+  const status = res && typeof res === 'object' ? res.status : null;
+  if (kind === 'now' && status === 'noop') {
+    rst = { ...rst, pendingCount: 0, scheduledAfter: null, scheduledNow: false }; // the chip clears at once; Devon's reset keeps the next push honest
+    const sha = typeof res.sha === 'string' && res.sha ? res.sha.slice(0, 7) : '';
+    showToast('Restart', sha ? `Already running latest (${sha})` : (res.message || 'Already running latest'));
+    renderAlerts();
+  } else if (kind === 'now' && status === 'error') {
+    showToast('Restart failed', res.message || 'restart failed');
+  } else if (kind === 'now' && status === 'scheduled') {
+    rstRestarting();
+  } else if (kind === 'cancel') {
+    clearRstToast();
+  }
+  await loadCoreState().catch(() => {});
+  if (kind === 'now' && !status) { // legacy core (raw state, no result): read the fresh state instead
+    const lsha = rst.targetSha && rst.pendingCount === 0 ? String(rst.targetSha).slice(0, 7) : '';
+    if (rstArmed()) rstRestarting();
+    else if (rst.pendingCount === 0) showToast('Restart', lsha ? `Already running latest (${lsha})` : 'Already running latest');
+    else showToast('Restart', `Still ${rst.pendingCount} commit${rst.pendingCount === 1 ? '' : 's'} behind — restart did not arm`);
+  }
+  renderHeader(); renderAlerts();
 }
 // ---- blocker popover: removed with the restart pill (t_6674705d) — the bell row carries the state ----
 function renderWatchPill() {
@@ -1067,7 +1103,7 @@ function setTeamMode(m) {
 // Watch: a locked node must explain itself — the grab cursor invites the drag, and the FIRST
 // blocked attempt toasts once per visit (no spam, no modal); a plain click still selects.
 let watchDragToasted = false;
-const showToast = (title, body) => { const d = document.createElement('div'); d.className = 'toast'; d.innerHTML = (title ? `<b>${esc(title)}</b><br>` : '') + esc(body); d.onclick = () => d.remove(); $('#toasts').appendChild(d); setTimeout(() => d.remove(), 6000); };
+const showToast = (title, body, spin) => { const d = document.createElement('div'); d.className = 'toast'; d.innerHTML = (title ? `<b>${esc(title)}</b><br>` : '') + (spin ? '<span class="spin"></span>' : '') + esc(body); d.onclick = () => d.remove(); $('#toasts').appendChild(d); setTimeout(() => d.remove(), 6000); };
 function startWatchDrag(ev, n) {
   const sx = ev.clientX, sy = ev.clientY; let moved = false;
   const mv = (e) => { if (moved || Math.abs(e.clientX - sx) + Math.abs(e.clientY - sy) <= 2) return; moved = true;
@@ -1716,7 +1752,11 @@ function renderAlertPanel(live) {
   if (!alertsOpen) { p.classList.add('hidden'); return; }
   const who = (a) => [a.agentId ? `<a href="#" data-alagent="${esc(a.agentId)}">${esc(nodeName(a.agentId))}</a>` : '',
     a.taskId ? `<a href="#" data-altask="${esc(a.taskId)}">${esc(shortTaskId(a.taskId))}</a>` : ''].filter(Boolean).join(' · ');
-  p.innerHTML = `<div class="al-head">Alerts</div>${live.length ? live.map((a) => `<div class="al-row"><i class="al-dot al-${esc(a.severity)}" title="${esc(a.severity)}"></i><div class="al-body"><span class="al-what" title="${esc(a.text)}">${esc(a.text)}</span><span class="al-who">${who(a)}</span></div><span class="al-side">${a.action ? `<button class="al-act" data-alop="${esc(a.action.op)}" data-alarg="${esc(a.action.arg || '')}">${esc(a.action.label)}</button>` : ''}${a.dismissable ? `<button class="al-x" title="Hide until the state changes" data-alx="${esc(a.id)}">×</button>` : ''}</span></div>`).join('') : '<div class="al-empty">All clear — nothing needs you right now.</div>'}`;
+  // The restart row's action doubles as its state (t_f8897886): in flight or armed it reads
+  // "Restarting…" with a spinner — still clickable (re-arming is harmless; the busy guard dedups).
+  const alLabel = (a) => a.kind === 'restart-pending' && a.action && (rstBusy === 'now' || rstArmed())
+    ? '<span class="spin"></span>Restarting…' : esc(a.action.label);
+  p.innerHTML = `<div class="al-head">Alerts</div>${live.length ? live.map((a) => `<div class="al-row"><i class="al-dot al-${esc(a.severity)}" title="${esc(a.severity)}"></i><div class="al-body"><span class="al-what" title="${esc(a.text)}">${esc(a.text)}</span><span class="al-who">${who(a)}</span></div><span class="al-side">${a.action ? `<button class="al-act" data-alop="${esc(a.action.op)}" data-alarg="${esc(a.action.arg || '')}">${alLabel(a)}</button>` : ''}${a.dismissable ? `<button class="al-x" title="Hide until the state changes" data-alx="${esc(a.id)}">×</button>` : ''}</span></div>`).join('') : '<div class="al-empty">All clear — nothing needs you right now.</div>'}`;
   p.classList.remove('hidden');
   const r = $('#alertbell').getBoundingClientRect();
   p.style.top = `${Math.round(r.bottom + 6)}px`;
@@ -2880,12 +2920,12 @@ function renderInbox() {
 // ---------- live updates ----------
 let pending = null, pendingP = null;
 // Self-update status push: prefer the dedicated bridge method, fall back to either plausible channel name.
-const onUpdPush = (d) => { upd = { ...normUpd(d), stub: false }; trackUpd(); renderSelfUpdate(); renderUpdSettings(); renderAlerts(); };
+const onUpdPush = (d) => { upd = { ...normUpd(d), stub: false }; trackUpd(); if (upd.state !== 'idle') clearRstToast(); renderSelfUpdate(); renderUpdSettings(); renderAlerts(); }; // flow visible via veil/pill — the "Restarting…" toast retires
 if (squad.onSelfUpdateStatus) squad.onSelfUpdateStatus(onUpdPush);
 else { squad.on('selfUpdateStatus', onUpdPush); squad.on('self-update-status', onUpdPush); }
 // Restart/watch pushes: prefer dedicated bridge helpers, fall back to plausible channel names
 // (Devon adds the preload helpers when the backend lands — see contract on t_20d5a23c).
-const onRestartPush = (d) => { rst = { ...normRestart(d), stub: false }; rstSeen = true; renderHeader(); renderAlerts(); boardSig = null; renderBoard(); };
+const onRestartPush = (d) => { rst = { ...normRestart(d), stub: false }; rstSeen = true; if (!rstArmed() && rst.pendingCount === 0) clearRstToast(); renderHeader(); renderAlerts(); boardSig = null; renderBoard(); };
 const onWatchPush = (d) => { watch = { ...normWatch(d), stub: false }; renderHeader(); };
 if (squad.onRestartState) squad.onRestartState(onRestartPush);
 else { squad.on('restart-state', onRestartPush); squad.on('restartStatus', onRestartPush); }
