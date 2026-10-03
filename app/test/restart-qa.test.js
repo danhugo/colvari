@@ -321,7 +321,7 @@ const qaRepo = (extra) => {
 const chipRow = (st) => Alerts.collect({ devMode: true, rst: st }).find((x) => x.kind === 'restart-pending') || null;
 const clearedPending = (rp) => !rp || (!(Number(rp.count)) && !rp.scheduledNow && !rp.afterTaskId && !rp.firedAt);
 
-test('qa: restart-now at the running commit returns {status:noop}, clears the stale count and hides the chip (t_2fdf83dc)', () => {
+test('qa: restart-now at the running commit returns {status:noop}, clears the stale count and hides the chip (t_2fdf83dc)', async () => {
   const d = tmp('squad-restart-qa-');
   const { repo, sha0 } = qaRepo(0);
   const s = new Store(path.join(d, 'p'));
@@ -338,7 +338,7 @@ test('qa: restart-now at the running commit returns {status:noop}, clears the st
   assert.equal(o._restartGate, true, 'pre: the stale schedule froze new dispatch');
   assert.ok(chipRow(o.restartState()), 'pre: the chip is up');
 
-  const res = o.restartNow();
+  const res = await o.restartNow();
   assert.ok(res && typeof res === 'object', 'the click returns an explicit result, not undefined');
   assert.equal(res.status, 'noop', 'target == running: the result says noop');
   assert.ok(typeof res.message === 'string' && res.message, 'with human-readable feedback for the toast');
@@ -354,7 +354,7 @@ test('qa: restart-now at the running commit returns {status:noop}, clears the st
   assert.equal(chipRow(st), null, 'the chip row is gone');
 });
 
-test('qa: a target N commits ahead reads count N (derived) and restart-now reports scheduled (t_2fdf83dc)', () => {
+test('qa: a target N commits ahead reads count N (derived) and restart-now reports scheduled (t_2fdf83dc)', async () => {
   const d = tmp('squad-restart-qa-');
   const { repo, sha0, tip } = qaRepo(3);
   const s = new Store(path.join(d, 'p'));
@@ -372,7 +372,7 @@ test('qa: a target N commits ahead reads count N (derived) and restart-now repor
   const row = chipRow(st);
   assert.ok(row && /3 commits behind/.test(row.text), `the row says so: ${row && row.text}`);
 
-  const res = o.restartNow();
+  const res = await o.restartNow();
   assert.ok(res && res.status === 'scheduled', 'a genuinely ahead target reports scheduled');
   assert.equal(up.calls.length, 1, 'the drain flow starts');
 });
