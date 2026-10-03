@@ -1913,12 +1913,15 @@ function cardHtml(t) {
     bl.length ? `<span class="tag blocked" title="waits for: ${esc(bl.map(taskTitle).join(', '))}">Blocked by ${esc(taskTitle(bl[0]).slice(0, 28))}${bl.length > 1 ? ` +${bl.length - 1}` : ''}</span>` : ready ? '<span class="tag ready" title="Ready">Ready</span>' : '',
     t.awaitingApproval ? '<span class="tag approval" title="needs approval">needs approval</span>' : ''].join('');
   const snippet = String(t.description || '').replace(/\s+/g, ' ').trim();
-  return `<div class="card ${sel.task === t.id ? 'sel' : ''}${t.awaitingApproval ? ' approval' : ''}" data-id="${t.id}"><b>${esc(t.title)}</b>${snippet && snippet !== t.title ? `<span class="cdesc" title="${esc(snippet)}">${esc(clipText(snippet, 100))}</span>` : ''}${tags ? `<span class="ctags">${tags}</span>` : ''}<small class="cmeta">${priorityBadge(t)}${t.assignee ? ((w) => `<span class="avatar sm" style="background:${avatarBg(w)}" title="${esc(w.name)}">${avatarBody(t.assignee, w)}</span><span class="cname">${esc(w.name)}</span>`)(who(t.assignee)) : '<span class="muted">unassigned</span>'}<span class="cago" title="last updated">${ago(t.updatedAt) || '—'}</span>${t.comments.length ? `<span class="ccount" title="${t.comments.length} comment${t.comments.length === 1 ? '' : 's'}">💬 ${t.comments.length}</span>` : ''}</small></div>`;
+  const nCmts = (t.comments || []).length; // a task without a comments array must not kill the whole board render
+  const cmtWord = nCmts === 1 ? 'comment' : 'comments';
+  return `<div class="card ${sel.task === t.id ? 'sel' : ''}${t.awaitingApproval ? ' approval' : ''}" data-id="${t.id}"><b>${esc(t.title)}</b>${snippet && snippet !== t.title ? `<span class="cdesc" title="${esc(snippet)}">${esc(clipText(snippet, 100))}</span>` : ''}${tags ? `<span class="ctags">${tags}</span>` : ''}<small class="cmeta">${priorityBadge(t)}${t.assignee ? ((w) => `<span class="avatar sm" style="background:${avatarBg(w)}" title="${esc(w.name)}">${avatarBody(t.assignee, w)}</span><span class="cname">${esc(w.name)}</span>`)(who(t.assignee)) : '<span class="muted">unassigned</span>'}<span class="cago" title="last updated">${ago(t.updatedAt) || '—'}</span>${nCmts ? `<span class="ccount" title="${nCmts} ${cmtWord}">💬 ${nCmts}</span>` : ''}</small></div>`;
 }
 function patchBoardColumns(tasks) {
   const colsEl = $('#columns');
   boardCols.forEach((st, ci) => {
-    const total = tasks.filter((t) => t.status === st).length;
+    const colTasks = tasks.filter((t) => t.status === st); // one pass serves the header count and the card list
+    const total = colTasks.length;
     const fold = st === 'done' && !doneOpen;
     let col = colsEl.querySelector(':scope > .col.' + st);
     if (!col) { col = tplEl(`<div class="col ${st}"></div>`); colsEl.appendChild(col); }
@@ -1938,7 +1941,7 @@ function patchBoardColumns(tasks) {
       if (!hint) { hint = tplEl('<div class="hint-first" data-testid="board-empty-team"></div>'); h3.after(hint); }
       if (hint.textContent !== wantHint) hint.textContent = wantHint;
     } else if (hint) { hint.remove(); hint = null; } // detach from `prev` too: cards must not insert after a removed node
-    const want = fold ? [] : st === 'done' ? doneCards(tasks) : tasks.filter((t) => t.status === st).slice().sort(byPriorityThenTitle);
+    const want = fold ? [] : st === 'done' ? doneCards(tasks) : colTasks.slice().sort(byPriorityThenTitle);
     const have = new Map(); // existing cards by task id (external duplicates are dropped, first wins)
     for (const el of [...col.children]) {
       if (!el.classList.contains('card')) continue;
@@ -2926,6 +2929,9 @@ function renderChatBody() {
 }
 // Thread links and ask-human answer forms ride the bubbles; both paths (full render and tail
 // append) wire them through here — property assignment, so re-binding over old nodes is a no-op.
+// The patch paths must pass a LIVE scope (the fragment before its nodes move into the room, or an
+// in-place rebuilt group): a template drained by appendChild/insertBefore matches nothing and
+// silently leaves the fresh bubbles dead (t_c69c2170).
 function bindChatBubbles(scope) {
   scope.querySelectorAll('[data-thread]').forEach((b) => b.onclick = () => { CH.thread = b.dataset.thread; chatSched.force(); });
   scope.querySelectorAll('.bubble.question').forEach((d) => {
@@ -2978,8 +2984,8 @@ function applyChatAppend(ev, plan, workingT) {
   }
   const t = document.createElement('template');
   t.innerHTML = renderGroups(rebuild, workingT);
+  bindChatBubbles(t.content); // bind BEFORE the insert moves the nodes out — a drained template matches nothing
   room.appendChild(t.content);
-  bindChatBubbles(t);
   CH.evFp = keptFps.concat(rebuild.map((e) => Chat.eventFp(e, subRecOf)));
   patchChatAvatars(room, workingT);
   finishAppend(room, ev, win, ob, workingT);
@@ -3033,9 +3039,9 @@ function applyChatPrepend(ev, workingT, prevTop, prevH) {
   if (fragItems.length) {
     const t = document.createElement('template');
     t.innerHTML = renderGroups(fragItems, workingT);
+    bindChatBubbles(t.content); // bind BEFORE the insert moves the nodes out — a drained template matches nothing
     const anchor = ob ? ob.nextSibling : room.firstChild;
     room.insertBefore(t.content, anchor);
-    bindChatBubbles(t);
   }
   CH.evFp = target.map((e) => Chat.eventFp(e, subRecOf));
   CH.domWin = win;
