@@ -126,8 +126,8 @@ const jsq = (v) => JSON.stringify(v);
 
 // ---- in-page instrumentation: wrap live render*/refresh + squad.call, count pushes, time clicks.
 const INSTRUMENT = `
-  if (window.__perf) return { already: true };
-  const P = window.__perf = {
+  if (window.__perfClick) return { already: true };
+  const P = window.__perfClick = {
     t0: performance.now(), statePushes: 0, logPushes: 0, renders: {}, renderCalls: [], refreshMs: [],
     clicks: [], longs: [], frames: [], lastRenderAllEnd: 0, clickDown: 0, clickRenderAllMs: 0,
   };
@@ -229,7 +229,7 @@ const INSTRUMENT = `
 `;
 
 const SUMMARY = `
-  const P = window.__perf;
+  const P = window.__perfClick;
   const q = (a, p) => { const x = a.filter(Number.isFinite).slice().sort((m, n) => m - n); return x.length ? x[Math.min(x.length - 1, Math.floor((x.length - 1) * p))] : 0; };
   const secs = (performance.now() - P.t0) / 1000;
   const stat = (a) => ({ n: a.length, p50: +q(a, .5).toFixed(2), p95: +q(a, .95).toFixed(2), max: a.length ? +Math.max(...a).toFixed(2) : 0, sum: +a.reduce((s, x) => s + x, 0).toFixed(1) });
@@ -340,11 +340,11 @@ function bulkSeed(dir, nodes) {
 // (was 16/82 in every run with zero diagnostics) is explainable from the summary alone.
 async function clickAt(label, xy) {
   if (!xy) return { ok: false, detail: { label, waiting: 'no-target' } };
-  await ex(`return window.__perf.arm(${jsq(label)})`);
+  await ex(`return window.__perfClick.arm(${jsq(label)})`);
   for (const type of ['mouseDown', 'mouseUp']) wc.sendInputEvent({ type, x: xy[0], y: xy[1], button: 'left', clickCount: 1 });
   const t0 = Date.now(); let waiting = 'unpolled';
   for (let t = 0; t < 100; t++) {
-    const s = await ex(`return window.__perf.peek()`);
+    const s = await ex(`return window.__perfClick.peek()`);
     if (s && s.done) return s.stale ? { ok: false, detail: { label, waiting: 'stale' } } : { ok: true, rec: s.rec };
     if (s && s.waiting) waiting = s.waiting;
     await WAIT(25);

@@ -701,7 +701,9 @@ class Orchestrator extends EventEmitter {
   // ---- stall watchdog: detection and recovery live in src/stall-watchdog.js; these prototype
   // methods are the delegation seam — tests stub runAlive/procTable on instances, and the sweep
   // dispatches through `orch.runAlive(...)` so a stub is honored. ----
-  sweepStalls() { SW.sweepStalls(this); }
+  // The sweep runs off a bare interval: an exception here would be an uncaught one (the 5s timer
+  // callback has no guard of its own), so the sweep itself is crash-proof like tick/sweepRestart.
+  sweepStalls() { try { SW.sweepStalls(this); } catch (e) { try { this.log(null, 'error', 'stall sweep: ' + e.message); } catch {} } }
 
   stallLiveKids(child) { return SW.stallLiveKids(this, child); }
 
@@ -1479,6 +1481,7 @@ class Orchestrator extends EventEmitter {
         run.stderr = errbuf.trim();
         try { removePerRunMcpDirs(env); } catch {} // per-run board config was read at child startup (t_8170a988)
         if (a.currentRun === run) a.currentRun = null;
+        this._stallCpu.delete(node.id); // drop the CPU snapshot: a recycled pid must not read as advancing CPU for the next run
         try {
           if (buf.trim()) this.onEvent(node, buf.trim(), run, rt.id);
           if (run.subs && run.subs.records.length) {
