@@ -13,16 +13,23 @@
 // MIN_GAP_MS no longer gates message wakes (t_9e4b4805) — it only anchors the watchdog nudge
 // throttle in nudgeIdle. Shared with orchestrator.js by reference (tests shorten the timings
 // in place, orchestrator re-exports this same object).
-const WAKE = { SWEEP_MS: 1000, DEBOUNCE_MS: 1500, MIN_GAP_MS: 5 * 60 * 1000, MAX_PER_PAIR: 3, PAIR_WINDOW_MS: 10 * 60 * 1000 };
+const WAKE = { SWEEP_MS: 1000, DEBOUNCE_MS: 1500, MIN_GAP_MS: 5 * 60 * 1000, MAX_PER_PAIR: 3, PAIR_WINDOW_MS: 10 * 60 * 1000, SLOW_SWEEP_MS: 25 };
+// SLOW_SWEEP_MS: the sweep runs at 1 Hz on the main event loop and listMessages() re-reads the
+// inbox per idle agent (orch.wakeUnread), so a sweep over this duration is a UI jank signal
+// worth logging — the same instrumentation the stall watchdog carries for its own sweep.
 
 function sweepWakes(orch) {
   if (orch.userStopped || orch.dispatchPaused) { for (const t of orch.wakeTimers.values()) clearTimeout(t.timer); orch.wakeTimers.clear(); return; }
+  const st = orch._wakeStats || (orch._wakeStats = { sweeps: 0, totalMs: 0, maxMs: 0, armed: 0 });
+  const sweepStart = Date.now();
+  let scanned = 0, withUnread = 0;
   try {
     const team = orch.store.getTeam();
     const now = Date.now();
     for (const node of team.nodes) {
       const a = orch.agent(node.id);
       if (orch.procs.has(node.id) || a.status === 'working') continue;
+      scanned++;
       const unread = orch.wakeUnread(node.id, team);
       if (!unread.length) {
         if (a.wakePending) { a.wakePending = null; orch.changed(); }
@@ -36,6 +43,7 @@ function sweepWakes(orch) {
       // Task dispatch is NOT debounced either (an assigned/unblocked task reaches the agent right
       // away and its prompt carries the unread count); system wakes never enter this sweep.
       const prev = a.wakePending;
+      withUnread++;
       if (!prev || prev.count !== unread.length) {
         // nextWakeAt is the armed timer's due time; recomputed only on a transition so an unchanged
         // pending state does not churn a state push every sweep.
@@ -45,6 +53,7 @@ function sweepWakes(orch) {
       // Debounce: a burst of messages coalesces into the one dispatch this timer fires. At most one
       // pending wake per agent: the wakeTimers entry IS the dedupe key.
       if (!orch.wakeTimers.has(node.id)) {
+        st.armed++;
         const dueAt = now + WAKE.DEBOUNCE_MS;
         orch.wakeTimers.set(node.id, { dueAt, timer: setTimeout(() => {
           orch.wakeTimers.delete(node.id);
@@ -53,6 +62,9 @@ function sweepWakes(orch) {
       }
     }
   } catch (e) { orch.log(null, 'error', 'wake sweep: ' + e.message); }
+  const sweepMs = Date.now() - sweepStart;
+  st.sweeps++; st.totalMs += sweepMs; st.maxMs = Math.max(st.maxMs, sweepMs);
+  if (sweepMs > WAKE.SLOW_SWEEP_MS) orch.log(null, 'system', `wake sweep: checked ${scanned} idle agent(s), ${withUnread} with unread, ${st.armed} wake(s) armed total, in ${sweepMs}ms (max ${st.maxMs}ms)`);
 }
 
 // Unread messages for a node from teammates or the human operator (system senders have their own

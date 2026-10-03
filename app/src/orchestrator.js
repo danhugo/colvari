@@ -231,6 +231,9 @@ class Orchestrator extends EventEmitter {
     this.wakeTimers = new Map(); // nodeId -> { timer, dueAt } — at most one pending wake per agent
     this.wakePairs = new Map(); // 'from>to' -> {count, since}
     this.wakeLastAt = new Map(); // nodeId -> ts of the agent's last agent->agent wake dispatch (nudge throttle anchor)
+    // Jank instrumentation (src/wake-sweep.js): sweep count/duration and debounce timers armed,
+    // so the 1 Hz sweep's main-loop cost is visible; a slow sweep logs a system line.
+    this._wakeStats = { sweeps: 0, totalMs: 0, maxMs: 0, armed: 0 };
     this._wakeTimer = setInterval(() => this.sweepWakes(), WAKE.SWEEP_MS);
     if (this._wakeTimer.unref) this._wakeTimer.unref();
     // Core watch state (sweepWatch): lastWatchAt/lastDigest advance on every due tick; wokeDigest is
