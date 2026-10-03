@@ -2085,13 +2085,24 @@ function renderWiki() {
   $('#wikipages').innerHTML = titles.length
     ? titles.map((t) => `<div class="${t === sel.page ? 'sel' : ''}" data-t="${esc(t)}"><b>${esc(t)}</b><small class="wk-meta">${esc(S.wiki[t].author)}${agoTxt(S.wiki[t].updatedAt) ? ' · ' + agoTxt(S.wiki[t].updatedAt) : ''}</small></div>`).join('')
     : all ? '<p class="muted wk-empty-body">No pages match your search.</p>' : '<p class="muted wk-empty-body">No pages yet. Click + New page to write your first one — e.g. a runbook, a glossary, or notes for the team.</p>';
-  document.querySelectorAll('#wikipages div[data-t]').forEach((d) => d.onclick = () => { sel.page = d.dataset.t; wikiEdit = false; loadPage(); renderWiki(); });
+  document.querySelectorAll('#wikipages div[data-t]').forEach((d) => d.onclick = () => { if (d.dataset.t !== sel.page && !discardWikiEdit()) return; sel.page = d.dataset.t; wikiEdit = false; loadPage(); renderWiki(); });
   if (sel.page && S.wiki[sel.page] && !wikiEdit) loadPage();
   const empty = !sel.page && !wikiEdit;
   $('#wk-empty').classList.toggle('hidden', !empty); $('#wk-editor').classList.toggle('hidden', empty);
   $('#wk-empty h3').textContent = all ? 'No page selected' : 'No wiki pages yet';
 }
-$('#wk-new').onclick = () => { sel.page = null; wikiEdit = true; $('#wk-title').value = ''; $('#wk-content').value = ''; showWiki(); renderWiki(); };
+// Dirty-editor guard (t_2a87ef9a): leaving a modified editor used to silently wipe the draft.
+function wikiDirty() {
+  if (!wikiEdit) return false;
+  const title = $('#wk-title').value.trim(), content = $('#wk-content').value;
+  if (!sel.page) return !!(title || content);
+  const p = S.wiki[sel.page];
+  return title !== (p ? p.title : sel.page) || content !== (p ? p.content || '' : '');
+}
+const discardWikiEdit = () => !wikiDirty() || confirm('Discard unsaved changes to this page?');
+const wikiNew = () => { if (!discardWikiEdit()) return; sel.page = null; wikiEdit = true; $('#wk-title').value = ''; $('#wk-content').value = ''; showWiki(); renderWiki(); };
+$('#wk-new').onclick = wikiNew;
+$('#wk-empty-new').onclick = wikiNew; // was rendered but never wired up — dead button
 $('#wk-search').oninput = renderWiki;
 function loadPage() { const p = S.wiki[sel.page]; if (!p) return; $('#wk-title').value = p.title; $('#wk-content').value = p.content; showWiki(); }
 // Cheap backlinks: tasks whose title or description mention this page's title.
@@ -2103,8 +2114,21 @@ function showWiki() {
   $('#wk-view').querySelectorAll('.wk-backlinks li').forEach((d) => d.onclick = () => { sel.task = d.dataset.task; showTab('board'); renderBoard(); });
 }
 $('#wk-edit').onclick = () => { wikiEdit = !wikiEdit; showWiki(); };
-$('#wk-save').onclick = async () => { const t = $('#wk-title').value.trim(); if (!t) return; await call('writeWiki', t, $('#wk-content').value); sel.page = t; wikiEdit = false; refresh(); };
-$('#wk-del').onclick = async () => { $('#wk-more').open = false; if (sel.page && confirm(`Delete page "${sel.page}"? This can't be undone.`)) { await call('deleteWiki', sel.page); sel.page = null; $('#wk-title').value = ''; $('#wk-content').value = ''; refresh(); } };
+$('#wk-save').onclick = async () => {
+  const t = $('#wk-title').value.trim();
+  if (!t) { alert('Give the page a title before saving.'); $('#wk-title').focus(); return; }
+  if (t !== sel.page && S.wiki[t] && !confirm(`A page titled "${t}" already exists. Overwrite it?`)) return;
+  const prev = sel.page && sel.page !== t && S.wiki[sel.page] ? sel.page : null; // title change would otherwise leave the old page behind as a stray duplicate
+  if (prev && !confirm(`Rename page "${prev}" to "${t}"? The old page will be removed.`)) return;
+  $('#wk-save').disabled = true;
+  try {
+    await call('writeWiki', t, $('#wk-content').value);
+    if (prev) await call('deleteWiki', prev);
+    sel.page = t; wikiEdit = false; refresh();
+  } catch (e) { alert(String(e.message || e).replace(/^Error invoking remote method 'api': (Error: )?/, '')); }
+  finally { $('#wk-save').disabled = false; }
+};
+$('#wk-del').onclick = async () => { $('#wk-more').open = false; if (sel.page && confirm(`Delete page "${sel.page}"? This can't be undone.`)) { try { await call('deleteWiki', sel.page); sel.page = null; $('#wk-title').value = ''; $('#wk-content').value = ''; refresh(); } catch (e) { alert(String(e.message || e).replace(/^Error invoking remote method 'api': (Error: )?/, '')); } } };
 
 // ---------- observability ----------
 const logTeamNodes = () => S.allNodes.filter((n) => teamScoped(sel.logTeam, n.id));
