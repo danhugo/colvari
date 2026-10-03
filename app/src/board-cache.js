@@ -104,7 +104,11 @@ class BoardCache extends EventEmitter {
     }
     for (const id of known) this._dropTask(id, { verify: true });
     this._reloadWikiIndex();
-    this.store.withLock(() => this._adoptOutOfBandWiki());
+    // Try-lock: a busy lock (an agent's MCP process mid-write-burst) must not spin-block the main
+    // thread here — getAll queued behind the sleepSync spin and measured as a multi-second stall
+    // (Quinn t_f4f6d15e). Skipping is safe: watch hints still deliver changes and the next
+    // reconcile round retries the adoption.
+    this.store.withLockTry(() => this._adoptOutOfBandWiki());
     for (const [title, e] of Object.entries(this._wikiIndex())) this._revalidateWikiPage(title, e);
     const indexed = new Set(Object.values(this._wikiIndex()).map((e) => e.slug));
     for (const [title, e] of [...this.wiki]) if (!indexed.has(e.slug)) this._dropWikiPage(title, e.slug, { verify: true });

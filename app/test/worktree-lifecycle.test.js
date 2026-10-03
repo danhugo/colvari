@@ -224,6 +224,19 @@ test('diskUsage: worktree count + bytes, symlinked node_modules not counted as a
   assert.deepStrictEqual(await WT.diskUsage(repo), u, 'served from the TTL cache');
 });
 
+// t_1fb02462: the whole computation (git spawn + worktree listing + du) sits behind the TTL now —
+// a header poll used to run a synchronous `git rev-parse` on the main process every call.
+test('diskUsage: within the TTL the worktree listing is not recomputed', async () => {
+  const { repo } = setup('t_lc10');
+  const u1 = await WT.diskUsage(repo, { force: true });
+  assert.strictEqual(u1.count, 1);
+  WT.ensureWorktree(repo, 't_lc10b'); // a second worktree lands after the cached sample
+  const u2 = await WT.diskUsage(repo); // TTL hit: count must NOT see the new worktree
+  assert.strictEqual(u2.count, 1);
+  const u3 = await WT.diskUsage(repo, { force: true }); // only an explicit refresh does
+  assert.strictEqual(u3.count, 2);
+});
+
 // ---- t_1ff80eba: our own node_modules link is not "uncommitted changes" ----
 
 // A branch cut before the `node_modules` ignore landed: the auto-created symlink shows as

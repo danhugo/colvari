@@ -233,6 +233,20 @@ class Store {
     fs.renameSync(tmp, this.file(name));
   }
   // cross-process mutex (mkdir is atomic; steal policy: LOCK / lockHolderDead above)
+  // One-shot lock attempt for periodic background work on the main thread: never spins. Contention
+  // (an agent's MCP process mid-write-burst) used to block the whole main thread in sleepSync(10)
+  // slices here — getAll queued behind the spin and measured as a multi-second stall (Quinn
+  // t_f4f6d15e). Callers must be safe to skip a round; the next tick retries.
+  withLockTry(fn) {
+    const lock = path.join(this.dir, '.lock');
+    try { fs.mkdirSync(lock); } catch { return false; }
+    try {
+      const tmp = path.join(lock, 'pid.' + process.pid + '.tmp');
+      fs.writeFileSync(tmp, String(process.pid));
+      fs.renameSync(tmp, path.join(lock, 'pid'));
+    } catch {}
+    try { fn(); return true; } finally { try { fs.rmSync(lock, { recursive: true, force: true }); } catch {} }
+  }
   withLock(fn) {
     const lock = path.join(this.dir, '.lock');
     const start = Date.now();
@@ -1065,16 +1079,50 @@ class Store {
   }
 
   // ---- usage: one record per claude run (see usage.js), newest last, capped ----
-  addRun(r) { this.update('runs', { runs: [] }, (d) => { d.runs.push(r); if (d.runs.length > 5000) d.runs.splice(0, d.runs.length - 5000); }); return r; }
+  // runs.json is rewritten whole on every run record and re-read whole by every consumer
+  // (listRuns, ledger, modelStats, usageStatus, the delta pump) — at board scale that was a
+  // per-run-event main-process stall (Quinn t_f4f6d15e: ~1.8s getAll outliers at run start and
+  // finish, growing with board age). Two changes: the parsed array is cached behind the same
+  // size:mtime stat key the task cache uses (an out-of-band edit busts it), and writes are
+  // compact — runs are machine-read, pretty-printing tripled the stringify+write cost. Same-ms
+  // same-size rewrites can't serve stale data because writes are write-through (t_8d586961
+  // deletes instead; here we know the bytes). Callers treat the returned records as read-only
+  // snapshots, like listTasks.
+  _runsCached() {
+    let st; try { st = fs.statSync(this.file('runs')); } catch { return null; }
+    const sig = st.size + ':' + st.mtimeMs;
+    if (this._runsMemo && this._runsMemo.sig === sig) return this._runsMemo.runs;
+    let d; try { d = JSON.parse(fs.readFileSync(this.file('runs'), 'utf8')); } catch { return null; }
+    this._runsMemo = { sig, runs: d.runs || [] };
+    return this._runsMemo.runs;
+  }
+  _writeRuns(runs) {
+    const tmp = this.file('runs') + '.' + process.pid + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify({ runs }));
+    fs.renameSync(tmp, this.file('runs'));
+    try { const st = fs.statSync(this.file('runs')); this._runsMemo = { sig: st.size + ':' + st.mtimeMs, runs }; } catch { this._runsMemo = null; }
+  }
+  addRun(r) {
+    this.withLock(() => { const runs = this._runsCached() || []; runs.push(r); if (runs.length > 5000) runs.splice(0, runs.length - 5000); this._writeRuns(runs); });
+    return r;
+  }
   // Re-persist one run after a late in-place update (proxy cost): replaces by id, appends when the
   // run is not present (trimmed the same way), so resolveProxyCost never duplicates or loses it.
-  replaceRun(r) { this.update('runs', { runs: [] }, (d) => { const i = d.runs.findIndex((x) => x.id === r.id); if (i >= 0) d.runs[i] = r; else { d.runs.push(r); if (d.runs.length > 5000) d.runs.splice(0, d.runs.length - 5000); } }); return r; }
+  replaceRun(r) {
+    this.withLock(() => {
+      const runs = this._runsCached() || []; const i = runs.findIndex((x) => x.id === r.id);
+      if (i >= 0) runs[i] = r; else { runs.push(r); if (runs.length > 5000) runs.splice(0, runs.length - 5000); }
+      this._writeRuns(runs);
+    });
+    return r;
+  }
   listRuns(filter = {}) {
-    let rs = this.read('runs', { runs: [] }).runs;
+    let rs = this._runsCached();
+    if (!rs) rs = this.read('runs', { runs: [] }).runs || [];
     for (const k of ['nodeId', 'taskId', 'billingSource', 'kind']) if (filter[k]) rs = rs.filter((r) => r[k] === filter[k]);
     return rs;
   }
-  clearRuns() { this.update('runs', { runs: [] }, (d) => { d.runs = []; }); }
+  clearRuns() { this.withLock(() => this._writeRuns([])); }
 
   // ---- persisted orchestrator log (logs.jsonl, rotated to logs.jsonl.1 past LOG_LIMITS.rotateBytes) ----
   // O(1) per call: queue the line and arm the tick-end flush (see the buffer note at the top).

@@ -130,34 +130,68 @@
   // keeps the previously-visible content in place. Clamped at 0 (content shrank / scrolled past top).
   const anchorScroll = (prevTop, prevHeight, newHeight) => Math.max(0, newHeight - prevHeight + prevTop);
 
-  // Append-only room update (t_fe51eee9, wiki paperclip-vs-us-perf #5): plan extending the room's
-  // DOM with the feed's new trailing events instead of rebuilding every group. prevDom is what the
-  // DOM was drawn from (the window events, oldest first), ev the fresh full feed, win the window
-  // size. Returns null whenever anything but a pure tail append happened — the caller must do the
-  // full render. On success: fresh = the new trailing events, keep = old events still inside the
-  // window (identity verified below), so the DOM should end up showing keep old + fresh.
-  function tailPlan(prevDom, ev, win) {
-    if (!prevDom || !prevDom.length || !ev.length) return null;
-    const tailAt = prevDom[prevDom.length - 1].at;
-    let delta = 0; // events appended strictly after the DOM's tail
-    for (let i = ev.length - 1; i >= 0 && ev[i].at > tailAt; i--) delta++;
-    if (!delta) return null;
-    const keep = Math.min(prevDom.length, Math.max(1, win | 0) - delta);
-    if (keep < 0) return null; // more new events than the window holds: rebuild
-    // Prefix stability: the kept events must be the very ones the DOM was drawn from. The
-    // fingerprint covers every field roomEvents mutates after creation (tool results, subagent
-    // totals/repeat counts) so a mutated older bubble falls back to the full render. Source-level
-    // label changes (node renames, task titles) heal on the next full render.
-    const fp = (e) => `${e.who}|${e.at}|${e.type}|${e.count || 1}|${e.result != null ? 1 : 0}|${e.total || 0}|${String(e.text || '').slice(0, 48)}`;
-    for (let i = 0; i < keep; i++) {
-      if (fp(ev[ev.length - delta - keep + i]) !== fp(prevDom[prevDom.length - keep + i])) return null;
+  // Fingerprint of everything a drawn bubble reads from its event, plus the live subagent-record
+  // state (status/tokens/endedAt) when the caller can resolve records. The renderer stores one fp
+  // per drawn event (mirroring the DOM exactly), so the next draw can diff the feed against the
+  // DOM with string compares instead of rebuilding every group.
+  function eventFp(e, recOf) {
+    let s = `${e.who}|${e.at}|${e.type}|${e.count || 1}|${e.result != null ? 1 : 0}|${e.total || 0}|${String(e.text || '').slice(0, 48)}|${e.inboxId || ''}`;
+    if (e.type === 'subagent' && recOf) { const r = recOf(e.subagentId); s += '|' + (r ? `${r.status || ''}|${r.tokens ? (r.tokens.inputTokens || 0) + (r.tokens.outputTokens || 0) : 0}|${r.endedAt || 0}` : 'x'); }
+    return s;
+  }
+
+  // Append/patch room update (t_1fb02462, extends t_fe51eee9): plan the minimal DOM change that
+  // turns the drawn room into pageOf(ev, win) instead of rebuilding every group. domFp is the
+  // per-event fingerprint list the renderer stored at draw time — it mirrors the DOM exactly,
+  // including the front drift whole-group eviction leaves behind. The DOM's events sit inside the
+  // fresh window at some offset — the slide — located by finding the first target event whose fp
+  // already exists in the DOM; from there the fp-aligned stretch is verified event by event.
+  // Returns null whenever alignment fails (rescope, backfilled older events) — the caller must do
+  // the full render, which is always correct. On success:
+  // { target, slide, alignFrom, alignLen } — the DOM keeps groups whose events sit fully inside
+  // [slide + alignFrom, slide + alignFrom + alignLen), whole-group evicts what fits before slide
+  // (a straddling group survives as front drift, the next plan call locates it), and re-renders
+  // from the first group that isn't confirmed — mutated older bubbles (late tool results,
+  // subagent totals/record state) patch in place from their group boundary instead of forcing a
+  // whole-room rebuild. That rebuild was the #1 streaming long task in Quinn's real-agent trace
+  // (t_f4f6d15e). alignFrom > 0 only when target[0..alignFrom) themselves mutated (front of the
+  // window): they re-render as part of the rebuild region.
+  function tailPlan(domFp, ev, win, recOf = null) {
+    if (!domFp || !domFp.length || !ev.length) return null;
+    const target = pageOf(ev, Math.max(1, win | 0)).items;
+    if (!target.length) return null;
+    let slide = -1, off = 0;
+    for (let t = 0; t < target.length && t < 24; t++) { // a mutated front must not hide a live anchor deeper in
+      const i = domFp.indexOf(eventFp(target[t], recOf));
+      if (i >= 0 && i - t < 0) return null; // the window reaches before the DOM: backfill, rebuild
+      if (i >= 0) { slide = i - t; off = t; break; }
     }
-    return { fresh: ev.slice(ev.length - delta), keep };
+    if (slide < 0) return null;
+    // target[j] sits at DOM position j + slide; verify the stretch from the anchor onward.
+    const align = Math.min(domFp.length - slide - off, target.length - off);
+    let stable = 0;
+    while (stable < align && eventFp(target[off + stable], recOf) === domFp[slide + off + stable]) stable++;
+    if (!stable) return null;
+    return { target, slide, alignFrom: off, alignLen: stable };
+  }
+
+  // Older-page request (chatGrow): plan prepending the next older window slice to the drawn room
+  // without a full rebuild (the scroll-up prepend was a whole-room innerHTML at feed scale — the
+  // 1.3s worst frame in Quinn's trace). The DOM's events must be exactly the fp-matching tail of
+  // the grown window; anything else (a simultaneous append, a mutated bubble) returns null and the
+  // caller does the full render. Slice and target are the DOM-verified older page and full window.
+  function prependPlan(domFp, ev, win, recOf = null) {
+    if (!domFp || !domFp.length || !ev.length) return null;
+    const target = pageOf(ev, Math.max(1, win | 0)).items;
+    const add = target.length - domFp.length;
+    if (add <= 0) return null;
+    for (let i = 0; i < domFp.length; i++) if (domFp[i] !== eventFp(target[add + i], recOf)) return null;
+    return { target, slice: target.slice(0, add) };
   }
 
   // Collapse consecutive identical messages (same type/target/text) from one author into one bubble + a ×N
   // badge at the end. Messages carrying attachments never collapse (each file needs its own thumbs).
   const collapseRepeats = (items) => items.reduce((out, it) => { const p = out[out.length - 1]; if (p && p.type === it.type && p.text === it.text && p.to === it.to && !p.atts && !it.atts && it.type !== 'tool' && it.type !== 'question' && it.type !== 'subagent') p.count = (p.count || 1) + 1; else out.push({ ...it }); return out; }, []);
-  return { avatarColor, initials, toolLabel, roomEvents, group, parseComposer, preview, mentionMatches, fmtSize, fileUrl, attThumbs, collapseRepeats, GROUP_MS, MAX, PAGE, pageOf, anchorScroll, tailPlan, feedKey };
+  return { avatarColor, initials, toolLabel, roomEvents, group, parseComposer, preview, mentionMatches, fmtSize, fileUrl, attThumbs, collapseRepeats, GROUP_MS, MAX, PAGE, pageOf, anchorScroll, eventFp, tailPlan, prependPlan, feedKey };
 });
 
