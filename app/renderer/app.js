@@ -18,8 +18,9 @@ const logsLoaded = new Set(); // projects whose persisted logs.jsonl was merged 
 async function loadLogs(pid) {
   if (logsLoaded.has(pid)) return; logsLoaded.add(pid);
   let saved = []; try { saved = await call('getLogs', 1500); } catch {}
-  const first = Math.min(...logs.filter((l) => l.projectId === pid).map((l) => l.at), Infinity);
-  logs.unshift(...saved.filter((l) => l.at < first).map((l) => ({ ...l, projectId: pid, saved: true })));
+  if (!Array.isArray(saved)) saved = [];
+  const first = Math.min(...logs.filter((l) => l.projectId === pid).map((l) => l.at || 0), Infinity);
+  logs.unshift(...saved.filter((l) => l && (l.at || 0) < first).map((l) => ({ ...l, projectId: pid, saved: true })));
   renderLog();
 }
 const testing = new Set(); // node ids with a preflight test in flight
@@ -2274,6 +2275,7 @@ function humanLog(t) {
   return { head: head.length > 140 ? head.slice(0, 139) + '…' : head, json: JSON.stringify(o, null, 2) };
 }
 function logRow(l) {
+  l = l || {}; // a null/primitive line renders as a system row instead of killing the whole build
   const w = who(l.nodeId); const lvl = LOG_LEVEL[l.kind] || 'text';
   const task = l.taskId ? `<span class="logtask" data-tasklink="${esc(l.taskId)}" title="${esc(l.task || l.taskId)} — open in task thread">${esc(shortTaskId(l.taskId))}</span>` : '';
   const badge = l.kind === 'monitor' ? 'Monitor' : l.kind === 'watch' ? 'Watch' : esc(l.kind);
@@ -2318,7 +2320,7 @@ function bindSubToggles(rerender) { document.querySelectorAll('[data-subtoggle]'
 // All severities shown by default; chips let you narrow the feed down to warn/error only.
 const logLevels = new Set(['info', 'warn', 'error']);
 const LOG_SEVERITY = { error: 'error', tool_error: 'error', stderr: 'warn' };
-const severityOf = (l) => l.level || LOG_SEVERITY[l.kind] || 'info';
+const severityOf = (l) => (l && (l.level || LOG_SEVERITY[l.kind])) || 'info'; // malformed/null line degrades to info, never throws the filter
 function renderLogLevelChips() {
   $('#loglevels').innerHTML = ['info', 'warn', 'error'].map((lv) => `<button class="lvchip lv-${lv}${logLevels.has(lv) ? ' on' : ''}" data-lv="${lv}" aria-pressed="${logLevels.has(lv)}" title="${logLevels.has(lv) ? 'Hide' : 'Show'} ${lv} lines"><span class="dot" aria-hidden="true"></span>${lv}</button>`).join('');
   document.querySelectorAll('#loglevels [data-lv]').forEach((b) => b.onclick = () => { const lv = b.dataset.lv; logLevels.has(lv) ? logLevels.delete(lv) : logLevels.add(lv); renderLogLevelChips(); renderLog(); });
@@ -2347,7 +2349,7 @@ function renderLog() {
   CH.subIndex = null; // per-draw subagent record index (see subRecOf)
   if (!$('#tab-obs').classList.contains('active')) return;
   const lkey = logKey();
-  if (lkey === logSig) return; logSig = lkey;
+  if (lkey === logSig) return;
   const f = $('#logfilter').value; const q = ($('#logsearch').value || '').trim().toLowerCase();
   const teamIds = sel.logTeam ? new Set(logTeamNodes().map((n) => n.id)) : null;
   const box = $('#log'); const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 20;
@@ -2373,7 +2375,7 @@ function renderLog() {
   const older = page.hidden ? `<button id="log-older" class="olderbar linklike">↑ ${page.hidden} earlier line${page.hidden === 1 ? '' : 's'} — scroll up or click to load</button>` : '';
   box.innerHTML = rows.length ? (hiddenInfo ? `<p class="muted logempty">${hiddenInfo} info line(s) hidden by the level filter — showing all. <button id="log-showall" class="linklike">Show all</button></p>` : '') + older +
     Subagents.nestRows(page.items, subRecOf, null).map((x) => x.kind === 'sub' ? subBlockHtml(x) : logRow(x.l)).join('') : `<p class="muted logempty">${empty}</p>`;
-  logTailAt = tailAt; logTailSeq = tailSeq;
+  logTailAt = tailAt; logTailSeq = tailSeq; logSig = lkey; // stamped only after the DOM actually built: a throw mid-build (malformed line, bad subagent record) must not mark the pane as rendered — renderLog would then early-return forever and freeze it
   const sa = document.getElementById('log-showall'); if (sa) sa.onclick = () => { logLevels.add('info'); logLevels.add('warn'); logLevels.add('error'); renderLogLevelChips(); renderLog(); };
   const ob = document.getElementById('log-older'); if (ob) ob.onclick = () => { logWin += LOG_PAGE; renderLog(); };
   bindSubToggles(renderLog);
@@ -3466,12 +3468,14 @@ function appendLogTail() {
   const f = $('#logfilter').value;
   const teamIds = sel.logTeam ? new Set(logTeamNodes().map((n) => n.id)) : null;
   const fresh = logs.filter((l) => l.projectId === ctx.p && (!teamIds || teamIds.has(l.nodeId)) && (!f || l.nodeId === f) && (l._seq === undefined || l._seq > logTailSeq));
-  logTailSeq = logSeq;
+  // logTailSeq is NOT advanced here: a throw inside the row build below would otherwise stamp the
+  // cursor past lines the DOM never received, hiding them for good. It moves only after the append
+  // succeeded (or when nothing new needed drawing); a bail just falls back to a full render.
   // Lines injected out-of-band (no _seq — tests, restored sessions) were never counted by the
   // cursor; claiming them here would stamp a signature the DOM never rendered and hide them for
   // good. Same for subagent lines: they nest into blocks only a full render can build.
   if (fresh.some((l) => l._seq === undefined || l.subagentId)) return false;
-  if (!fresh.length) { logSig = logKey(); return true; } // only already-rendered or filtered-out lines arrived
+  if (!fresh.length) { logTailSeq = logSeq; logSig = logKey(); return true; } // only already-rendered or filtered-out lines arrived
   const added = fresh;
   added.sort((a, b) => (a.at || 0) - (b.at || 0));
   if (added[0].at < logTailAt) return false; // straggler older than the tail: let renderLog re-sort
@@ -3488,6 +3492,7 @@ function appendLogTail() {
     olderBar.textContent = `↑ ${hidden} earlier line${hidden === 1 ? '' : 's'} — scroll up or click to load`;
   } else renderLog.winItems += added.length;
   renderLog.total += added.length;
+  logTailSeq = logSeq;
   logTailAt = added[added.length - 1].at;
   logSig = logKey();
   box.scrollTop = box.scrollHeight;
@@ -3496,7 +3501,7 @@ function appendLogTail() {
 }
 // Direct 'log' pushes now carry only the low-volume paths (self-update watcher); orchestrator log
 // lines arrive batched on the 'delta' channel above (t_d22a6cf2).
-squad.on('log', (l) => { l._seq = ++logSeq; logs.push(l); if (logs.length > 8000) logs.splice(0, 1000); if (l.projectId === ctx.p) chatBump(); scheduleLogRender(); });
+squad.on('log', (l) => { if (!l || typeof l !== 'object') return; l._seq = ++logSeq; logs.push(l); if (logs.length > 8000) logs.splice(0, 1000); if (l.projectId === ctx.p) chatBump(); scheduleLogRender(); });
 // In-app toast for orchestrator notifications (desktop notifications are shown by the main process).
 squad.on('notify', (n) => {
   if (n.projectId && n.projectId !== ctx.p) return;
