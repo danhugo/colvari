@@ -37,6 +37,11 @@ function fakeGit(opts = {}) {
     if (a.startsWith('diff --name-only')) return { code: 0, out: opts.lockChanged ? 'package-lock.json' : '' };
     if (a.startsWith('worktree')) return { code: 0, out: '' };
     if (a.startsWith('reset --hard')) { if (opts.resetFails) return { code: 1, out: 'nope' }; sha = args[2]; return { code: 0, out: '' }; }
+    if (a.startsWith('rev-list --count')) {
+      if (opts.revListFails) return { code: 1, out: '' };
+      const [from, to] = args[2].split('..');
+      return { code: 0, out: String(from === to ? 0 : (opts.behind != null ? opts.behind : 1)) };
+    }
     return { code: 0, out: '' };
   };
   g.calls = calls; g.sha = () => sha; g.setSha = (s) => { sha = s; }; g.setOrigin = (s) => { opts.origin = s; }; g.setDirty = (v) => { opts.dirty = v; };
@@ -382,6 +387,65 @@ test('a stood-down scheduled restart releases the dispatch schedule (the orchest
   assert.strictEqual(rp.count, 7, 'the pending count survives the stand-down');
   assert.ok(s.readLogs().some((l) => /nothing to restart onto/.test(l.text)));
   assert.ok(s.readLogs().some((l) => /released the dispatch schedule/.test(l.text)));
+});
+
+// t_f6d37ca4: the tally reads as commits the running build is behind (running..target via git).
+// At the boot sha that count is 0 — a stale tally must die with the stand-down, or it holds the
+// bell row up forever and the cap re-arms restarts onto code that is already live (t_7426095a).
+const standDownStore = (git) => {
+  const { Store } = require('../src/store');
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'su-standdown-'));
+  const s = new Store(path.join(d, 'p'));
+  s.saveSettings({ autoRestart: true });
+  const w = new UpdateWatcher({
+    store: s, repoDir: '/repo', pollMs: 3.6e6, git, npm: fakeNpm(),
+    relaunch: () => { w.relaunched = (w.relaunched || 0) + 1; },
+  });
+  clearInterval(w._timer);
+  return { s, w };
+};
+
+test('a stand-down at the running sha clears a stale pending tally (running..target is 0 commits)', async () => {
+  const git = fakeGit();
+  const { s, w } = standDownStore(git);
+  let cleared = 0;
+  w.on('pending-cleared', () => cleared++);
+  // The incident shape: merges landed, the app already runs the target, the tally survived.
+  s.setRestartPending({ scheduledNow: true, count: 7, sha: SHA1 });
+  w.restartScheduled('scheduled restart (now)');
+  await new Promise((r) => setTimeout(r, 30));
+  assert.strictEqual(w.phase, 'idle');
+  assert.ok(!w.relaunched, 'nothing to restart onto');
+  assert.strictEqual(s.restartPending(), null, 'count 0 clears the flag and the count');
+  assert.strictEqual(cleared, 1, "the 'pending-cleared' event fires so the renderer is pushed");
+  assert.ok(s.readLogs().some((l) => /cleared the pending state/.test(l.text)));
+});
+
+test('a stand-down keeps the tally when the pending target is not the running build', async () => {
+  const git = fakeGit();
+  const { s, w } = standDownStore(git);
+  let cleared = 0;
+  w.on('pending-cleared', () => cleared++);
+  s.setRestartPending({ scheduledNow: true, count: 7, sha: SHA2 });
+  w.restartScheduled('scheduled restart (now)');
+  await new Promise((r) => setTimeout(r, 30));
+  assert.strictEqual(w.phase, 'idle');
+  const rp = s.restartPending();
+  assert.ok(rp && !rp.scheduledNow, 'the schedule is still disarmed');
+  assert.strictEqual(rp.count, 7, 'the target is ahead of the running build — the count stays');
+  assert.strictEqual(rp.sha, SHA2);
+  assert.strictEqual(cleared, 0, 'no clear event for a real pending target');
+});
+
+test('an uncomputable count never clears on a guess (git rev-list fails)', async () => {
+  const git = fakeGit({ revListFails: true });
+  const { s, w } = standDownStore(git);
+  s.setRestartPending({ scheduledNow: true, count: 7, sha: SHA1 });
+  w.restartScheduled('scheduled restart (now)');
+  await new Promise((r) => setTimeout(r, 30));
+  const rp = s.restartPending();
+  assert.ok(rp && rp.count === 7, 'git failed: the tally survives');
+  assert.ok(!rp.scheduledNow, 'the schedule is still released');
 });
 
 test('unknown running sha (boot capture failed): the same-commit skip stands down and the restart proceeds', async () => {
