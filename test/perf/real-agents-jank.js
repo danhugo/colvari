@@ -140,7 +140,7 @@ const INSTRUMENT = `
   if (window.__jank) return { already: true };
   const P = window.__jank = {
     t0: performance.now(), wallAt: Date.now() - performance.now(), phaseName: 'setup',
-    probes: [], frames: {}, lt: {}, statePushes: 0, logPushes: 0,
+    probes: [], frames: {}, lt: {}, splitCounts: {}, statePushes: 0, logPushes: 0,
     roomDraws: [], roomDrawMs: 0, rebuildMs: 0, refreshN: 0, refreshMs: 0,
   };
   Object.defineProperty(P, 'phase', { get: () => P.phaseName, set: (k) => { P.phaseName = k; } });
@@ -151,7 +151,7 @@ const INSTRUMENT = `
   let last = performance.now();
   const raf = (t) => { const d = t - last; last = t; if (d > 0) { const f = F(phaseOf()); f.frames++; f.sum += d; if (d > f.max) f.max = d; if (d < 34) f.fast++; else if (f.jank.length < 5000) f.jank.push(+d.toFixed(1)); } requestAnimationFrame(raf); };
   requestAnimationFrame(raf);
-  const timedChat = () => { const o = window.renderChatBody; if (typeof o !== 'function' || o.__wrapped) return; window.renderChatBody = function (...a) { const t = performance.now(); try { return o.apply(this, a); } finally { const d = performance.now() - t; P.roomDraws.push(+d.toFixed(2)); P.roomDrawMs += d; if (P.roomDraws.length > 6000) P.roomDraws.shift(); } }; o.__wrapped = true; };
+  const timedChat = () => { const o = window.renderChatBody; if (typeof o !== 'function' || o.__wrapped) return; window.renderChatBody = function (...a) { const t = performance.now(); try { return o.apply(this, a); } finally { const d = performance.now() - t; P.roomDraws.push(+d.toFixed(2)); P.roomDrawMs += d; if (P.roomDraws.length > 6000) P.roomDraws.shift(); const sb = P.splitCounts[P.phaseName] = P.splitCounts[P.phaseName] || { draws: 0, ms: 0 }; sb.draws++; sb.ms += d; } }; o.__wrapped = true; };
   timedChat();
   const timedRebuild = () => { const c = window.Chat; if (!c || typeof c.roomEvents !== 'function' || c.roomEvents.__wrapped) return; const o = c.roomEvents; c.roomEvents = function (...a) { const t = performance.now(); try { return o.apply(this, a); } finally { P.rebuildMs += performance.now() - t; } }; o.__wrapped = true; };
   timedRebuild();
@@ -204,10 +204,10 @@ const INSTRUMENT = `
   // per-subwindow stats let the report keep only the subwindows where lines actually flowed).
   P.split = (name) => { P.phase = name; return true; };
   P.phaseStats = (name) => {
-    const f = P.frames[name], b = P.lt[name];
-    delete P.frames[name]; delete P.lt[name];
+    const f = P.frames[name], b = P.lt[name], sb = P.splitCounts[name];
+    delete P.frames[name]; delete P.lt[name]; delete P.splitCounts[name];
     const j = f ? [...f.jank].sort((a, z) => a - z) : [];
-    return { frames: f ? f.frames : 0, fast: f ? f.fast : 0, jankN: j.length, jankP50: j.length ? j[Math.floor(j.length / 2)] : 0, jankP95: j.length ? j[Math.floor(j.length * 0.95)] : 0, jankMax: f ? +f.max.toFixed(1) : 0, worst: j.length ? [...j].reverse().slice(0, 5) : [], ltN: b ? b.n : 0, ltMs: b ? +b.ms.toFixed(1) : 0, ltMax: b ? +b.max.toFixed(1) : 0 };
+    return { frames: f ? f.frames : 0, fast: f ? f.fast : 0, jankN: j.length, jankP50: j.length ? j[Math.floor(j.length / 2)] : 0, jankP95: j.length ? j[Math.floor(j.length * 0.95)] : 0, jankMax: f ? +f.max.toFixed(1) : 0, worst: j.length ? [...j].reverse().slice(0, 5) : [], ltN: b ? b.n : 0, ltMs: b ? +b.ms.toFixed(1) : 0, ltMax: b ? +b.max.toFixed(1) : 0, roomDraws: sb ? sb.draws : 0, roomDrawMs: sb ? +sb.ms.toFixed(1) : 0 };
   };
   return { ok: true };
 `;
@@ -563,7 +563,10 @@ async function main() {
     byName: Object.fromEntries(Object.entries(byName).map(([k, v]) => [k, { n: v.n, perSec: +(v.n / winSecs).toFixed(2), msP50: q(v.ms, 0.5), msP95: q(v.ms, 0.95), msMax: v.ms.length ? Math.max(...v.ms) : 0 }]).sort((a, b) => b[1].n - a[1].n).slice(0, 14)),
   };
   summary.streamSubs = streamSubs;
-  const liveSubs = streamSubs.filter((w) => w.logPushes >= 1);
+  // Real helpycode runs update the feed via state-push deltas + refresh pulls, not per-line
+  // log pushes (log channel stayed 0 while runs completed with essays) — so "live" subwindows
+  // are the ones where the chat room actually REDREW.
+  const liveSubs = streamSubs.filter((w) => w.roomDraws >= 2 || w.logPushes >= 1);
   summary.streamPushes = {
     n: streamPushes.length, perSec: +(streamPushes.length / streamWindowSecs).toFixed(2),
     state: streamPushes.filter((p) => p.channel === 'state').length, log: streamPushes.filter((p) => p.channel === 'log').length,
@@ -572,9 +575,9 @@ async function main() {
   };
   if (liveSubs.length < Math.min(2, streamSubs.length)) { // effectively no streaming traffic at all
     const diag = await ex(`return { working: Object.values(S.orch.agents || {}).filter((a) => a.status === 'working').length, running: !!S.orch.running, todo: S.tasks.filter((t) => t.status === 'todo').length, logTail: logs.slice(-6).map((l) => l.kind + ': ' + String(l.text).slice(0, 120)) }`).catch(() => ({}));
-    throw new Error('only ' + liveSubs.length + '/' + streamSubs.length + ' 10s subwindows had any log pushes — agents effectively never streamed. Diagnostics: ' + JSON.stringify(diag, null, 2));
+    throw new Error('only ' + liveSubs.length + '/' + streamSubs.length + ' 10s subwindows had feed updates — agents never streamed visibly. Diagnostics: ' + JSON.stringify(diag, null, 2));
   }
-  const liveFrames = liveSubs.reduce((acc, w) => { acc.frames += w.frames; acc.jankN += w.jankN; acc.ltN += w.ltN; acc.ltMs += w.ltMs; if (w.jankMax > acc.jankMax) acc.jankMax = w.jankMax; if (w.ltMax > acc.ltMax) acc.ltMax = w.ltMax; return acc; }, { frames: 0, jankN: 0, ltN: 0, ltMs: 0, jankMax: 0, ltMax: 0 });
+  const liveFrames = liveSubs.reduce((acc, w) => { acc.frames += w.frames; acc.jankN += w.jankN; acc.ltN += w.ltN; acc.ltMs += w.ltMs; acc.draws += w.roomDraws || 0; acc.drawMs += w.roomDrawMs || 0; if (w.jankMax > acc.jankMax) acc.jankMax = w.jankMax; if (w.ltMax > acc.ltMax) acc.ltMax = w.ltMax; return acc; }, { frames: 0, jankN: 0, ltN: 0, ltMs: 0, jankMax: 0, ltMax: 0, draws: 0, drawMs: 0 });
   const liveSecs = liveSubs.reduce((s, w) => s + w.wallMs, 0) / 1000;
   const allJank = liveSubs.flatMap((w) => w.worst).sort((a, b) => b - a);
   summary.streaming = {
@@ -582,6 +585,7 @@ async function main() {
     jankPerSec: +(liveFrames.jankN / liveSecs).toFixed(2), jankP95: allJank.length ? allJank[Math.floor(allJank.length * 0.95)] || allJank[allJank.length - 1] : 0, jankMax: liveFrames.jankMax,
     longTasks: liveFrames.ltN, blockedMsPerSec: +(liveFrames.ltMs / liveSecs).toFixed(1), longMaxMs: liveFrames.ltMax,
     ioBlockedMsPerSec: +(liveSubs.reduce((s, w) => s + w.ioMs, 0) / liveSecs).toFixed(1),
+    roomDrawsPerSec: +(liveFrames.draws / liveSecs).toFixed(2), roomDrawMsPerSec: +(liveFrames.drawMs / liveSecs).toFixed(1),
   };
   summary.io = { streamWindow: ioWin, eventLoopMs: (() => { const us = (ns) => +((ns || 0) / 1000).toFixed(2); return { p50: us(EL.percentile(50)), p95: us(EL.percentile(95)), max: us(EL.max) }; })(), slowestCallsMs: [...IO.slowest], maxMsPerCall: +IO.maxMs.toFixed(2) };
   summary.env = {
@@ -630,7 +634,7 @@ ${Object.entries(s.frames).map(frow).join('\n')}
 ${Object.entries(s.longTasks).map(lrow).join('\n')}
 
 Scroll passes: ${JSON.stringify((s.scroll || []).map((r) => ({ groups: r.groupsBefore + '→' + r.groupsAfter, grew: r.grew })))}
-Stream (untouched, ${s.streamPushes.liveSubs}/${s.streamPushes.subs} live 10s subwindows): pushes ${s.streamPushes.perSec}/s (state ${s.streamPushes.state}, log ${s.streamPushes.log}, ${s.streamPushes.kbPerSec} KB/s) · **while-streaming fps ${s.streaming.fps}, jank ${s.streaming.jankN} (${s.streaming.jankPerSec}/s, p95 ${s.streaming.jankP95} ms, max ${s.streaming.jankMax} ms)**, long tasks ${s.streaming.longTasks} (${s.streaming.blockedMsPerSec} ms/s blocked, max ${s.streaming.longMaxMs} ms) · main appendLog ${s.streaming.ioBlockedMsPerSec} ms/s · roomEvents rebuild Σ ${s.rebuildMs} ms · refresh n=${s.refresh.n} Σ ${s.refresh.msTotal} ms
+Stream (untouched, ${s.streamPushes.liveSubs}/${s.streamPushes.subs} live 10s subwindows): pushes ${s.streamPushes.perSec}/s (state ${s.streamPushes.state}, log ${s.streamPushes.log}, ${s.streamPushes.kbPerSec} KB/s) · room redraws ${s.streaming.roomDrawsPerSec}/s (Σ ${s.streaming.roomDrawMsPerSec} ms/s) · **while-updating fps ${s.streaming.fps}, jank ${s.streaming.jankN} (${s.streaming.jankPerSec}/s, p95 ${s.streaming.jankP95} ms, max ${s.streaming.jankMax} ms)**, long tasks ${s.streaming.longTasks} (${s.streaming.blockedMsPerSec} ms/s blocked, max ${s.streaming.longMaxMs} ms) · main appendLog ${s.streaming.ioBlockedMsPerSec} ms/s · roomEvents rebuild Σ ${s.rebuildMs} ms · refresh n=${s.refresh.n} Σ ${s.refresh.msTotal} ms
 
 ## (c) CPU % by phase
 
