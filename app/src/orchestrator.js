@@ -25,6 +25,7 @@ const { SubagentTracker, isSubagentTool } = require('./subagents');
 const FQ = require('./failures');
 const PB = require('./litellm');
 const SW = require('./stall-watchdog');
+const WS = require('./wake-sweep');
 
 const MCP_SERVER = path.join(__dirname, 'mcp-server.js');
 
@@ -76,15 +77,9 @@ function autoCompactEnv(pct) {
   return String(Math.min(100, Math.max(10, Math.round(pct))));
 }
 
-// Wake-on-message: how often the orchestrator looks for unread agent->agent messages, how long a burst
-// may coalesce into one dispatch, and the ping-pong guard (max auto-wakes per sender->recipient pair
-// per window). An idle agent with unread agent messages is woken on every sweep — message wakes are
-// never held back by a suppression window (t_9e4b4805: the old 5-min per-agent gap delayed teammate
-// messages while the agent sat idle); DEBOUNCE_MS coalesces a burst and the pair cap is the loop
-// protection. MIN_GAP_MS now only anchors the idle/stale nudge throttle in nudgeIdle — a changed idle
-// set must not re-wake a just-woken core. Task dispatch never waits on the gap.
-// Exported so tests can shorten the timings.
-const WAKE = { SWEEP_MS: 1000, DEBOUNCE_MS: 1500, MIN_GAP_MS: 5 * 60 * 1000, MAX_PER_PAIR: 3, PAIR_WINDOW_MS: 10 * 60 * 1000 };
+// Wake-on-message (src/wake-sweep.js): constants and sweep machinery live there; WAKE is shared by
+// reference so tests shortening the timings in place keep working through either export.
+const WAKE = WS.WAKE;
 
 // Stall watchdog (src/stall-watchdog.js): constants and machinery live there; STALL is shared by
 // reference so tests shortening the timings in place keep working through either export.
@@ -568,55 +563,11 @@ class Orchestrator extends EventEmitter {
     return { ...m, delivered: live ? 'interrupt' : queued ? 'queued' : 'inbox' };
   }
 
-  // ---- wake on message: an idle agent that receives a send_message is dispatched with its unread
-  // messages as the prompt. The sender's send_message has already returned (it only writes to the
-  // store); delivery happens here, in the background, debounced and loop-capped. ----
-  sweepWakes() {
-    if (this.userStopped || this.dispatchPaused) { for (const t of this.wakeTimers.values()) clearTimeout(t.timer); this.wakeTimers.clear(); return; }
-    try {
-      const team = this.store.getTeam();
-      const now = Date.now();
-      for (const node of team.nodes) {
-        const a = this.agent(node.id);
-        if (this.procs.has(node.id) || a.status === 'working') continue;
-        const unread = this.wakeUnread(node.id, team);
-        if (!unread.length) {
-          if (a.wakePending) { a.wakePending = null; this.changed(); }
-          continue;
-        }
-        // Per-agent wake debounce: while an agent runs (task or wake), messages stay queued unread —
-        // never a parallel run. Once idle, unread teammate and human messages wake the agent on every
-        // sweep, burst-coalesced by the debounce timer below: message wakes are never suppressed
-        // (t_9e4b4805 — the old MIN_GAP_MS window delayed teammate messages while the agent sat idle;
-        // the pair cap in dispatchWake is the ping-pong guard, and human senders are exempt from it).
-        // Task dispatch is NOT debounced either (an assigned/unblocked task reaches the agent right
-        // away and its prompt carries the unread count); system wakes never enter this sweep.
-        const prev = a.wakePending;
-        if (!prev || prev.count !== unread.length) {
-          // nextWakeAt is the armed timer's due time; recomputed only on a transition so an unchanged
-          // pending state does not churn a state push every sweep.
-          a.wakePending = { count: unread.length, suppressed: false, nextWakeAt: (prev && prev.nextWakeAt) || now + WAKE.DEBOUNCE_MS };
-          this.changed();
-        }
-        // Debounce: a burst of messages coalesces into the one dispatch this timer fires. At most one
-        // pending wake per agent: the wakeTimers entry IS the dedupe key.
-        if (!this.wakeTimers.has(node.id)) {
-          const dueAt = now + WAKE.DEBOUNCE_MS;
-          this.wakeTimers.set(node.id, { dueAt, timer: setTimeout(() => {
-            this.wakeTimers.delete(node.id);
-            this.dispatchWake(node.id).catch((e) => this.log(node.id, 'error', 'wake dispatch: ' + e.message));
-          }, WAKE.DEBOUNCE_MS) });
-        }
-      }
-    } catch (e) { this.log(null, 'error', 'wake sweep: ' + e.message); }
-  }
-  // Unread messages for a node from teammates or the human operator (system senders have their own
-  // delivery paths and never wake anyone — except the queued status-check nudge, whose wake flag
-  // opts exactly that one message kind into waking an idle agent, like the human message it replaced).
-  wakeUnread(nodeId, team = this.store.getTeam()) {
-    return this.store.listMessages({ to: nodeId })
-      .filter((m) => !m.read && m.from !== nodeId && (m.from !== 'system' || m.wake) && (m.from === 'human' || m.from === 'system' || team.nodes.some((n) => n.id === m.from)));
-  }
+  // ---- wake on message: sweep machinery lives in src/wake-sweep.js; these prototype methods are
+  // the delegation seam — the sweep reads through `orch.*` so tests stub runAlive-style on
+  // instances (o.wakeUnread = ...), and the 1s timer dispatches through `this.sweepWakes()`. ----
+  sweepWakes() { WS.sweepWakes(this); }
+  wakeUnread(nodeId, team = this.store.getTeam()) { return WS.wakeUnread(this, nodeId, team); }
   async dispatchWake(nodeId) {
     const team = this.store.getTeam();
     const node = team.nodes.find((n) => n.id === nodeId);
