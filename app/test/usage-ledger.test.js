@@ -99,6 +99,25 @@ test('orchestrator snapshot exposes the ledger, never cross-model token totals',
   assert.doesNotThrow(() => JSON.stringify(snap)); // must survive the renderer state push
 });
 
+test('ledger() instrumentation counts rebuilds vs memo hits and stays quiet under the slow threshold', () => {
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'squad-ledger-inst-'));
+  const pm = new ProjectManager(path.join(d, 'root')); const pid = pm.list()[0].id; const s = pm.store(pid);
+  const o = new Orchestrator(s);
+  const lines = [];
+  o.log = (id, kind, text) => lines.push(text);
+  assert.deepEqual(o.ledger().rows, []);
+  assert.equal(o._ledgerRebuilds, 1);
+  o.ledger(); o.ledger(); // unchanged runs file: absorbed by the signature memo
+  assert.equal(o._ledgerRebuilds, 1);
+  assert.equal(o._ledgerHits, 2);
+  assert.ok(typeof o._ledgerLastMs === 'number' && o._ledgerLastMs >= 0);
+  assert.deepEqual(lines, []); // fast rebuild under the 50 ms slow-log threshold
+  s.addRun(U.newRun({ runtime: 'claude', model: 'claude-sonnet-4-5' }));
+  o.ledger();
+  assert.equal(o._ledgerRebuilds, 2, 'a runs-file write invalidates the memo');
+  assert.equal(o._ledgerHits, 2);
+});
+
 // ---- account-keyed rows (t_f514cc2e): firstParty==subscription for claude, legacy runtime-less
 // runs attribute to claude, one cost definition (apiEq vs billed) ----
 
