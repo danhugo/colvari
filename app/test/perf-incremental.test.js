@@ -14,6 +14,15 @@ function tmpStore() {
   return new Store(dir);
 }
 
+// Log appends are buffered (t_d22a6cf2) — flushes are async. Tests that assert on-disk state wait
+// for the store's own confirmation (pendingLogLines drains once the write resolves): the bytes can
+// show up in the file a tick or two before the in-flight queue clears, and anything asserting or
+// rewriting the file before that would race the queue.
+const flushed = (s) => new Promise((r) => {
+  const tick = () => (s.pendingLogLines().length === 0 ? r() : setImmediate(tick));
+  setImmediate(tick);
+});
+
 test('pickChanged: null since -> all keys; unchanged -> none; only diffs listed', () => {
   const v = { board: '1:1', runs: '2:2', settings: '3:3' };
   assert.deepEqual(pickChanged(v, null).sort(), ['board', 'runs', 'settings']);
@@ -22,7 +31,7 @@ test('pickChanged: null since -> all keys; unchanged -> none; only diffs listed'
   assert.deepEqual(pickChanged(v, {}), ['board', 'runs', 'settings']);
 });
 
-test('versions(): stable when untouched, changes on writes to the right file', () => {
+test('versions(): stable when untouched, changes on writes to the right file', async () => {
   const s = tmpStore();
   const v1 = s.versions();
   assert.equal(s.versions().board, v1.board); // unchanged store: identical sigs
@@ -39,6 +48,7 @@ test('versions(): stable when untouched, changes on writes to the right file', (
   s.forTeam('tm').updateNode(s.forTeam('tm').getTeam().nodes[0].id, { name: 'A2' });
   assert.notEqual(s.versions().teams, teams1);
   s.appendLog({ nodeId: 'a', kind: 'system', text: 'x' });
+  await flushed(s); // the logs sig is disk-based; it moves once the buffered line flushes
   assert.notEqual(s.versions().logs, v2.logs);
 });
 
@@ -105,9 +115,11 @@ test('snapshot logs: appends are picked up incrementally without re-reading the 
   assert.equal(s2.logs[2].level, 'error');
 });
 
-test('logs(): truncate/shrink of logs.jsonl falls back to a full re-read', () => {
+test('logs(): truncate/shrink of logs.jsonl falls back to a full re-read', async () => {
   const { orch, counts } = countingOrch(tmpStore());
   for (let i = 0; i < 5; i++) orch.store.appendLog({ nodeId: 'a', kind: 'system', text: 'm' + i });
+  orch.snapshot();
+  await flushed(orch.store); // settle the buffered lines so the rewrite below really replaces them
   orch.snapshot();
   const before = counts.readLogs;
   fs.writeFileSync(orch.store.logFile(), JSON.stringify({ at: Date.now(), nodeId: 'a', kind: 'system', text: 'fresh' }) + '\n');
