@@ -199,6 +199,16 @@ const INSTRUMENT = `
   };
   P.scrollRect = () => { const r = $('#chat-room').getBoundingClientRect(); return [Math.round(r.x + r.width / 2), Math.round(r.y + Math.min(160, r.height / 2))]; };
   P.scrollInfo = () => { const r = $('#chat-room'); return { top: Math.round(r.scrollTop), h: r.scrollHeight, ch: r.clientHeight, groups: r.querySelectorAll('.cgroup').length }; };
+  // Per-subwindow buckets: rotate the phase so frames/longtasks land in fresh per-subwindow
+  // stores, and snapshot+clear one on demand (real-model streaming has minute-long lulls —
+  // per-subwindow stats let the report keep only the subwindows where lines actually flowed).
+  P.split = (name) => { P.phase = name; return true; };
+  P.phaseStats = (name) => {
+    const f = P.frames[name], b = P.lt[name];
+    delete P.frames[name]; delete P.lt[name];
+    const j = f ? [...f.jank].sort((a, z) => a - z) : [];
+    return { frames: f ? f.frames : 0, fast: f ? f.fast : 0, jankN: j.length, jankP50: j.length ? j[Math.floor(j.length / 2)] : 0, jankP95: j.length ? j[Math.floor(j.length * 0.95)] : 0, jankMax: f ? +f.max.toFixed(1) : 0, worst: j.length ? [...j].reverse().slice(0, 5) : [], ltN: b ? b.n : 0, ltMs: b ? +b.ms.toFixed(1) : 0, ltMax: b ? +b.max.toFixed(1) : 0 };
+  };
   return { ok: true };
 `;
 
@@ -263,9 +273,9 @@ const TOPICS = ['event-driven UI rendering', 'database indexing strategies', 'co
 const taskPrompt = (i) => {
   const t = TOPICS[i % TOPICS.length];
   const kind = i % 3;
-  if (kind === 0) return `Write a detailed 12-paragraph technical essay about ${t}. Structure it with markdown headings. Do not modify any files; write the essay directly in your reply.`;
-  if (kind === 1) return `List exactly 30 numbered, specific ideas about ${t}, one to two sentences each, then a short closing paragraph. No file edits; answer directly.`;
-  return `Explain ${t} in 8 sections with headings, each section 4-6 sentences, then summarize in 5 bullets. Answer directly without touching files.`;
+  if (kind === 0) return `Write a detailed technical essay about ${t}: 25 markdown sections, 3-5 substantial sentences each, plus an intro and a conclusion. Do not modify any files; write the essay directly in your reply.`;
+  if (kind === 1) return `List exactly 50 numbered, specific ideas about ${t}, one to three sentences each, then a two-paragraph closing reflection. No file edits; answer directly.`;
+  return `Explain ${t} in 14 sections with headings, each section 5-7 sentences, then a 12-bullet summary. Answer directly without touching files.`;
 };
 
 // ---- function-level trace + long-task attribution ----------------------------------------
@@ -488,24 +498,27 @@ async function main() {
   console.log(`[realperf] scroll campaign done: ${JSON.stringify(scrollRecs)}`);
 
   await phase('stream');
-  const streamT0 = Date.now();
   const pushesAtStreamStart = PERF_PUSH.length;
-  // Wait for actual streaming before measuring the untouched window: real model runs have
-  // quiet lulls (thinking/API latency) where no log lines flow for tens of seconds.
+  // Untouched streaming window, measured in 10 s subwindows: real model runs have minute-long
+  // quiet lulls (thinking/API latency), so a single fixed window is a lottery — subwindows
+  // with actual log pushes give the "while messages stream in" numbers, the rest show idle.
+  const streamSubs = [];
   {
-    let waited = 0, lastPushes = PERF_PUSH.length;
-    while (waited < 150000) {
-      await WAIT(5000); waited += 5000;
-      const now = PERF_PUSH.length;
-      if (now > lastPushes + 3) break;
-      lastPushes = now;
+    const SUBS = Math.max(2, Number(process.env.PERF_STREAM_SUBS || 12));
+    for (let i = 0; i < SUBS; i++) {
+      await ex(`return window.__jank.split('stream${i}')`);
+      const t0 = Date.now();
+      const pushes0 = PERF_PUSH.length;
+      const io0 = { c: IO.winCalls, ms: IO.winTotalMs };
+      IO.winCalls = 0; IO.winTotalMs = 0;
+      await WAIT(10000);
+      const st = (await ex(`return window.__jank.phaseStats('stream${i}')`)) || {};
+      streamSubs.push({ i, wallMs: Date.now() - t0, pushes: PERF_PUSH.length - pushes0, logPushes: PERF_PUSH.slice(pushes0).filter((p) => p.channel === 'log').length, statePushes: PERF_PUSH.slice(pushes0).filter((p) => p.channel === 'state').length, ioCalls: IO.winCalls, ioMs: +(IO.winTotalMs).toFixed(1), ...st });
+      IO.winCalls = 0; IO.winTotalMs = 0;
     }
-    console.log(`[realperf] stream window: waited ${waited} ms for pushes to flow`);
   }
-  const measuredT0 = Date.now();
-  await WAIT(STREAM_MS);
   const streamPushes = PERF_PUSH.slice(pushesAtStreamStart);
-  const streamWindowSecs = (Date.now() - measuredT0) / 1000;
+  const streamWindowSecs = streamSubs.reduce((s, w) => s + w.wallMs, 0) / 1000;
   const ioWin = { calls: IO.winCalls, totalMs: +IO.winTotalMs.toFixed(1) };
   IO.winCalls = 0; IO.winTotalMs = 0;
   EL.enable();
@@ -549,15 +562,27 @@ async function main() {
     perSec: +(PERF_IPC.length / winSecs).toFixed(2),
     byName: Object.fromEntries(Object.entries(byName).map(([k, v]) => [k, { n: v.n, perSec: +(v.n / winSecs).toFixed(2), msP50: q(v.ms, 0.5), msP95: q(v.ms, 0.95), msMax: v.ms.length ? Math.max(...v.ms) : 0 }]).sort((a, b) => b[1].n - a[1].n).slice(0, 14)),
   };
+  summary.streamSubs = streamSubs;
+  const liveSubs = streamSubs.filter((w) => w.logPushes >= 5);
   summary.streamPushes = {
     n: streamPushes.length, perSec: +(streamPushes.length / streamWindowSecs).toFixed(2),
     state: streamPushes.filter((p) => p.channel === 'state').length, log: streamPushes.filter((p) => p.channel === 'log').length,
     kbPerSec: +(streamPushes.reduce((s, p) => s + p.bytes, 0) / 1024 / streamWindowSecs).toFixed(1),
+    liveSubs: liveSubs.length, subs: streamSubs.length,
   };
-  if (summary.streamPushes.log < 10) { // agents finished early: the "streaming" scenario silently became idle
+  if (!liveSubs.length) { // not a single subwindow with real streaming traffic — scenario invalid
     const diag = await ex(`return { working: Object.values(S.orch.agents || {}).filter((a) => a.status === 'working').length, running: !!S.orch.running, todo: S.tasks.filter((t) => t.status === 'todo').length, logTail: logs.slice(-6).map((l) => l.kind + ': ' + String(l.text).slice(0, 120)) }`).catch(() => ({}));
-    throw new Error('stream window had ' + summary.streamPushes.log + ' log pushes — agents were not streaming. Diagnostics: ' + JSON.stringify(diag, null, 2));
+    throw new Error('no 10s subwindow had >=5 log pushes — agents never streamed during the stream phase. Diagnostics: ' + JSON.stringify(diag, null, 2));
   }
+  const liveFrames = liveSubs.reduce((acc, w) => { acc.frames += w.frames; acc.jankN += w.jankN; acc.ltN += w.ltN; acc.ltMs += w.ltMs; if (w.jankMax > acc.jankMax) acc.jankMax = w.jankMax; if (w.ltMax > acc.ltMax) acc.ltMax = w.ltMax; return acc; }, { frames: 0, jankN: 0, ltN: 0, ltMs: 0, jankMax: 0, ltMax: 0 });
+  const liveSecs = liveSubs.reduce((s, w) => s + w.wallMs, 0) / 1000;
+  const allJank = liveSubs.flatMap((w) => w.worst).sort((a, b) => b - a);
+  summary.streaming = {
+    wallSecs: +liveSecs.toFixed(1), fps: +(liveFrames.frames / liveSecs).toFixed(1), jankN: liveFrames.jankN,
+    jankPerSec: +(liveFrames.jankN / liveSecs).toFixed(2), jankP95: allJank.length ? allJank[Math.floor(allJank.length * 0.95)] || allJank[allJank.length - 1] : 0, jankMax: liveFrames.jankMax,
+    longTasks: liveFrames.ltN, blockedMsPerSec: +(liveFrames.ltMs / liveSecs).toFixed(1), longMaxMs: liveFrames.ltMax,
+    ioBlockedMsPerSec: +(liveSubs.reduce((s, w) => s + w.ioMs, 0) / liveSecs).toFixed(1),
+  };
   summary.io = { streamWindow: ioWin, eventLoopMs: (() => { const us = (ns) => +((ns || 0) / 1000).toFixed(2); return { p50: us(EL.percentile(50)), p95: us(EL.percentile(95)), max: us(EL.max) }; })(), slowestCallsMs: [...IO.slowest], maxMsPerCall: +IO.maxMs.toFixed(2) };
   summary.env = {
     agents: AGENTS, tasksPerAgent: TASKS_PER_AGENT, reps: REPS, scrollReps: SCROLL_REPS, traceMs: trace.windowMs || TRACE_MS,
@@ -605,7 +630,7 @@ ${Object.entries(s.frames).map(frow).join('\n')}
 ${Object.entries(s.longTasks).map(lrow).join('\n')}
 
 Scroll passes: ${JSON.stringify((s.scroll || []).map((r) => ({ groups: r.groupsBefore + '→' + r.groupsAfter, grew: r.grew })))}
-Stream pushes: ${s.streamPushes.perSec}/s (state ${s.streamPushes.state}, log ${s.streamPushes.log}, ${s.streamPushes.kbPerSec} KB/s) · roomEvents rebuild Σ ${s.rebuildMs} ms · refresh n=${s.refresh.n} Σ ${s.refresh.msTotal} ms
+Stream (untouched, ${s.streamPushes.liveSubs}/${s.streamPushes.subs} live 10s subwindows): pushes ${s.streamPushes.perSec}/s (state ${s.streamPushes.state}, log ${s.streamPushes.log}, ${s.streamPushes.kbPerSec} KB/s) · **while-streaming fps ${s.streaming.fps}, jank ${s.streaming.jankN} (${s.streaming.jankPerSec}/s, p95 ${s.streaming.jankP95} ms, max ${s.streaming.jankMax} ms)**, long tasks ${s.streaming.longTasks} (${s.streaming.blockedMsPerSec} ms/s blocked, max ${s.streaming.longMaxMs} ms) · main appendLog ${s.streaming.ioBlockedMsPerSec} ms/s · roomEvents rebuild Σ ${s.rebuildMs} ms · refresh n=${s.refresh.n} Σ ${s.refresh.msTotal} ms
 
 ## (c) CPU % by phase
 
