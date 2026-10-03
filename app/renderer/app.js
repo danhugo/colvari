@@ -1015,6 +1015,16 @@ function drawClusterCard(g, n, onExpand) {
   el('title', {}, g).textContent = n.members.map((m) => `${m.name} — ${nodeLive(m)}`).join('\n');
   g.style.cursor = 'pointer'; g.onclick = (ev) => { ev.stopPropagation(); onExpand(); };
 }
+// Tidy top-down tree over assign edges (the engine behind graphAuto and the Auto-layout button).
+// One parent per node — the first assign edge wins; later ones are ignored. Roots (no assign
+// parent) place left-to-right, core agents first; children place recursively and a parent is
+// centred over its first/last child. More than 5 all-leaf reports wrap under their lead into a
+// 5-wide block instead of one endless row. Agents with no assign edges, plus anything not reached
+// from a root, wrap into a near-landscape grid balanced toward the canvas aspect ratio. Spacing:
+// GX = card width + 36, GY = card height + 64. Pure layout — the stored x/y stay the user's
+// manual layout; the result is applied per render only while graphAuto is on. The same algorithm
+// also lives (shared + instrumented) in app/src/graph-view.js as layoutTree/treeLayout, which
+// test/graph-view.test.js exercises; this renderer copy is the one buildView actually calls.
 function treeLayout(nodes, edges) {
   const ids = new Set(nodes.map((n) => n.id)), kids = {}, hasParent = new Set(); const GX = W + 36, GY = H + 64, pos = {};
   for (const e of edges) if ((e.type || 'assign') === 'assign' && ids.has(e.from) && ids.has(e.to) && e.from !== e.to && !hasParent.has(e.to)) { (kids[e.from] ||= []).push(e.to); hasParent.add(e.to); }
@@ -1394,7 +1404,10 @@ function canvasMenu(ev) {
   showMenu(ev.clientX, ev.clientY, menuItems(items)); bindMenu(items);
 }
 async function addAgentAt(x, y) { const role = S.team.nodes.length === 0 ? 'PM' : 'Dev'; const n = await call('addNode', { role, x: Math.round(x), y: Math.round(y) }); sel.node = n.id; refresh(); }
-// Layered (Sugiyama-lite) layout: longest-path layers over assign/review edges, barycentre ordering, centred rows.
+// Auto-layout button (also the canvas context menu's "Auto-layout"): flips graphAuto back on so
+// every render recomputes positions via treeLayout above, collapses clusters to their heads,
+// persists the fresh positions when the view is unclustered, then fits the result to the viewport.
+// There is no separate layout pass here — treeLayout is the whole engine.
 async function autoLayout() {
   if (!S.team.nodes.length) return; graphAuto = true; expandedClusters.clear(); renderGraph();
   if (!GV.clustered) await call('setPositions', Object.fromEntries(S.team.nodes.map((n) => [n.id, { x: n.x, y: n.y }])));
