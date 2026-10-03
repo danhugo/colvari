@@ -183,7 +183,7 @@ header .pill { font-variant-numeric:tabular-nums; } .pill.quiet { color:var(--mu
 /* Chat (#company room) — Slack/Discord-like, always dark. */
 #tab-chat { padding:0; } .chat { display:flex; height:100%; background:var(--bg-surface); color:var(--fg-primary); } .chat-main { flex:1; display:flex; flex-direction:column; min-width:0; }
 .chat-head { display:flex; align-items:center; gap:8px; padding:10px 16px; border-bottom:1px solid var(--border); } .chat .muted { color:var(--fg-muted); }
-#chat-room { flex:1; overflow:auto; padding:8px 0; } .cgroup { display:flex; gap:10px; padding:6px 16px; content-visibility:auto; contain-intrinsic-size:auto 72px; } .cgroup:hover { background:var(--bg-hover); }
+#chat-room { flex:1; overflow:auto; padding:8px 0; } .cgroup { display:flex; gap:10px; padding:6px 16px; } .cgroup:hover { background:var(--bg-hover); }
 .avatar { flex:0 0 36px; height:36px; border-radius:50%; display:flex; align-items:center; justify-content:center; color:var(--fg-on-accent); font-weight:700; font-size:13px; position:relative; }
 /* DiceBear face fills its avatar shell; radius follows the shell (squircle chips, circle leads).
    img-scoped on purpose: on the SVG <image> nodes CSS width/height would override the geometry attrs. */
@@ -262,7 +262,15 @@ button:focus-visible, input:focus, select:focus, textarea:focus { outline:none; 
 /* Chat — follows the theme via tokens */
 .chat { background:var(--bg-app); color:var(--fg-primary); } .chat .muted { color:var(--fg-muted); }
 .chat-head { border-bottom-color:var(--border); background:var(--bg-surface); padding:var(--space-2) var(--space-4); }
-#chat-room { padding:var(--space-2) 0; } .cgroup { padding:var(--space-1) var(--space-4); transition:background var(--dur-fast); } .cgroup:hover { background:var(--bg-hover); }
+/* overflow-anchor off + no content-visibility (t_h0a1c2f9): the room manages anchoring itself
+   (explicit bottom pins + Chat.anchorScroll on every draw path), and Chrome's native anchoring
+   plus the content-visibility:auto placeholder dance around it produced one-frame jumps of the
+   whole conversation while agents stream (measured 90-650px layout shifts seconds after an
+   append, with zero DOM/scroll/scroll-position change — rows teleport or collapse to their
+   72px placeholder and back). The feed window is capped at ~100 events, so full layout of every
+   group is cheap next to the correctness win; the cold-render cost stays handled by the
+   progressive split paint. Our writes are the only scroller from here on. */
+#chat-room { padding:var(--space-2) 0; overflow-anchor:none; } .cgroup { padding:var(--space-1) var(--space-4); transition:background var(--dur-fast); } .cgroup:hover { background:var(--bg-hover); }
 .avatar { border-radius:var(--radius-md); flex-basis:32px; height:32px; }
 .role { background:var(--bg-hover); color:var(--fg-secondary); border-radius:var(--radius-xs); } .cname time { color:var(--fg-muted); }
 .bubble { line-height:var(--lh-body); margin:1px 0; } .bubble.thought { color:var(--fg-secondary); } .bubble.action, .bubble.handoff { color:var(--accent-text); } .bubble.error { color:var(--danger); }

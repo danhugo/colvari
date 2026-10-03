@@ -501,6 +501,7 @@ async function chatOpenCampaign(reps) {
   const recs = [];
   for (let i = 0; i < reps; i++) {
     await ex(`showTab('board'); await w(250);`); // always enter chat from another tab
+    const tabXY = await xyOf('button[data-tab="chat"]');
     const tabRec = tabXY ? await (async () => {
       await ex(`return window.__jank.arm('tab:chat', 'tabChatWithGroups', 8000)`);
       await clickAt(tabXY);
