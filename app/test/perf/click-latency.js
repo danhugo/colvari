@@ -53,13 +53,14 @@ const CLICK_REPS = Math.max(1, Number(process.env.PERF_CLICK_REPS || 8));
 const SEED_TASKS = Number(process.env.PERF_SEED_TASKS || 550);   // board bulk: matches the real 550+ task project
 const SEED_LOGS = Number(process.env.PERF_SEED_LOGS || 1500);    // logs.jsonl history the obs tab loads
 const SEED_RUNS = Number(process.env.PERF_SEED_RUNS || 200);     // runs.json history for the usage tab
+const SEED_INBOX = Number(process.env.PERF_SEED_INBOX || 0);     // open inbox items for the inbox badge/tab (0 = none)
 const CARD_CLICKS = Number(process.env.PERF_CARD_CLICKS || 10);  // board card-selection samples
 const STREAM_SECONDS = Number(process.env.STREAM_SECONDS || 0) ||
   Math.ceil((WARM_MS + SAMPLE_MS) / 1000) + 25;             // keep agents alive past the window
 const STREAM_EPS = Number(process.env.STREAM_EPS || 6);
 const TRACE_MS = Number(process.env.PERF_TRACE_MS || 0);     // one-off CPU profile window
 const IDLE = !!process.env.PERF_IDLE; // t_6fb709f6: idle phase — seed and click with NO run started
-const TRACE_FNS = ['renderLog', 'renderGraph', 'renderBoard', 'renderChat', 'renderOverview', 'renderAll', 'JSON.parse', '(garbage collector)'];
+const TRACE_FNS = ['renderLog', 'renderGraph', 'renderBoard', 'renderChat', 'renderOverview', 'renderAll', 'renderInbox', 'renderInboxBadge', 'JSON.parse', '(garbage collector)'];
 const TABS = ['chat', 'team', 'board', 'wiki', 'obs', 'usage', 'settings', 'inbox']; // 'overview' is a legacy id (showTab maps it to team) — a no-target drop since it left the tab bar
 const WAIT = (ms) => new Promise((r) => setTimeout(r, ms));
 fs.mkdirSync(OUT, { recursive: true });
@@ -133,7 +134,7 @@ const INSTRUMENT = `
   // Ring that evicts the OLDEST entry once full: frames/renders must always cover "now",
   // otherwise a long window fills the buffer with early samples and every peek starves.
   const ring = (a, x, cap = 6000) => { if (a.length >= cap) a.shift(); a.push(x); };
-  for (const name of ['renderSidebar','renderGraph','renderPreflightBar','renderNodeForm','renderBoard','renderWiki','renderObs','renderSettings','renderHeader','renderSelfUpdate','renderAlerts','renderUsage','renderOverview','renderInbox','renderGuide','renderChat','renderLog','renderLive']) {
+  for (const name of ['renderSidebar','renderGraph','renderPreflightBar','renderNodeForm','renderBoard','renderWiki','renderObs','renderSettings','renderHeader','renderSelfUpdate','renderAlerts','renderUsage','renderOverview','renderInbox','renderInboxBadge','renderGuide','renderChat','renderLog','renderLive']) {
     const f = window[name];
     if (typeof f !== 'function') continue;
     P.renders[name] = [];
@@ -296,10 +297,12 @@ function bulkSeed(dir, nodes) {
   const verbs = ['Fix', 'Refactor', 'Profile', 'Wire', 'Document', 'Harden', 'Migrate', 'Cache', 'Debounce', 'Instrument'];
   const objs = ['render path', 'log pane', 'board columns', 'graph layout', 'usage ledger', 'inbox badge', 'wake sweep', 'stall watchdog', 'settings form', 'wiki editor'];
   const dist = [['done', Math.floor(SEED_TASKS * 0.8)], ['review', Math.floor(SEED_TASKS * 0.05)], ['in_progress', Math.floor(SEED_TASKS * 0.05)], ['waiting_for_human', Math.floor(SEED_TASKS * 0.03)], ['merge_conflict', Math.floor(SEED_TASKS * 0.01)]];
+  const tids = [];
   let seeded = 0;
   for (const [status, count] of dist) {
     for (let i = 0; i < count; i++) {
       const t = store.createTask({ title: `${pick(verbs)} the ${pick(objs)} (seed ${++seeded})`, description: 'Seeded history for the perf baseline board. Includes a realistic description so card snippets render.', assignee: Math.random() < 0.15 ? null : pick(nodes), createdBy: pick(nodes) });
+      tids.push(t.id);
       store.updateTask(t.id, { status });
       if (seeded % 7 === 0) store.commentTask(t.id, pick(nodes), 'Synthetic comment: measured the render path, the numbers point at the full renderAll fan-out on every push.');
     }
@@ -313,8 +316,22 @@ function bulkSeed(dir, nodes) {
     run.startedAt = new Date(started).toISOString();
     store.addRun(U.finishRun(run, { code: 0, env: {}, billingMode: 'auto', startedMs: started }));
   }
+  // Open inbox items (t_4b420de0): questions and approvals against seeded tasks. addInbox
+  // (not askHuman) so none of the bulk tasks flips to waiting_for_human — the board
+  // distribution above must stay intact for the card/column numbers.
+  const qs = ['Should I also update the README for this change?', 'The schema migration would drop the legacy table — proceed?', 'Two implementations pass the tests: cache-first or invalidate-on-write?', 'This touches the permissions surface — want a security pass before merge?'];
+  for (let i = 0; i < SEED_INBOX; i++) {
+    const approval = i % 3 !== 2; // 2/3 approvals, 1/3 questions — the renderInbox kinds mix
+    store.addInbox({
+      kind: approval ? 'approval' : 'question',
+      taskId: i % 4 === 0 ? pick(tids) : null,
+      nodeId: i % 5 === 0 ? null : pick(nodes),
+      question: approval ? `Approve merge of ${pick(verbs).toLowerCase()} ${pick(objs)} (inbox seed ${i + 1})?` : `${pick(qs)} (inbox seed ${i + 1})`,
+      choices: approval ? [] : ['Yes', 'No', 'Discuss first'],
+    });
+  }
   const lt = store.createTask({ title: 'perf load target (writer churn)', description: 'Target task for external board-writer churn during the load phase.', assignee: nodes[0], createdBy: nodes[0] });
-  return { seededTasks: seeded + TASKS * 6, seededLogs: SEED_LOGS, seededRuns: SEED_RUNS, loadTarget: lt.id };
+  return { seededTasks: seeded + TASKS * 6, seededLogs: SEED_LOGS, seededRuns: SEED_RUNS, seededInbox: SEED_INBOX, loadTarget: lt.id };
 }
 
 // One real input click at [x,y] (webContents coordinates), timed input-dispatch -> paint.
