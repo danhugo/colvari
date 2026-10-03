@@ -77,7 +77,7 @@ test('wiki: list summaries (no body) and full-text search', () => {
   assert.deepEqual(s.searchWiki(''), []);
 });
 
-test('sessions: grouped from runs, paginated log scoped to the session window', () => {
+test('sessions: grouped from runs, paginated log scoped to the session window', async () => {
   const { newRun } = require('../src/usage');
   const s = tmp();
   const n = s.addNode({ name: 'Devon', role: 'Dev' });
@@ -99,18 +99,18 @@ test('sessions: grouped from runs, paginated log scoped to the session window', 
   assert.equal(Math.round((sess1.reportedCostUsd + Number.EPSILON) * 100) / 100, 0.15);
   assert.equal(sess1.taskId, t.id);
 
-  const log1 = s.getSessionLog('sess-1', { offset: 0, limit: 1 });
+  const log1 = await s.getSessionLog('sess-1', { offset: 0, limit: 1 });
   assert.equal(log1.total, 2);
   assert.equal(log1.entries.length, 1);
   assert.equal(log1.entries[0].text, 'session1 line A');
-  const log1p2 = s.getSessionLog('sess-1', { offset: 1, limit: 1 });
+  const log1p2 = await s.getSessionLog('sess-1', { offset: 1, limit: 1 });
   assert.equal(log1p2.entries[0].text, 'session1 line B');
 
-  const log2 = s.getSessionLog('sess-2');
+  const log2 = await s.getSessionLog('sess-2');
   assert.equal(log2.total, 1);
   assert.equal(log2.entries[0].text, 'session2 line A');
 
-  assert.deepEqual(s.getSessionLog('no-such-session'), { total: 0, offset: 0, limit: 200, entries: [] });
+  assert.deepEqual(await s.getSessionLog('no-such-session'), { total: 0, offset: 0, limit: 200, entries: [] });
 });
 
 test('changing an agent role to a preset fills its empty prompt, tools and permission mode', () => {

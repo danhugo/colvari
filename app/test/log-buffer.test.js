@@ -56,10 +56,10 @@ test('rotation: past rotateBytes the live file becomes logs.jsonl.1 and readLogs
   } finally { LOG_LIMITS.rotateBytes = prevRotate; }
 });
 
-test('append -> getSessionLog stays coherent while lines are still buffered', () => {
+test('append -> getSessionLog stays coherent while lines are still buffered', async () => {
   const s = tmp();
   s.appendLog({ at: Date.now(), nodeId: 'n1', kind: 'text', text: 'session line' });
-  const log = s.getSessionLog('missing-session');
+  const log = await s.getSessionLog('missing-session');
   assert.equal(log.total, 0); // window filter still applies (no runs for the session)
   assert.equal(s.readLogs(5)[0].text, 'session line');
 });
