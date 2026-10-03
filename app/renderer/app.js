@@ -140,16 +140,36 @@ function renderAll() {
 // The sidebar Inbox badge is always-visible chrome: it tracks the inbox count on every render,
 // not only while the inbox tab itself is drawn — an inline update inside renderInbox left the
 // badge stale whenever items landed while another tab was active.
+// Debounced (t_94f9b9f0): a render burst (state pushes while agents stream) used to pay the DOM
+// write once per render. The first change in a burst still writes this frame — the badge never
+// lags its render, so the every-render chrome contract holds — and further changes inside the
+// 100ms window collapse into one trailing write that re-reads S.inbox at fire time, so the last
+// value always lands even if the count flipped and flipped back mid-burst.
 // Perf instrumentation (t_f6b343a5): ring of recent durations + slow-call count, inspect via
-// window.__perf.inboxBadge — nothing is logged unless a call exceeds SLOW_MS.
+// window.__perf.inboxBadge — nothing is logged unless a write exceeds SLOW_MS.
 const PERF = { inboxBadge: { samples: [], slow: 0, SLOW_MS: 2 } };
-function renderInboxBadge() {
+const IB_DEBOUNCE_MS = 100;
+let ibTimer = null; // pending trailing write, or the leading write's coalescing-window expiry
+let ibShown = null; // value currently in the DOM
+function ibBadgeWrite() {
   const t0 = performance.now();
-  $('#inbox-tab-badge').textContent = (S.inbox || []).length ? String(S.inbox.length) : '';
+  ibShown = (S.inbox || []).length ? String(S.inbox.length) : '';
+  $('#inbox-tab-badge').textContent = ibShown;
   const ms = performance.now() - t0;
   const p = PERF.inboxBadge;
   p.samples.push(ms); if (p.samples.length > 120) p.samples.shift();
   if (ms > p.SLOW_MS) { p.slow++; console.debug('inbox badge render slow', ms.toFixed(2), 'ms'); }
+}
+function renderInboxBadge() {
+  const want = (S.inbox || []).length ? String(S.inbox.length) : '';
+  if (want === ibShown) return; // unchanged since the last write: no DOM work, no timer churn
+  if (ibTimer !== null) { // inside a burst window: collapse to one trailing write
+    clearTimeout(ibTimer);
+    ibTimer = setTimeout(() => { ibTimer = null; ibBadgeWrite(); }, IB_DEBOUNCE_MS);
+    return;
+  }
+  ibBadgeWrite(); // leading edge: the first change of a burst lands this frame
+  ibTimer = setTimeout(() => { ibTimer = null; }, IB_DEBOUNCE_MS);
 }
 window.__perf = PERF;
 // The always-visible chrome (Perry's contract, t_8d586961): badges, counts and the restart chip
