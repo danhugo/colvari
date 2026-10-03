@@ -583,7 +583,12 @@ class Store {
     try { this._saveHashes(h); } catch {}
   }
   _verifyTaskIntegrity() {
-    this.withLock(() => {
+    // Try-lock, not spin (t_a2566d54): the verify is advisory — out-of-band edits are adopted with a
+    // store-log line, and every sanctioned write maintains the hash map itself — so skipping the
+    // round while an agent's MCP process holds the lock costs nothing. Spinning here put a
+    // multi-second main-thread freeze on every first board load that raced a write burst (the
+    // getAll tail that survived the dispatch fixes).
+    this.withLockTry(() => {
       try {
         const hashes = this._readHashes();
         if (!hashes) { this._snapshotTaskHashes(); return; } // first open of a per-file store: adopt as baseline
@@ -613,7 +618,8 @@ class Store {
     });
   }
   _verifyWikiIntegrity() {
-    this.withLock(() => {
+    // Try-lock, not spin — same contract as _verifyTaskIntegrity (t_a2566d54).
+    this.withLockTry(() => {
       try {
         const idx = this._readWikiIndex();
         let changed = false;
