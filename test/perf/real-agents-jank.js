@@ -57,19 +57,11 @@ process.env.AGENTS_SQUAD_DEV = '0';
 process.on('exit', () => { try { fs.rmSync(process.env.AGENTS_SQUAD_PROJECT, { recursive: true, force: true, maxRetries: 3 }); } catch {} });
 if (!process.env.AGENTS_SQUAD_PROJECT.startsWith(os.tmpdir())) throw new Error('[realperf] AGENTS_SQUAD_PROJECT must be an isolated temp root');
 
-// Track every child this harness spawns so a wedged teardown can SIGKILL exactly OUR
-// helpycode children (never anything else — the live app runs the same binary).
-const cp = require('child_process');
-const MY_CHILDREN = new Set();
-{
-  const origSpawn = cp.spawn;
-  cp.spawn = function (...a) {
-    const child = origSpawn.apply(this, a);
-    try { if (child && child.pid) { MY_CHILDREN.add(child.pid); child.once('exit', () => MY_CHILDREN.delete(child.pid)); } } catch {}
-    return child;
-  };
-}
-const killMyChildren = () => { for (const pid of [...MY_CHILDREN]) { try { process.kill(pid, 'SIGKILL'); } catch {} } MY_CHILDREN.clear(); };
+// Teardown note: call('stop') can hang forever when real helpycode children ignore its kill
+// (observed twice) — stopOrchestrator below time-boxes it; Electron's exit reaps the child
+// tree (verified: killing a wedged instance left zero orphan helpycode processes), and a
+// hard process.exit fallback covers anything else. Never wrap child_process.spawn here —
+// that wedged Electron's own boot in a sync wait.
 
 // Per-IPC-call durations + push sizes, wrapped before main.js registers handlers.
 const { ipcMain } = require('electron');
@@ -124,7 +116,7 @@ app.on('web-contents-created', (_e, contents) => {
     try { await main(); } catch (e) { failed = true; console.error('[realperf] failed:', e && e.stack || e); }
     if (failed) { try { await stopOrchestrator(); } catch {} await WAIT(1000); }
     app.exit(failed ? 1 : 0);
-    setTimeout(() => { killMyChildren(); process.exit(failed ? 1 : 0); }, 3000).unref();
+    setTimeout(() => { try { app.exit(failed ? 1 : 0); } catch {} process.exit(failed ? 1 : 0); }, 3000).unref();
   });
 });
 
@@ -134,15 +126,14 @@ const exT = (js, ms) => Promise.race([ex(js), WAIT(ms || 30000).then(() => { thr
 const jsq = (v) => JSON.stringify(v);
 
 // Orchestrator stop: call('stop') can hang forever when real helpycode children ignore its
-// kill (observed twice) — time-box it, then SIGKILL exactly our recorded children.
+// kill (observed twice) — time-box it; Electron's exit reaps the rest.
 async function stopOrchestrator() {
   try { await Promise.race([exT(`await call('stop')`, 15000), WAIT(16000).then(() => { throw new Error('stop-timeout'); })]); }
   catch (e) { console.error('[realperf] stop did not settle:', e.message); }
-  killMyChildren();
   await WAIT(800);
 }
 // Last-resort watchdog: a promise-hang anywhere must not leave an instance lingering.
-setTimeout(() => { console.error('[realperf] WATCHDOG: force exit'); killMyChildren(); try { app.exit(3); } catch {} }, Number(process.env.PERF_MAX_MS || 20 * 60000)).unref();
+setTimeout(() => { console.error('[realperf] WATCHDOG: force exit'); try { app.exit(3); } catch {} }, Number(process.env.PERF_MAX_MS || 20 * 60000)).unref();
 
 // ---- in-page instrumentation -------------------------------------------------------------
 const INSTRUMENT = `
