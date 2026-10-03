@@ -22,7 +22,11 @@
  *
  * Knobs: PERF_AGENTS (2), PERF_TASKS_PER_AGENT (3), PERF_REPS (6), PERF_SCROLL_REPS (3),
  *   PERF_TRACE_MS (30000), PERF_STREAM_MS (30000), PERF_SEED_TASKS/LOGS/RUNS (550/1500/200),
- *   PERF_WARM_MS (5000), PERF_HCPATH, PERF_HC_MODEL, PERF_APP_DIR, PERF_OUT.
+ *   PERF_WARM_MS (5000), PERF_STAGGER_MS (8000 when AGENTS>2, else 0), PERF_STALL_MIN
+ *   (5 when AGENTS>=5, else 2), PERF_MAX_LOAD (unset; aborts at boot when load1m is above it —
+ *   run 5-agent passes with load1m under ~6), PERF_HCPATH, PERF_HC_MODEL, PERF_APP_DIR, PERF_OUT.
+ * Screenshots land in PERF_OUT: chat-open / thread-open (first campaign rep), scroll-up (top of
+ * the first scroll pass), streaming (mid stream window).
  */
 const { app } = require('electron');
 const fs = require('fs');
@@ -46,13 +50,21 @@ const SEED_TASKS = Number(process.env.PERF_SEED_TASKS || 550);
 const SEED_LOGS = Number(process.env.PERF_SEED_LOGS || 1500);
 const SEED_RUNS = Number(process.env.PERF_SEED_RUNS || 200);
 const AGENT_START_TIMEOUT_MS = Number(process.env.PERF_AGENT_START_TIMEOUT_MS || 180000);
+// 5-agent viability (t_c69c2170): queueing every task upfront started AGENTS helpycode CLIs in
+// the same second — boot + introspection pinned load ~16, agents starved and the run died in its
+// own watchdogs. Tasks are queued one at a time instead (the orchestrator's 1 s dispatch sweep
+// starts each as its node frees); the stall watchdog gets proportional headroom so a long model
+// thinking pause under 5-way CPU contention is not mistaken for a stall and churn-recovered.
+const STAGGER_MS = Math.max(0, Number(process.env.PERF_STAGGER_MS ?? (AGENTS > 2 ? 8000 : 0)));
+const STALL_MIN = Number(process.env.PERF_STALL_MIN || (AGENTS >= 5 ? 5 : 2));
+const QUEUE_MS = AGENTS * TASKS_PER_AGENT * STAGGER_MS;
 const WAIT = (ms) => new Promise((r) => setTimeout(r, ms));
 fs.mkdirSync(OUT, { recursive: true });
 
 // GUI test mode: isolated data root, no single-instance lock, procguard on spawned children.
 process.env.AGENTS_SQUAD_SMOKE = '1';
 process.env.AGENTS_SQUAD_PROJECT = fs.mkdtempSync(path.join(os.tmpdir(), 'squad-realperf-root-'));
-process.env.AGENTS_SQUAD_TEST_TIMEOUT_MS = String(AGENT_START_TIMEOUT_MS + TRACE_MS + STREAM_MS + REPS * 30000 + SCROLL_REPS * 40000 + 420000);
+process.env.AGENTS_SQUAD_TEST_TIMEOUT_MS = String(AGENT_START_TIMEOUT_MS + QUEUE_MS + TRACE_MS + STREAM_MS + REPS * 30000 + SCROLL_REPS * 40000 + 420000);
 process.env.AGENTS_SQUAD_DEV = '0';
 process.on('exit', () => { try { fs.rmSync(process.env.AGENTS_SQUAD_PROJECT, { recursive: true, force: true, maxRetries: 3 }); } catch {} });
 if (!process.env.AGENTS_SQUAD_PROJECT.startsWith(os.tmpdir())) throw new Error('[realperf] AGENTS_SQUAD_PROJECT must be an isolated temp root');
@@ -132,8 +144,9 @@ async function stopOrchestrator() {
   catch (e) { console.error('[realperf] stop did not settle:', e.message); }
   await WAIT(800);
 }
-// Last-resort watchdog: a promise-hang anywhere must not leave an instance lingering.
-setTimeout(() => { console.error('[realperf] WATCHDOG: force exit'); try { app.exit(3); } catch {} }, Number(process.env.PERF_MAX_MS || 20 * 60000)).unref();
+// Last-resort watchdog: a promise-hang anywhere must not leave an instance lingering. Scales
+// with AGENTS — the 5-agent run legitimately runs longer under load (t_c69c2170).
+setTimeout(() => { console.error('[realperf] WATCHDOG: force exit'); try { app.exit(3); } catch {} }, Number(process.env.PERF_MAX_MS || (20 + 4 * Math.max(0, AGENTS - 2)) * 60000)).unref();
 
 // ---- in-page instrumentation -------------------------------------------------------------
 const INSTRUMENT = `
@@ -165,30 +178,69 @@ const INSTRUMENT = `
   // the app's CSP (default-src 'self') forbids eval/new Function in the page.
   const PREDS = {
     tabChatWithGroups: () => !!document.querySelector('#tab-chat.active') && document.querySelectorAll('#chat-room .cgroup').length > 0,
-    threadOpen: () => !!document.querySelector('#chat-threadroom'),
-    threadClosed: () => !document.querySelector('#chat-threadroom'),
+    // Thread probes check the VISIBLE panel, not bare element existence: closing hides
+    // #chat-thread but syncThreadPanel keeps #chat-threadroom in the DOM (t_c69c2170 — the
+    // old existence predicates could never see a close, and saw stale opens across reps).
+    threadOpen: () => { const p = document.querySelector('#chat-thread:not(.hidden)'); return !!(p && p.querySelector('#chat-threadroom')); },
+    threadClosed: () => !document.querySelector('#chat-thread:not(.hidden)'),
     roomNonEmpty: () => document.querySelectorAll('#chat-room .cgroup').length > 0 || !!document.querySelector('#chat-room p'),
   };
   const ACTS = {
     teamSwitch: async () => { const s = document.querySelector('#chatteam'); const opts = [...s.options].map((o) => o.value); if (opts.length < 2) throw new Error('no second team'); s.value = opts[1]; s.dispatchEvent(new Event('change')); },
     teamBack: async () => { const s = document.querySelector('#chatteam'); const opts = [...s.options].map((o) => o.value); if (opts.length < 2) throw new Error('no second team'); s.value = opts[0]; s.dispatchEvent(new Event('change')); },
   };
-  const finishProbe = async (pr) => {
+  const finishProbe = async (pr, push) => {
     const deadline = pr.t0 + (pr.timeout || 8000);
     let ok = false;
     while (performance.now() < deadline) { let g = false; try { g = !!pr.expect(); } catch (e) {} if (g) { ok = true; break; } await w(8); }
-    if (!ok) { const rec = { name: pr.name, ok: false, err: 'expect-timeout', ms: +(performance.now() - pr.t0).toFixed(1) }; P.probes.push(rec); return rec; }
+    if (!ok) { const rec = { name: pr.name, ok: false, err: 'expect-timeout', ms: +(performance.now() - pr.t0).toFixed(1) }; if (push !== false) P.probes.push(rec); return rec; }
     await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
     const t1 = performance.now();
     const lo = pr.t0 + P.wallAt - 3, hi = t1 + P.wallAt + 3;
     const longs = [];
     for (const k of Object.keys(P.lt)) for (const s of P.lt[k].samples) if (s.start >= lo && s.start <= hi) longs.push(s);
     const rec = { name: pr.name, ok: true, ms: +(t1 - pr.t0).toFixed(1), longTasks: longs };
-    P.probes.push(rec);
+    if (push !== false) P.probes.push(rec);
     return rec;
   };
   P.arm = (name, predName, timeoutMs) => { const expect = PREDS[predName]; if (!expect) return { err: 'no-pred:' + predName }; P._pr = { name, t0: performance.now(), expect, timeout: timeoutMs }; return true; };
-  P.settle = () => { const pr = P._pr; if (!pr) return Promise.resolve({ name: '?', ok: false, err: 'not-armed' }); P._pr = null; return finishProbe(pr); };
+  P.settle = (push) => { const pr = P._pr; if (!pr) return Promise.resolve({ name: '?', ok: false, err: 'not-armed' }); P._pr = null; return finishProbe(pr, push); };
+  // Locate + arm in ONE page round trip: pick a target a real input click can actually reach at
+  // the exact returned coordinates (elementFromPoint must resolve inside the candidate) and stamp
+  // t0 at the same moment. The old arm→click pair spanned two round trips during which streaming
+  // re-renders shifted the live-tail feed under the saved point — 0 of 4 thread opens landed
+  // (t_94b8df1f). Retry-on-miss lives driver-side (clickProbe).
+  P.armAt = (kind, name, predName, timeoutMs) => {
+    const expect = PREDS[predName]; if (!expect) return { err: 'no-pred:' + predName };
+    if (kind === 'roomlink' && !PREDS.threadClosed()) return { err: 'panel-open' };
+    const cands = [];
+    if (kind === 'roomlink') {
+      for (const b of document.querySelectorAll('#chat-room [data-thread]')) {
+        if (typeof b.onclick !== 'function') continue; // a dead link can never open — not an open attempt
+        const r = b.getBoundingClientRect();
+        if (r.width < 8 || r.height < 8) continue;
+        const cx = Math.round(r.x + Math.min(60, r.width / 2)), cy = Math.round(r.y + r.height / 2);
+        if (cx < 0 || cy < 0 || cx >= innerWidth || cy >= innerHeight) continue;
+        const at = document.elementFromPoint(cx, cy);
+        if (!at || !(at === b || b.contains(at))) continue;
+        cands.push({ xy: [cx, cy], buried: !!b.closest('details:not([open])') }); // folded evrun content hit-tests but is invisible: last resort
+        if (cands.length >= 6) break;
+      }
+    } else if (kind === 'closebtn') {
+      const p = document.querySelector('#chat-thread:not(.hidden)');
+      const b = p && p.querySelector('#ch-close');
+      if (!b) return { err: 'no-panel' };
+      const r = b.getBoundingClientRect();
+      const cx = Math.round(r.x + r.width / 2), cy = Math.round(r.y + r.height / 2);
+      const at = document.elementFromPoint(cx, cy);
+      if (!at || !(at === b || b.contains(at))) return { err: 'occluded' };
+      cands.push({ xy: [cx, cy], buried: false });
+    } else return { err: 'no-kind:' + kind };
+    const c = cands.find((x) => !x.buried) || cands[0];
+    if (!c) return { err: 'no-target' };
+    P._pr = { name, t0: performance.now(), expect, timeout: timeoutMs || 2500 };
+    return c.xy;
+  };
   P.probeAct = async (name, actName, predName, timeoutMs) => {
     const act = ACTS[actName];
     if (!act) return { name, ok: false, err: 'no-act:' + actName };
@@ -368,61 +420,99 @@ async function startTrace(minMs) {
 
 // ---- scenarios ---------------------------------------------------------------------------
 async function seed() {
-  const prompts = Array.from({ length: AGENTS * TASKS_PER_AGENT }, (_, i) => taskPrompt(i));
   const res = await ex(`
     const p = await call('createProject', 'Real-agent jank baseline');
     switchTo({ p: p.id }); await w(600); await refresh();
-    await call('saveSettings', { helpycodePath: ${jsq(HCPATH)}, useWorktrees: false, maxConcurrency: ${AGENTS}, maxRuns: ${AGENTS * TASKS_PER_AGENT + 2}, requireApproval: false, stallTimeoutMin: 2 });
+    await call('saveSettings', { helpycodePath: ${jsq(HCPATH)}, useWorktrees: false, maxConcurrency: ${AGENTS}, maxRuns: ${AGENTS * TASKS_PER_AGENT + 2}, requireApproval: false, stallTimeoutMin: ${STALL_MIN} });
     const nodes = [];
     for (let i = 0; i < ${AGENTS}; i++) nodes.push(await call('addNode', { name: 'Real-' + (i + 1), role: 'Dev', x: 90 + (i % 3) * 240, y: 110 + Math.floor(i / 3) * 190, runtime: 'helpycode', model: ${jsq(MODEL)} }));
     for (const n of nodes.slice(1)) await call('addEdge', nodes[0].id, n.id, 'assign');
-    const prompts = ${jsq(prompts)};
-    const tasks = [];
-    let k = 0;
-    for (let r = 0; r < ${TASKS_PER_AGENT}; r++) for (let i = 0; i < ${AGENTS}; i++) tasks.push((await call('createTask', { title: 'Real streaming task ' + (++k), description: prompts[k - 1], assignee: nodes[i].id })).id);
     await refresh();
-    return { project: ctx.p, dir: S.dir, nodes: nodes.map((n) => n.id), tasks };
+    return { project: ctx.p, dir: S.dir, nodes: nodes.map((n) => n.id) };
   `);
   return res;
 }
 
-async function waitForAgents() {
+async function waitForAgents(seeded) {
   const t0 = Date.now();
   await ex(`await call('run')`);
+  // Staggered queueing: one task per WAIT(STAGGER_MS); the orchestrator's 1 s dispatch sweep
+  // starts each run as its node's slot frees, ramping the CLI boot storm instead of spawning
+  // AGENTS helpycode processes in the same second. STAGGER_MS=0 (2-agent default) queues all
+  // upfront, reproducing the old boot pattern.
+  const total = AGENTS * TASKS_PER_AGENT;
+  for (let k = 0; k < total; k++) {
+    await ex(`await call('createTask', { title: 'Real streaming task ' + (${k + 1}), description: ${jsq(taskPrompt(k))}, assignee: ${jsq(seeded.nodes[k % seeded.nodes.length])} })`);
+    if (k < total - 1 && STAGGER_MS) await WAIT(STAGGER_MS);
+  }
+  await ex(`await refresh()`).catch(() => {});
   let working = 0;
-  while (Date.now() - t0 < AGENT_START_TIMEOUT_MS) {
+  while (Date.now() - t0 < AGENT_START_TIMEOUT_MS + QUEUE_MS) {
     working = (await ex(`return Object.values(S.orch.agents || {}).filter((a) => a.status === 'working').length`)) || 0;
     if (working >= AGENTS) return working;
     await WAIT(1000);
   }
   const diag = await ex(`return { agents: S.orch.agents, logs: logs.slice(-20).map((l) => l.kind + ': ' + String(l.text).slice(0, 200)), todo: S.tasks.filter((t) => t.status === 'todo' || t.status === 'in_progress').map((t) => t.id + ' ' + t.status) }`).catch(() => ({}));
-  throw new Error(`only ${working}/${AGENTS} real agents started within ${AGENT_START_TIMEOUT_MS} ms — diagnostics: ` + JSON.stringify(diag, null, 2));
+  throw new Error(`only ${working}/${AGENTS} real agents started within ${AGENT_START_TIMEOUT_MS + QUEUE_MS} ms — diagnostics: ` + JSON.stringify(diag, null, 2));
 }
 
 const phase = (k) => ex(`window.__jank.phase = ${jsq(k)}`);
+
+// PNGs for the report: chat open, open thread, scroll-up top, mid-streaming frame.
+const SHOTS = [];
+async function shot(name) {
+  if (SHOTS.includes(name)) return;
+  try {
+    const img = await wc.capturePage();
+    if (!img || img.isEmpty()) return;
+    fs.writeFileSync(path.join(OUT, name + '.png'), img.toPNG());
+    SHOTS.push(name);
+    console.log('[realperf] shot ' + name + '.png');
+  } catch (e) { console.error('[realperf] shot ' + name + ' failed:', e && e.message || e); }
+}
+
+// Locate+arm in one page call, real input click, settle with a short window. A missed click
+// (the feed shifted between locate and dispatch) retries on a fresh locate instead of burning
+// an 8 s timeout, so every rep's open is attempted until it actually happens — and the open,
+// when it happens, is measured from its own t0. Only the rep's final record lands in the report.
+async function clickProbe(kind, name, predName, tries = 3) {
+  let last = null;
+  for (let a = 0; a < tries; a++) {
+    const armed = await ex(`return window.__jank.armAt(${jsq(kind)}, ${jsq(name)}, ${jsq(predName)}, 2500)`);
+    if (!armed || armed.err) {
+      const rec = { name, ok: false, err: (armed && armed.err) || 'locate-failed', ms: 0 };
+      await exT(`window.__jank.probes.push(${jsq(rec)})`, 5000).catch(() => {}); // the summary table reads page-side probes only
+      return rec;
+    }
+    await clickAt(armed);
+    last = await exT(`return window.__jank.settle(${a === tries - 1})`, 9000);
+    if (last && last.ok) return last;
+    if (a < tries - 1) {
+      // An open may have landed after its settle window (slow frame): close it via the panel's
+      // own button so the next attempt starts from a closed panel (armAt refuses otherwise).
+      await ex(`const b = document.querySelector('#chat-thread:not(.hidden) #ch-close'); if (b) b.click();`).catch(() => {});
+      await WAIT(200);
+    }
+  }
+  return last || { name, ok: false, err: 'no-settle' };
+}
 
 async function chatOpenCampaign(reps) {
   const recs = [];
   for (let i = 0; i < reps; i++) {
     await ex(`showTab('board'); await w(250);`); // always enter chat from another tab
-    const tabXY = await xyOf('button[data-tab="chat"]');
-    if (tabXY) {
+    const tabRec = tabXY ? await (async () => {
       await ex(`return window.__jank.arm('tab:chat', 'tabChatWithGroups', 8000)`);
       await clickAt(tabXY);
-      recs.push(await ex(`return window.__jank.settle()`));
-    }
-    const thrXY = await ex(`const els = [...document.querySelectorAll('#chat-room [data-thread]')]; for (const b of els) { const r = b.getBoundingClientRect(); if (r.top >= 0 && r.bottom <= innerHeight && r.height > 4) return [Math.round(r.x + r.width / 2), Math.round(r.y + Math.min(14, r.height / 2))]; } return null;`);
-    if (thrXY) {
-      await ex(`return window.__jank.arm('thread:open', 'threadOpen', 8000)`);
-      await clickAt(thrXY);
-      recs.push(await ex(`return window.__jank.settle()`));
+      return ex(`return window.__jank.settle()`);
+    })() : null;
+    if (tabRec) { recs.push(tabRec); if (tabRec.ok) await shot('chat-open'); }
+    const openRec = await clickProbe('roomlink', 'thread:open', 'threadOpen');
+    recs.push(openRec);
+    if (openRec.ok) {
+      await shot('thread-open');
       await WAIT(250);
-      const closeXY = await xyOf('#ch-close');
-      if (closeXY) {
-        await ex(`return window.__jank.arm('thread:close', 'threadClosed', 8000)`);
-        await clickAt(closeXY);
-        recs.push(await ex(`return window.__jank.settle()`));
-      }
+      recs.push(await clickProbe('closebtn', 'thread:close', 'threadClosed'));
     }
     recs.push(await ex(`return window.__jank.probeAct('team:switch', 'teamSwitch', 'roomNonEmpty', 8000)`));
     recs.push(await ex(`return window.__jank.probeAct('team:back', 'teamBack', 'roomNonEmpty', 8000)`));
@@ -445,6 +535,7 @@ async function scrollCampaign(reps) {
     }
     await WAIT(300);
     const mid = await ex(`return window.__jank.scrollInfo()`); // captured at the top: prepend grew the DOM
+    if (i === 0) await shot('scroll-up');
     for (let s = 0; s < 40; s++) { // back to the bottom (window shrink redraw)
       await wheelAt(xy, 240);
       await WAIT(16);
@@ -461,16 +552,18 @@ async function scrollCampaign(reps) {
 
 // ---- main --------------------------------------------------------------------------------
 async function main() {
+  const maxLoad = Number(process.env.PERF_MAX_LOAD || 0);
+  if (maxLoad > 0 && LOAD_START[0] > maxLoad) throw new Error(`load1m ${LOAD_START[0].toFixed(1)} > PERF_MAX_LOAD ${maxLoad} — rerun on a quiet machine (5-agent passes want load1m under ~6)`);
   await WAIT(1200);
   const seeded = await seed();
   const bulk = bulkSeed(seeded.dir, seeded.nodes);
-  console.log('[realperf] seeded', JSON.stringify({ nodes: seeded.nodes.length, tasks: seeded.tasks.length, ...bulk }));
+  console.log('[realperf] seeded', JSON.stringify({ nodes: seeded.nodes.length, tasks: AGENTS * TASKS_PER_AGENT, staggerMs: STAGGER_MS, stallMin: STALL_MIN, ...bulk }));
   await ex(`await refresh(); showTab('chat'); await w(400);`);
   const inst = await ex(INSTRUMENT);
   if (!inst || !inst.ok) throw new Error('instrumentation failed: ' + JSON.stringify(inst));
   await phase('warm');
 
-  const working = await waitForAgents();
+  const working = await waitForAgents(seeded);
   console.log(`[realperf] ${working}/${AGENTS} real helpycode agents working`);
   await WAIT(WARM_MS);
 
@@ -515,6 +608,7 @@ async function main() {
       const st = (await ex(`return window.__jank.phaseStats('stream${i}')`)) || {};
       streamSubs.push({ i, wallMs: Date.now() - t0, pushes: PERF_PUSH.length - pushes0, logPushes: PERF_PUSH.slice(pushes0).filter((p) => p.channel === 'log').length, statePushes: PERF_PUSH.slice(pushes0).filter((p) => p.channel === 'state').length, ioCalls: IO.winCalls, ioMs: +(IO.winTotalMs).toFixed(1), ...st });
       IO.winCalls = 0; IO.winTotalMs = 0;
+      if (i === 1) await shot('streaming'); // two subwindows in: comfortably mid-stream
     }
   }
   const streamPushes = PERF_PUSH.slice(pushesAtStreamStart);
@@ -563,6 +657,7 @@ async function main() {
     byName: Object.fromEntries(Object.entries(byName).map(([k, v]) => [k, { n: v.n, perSec: +(v.n / winSecs).toFixed(2), msP50: q(v.ms, 0.5), msP95: q(v.ms, 0.95), msMax: v.ms.length ? Math.max(...v.ms) : 0 }]).sort((a, b) => b[1].n - a[1].n).slice(0, 14)),
   };
   summary.streamSubs = streamSubs;
+  summary.screenshots = fs.readdirSync(OUT).filter((f) => f.endsWith('.png'));
   // Real helpycode runs update the feed via state-push deltas + refresh pulls, not per-line
   // log pushes (log channel stayed 0 while runs completed with essays) — so "live" subwindows
   // are the ones where the chat room actually REDREW.
@@ -590,6 +685,7 @@ async function main() {
   summary.io = { streamWindow: ioWin, eventLoopMs: (() => { const us = (ns) => +((ns || 0) / 1000).toFixed(2); return { p50: us(EL.percentile(50)), p95: us(EL.percentile(95)), max: us(EL.max) }; })(), slowestCallsMs: [...IO.slowest], maxMsPerCall: +IO.maxMs.toFixed(2) };
   summary.env = {
     agents: AGENTS, tasksPerAgent: TASKS_PER_AGENT, reps: REPS, scrollReps: SCROLL_REPS, traceMs: trace.windowMs || TRACE_MS,
+    staggerMs: STAGGER_MS, stallMin: STALL_MIN,
     seeds: { tasks: SEED_TASKS, logs: SEED_LOGS, runs: SEED_RUNS }, cli: HCPATH, model: MODEL,
     platform: `${os.platform()} ${os.arch()} cpus=${os.cpus().length}`,
     load: { start1m: +LOAD_START[0].toFixed(2), end1m: +os.loadavg()[0].toFixed(2), end5m: +os.loadavg()[1].toFixed(2) },
@@ -634,6 +730,7 @@ ${Object.entries(s.frames).map(frow).join('\n')}
 ${Object.entries(s.longTasks).map(lrow).join('\n')}
 
 Scroll passes: ${JSON.stringify((s.scroll || []).map((r) => ({ groups: r.groupsBefore + '→' + r.groupsAfter, grew: r.grew })))}
+Screenshots: ${(s.screenshots || []).join(', ') || '—'}
 Stream (untouched, ${s.streamPushes.liveSubs}/${s.streamPushes.subs} live 10s subwindows): pushes ${s.streamPushes.perSec}/s (state ${s.streamPushes.state}, log ${s.streamPushes.log}, ${s.streamPushes.kbPerSec} KB/s) · room redraws ${s.streaming.roomDrawsPerSec}/s (Σ ${s.streaming.roomDrawMsPerSec} ms/s) · **while-updating fps ${s.streaming.fps}, jank ${s.streaming.jankN} (${s.streaming.jankPerSec}/s, p95 ${s.streaming.jankP95} ms, max ${s.streaming.jankMax} ms)**, long tasks ${s.streaming.longTasks} (${s.streaming.blockedMsPerSec} ms/s blocked, max ${s.streaming.longMaxMs} ms) · main appendLog ${s.streaming.ioBlockedMsPerSec} ms/s · roomEvents rebuild Σ ${s.rebuildMs} ms · refresh n=${s.refresh.n} Σ ${s.refresh.msTotal} ms
 
 ## (c) CPU % by phase

@@ -2926,6 +2926,9 @@ function renderChatBody() {
 }
 // Thread links and ask-human answer forms ride the bubbles; both paths (full render and tail
 // append) wire them through here — property assignment, so re-binding over old nodes is a no-op.
+// The patch paths must pass a LIVE scope (the fragment before its nodes move into the room, or an
+// in-place rebuilt group): a template drained by appendChild/insertBefore matches nothing and
+// silently leaves the fresh bubbles dead (t_c69c2170).
 function bindChatBubbles(scope) {
   scope.querySelectorAll('[data-thread]').forEach((b) => b.onclick = () => { CH.thread = b.dataset.thread; chatSched.force(); });
   scope.querySelectorAll('.bubble.question').forEach((d) => {
@@ -2978,8 +2981,8 @@ function applyChatAppend(ev, plan, workingT) {
   }
   const t = document.createElement('template');
   t.innerHTML = renderGroups(rebuild, workingT);
+  bindChatBubbles(t.content); // bind BEFORE the insert moves the nodes out — a drained template matches nothing
   room.appendChild(t.content);
-  bindChatBubbles(t);
   CH.evFp = keptFps.concat(rebuild.map((e) => Chat.eventFp(e, subRecOf)));
   patchChatAvatars(room, workingT);
   finishAppend(room, ev, win, ob, workingT);
@@ -3033,9 +3036,9 @@ function applyChatPrepend(ev, workingT, prevTop, prevH) {
   if (fragItems.length) {
     const t = document.createElement('template');
     t.innerHTML = renderGroups(fragItems, workingT);
+    bindChatBubbles(t.content); // bind BEFORE the insert moves the nodes out — a drained template matches nothing
     const anchor = ob ? ob.nextSibling : room.firstChild;
     room.insertBefore(t.content, anchor);
-    bindChatBubbles(t);
   }
   CH.evFp = target.map((e) => Chat.eventFp(e, subRecOf));
   CH.domWin = win;
