@@ -203,3 +203,38 @@ test('renderer plan+patch reproduce getAll state from deltas alone (wiki rule 5,
   pump.close(); s.cache.close();
   fs.rmSync(d, { recursive: true, force: true });
 });
+
+// ---- log lines ride the batch (t_d22a6cf2) ----
+
+test('pushLog batches lines in order into ONE logs delta per tick; a logs-only burst still sends', async () => {
+  const { pump, sends } = mkPump();
+  pump.pushLog({ nodeId: 'n1', kind: 'text', text: 'a' });
+  pump.pushLog({ nodeId: 'n1', kind: 'text', text: 'b' });
+  pump.pushLog({ nodeId: 'n1', kind: 'text', text: 'c' });
+  assert.ok(await until(() => sends.length === 1), 'one send for the whole burst');
+  const d = sends[0].deltas;
+  assert.equal(d.length, 1);
+  assert.equal(d[0].type, 'logs');
+  assert.deepEqual(d[0].set.map((l) => l.text), ['a', 'b', 'c']); // append-only: order preserved, no coalescing
+  assert.equal(sends[0].seq, 1); assert.equal(sends[0].prev, 0); // logs alone still join the seq chain
+  pump.close();
+});
+
+test('log lines ride along with task deltas in the same batch', async () => {
+  const { pump, cache, sends } = mkPump();
+  cache.emit('change', { section: 'task', id: 't1', type: 'put', seq: 1, data: { id: 't1' } });
+  pump.pushLog({ nodeId: 'n1', kind: 'text', text: 'hi' });
+  assert.ok(await until(() => sends.length === 1));
+  assert.deepEqual(sends[0].deltas.map((d) => d.type), ['task', 'logs']);
+  pump.close();
+});
+
+test('close() drops buffered log lines and pushLog after close is a no-op', async () => {
+  const { pump, sends } = mkPump();
+  pump.pushLog({ nodeId: 'n1', kind: 'text', text: 'x' });
+  pump.close();
+  pump.pushLog({ nodeId: 'n1', kind: 'text', text: 'y' });
+  await sleep(40);
+  assert.equal(sends.length, 0);
+  assert.equal(pump.logBuf.length, 0);
+});

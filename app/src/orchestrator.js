@@ -356,10 +356,12 @@ class Orchestrator extends EventEmitter {
     const sig = this.logSig(); const size = Number(sig.split(':')[0]) || 0;
     let c = this._logTail;
     if (!c || c.sig !== sig) {
-      // Growth is normally a pure append; the store's trim rewrite (logs over the size cap) can also
-      // leave a bigger file, so confirm the head is untouched before trusting the incremental read.
-      let grew = c && size > c.size && sig && this._logHead() === c.head;
-      let entries;
+      // Growth is normally a pure append; rotation (or an external rewrite) can also shrink the
+      // file, so confirm the head is untouched before trusting the incremental read. A previous
+      // build that folded buffered lines into entries disqualifies it too: those lines were past
+      // c.size, so the byte delta would read them a second time once flushed.
+      let grew = c && !(c.pendingLen > 0) && size > c.size && sig && this._logHead() === c.head;
+      let entries; let folded;
       if (grew) {
         try {
           const fd = fs.openSync(this.store.logFile(), 'r');
@@ -367,13 +369,19 @@ class Orchestrator extends EventEmitter {
             const buf = Buffer.alloc(size - c.size);
             fs.readSync(fd, buf, 0, buf.length, c.size);
             entries = c.entries.concat(C.parseLogs(buf.toString('utf8'), Infinity));
+            folded = 0; // c had no folded pending: entries are exactly the c.size disk bytes
           } finally { fs.closeSync(fd); }
-        } catch { entries = this.store.readLogs(Infinity); }
-      } else { try { entries = this.store.readLogs(Infinity); } catch { entries = []; } }
+        } catch { entries = this.store.readLogs(Infinity); folded = this.store.pendingLogLines().length; }
+      } else { try { entries = this.store.readLogs(Infinity); } catch { entries = []; } folded = this.store.pendingLogLines().length; } // readLogs already merges pending
       if (entries.length > C.LOG_CAP) entries = entries.slice(-C.LOG_CAP);
-      c = this._logTail = { sig, size, head: this._logHead(), entries };
+      c = this._logTail = { sig, size, head: this._logHead(), entries, pendingLen: folded };
     }
-    return this._memoBy('logEntries|' + limit, sig + '|' + this.teamsSigOf(), () => TL.logEntries(c.entries.slice(-(limit ?? Infinity)), this.nodeTeams()));
+    // Buffered (not-yet-flushed) lines ride on top of the disk-side tail (t_d22a6cf2): appends are
+    // visible to snapshot() immediately, without a re-read; the cursor hands over only the lines
+    // that arrived since, and the flush's sig change resets it via the rebuild above.
+    const pending = this.store.pendingLogLines().slice(c.pendingLen || 0);
+    c.pendingLen = (c.pendingLen || 0) + pending.length;
+    return this._memoBy('logEntries|' + limit, sig + '|' + c.pendingLen + '|' + this.teamsSigOf(), () => TL.logEntries(c.entries.concat(pending).slice(-(limit ?? Infinity)), this.nodeTeams()));
   }
   _logHead() {
     try {

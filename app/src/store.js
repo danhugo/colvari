@@ -6,6 +6,7 @@
 // Private stores (messages, inbox, runs, settings, teams) deliberately stay OUTSIDE .squad/ so
 // direct reads of the board tree never expose DMs.
 const fs = require('fs');
+const fsp = fs.promises;
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
@@ -82,6 +83,36 @@ function sanitizeAttachments(list) {
   if (!Array.isArray(list) || !list.length) return null;
   const out = list.filter((a) => a && a.path).map((a) => pick({ path: String(a.path), name: String(a.name || ''), mime: String(a.mime || ''), size: Number(a.size) || 0 }, ATTACHMENT_FIELDS));
   return out.length ? out : null;
+}
+
+// ---- async buffered log appends (t_d22a6cf2, wiki change 1) ----
+// appendLog used to appendFileSync + statSync EVERY line and, past 3MB, read-and-rewrite the whole
+// file under the lock — all on the calling thread, which in the app is the Electron main process,
+// so every IPC reply queued behind log writes while agents streamed. Lines now go into a per-dir
+// buffer (shared by every Store instance in the process, so per-process ordering is preserved) that
+// one async appendFile flushes per batch; the file size is tracked in memory instead of a stat per
+// line, and rotation (logs.jsonl -> logs.jsonl.1) replaces the read-and-rewrite trim. The flush is
+// armed with setImmediate (not a timer): a sync burst coalesces into exactly one append at the end
+// of the tick, no polling timer handle is ever created, and cross-process visibility lags by a tick
+// at most. Crash risk: a hard kill loses the last flush window of log lines — acceptable for a
+// diagnostic log (task files keep their sync writes). A normal exit flushes synchronously instead.
+const LOG_LIMITS = { flushBytes: 256 * 1024, rotateBytes: 3e6 }; // one object so tests can shrink them (same pattern as LOCK); not runtime configuration
+const LOG_BUFS = new Map(); // resolved dir -> { dir, store, lines, flying, bytes, size, armed, flushing }
+function logBufState(dir, store) {
+  const key = path.resolve(dir);
+  let st = LOG_BUFS.get(key);
+  if (!st) { st = { dir: key, store, lines: [], flying: [], bytes: 0, size: null, armed: false, flushing: false }; LOG_BUFS.set(key, st); }
+  return st;
+}
+let _logExitHooked = false;
+function hookLogExitFlush() {
+  if (_logExitHooked) return; _logExitHooked = true;
+  process.on('exit', () => {
+    for (const st of LOG_BUFS.values()) {
+      const lines = st.flying.concat(st.lines); st.flying = []; st.lines = []; st.bytes = 0;
+      if (lines.length) { try { fs.appendFileSync(path.join(st.dir, 'logs.jsonl'), lines.join('')); } catch {} }
+    }
+  });
 }
 
 class Store {
@@ -1044,23 +1075,108 @@ class Store {
   }
   clearRuns() { this.update('runs', { runs: [] }, (d) => { d.runs = []; }); }
 
-  // ---- persisted orchestrator log (logs.jsonl, trimmed to the last LOG_CAP lines) ----
+  // ---- persisted orchestrator log (logs.jsonl, rotated to logs.jsonl.1 past LOG_LIMITS.rotateBytes) ----
+  // O(1) per call: queue the line and arm the tick-end flush (see the buffer note at the top).
   appendLog(l) {
-    const f = path.join(this.dir, 'logs.jsonl');
-    fs.appendFileSync(f, C.logLine(l) + '\n');
-    try { if (fs.statSync(f).size > 3e6) { const keep = C.parseLogs(fs.readFileSync(f, 'utf8'), C.LOG_CAP); this.withLock(() => fs.writeFileSync(f, keep.map(C.logLine).join('\n') + '\n')); } } catch {}
+    hookLogExitFlush();
+    const st = logBufState(this.dir, this);
+    const line = C.logLine(l) + '\n';
+    st.lines.push(line);
+    st.bytes += Buffer.byteLength(line);
+    if (st.bytes >= LOG_LIMITS.flushBytes) this._flushLogs();
+    else if (!st.armed && !st.flushing) {
+      st.armed = true;
+      setImmediate(() => { st.armed = false; this._flushLogs(); });
+    }
+  }
+  // Lines accepted but not yet confirmed on disk, oldest first — in-flight (write pending) ones
+  // included, so readers in THIS process (orchestrator incremental logs()) never see a gap between
+  // "left the buffer" and "visible in the file". Read-only; the flush consumes the queues itself.
+  pendingLogLines() {
+    const st = LOG_BUFS.get(path.resolve(this.dir));
+    if (!st || (!st.flying.length && !st.lines.length)) return [];
+    try { return st.flying.concat(st.lines).map((s) => JSON.parse(s)); } catch { return []; }
+  }
+  // One async append per batch. A batch in flight never blocks appendLog: lines landing during the
+  // await stay in st.lines for the tail re-flush. `flushing` also keeps two appends from racing
+  // into an out-of-order file. Errors requeue the batch (front, order preserved) and retry on the
+  // next flush — a failing disk must not take down the caller.
+  _flushLogs() {
+    const st = logBufState(this.dir, this);
+    if (st.flushing) return;
+    if (!st.lines.length) return;
+    st.flushing = true;
+    st.flying = st.lines.splice(0); // handed to the write, still visible to readers until confirmed
+    st.bytes = 0;
+    const data = st.flying.join('');
+    (async () => {
+      try {
+        if (st.size == null) { try { st.size = (await fsp.stat(this.logFile())).size; } catch { st.size = 0; } }
+        await fsp.appendFile(this.logFile(), data);
+        st.flying = []; // confirmed on disk: readers switch to the file (sig moved with it)
+        st.size += Buffer.byteLength(data);
+        if (st.size >= LOG_LIMITS.rotateBytes) {
+          // Our in-memory size under-counts what other processes append, so confirm against the
+          // real file; a foreign rotation already shrank it. The rename itself goes under the lock.
+          try { st.size = (await fsp.stat(this.logFile())).size; } catch { st.size = 0; }
+          if (st.size >= LOG_LIMITS.rotateBytes) { this._rotateLogs(); st.size = 0; }
+        }
+      } catch {
+        st.size = null; // unknown again: next flush re-stats
+        st.lines = st.flying.concat(st.lines); // put the batch back, order preserved, retry next flush
+        st.flying = [];
+        st.bytes = Buffer.byteLength(st.lines.join(''));
+      } finally {
+        st.flushing = false;
+        if (st.lines.length) this._flushLogs();
+      }
+    })();
+  }
+  // Rotation instead of the old read-and-rewrite trim: the full file becomes the single backup and
+  // the live file starts empty. Under the lock because every Store process may rotate; the fresh
+  // stat inside decides (a foreign rotation already reset the size).
+  _rotateLogs() {
+    this.withLock(() => {
+      let size = 0;
+      try { size = fs.statSync(this.logFile()).size; } catch { return; }
+      if (size < LOG_LIMITS.rotateBytes) return;
+      try { fs.rmSync(this.logFile() + '.1', { force: true }); } catch {}
+      try { fs.renameSync(this.logFile(), this.logFile() + '.1'); } catch {}
+    });
   }
   // level (info/warn/error, derived from kind via TL.levelOf) lets the UI default its filter to warn+error.
-  // Tails logs.jsonl instead of reading it whole: reads backward from EOF in growing windows until
-  // `limit` complete lines are available, so a multi-MB log costs one small read, not a full parse.
+  // Tail reads: backward from EOF in growing windows until `limit` complete lines are available, so a
+  // multi-MB log costs one small read, not a full parse. The rotated backup tops up a short read (the
+  // live file is empty right after a rotation), and this process's queued + in-flight lines are merged
+  // last, so append -> read stays coherent within a process without waiting for the flush. When the
+  // in-flight write has already landed at the file tail (write visible, splice pending) it is counted
+  // once — dropped from the disk side, read from the buffer.
   readLogs(limit = 2000) {
     try {
-      const f = this.logFile(); const st = fs.statSync(f);
-      let bytes = Math.min(st.size, Math.max(256 * 1024, limit * 300));
+      let out = this._readLogTail(this.logFile(), limit);
+      if (out.length < limit) out = this._readLogTail(this.logFile() + '.1', limit === Infinity ? Infinity : limit - out.length).concat(out);
+      const st = LOG_BUFS.get(path.resolve(this.dir));
+      if (st) {
+        const flying = st.flying;
+        if (flying.length && out.length >= flying.length) {
+          const tail = out.slice(-flying.length);
+          if (flying.every((l, i) => JSON.stringify(tail[i]) === l.replace(/\n$/, ''))) out = out.slice(0, out.length - flying.length);
+        }
+        if (flying.length || st.lines.length) {
+          try { out = out.concat(flying.concat(st.lines).map((s) => JSON.parse(s))); } catch {}
+        }
+      }
+      return out.slice(-limit).map((l) => ({ ...l, level: TL.levelOf(l.kind) }));
+    } catch { return []; }
+  }
+  _readLogTail(file, limit) {
+    try {
+      const st = fs.statSync(file);
+      let bytes = Math.min(st.size, limit === Infinity ? st.size : Math.max(256 * 1024, limit * 300));
       let out = [];
       for (;;) {
         const buf = Buffer.alloc(bytes);
-        const fd = fs.openSync(f, 'r');
+        const fd = fs.openSync(file, 'r');
         try { fs.readSync(fd, buf, 0, bytes, st.size - bytes); } finally { fs.closeSync(fd); }
         let text = buf.toString('utf8');
         if (bytes < st.size) text = text.slice(text.indexOf('\n') + 1); // drop the partial first line
@@ -1068,10 +1184,15 @@ class Store {
         if (out.length >= limit || bytes >= st.size) break;
         bytes = Math.min(st.size, bytes * 4);
       }
-      return out.map((l) => ({ ...l, level: TL.levelOf(l.kind) }));
+      return out;
     } catch { return []; }
   }
-  clearLogs() { try { fs.unlinkSync(path.join(this.dir, 'logs.jsonl')); } catch {} }
+  clearLogs() {
+    const st = LOG_BUFS.get(path.resolve(this.dir));
+    if (st) { st.lines = []; st.flying = []; st.bytes = 0; st.size = 0; }
+    try { fs.unlinkSync(this.logFile()); } catch {}
+    try { fs.unlinkSync(this.logFile() + '.1'); } catch {}
+  }
 
   // ---- sessions: claude sessions grouped from persisted runs (see usage.js newRun) ----
   // One entry per distinct sessionId, newest first: [{sessionId, nodeId, agent, taskId, task, startedAt, endedAt, model, models, runs, reportedCostUsd}].
@@ -1123,4 +1244,4 @@ class Store {
   deletePreset(name) { return this.saveSettings({ rolePresets: this.getSettings().rolePresets.filter((x) => x.name !== name) }).rolePresets; }
 }
 
-module.exports = { Store, ROLES, STATUSES, PRIORITIES: C.PRIORITIES, defaultProjectDir, pickChanged, LOCK, lockHolderDead };
+module.exports = { Store, ROLES, STATUSES, PRIORITIES: C.PRIORITIES, defaultProjectDir, pickChanged, LOCK, lockHolderDead, LOG_LIMITS };

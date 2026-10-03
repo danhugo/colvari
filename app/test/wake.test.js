@@ -189,8 +189,8 @@ test('wake: nudge wakes respect the per-agent gap — deferred inside it, fired 
   o.nudgeIdle();
   assert.equal(nudges().length, 0, 'no nudge message while inside the gap');
   assert.ok(!o.nudged.get(pm.id + '|idle'), 'a deferred nudge must not consume its debounce key');
-  const logs = fs.readFileSync(s.logFile(), 'utf8');
-  assert.match(logs, /nudge deferred for another \d+min/, 'the deferral is logged');
+  // Log writes are buffered (t_d22a6cf2): read through the store, which merges not-yet-flushed lines.
+  assert.match(s.readLogs(50).map((l) => l.text).join('\n'), /nudge deferred for another \d+min/, 'the deferral is logged');
 
   await sleep(WAKE.MIN_GAP_MS + 60);
   o.nudgeIdle(); // interval passed: the same (unconsumed) condition now fires
