@@ -1934,6 +1934,10 @@ const doneCards = (list) => { const all = list.filter((t) => t.status === 'done'
 //                       then flip done to retry the merge
 //   done              — merged; folded by default to the 20 most recently updated (see doneCards)
 const boardCols = ['todo', 'in_progress', 'waiting_for_human', 'review', 'merge_conflict', 'done'];
+// A task whose status is not one of the six (the store gained a status without a matching column,
+// or a task file lost its status) must neither crash the render nor silently vanish: colStOf
+// buckets it into an "other" column rendered after done.
+const colStOf = (t) => (boardCols.includes(t.status) ? t.status : 'other');
 const cardSigs = new WeakMap(); // card element -> html it was built from
 const tplEl = (html) => { const t = document.createElement('template'); t.innerHTML = html.trim(); return t.content.firstElementChild; };
 const colHead = (st, total) => st === 'done'
@@ -1983,9 +1987,10 @@ const cardHtmlCached = (t, envKey) => {
 };
 function patchBoardColumns(tasks) {
   const colsEl = $('#columns');
-  const envKey = [agentStamp(), JSON.stringify(S.orch.running || null), rst.scheduledAfter || '', rst.gating.join(), upd.devMode !== false, sel.boardTeam || '', S.tasks.length, S.tasks.map((x) => x.status[0]).join(''), S.allNodes.map((n) => n.name).join()].join('|');
-  boardCols.forEach((st, ci) => {
-    const colTasks = tasks.filter((t) => t.status === st); // one pass serves the header count and the card list
+  const envKey = [agentStamp(), JSON.stringify(S.orch.running || null), rst.scheduledAfter || '', rst.gating.join(), upd.devMode !== false, sel.boardTeam || '', S.tasks.length, S.tasks.map((x) => colStOf(x)[0]).join(''), S.allNodes.map((n) => n.name).join()].join('|');
+  const strays = tasks.filter((t) => !boardCols.includes(t.status)); // collected once; the "other" column reuses them
+  (strays.length ? boardCols.concat('other') : boardCols).forEach((st, ci) => {
+    const colTasks = st === 'other' ? strays : tasks.filter((t) => t.status === st); // one pass serves the header count and the card list
     const total = colTasks.length;
     const fold = st === 'done' && !doneOpen;
     let col = colsEl.querySelector(':scope > .col.' + st);
