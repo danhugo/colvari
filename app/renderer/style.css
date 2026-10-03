@@ -47,7 +47,7 @@ main { flex:1; overflow:hidden; } .tab { display:none; height:100%; padding:10px
 .panel label { display:block; margin:8px 0 2px; color:var(--muted); } .panel input, .panel select, .panel textarea { width:100%; }
 /* All six statuses share one row, Trello-style (t_1c907493) — done and merge_conflict used to wrap
    onto a second row of orphan columns. Narrow windows scroll horizontally instead. */
-#columns { flex:1; display:grid; grid-template-columns:repeat(6,minmax(175px,1fr)); gap:8px; overflow:auto; } .col { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:8px; min-height:0; }
+#columns { flex:1; display:grid; grid-template-columns:repeat(6,minmax(175px,1fr)); grid-template-rows:minmax(0,1fr); gap:8px; overflow:auto; } .col { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:8px; min-height:0; overflow-y:auto; }
 .col h3 { margin:0 0 8px; font-size:12px; text-transform:uppercase; color:var(--muted); white-space:nowrap; } .card { border:1px solid var(--line); border-radius:6px; padding:7px; margin-bottom:6px; cursor:pointer; background:var(--bg); } .card.sel { border-color:var(--acc); }
 .card small { color:var(--muted); display:block; } .comment { border-left:3px solid var(--line); padding:2px 8px; margin:6px 0; white-space:pre-wrap; }
 .wk-toolbar { margin-bottom:6px; } .wk-toolbar button { width:100%; } #wk-search { width:100%; margin-bottom:8px; }
