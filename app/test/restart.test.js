@@ -319,6 +319,66 @@ test('orchestrator: human pill — restartNow fires when idle; cancel disarms an
   assert.ok(up.calls.includes('cancel'), 'a running flow is aborted too');
 });
 
+// t_f6d37ca4: the restart-now IPC answers {status:'noop'|'scheduled'|'error', message} instead of
+// returning state. A target the running build already contains (0 commits behind, from git) is a
+// noop: the stale pending state is cleared and pushed, and no schedule arms — its dispatch gate
+// would freeze the team for a restart that can never happen.
+test('orchestrator: restartNow at the running build sha returns {status:"noop"} and clears the stale pending state', () => {
+  const d = tmp('squad-restart-');
+  const repo = tmp('squad-restart-repo-');
+  execSync(`git -C "${repo}" init -q`);
+  execSync(`git -C "${repo}" -c user.email=t@t -c user.name=t commit --allow-empty -qm boot`);
+  const sha = execSync(`git -C "${repo}" rev-parse HEAD`).toString().trim();
+  const s = new Store(path.join(d, 'p'));
+  s.addNode({ name: 'PM', role: 'PM' });
+  const o = new Orchestrator(s, { repoDir: repo }); // records meta.buildSha = sha
+  clearInterval(o._wakeTimer); clearInterval(o._stallTimer); clearInterval(o._tickTimer); clearInterval(o._restartTimer);
+  o.wakeRun = async () => {};
+  s.setRestartPending({ scheduledNow: true, count: 21, sha });
+  let pushed = null;
+  o.on('restart-state', (r) => { pushed = r; });
+  const r = o.restartNow();
+  assert.equal(r.status, 'noop');
+  assert.match(r.message, /already running/);
+  assert.equal(s.restartPending(), null, 'the stale tally and the armed schedule are gone');
+  assert.ok(pushed && pushed.pendingCount === 0, 'the cleared state is pushed to the renderer');
+  assert.ok(!o._restartGate, 'the dispatch gate never armed');
+});
+
+test('orchestrator: restartNow with a genuinely pending target returns {status:"scheduled"} and arms', () => {
+  const d = tmp('squad-restart-');
+  const repo = tmp('squad-restart-repo-');
+  execSync(`git -C "${repo}" init -q`);
+  execSync(`git -C "${repo}" -c user.email=t@t -c user.name=t commit --allow-empty -qm boot`);
+  const s = new Store(path.join(d, 'p'));
+  s.addNode({ name: 'PM', role: 'PM' });
+  const o = new Orchestrator(s, { repoDir: repo }); // buildSha = the boot commit
+  clearInterval(o._wakeTimer); clearInterval(o._stallTimer); clearInterval(o._tickTimer); clearInterval(o._restartTimer);
+  o.wakeRun = async () => {};
+  execSync(`git -C "${repo}" -c user.email=t@t -c user.name=t commit --allow-empty -qm two`);
+  const sha2 = execSync(`git -C "${repo}" rev-parse HEAD`).toString().trim();
+  s.setRestartPending({ count: 2, sha: sha2 });
+  const up = fakeUpdater();
+  o.updater = up;
+  o.running = false;
+  const r = o.restartNow();
+  assert.equal(r.status, 'scheduled');
+  assert.ok(s.restartPending().scheduledNow, 'the restart is armed');
+  assert.ok(up.calls.includes('manual restart'), 'an idle board fires immediately');
+  assert.ok(o.restartState().pendingCount === 2, 'the real pending count stays');
+});
+
+test('orchestrator: restartNow in a packaged build returns {status:"error"}', () => {
+  const s = new Store(path.join(tmp('squad-restart-'), 'p'));
+  s.addNode({ name: 'PM', role: 'PM' });
+  const o = new Orchestrator(s, { devMode: false });
+  clearInterval(o._wakeTimer); clearInterval(o._stallTimer); clearInterval(o._tickTimer); clearInterval(o._restartTimer);
+  const r = o.restartNow();
+  assert.equal(r.status, 'error');
+  assert.ok(r.message);
+  assert.equal(s.restartPending(), null, 'nothing armed');
+});
+
 test('orchestrator: the fired schedule is consumed only on the next boot (Cato #4)', () => {
   const d = tmp('squad-restart-');
   const { s } = setup(d);

@@ -126,6 +126,9 @@ function orchFor(pid) {
     // Scheduled restarts fire through the watcher's drain/test/relaunch flow (watcherFor lazily
     // creates it; in non-dev builds it answers the no-op stub and the schedule just stays armed).
     o.updater = watcherFor(pid);
+    // The watcher clears pending restart state on a same-commit stand-down; re-push so the
+    // renderer's bell row drops immediately instead of waiting for the next sweep (t_f6d37ca4).
+    if (o.updater && typeof o.updater.on === 'function') o.updater.on('pending-cleared', () => { const oc = orchs.get(pid); if (oc) oc.pushRestartState(); });
     bootRecovery(pid); // heartbeat check + orphan reap + interrupted-task comments (once per project)
     orchs.set(pid, o);
     pumpFor(pid).attachOrch(o); // the pump's orch deltas feed the same 'state' payload (t_39bf39ac)
@@ -2902,7 +2905,7 @@ const api = {
   // Scheduled restarts (plan t_42f310cf item 1): pull state + the pill's two actions (t_8c795573);
   // live updates arrive on the 'restart-state' push channel.
   getRestartState: (c) => orchFor(c.p).restartState(),
-  restartNow: (c) => { orchFor(c.p).restartNow(); return orchFor(c.p).restartState(); },
+  restartNow: (c) => orchFor(c.p).restartNow(), // explicit result: {status:'noop'|'scheduled'|'error', message} (t_f6d37ca4)
   cancelRestart: (c) => { orchFor(c.p).cancelRestart(); return orchFor(c.p).restartState(); },
   // Runtime breaker resume (t_419062e2): clears the unavailable state and re-dispatches the queued
   // tasks. Throws the reason on failure — the renderer shows it inline in the banner.

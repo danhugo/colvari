@@ -1204,6 +1204,10 @@ class Orchestrator extends EventEmitter {
     this._restartPushed = k;
     this.emit('restart-state', this.restartState());
   }
+  // Public push for out-of-band state changes: the watcher clears pending restart state on a
+  // stand-down (main.js relays its 'pending-cleared' event here) so the renderer's bell row
+  // drops immediately instead of waiting for the next sweep.
+  pushRestartState() { this._pushRestartState(); }
 
   // Per tick while a Run is active, and (via _restartTimer) every IDLE_SWEEP_MS while idle: cap
   // auto-schedule, anchor failover, dispatch gating, and the fire itself. Eligible means armed
@@ -1273,16 +1277,32 @@ class Orchestrator extends EventEmitter {
   // Human escape hatch (Uma's pill, Cato t_42f310cf #7): arm a restart-now — in-flight tasks
   // finish, then the watcher's flow takes over. Works while stopped too (no tick loop then): an
   // idle board fires immediately; a board with lingering procs fires from the next start()'s tick.
+  // Returns an explicit result for the IPC (t_f6d37ca4): {status:'noop'|'scheduled'|'error',
+  // message}. noop = the pending target is the commit already running (0 commits behind, computed
+  // from git) — the flow would stand down anyway, so say so, clear the stale state and push,
+  // instead of arming a schedule whose gate freezes dispatch for a restart that cannot happen.
   restartNow() {
     if (this.devMode === false) {
       this.log(null, 'system', 'restart: unavailable in a packaged build — request ignored');
-      return;
+      return { status: 'error', message: 'restart scheduling is unavailable in a packaged build' };
+    }
+    const meta = this.store.meta() || {};
+    const rp = meta.restartPending || null;
+    const behind = rp && rp.sha && meta.buildSha && this.repoDir
+      ? WT.commitsBehind(this.repoDir, meta.buildSha, rp.sha)
+      : null;
+    if (behind === 0) {
+      this.store.clearRestartPending();
+      this.log(null, 'system', `restart: nothing to restart onto — ${String(rp.sha).slice(0, 7)} is the commit already running; cleared the stale pending state`);
+      this._pushRestartState();
+      return { status: 'noop', message: `already running ${String(rp.sha).slice(0, 7)} — nothing to restart onto` };
     }
     this.store.setRestartPending({ scheduledNow: true });
     this.log(null, 'system', 'restart: manual restart armed — in-flight tasks finish first');
     if (this.running) this.sweepRestart();
     else if (this.procs.size === 0) this._fireRestart('manual restart');
     this._pushRestartState();
+    return { status: 'scheduled', message: this.procs.size ? 'armed — in-flight tasks finish first' : 'scheduled — agents drain, tests run, then the app relaunches' };
   }
 
   // Cancel the armed schedule (the pending count stays). A restart flow already in flight is

@@ -206,16 +206,35 @@ class UpdateWatcher extends EventEmitter {
   }
   emitStatus() { this.emit('status', this.status()); }
   setPhase(phase) { this.phase = phase; this.setPaused(phase !== 'idle'); this.emitStatus(); }
-  // A stand-down (nothing to restart onto) never relaunches, but the orchestrator holds its
-  // dispatch gate until the relaunch — lift it here by disarming any armed/fired schedule, the
-  // way cancelRestart does (the pending count is kept). Best-effort: test stores without restart
-  // state are skipped.
-  _disarmScheduleIfAny() {
+  // Commits the running build (bootSha) still lacks up to the pending restart's target, computed
+  // from git — the same "running..target" count the merge site stores. Null when it cannot be
+  // computed (no boot sha, no target, git failure): never guess 0, never clear on a guess.
+  _pendingBehind(rp) {
+    if (!rp || !this.bootSha) return null;
+    const target = rp.sha || this.toSha;
+    if (!target) return null;
+    const r = this.git(['rev-list', '--count', `${this.bootSha}..${target}`]);
+    return r.code === 0 ? (Number(String(r.out).trim()) || 0) : null;
+  }
+  // A stand-down (nothing to restart onto) never relaunches, but it must release what the restart
+  // held: the orchestrator keeps its dispatch gate while a schedule is armed, so disarm any
+  // armed/fired schedule the way cancelRestart does — and when git confirms the running build
+  // already contains the pending target (count 0), the tally itself is stale: clear it, or it
+  // holds the bell row up forever and the cap re-arms restarts onto live code (t_7426095a,
+  // t_f6d37ca4). Best-effort: test stores without restart state are skipped.
+  _standDown() {
     try {
       const rp = this.store.restartPending && this.store.restartPending();
-      if (rp && (rp.scheduledNow || rp.afterTaskId || rp.firedAt)) {
+      if (!rp) return;
+      if (rp.scheduledNow || rp.afterTaskId || rp.firedAt) {
         this.store.setRestartPending({ scheduledNow: false, afterTaskId: null, firedAt: null, firedCount: null });
-        this._log('system', 'self-update: stood-down restart released the dispatch schedule (the pending count stays).');
+        this._log('system', 'self-update: stood-down restart released the dispatch schedule.');
+      }
+      if (this._pendingBehind(rp) === 0) {
+        this.store.clearRestartPending();
+        this._log('system', 'self-update: cleared the pending state — the running build already has the pending target (0 commits behind).');
+        this.emit('pending-cleared');
+        this.emitStatus();
       }
     } catch {}
   }
@@ -278,7 +297,7 @@ class UpdateWatcher extends EventEmitter {
     if (this.bootSha && s.to === this.bootSha) {
       this._deferred = null;
       this._log('system', `self-update: ${reason} skipped — target ${s.to.slice(0, 7)} is the commit already running; nothing to restart onto.`);
-      this._disarmScheduleIfAny();
+      this._standDown();
       this.emitStatus();
       return;
     }
@@ -329,7 +348,7 @@ class UpdateWatcher extends EventEmitter {
       if (this.bootSha && String(to) === String(this.bootSha)) {
         this._log('system', `self-update: target ${String(to).slice(0, 7)} is the commit already running — nothing to restart onto; standing down.`);
         this._busy = false;
-        this._disarmScheduleIfAny();
+        this._standDown();
         this.setPhase('idle');
         return;
       }
@@ -386,7 +405,7 @@ class UpdateWatcher extends EventEmitter {
       if (this.bootSha && String(to) === String(this.bootSha)) {
         this._log('system', `self-update: coalesced target is the running commit ${String(to).slice(0, 7)}; standing down — no restart.`);
         this._busy = false;
-        this._disarmScheduleIfAny();
+        this._standDown();
         this.setPhase('idle');
         return;
       }
