@@ -517,21 +517,26 @@ function renderHeader() {
   const rs = o.runState || (o.running ? { state: 'running' } : { state: 'stopped', reason: 'not started' });
   const todos = S.tasks.filter((t) => t.status === 'todo').length;
   const pill = $('#runstate');
+  // Guarded writes (t_h0a1c2f9): these pills are rewritten on every renderAll tick while agents
+  // stream; a same-value textContent assignment still dirties the header's layout, and the
+  // layout-shift probe pinned recurring shifts on exactly these chips. Write only on change.
+  const setText = (el, text) => { if (el.textContent !== text) el.textContent = text; };
+  const setTitle = (el, text) => { if (el.title !== text) el.title = text; };
   if (rs.state === 'running') {
-    pill.textContent = `Running (${par || 1})`; // short status chip (t_db67859d): full wording in the tooltip
-    pill.title = `running · ${par > 1 ? `${par} in parallel` : `${par || 1} agent`} · ${o.runs || 0} runs`;
+    setText(pill, `Running (${par || 1})`); // short status chip (t_db67859d): full wording in the tooltip
+    setTitle(pill, `running · ${par > 1 ? `${par} in parallel` : `${par || 1} agent`} · ${o.runs || 0} runs`);
   } else if (rs.state === 'idle') {
-    pill.textContent = 'Idle (nothing to do)';
-    pill.title = `idle · ${rs.reason || 'waiting for todo tasks'} · ${o.runs || 0} runs`;
+    setText(pill, 'Idle (nothing to do)');
+    setTitle(pill, `idle · ${rs.reason || 'waiting for todo tasks'} · ${o.runs || 0} runs`);
   } else {
-    pill.textContent = todos ? `Stopped (${todos} todo)` : 'Stopped';
-    pill.title = `stopped — ${rs.reason || 'scheduler off'}${todos ? ` · ${todos} todo waiting` : ''} · Run (or ⌘⏎) starts the team`;
+    setText(pill, todos ? `Stopped (${todos} todo)` : 'Stopped');
+    setTitle(pill, `stopped — ${rs.reason || 'scheduler off'}${todos ? ` · ${todos} todo waiting` : ''} · Run (or ⌘⏎) starts the team`);
   }
   pill.classList.toggle('on', rs.state === 'running');
   pill.classList.toggle('halt', rs.state === 'stopped' && todos > 0);
   $('#stop').classList.toggle('hidden', rs.state === 'stopped'); // Stop stays in the bar while the run is on — running or idle (⌘. always works)
   $('#runbtn').classList.toggle('hidden', rs.state !== 'stopped'); // the visible way back while the scheduler is off
-  $('#runbtn').textContent = rs.state === 'stopped' && todos ? `${todos} task${todos === 1 ? '' : 's'} waiting — Run` : 'Run'; // the waiting count rides the button (t_bd295f0e)
+  setText($('#runbtn'), rs.state === 'stopped' && todos ? `${todos} task${todos === 1 ? '' : 's'} waiting — Run` : 'Run'); // the waiting count rides the button (t_bd295f0e)
   // Money pill: the app's single cost total — API-eq over ALL recorded runs, the same per-run ledger
   // sum the Usage tab's grand total shows, so pill and tab can never disagree (t_b1115e48). The
   // billed vs subscription split stays in the tooltip: subscription usage is covered by the plan,
@@ -542,14 +547,15 @@ function renderHeader() {
       for (const e of runLedger(r)) { const rc = e.costUsd || 0; total += rc; if (isSub) sub += rc; else billed += rc; } }
   } else { billed = o.billedCost || 0; sub = o.subCost || 0; total = billed + sub; }
   const c = $('#totalcost');
-  c.textContent = total > 0 ? `API-eq $${total.toFixed(2)}` : 'no cost yet';
+  const costText = total > 0 ? `API-eq $${total.toFixed(2)}` : 'no cost yet';
+  setText(c, costText);
   // An empty placeholder pill is dead weight in an already tight header — hide it until it has
   // something to say (the meter chips need every pixel at 1400px).
   c.classList.toggle('hidden', !(total > 0));
   c.classList.toggle('quiet', !(billed > 0));
-  c.title = total > 0
+  setTitle(c, total > 0
     ? `API-eq (API-equivalent) $${total.toFixed(4)} — what all recorded usage would cost at API list prices; the same single total the Usage tab's grand total shows. Actually billed per token (API key / proxy / cloud): $${billed.toFixed(4)}. Covered by subscription, not billed per token: $${sub.toFixed(4)}. "est" marks list-price estimates for keys that report no cost themselves.`
-    : 'No recorded usage yet.';
+    : 'No recorded usage yet.');
   renderWatchPill();
 }
 // ---------- worktree disk pill (t_fe10d3e0; IPC by Devon, t_9b662983) ----------
@@ -569,10 +575,12 @@ function renderWtDisk() {
   const over = wtDisk.count > WT_DISK_CAP.count || wtDisk.bytes > WT_DISK_CAP.bytes;
   c.classList.remove('hidden');
   c.classList.toggle('wtwarn', over);
-  c.textContent = `${over ? '⚠ ' : ''}${wtDisk.count} wt · ${fmtWtBytes(wtDisk.bytes)}`;
-  c.title = over
+  const text = `${over ? '⚠ ' : ''}${wtDisk.count} wt · ${fmtWtBytes(wtDisk.bytes)}`;
+  if (c.textContent !== text) c.textContent = text; // 30s poll: skip the write (and the header reflow) when the number didn't move
+  const title = over
     ? `Worktrees above cap (>20 or >2GB): ${wtDisk.count} worktrees, ${fmtWtBytes(wtDisk.bytes)} in .squad/worktrees. Done+merged tasks are removed on merge; retained ones are flagged on their task.`
     : `.squad/worktrees: ${wtDisk.count} worktree${wtDisk.count === 1 ? '' : 's'}, ${fmtWtBytes(wtDisk.bytes)} of disk.`;
+  if (c.title !== title) c.title = title;
 }
 async function pollWtDisk() { try { const d = await call('getDiskUsage'); if (d && typeof d === 'object') { wtDisk = d; renderWtDisk(); } } catch {} }
 pollWtDisk(); setInterval(pollWtDisk, 30e3);
@@ -2768,7 +2776,7 @@ function renderUpdSettings() {
 // ---------- shared helpers (used by several views) ----------
 const projLogs = () => logs.filter((l) => l.projectId === ctx.p);
 // ---------- chat: #company room, task threads, working indicator, composer ----------
-const CH = { thread: null, key: '', mi: 0, asks: [] };
+const CH = { thread: null, key: '', mi: 0, asks: [], openChips: new Set() };
 // Chat team scope (t_1158f757): an event belongs to the selected team when its sender or
 // receiver does, or (one lookup) its task's assignee does — that covers human/orchestrator
 // authored comments and questions on this team's tasks. An event with no team node and no
@@ -2788,7 +2796,7 @@ const who = (id) => { const n = nodeById(id); return n ? { name: n.name, role: n
 function bubble(e) {
   const link = e.taskId && !CH.thread ? ` data-thread="${e.taskId}"` : ''; const tt = link ? taskTitle(e.taskId) : ''; const tl = link && !e._sameTask ? `<span class="tlink" title="${esc(tt)}">↳ ${esc(tt)}</span>` : '';
   const rep = e.count > 1 ? `<span class="repeat" title="repeated ${e.count} times">×${e.count}</span>` : '';
-  if (e.type === 'tool') return `<details class="cchip"><summary>🔧 ${esc(e.label)}</summary><pre>${esc(e.text)}${e.result != null ? '\n→ ' + esc(String(e.result).slice(0, 2000)) : ''}</pre></details>${tl ? `<span class="bubble linked"${link}>${tl}</span>` : ''}<br>`;
+  if (e.type === 'tool') return `<details class="cchip" data-chip="t:${e.at}:${esc(e.label)}"><summary>🔧 ${esc(e.label)}</summary><pre>${esc(e.text)}${e.result != null ? '\n→ ' + esc(String(e.result).slice(0, 2000)) : ''}</pre></details>${tl ? `<span class="bubble linked"${link}>${tl}</span>` : ''}<br>`;
   // One collapsible bubble per subagent (children folded in roomEvents, sub-subagents nested inside):
   // summary header carries description/status/duration/tokens; expanded shows compact child lines.
   if (e.type === 'subagent') {
@@ -2797,8 +2805,8 @@ function bubble(e) {
     const meta = [dur, `tok: ${Subagents.tokensLabel(rec.tokens)}`].filter(Boolean).join(' · ');
     const line = (x) => x.kind === 'tool' ? `<span class="sev-tool">🔧 ${esc(Chat.toolLabel(x.text))}</span>` : x.kind === 'tool_result' ? `<span class="sev-res">→ ${esc(String(x.text).slice(0, 160))}</span>` : esc(String(x.text).slice(0, 160));
     const sevHtml = (ev2) => ev2.events.map((x) => `<div class="sev">${line(x)}</div>`).join('') + (ev2.total > ev2.events.length ? `<div class="sev muted">+ ${ev2.total - ev2.events.length} more event(s)</div>` : '');
-    const childHtml = (e2) => `<details class="cchip subagent child"><summary>↳ 🤖 ${esc((subRecOf(e2.subagentId) || e2).description || 'Subagent')} <span class="substatus ss-${esc((subRecOf(e2.subagentId) || {}).status || 'unknown')}">${esc((subRecOf(e2.subagentId) || {}).status || 'unknown')}</span> <span class="submeta">${esc([Subagents.fmtDuration(Subagents.durationMs(subRecOf(e2.subagentId) || {})), `tok: ${Subagents.tokensLabel((subRecOf(e2.subagentId) || {}).tokens)}`].filter(Boolean).join(' · '))}</span> <span class="subcount">${e2.total}</span></summary><div class="subevents">${sevHtml(e2)}${(e2.children || []).map(childHtml).join('')}</div></details>`;
-    return `<details class="cchip subagent"><summary>🤖 ${esc(rec.description || 'Subagent')} <span class="substatus ss-${esc(rec.status || 'unknown')}">${esc(rec.status || 'unknown')}</span> <span class="submeta">${esc(meta)}</span> <span class="subcount">${e.total}</span></summary><div class="subevents">${sevHtml(e)}${(e.children || []).map(childHtml).join('')}</div></details>${tl ? `<span class="bubble linked"${link}>${tl}</span>` : ''}<br>`;
+    const childHtml = (e2) => `<details class="cchip subagent child" data-chip="s:${esc(e2.subagentId)}"><summary>↳ 🤖 ${esc((subRecOf(e2.subagentId) || e2).description || 'Subagent')} <span class="substatus ss-${esc((subRecOf(e2.subagentId) || {}).status || 'unknown')}">${esc((subRecOf(e2.subagentId) || {}).status || 'unknown')}</span> <span class="submeta">${esc([Subagents.fmtDuration(Subagents.durationMs(subRecOf(e2.subagentId) || {})), `tok: ${Subagents.tokensLabel((subRecOf(e2.subagentId) || {}).tokens)}`].filter(Boolean).join(' · '))}</span> <span class="subcount">${e2.total}</span></summary><div class="subevents">${sevHtml(e2)}${(e2.children || []).map(childHtml).join('')}</div></details>`;
+    return `<details class="cchip subagent" data-chip="s:${esc(e.subagentId)}"><summary>🤖 ${esc(rec.description || 'Subagent')} <span class="substatus ss-${esc(rec.status || 'unknown')}">${esc(rec.status || 'unknown')}</span> <span class="submeta">${esc(meta)}</span> <span class="subcount">${e.total}</span></summary><div class="subevents">${sevHtml(e)}${(e.children || []).map(childHtml).join('')}</div></details>${tl ? `<span class="bubble linked"${link}>${tl}</span>` : ''}<br>`;
   }
   if (e.type === 'question') return `<div class="bubble question" data-iid="${e.inboxId}">❓ <b>Question for you</b>${tl}<br>${esc(e.text)}<br>${e.choices.map((c) => `<button class="primary ch-choice" data-v="${esc(c)}">${esc(c)}</button>`).join('')}<textarea class="ch-ans" rows="1" placeholder="Or type an answer"></textarea><button class="ch-send">Answer</button></div>`;
   const ico = (p) => `<svg viewBox="0 0 24 24" aria-hidden="true">${p}</svg>`;
@@ -2864,6 +2872,9 @@ const chatGrow = () => { CH.win = (CH.win || Chat.PAGE) + Chat.PAGE; chatSched.f
 $('#chat-room').addEventListener('scroll', () => { const room = $('#chat-room');
   if (room.scrollHeight - room.scrollTop - room.clientHeight < 40) { CH.pendingNew = 0; if ((CH.win || Chat.PAGE) > Chat.PAGE) { CH.win = Chat.PAGE; chatSched.force(); } updateNewPill(); }
   else if (room.scrollTop < 80 && CH.ev && CH.ev.length > (CH.win || Chat.PAGE)) chatGrow(); });
+// toggle does not bubble; capture on the tab (room + thread panel) so expanded tool/subagent
+// chips keep their state across the streaming redraws (restoreChips re-applies the Set).
+$('#tab-chat').addEventListener('toggle', (e) => { const d = e.target; if (!(d instanceof HTMLDetailsElement) || !d.dataset.chip) return; if (d.open) CH.openChips.add(d.dataset.chip); else CH.openChips.delete(d.dataset.chip); }, true);
 // Skip-no-op renders (t_9d92c3d3), counters since t_e116438b: the room redraws only when a
 // chat-relevant event moved the epoch — an O(1) integer check in place of the old per-call
 // Chat.feedKey signature (a JSON.stringify over every log/task/message/inbox/node/agent/run,
@@ -2895,7 +2906,10 @@ function renderChatBody() {
   CH.ev = ev;
   CH.asks = ev.filter((e) => e.type === 'question').map((e) => e.who);
   const workingT = sel.chatTeam ? new Set([...working].filter((id) => teamScoped(sel.chatTeam, id))) : working;
-  $('#chat-typing').innerHTML = [...workingT].map((id) => { const wk = wakeLabel(id); return `<span class="typing"><span class="spin"></span>${esc(clipText(wk || `${who(id).name} is working`, 64))}<span class="dots"></span></span>`; }).join(' · ');
+  // Same-string rewrites still destroy + recreate the strip's nodes every draw (a repaint of the
+  // header each streaming tick) — write only when the content actually changed.
+  const typingHtml = [...workingT].map((id) => { const wk = wakeLabel(id); return `<span class="typing"><span class="spin"></span>${esc(clipText(wk || `${who(id).name} is working`, 64))}<span class="dots"></span></span>`; }).join(' · ');
+  if (CH.typingKey !== typingHtml) { CH.typingKey = typingHtml; $('#chat-typing').innerHTML = typingHtml; }
   renderYourTurn(ev);
   const room = $('#chat-room'); const atBottom = room.scrollHeight - room.scrollTop - room.clientHeight < 40;
   const prevH = room.scrollHeight, prevTop = room.scrollTop;
@@ -2986,7 +3000,15 @@ function renderChatBody() {
 // The patch paths must pass a LIVE scope (the fragment before its nodes move into the room, or an
 // in-place rebuilt group): a template drained by appendChild/insertBefore matches nothing and
 // silently leaves the fresh bubbles dead (t_c69c2170).
+// Open chip state (t_h0a1c2f9): a tool/subagent chip the user expanded must survive the room
+// redraws a streaming feed causes — a rebuild used to collapse it every draw, visibly moving the
+// conversation each time. Chips carry a stable data-chip key; the Set is maintained by the
+// delegated toggle listener below and re-applied here.
+function restoreChips(scope) {
+  scope.querySelectorAll('details[data-chip]').forEach((d) => { const on = CH.openChips.has(d.dataset.chip); if (d.open !== on) d.open = on; });
+}
 function bindChatBubbles(scope) {
+  restoreChips(scope);
   scope.querySelectorAll('[data-thread]').forEach((b) => b.onclick = () => { CH.thread = b.dataset.thread; chatSched.force(); });
   scope.querySelectorAll('.bubble.question').forEach((d) => {
     const answer = (v) => act(async () => { if (!v) return; await call('answerInbox', d.dataset.iid, v); refresh(); })();
@@ -3118,14 +3140,24 @@ function applyChatPrepend(ev, workingT, prevTop, prevH) {
 // Working/needs-you rings live in the group avatars; append/prepend/no-op draws don't touch their
 // HTML, so ring changes (a run starting or stopping) patch class-wise here. Group authorship comes
 // from the books (CH.evFp mirrors the DOM), so legacy groups without data-who are covered too.
+// Off-screen groups are skipped: a DOM write inside a content-visibility:auto group drops its
+// remembered intrinsic size, and the skip pass then collapses the group to the 72px placeholder —
+// the whole conversation below jumps (measured -410px layout shifts seconds after a run flip,
+// t_h0a1c2f9). Off-screen rings can't be seen anyway; the next draw that finds them on screen
+// patches them.
 function patchChatAvatars(room, workingT) {
   const ask = needsYou(); const fps = CH.evFp || [];
+  const vr = typeof room.getBoundingClientRect === 'function' ? room.getBoundingClientRect() : null; // one forced layout; the per-group reads after it are clean
   let i = 0;
   room.querySelectorAll('.cgroup').forEach((g) => {
     const cnt = +g.dataset.cnt || 1;
     const id = i < fps.length ? fps[i].slice(0, fps[i].indexOf('|')) : g.dataset.who || null;
     i += cnt;
     if (!id) return;
+    if (vr && typeof g.getBoundingClientRect === 'function') {
+      const r = g.getBoundingClientRect();
+      if (r.bottom < vr.top - 200 || r.top > vr.bottom + 200) return;
+    }
     const av = g.querySelector('.avatar'); if (!av) return;
     const w = workingT.has(id), a = ask.has(id);
     if (av.classList.contains('working') !== w) av.classList.toggle('working', w);
@@ -3146,6 +3178,7 @@ function syncThreadPanel(ev, workingT) {
   if (key === CH.thKey) return;
   CH.thKey = key;
   th.innerHTML = `<div class="chat-head"><b>🧵 ${esc(t.title)}</b><span class="role">${esc(t.status)}</span><span class="spacer"></span><button id="ch-close" title="Close thread">✕</button></div><div id="chat-threadroom">${tev.length ? renderGroups(tev, wt) : '<p class="muted" style="padding:16px">Nothing in this thread yet.</p>'}</div>`;
+  restoreChips(th); // the panel rebuilds as its thread streams: keep the user's expanded chips open
   $('#ch-close').onclick = () => { CH.thread = null; CH.thKey = null; chatSched.force(); };
 }
 function chatPreview() {
