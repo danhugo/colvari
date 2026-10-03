@@ -49,10 +49,12 @@ function procTable() {
 // (ps unavailable, slot placeholder without a pid) counts as alive: never stall on a hunch. The
 // board MCP helper subtree is excluded (isBoardHelper): it idles for the whole session and would
 // otherwise keep a hung CLI "alive" forever.
-function runAlive(orch, nodeId, child) {
+// snapshot: optional shared proc table — the sweep passes one so a pass with N silent runs forks
+// ps once, not N times (all reads within a sweep are the same instant anyway).
+function runAlive(orch, nodeId, child, snapshot) {
   if (!child || !child.pid) return true;
   if (child.exitCode != null) return false; // already exited; the close event just hasn't fired
-  const rows = orch.procTable();
+  const rows = snapshot === undefined ? orch.procTable() : snapshot;
   if (!rows) return true;
   const me = rows.find((r) => r.pid === child.pid);
   const prev = orch._stallCpu.get(nodeId);
@@ -75,8 +77,8 @@ function runAlive(orch, nodeId, child) {
 
 // Live (non-zombie) descendants of the run's CLI, for the hard-cap log: they show what kept a
 // silent run "alive" (board MCP helpers excluded, same scan as runAlive).
-function stallLiveKids(orch, child) {
-  const rows = orch.procTable();
+function stallLiveKids(orch, child, snapshot) {
+  const rows = snapshot === undefined ? orch.procTable() : snapshot;
   if (!rows || !child || !child.pid) return [];
   const kids = new Map();
   for (const r of rows) { if (!kids.has(r.ppid)) kids.set(r.ppid, []); kids.get(r.ppid).push(r); }
@@ -117,6 +119,12 @@ function sweepStalls(orch) {
   if (!(timeoutMin > 0)) return;
   const now = Date.now();
   const hardCapMs = timeoutMin * STALL.HARD_CAP_MULT * 60000;
+  // One shared proc table per sweep, forked lazily on the first liveness check (ps is a blocking
+  // execFileSync — the whole point of this cache): a sweep that must judge N silent runs reads a
+  // single snapshot instead of forking ps per run. null (ps unavailable) stays falsy, so a failed
+  // fork is retried on the next run rather than pinned for the pass.
+  let rows;
+  const table = () => rows || (rows = orch.procTable());
   for (const [nodeId, child] of [...orch.procs]) {
     const a = orch.agents[nodeId];
     const run = a && a.currentRun;
@@ -130,7 +138,7 @@ function sweepStalls(orch) {
     if (idleMs < timeoutMin * 60000) continue;
     // A live descendant (long silent tool call) protects the run — up to the hard cap, where
     // silence wins: the cap is what recovers runs whose runtime keeps helpers alive forever.
-    const alive = orch.runAlive(nodeId, child);
+    const alive = orch.runAlive(nodeId, child, table());
     const capped = alive && idleMs >= hardCapMs;
     if (alive && !capped) continue;
     // One-way claim on the run object: whichever sweep flips .stalled owns the recovery, so a tick
@@ -138,7 +146,7 @@ function sweepStalls(orch) {
     run.stalled = true;
     a.stall = { state: 'stalled' };
     const idleMin = Math.round(idleMs / 60000);
-    const kids = capped ? orch.stallLiveKids(child) : null;
+    const kids = capped ? stallLiveKids(orch, child, table()) : null;
     orch.log(nodeId, 'error', capped
       ? `stall: no output for ${idleMin} min (${STALL.HARD_CAP_MULT}x the ${timeoutMin} min timeout) — killing despite live child processes: ${kids.length ? kids.slice(0, 3).map((k) => `pid ${k.pid} ${String(k.command).slice(0, 80)}`).join('; ') + (kids.length > 3 ? `; +${kids.length - 3} more` : '') : 'none found'}`
       : isWake
