@@ -2301,7 +2301,8 @@ function renderLog() {
 }
 $('#logteam').onchange = () => { sel.logTeam = $('#logteam').value; $('#logfilter').value = ''; renderObs(); renderLog(); };
 $('#logfilter').onchange = renderLog;
-$('#logsearch').oninput = renderLog;
+let logSearchTimer = 0;
+$('#logsearch').oninput = () => { clearTimeout(logSearchTimer); logSearchTimer = setTimeout(renderLog, 150); }; // each keystroke re-filters and rebuilds the whole window (~56ms at profile sizes) — render once per typing pause
 $('#clearlog').onclick = act(async () => { if (!confirm('Clear the log of this project (also the saved log file)?')) return; for (let i = logs.length - 1; i >= 0; i--) if (logs[i].projectId === ctx.p) logs.splice(i, 1); await call('clearLogs'); renderLog(); });
 
 // ---------- usage & billing ----------
