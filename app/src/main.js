@@ -1567,9 +1567,11 @@ async function guiE2E() {
     expect('logs: pane shows 20+ lines and scrolls', overview.rows > 20 && overview.scrolls, overview);
     for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`await w(300);`); await shot(`main-logs-${t}`); }
     const target = nodes[3];
-    await ex(`document.querySelector('#logagents .logagent-row[data-id="${target.id}"]').click(); await w(300);`);
-    const session = await ex(`return { sel: document.querySelector('#logagents .logagent-row.sel')?.dataset.id, rows: [...document.querySelectorAll('#log .logrow')].map((r) => r.querySelector('.logtext').textContent) }`);
-    expect('logs: clicking an agent opens just its own session conversation (27 lines, 3 "starts session")', session.sel === target.id && session.rows.length === 27 && session.rows.filter((r) => /starts session/.test(r)).length === 3, { sel: session.sel, count: session.rows.length, starts: session.rows.filter((r) => /starts session/.test(r)).length });
+    // No wait: the click handler re-renders synchronously, so the row highlight and the filter
+    // dropdown must move within the same tick (t_h0a1c2fa bug 1 — stale obs agent highlight).
+    await ex(`document.querySelector('#logagents .logagent-row[data-id="${target.id}"]').click();`);
+    const session = await ex(`return { sel: document.querySelector('#logagents .logagent-row.sel')?.dataset.id, filter: $('#logfilter').value, rows: [...document.querySelectorAll('#log .logrow')].map((r) => r.querySelector('.logtext').textContent) }`);
+    expect('logs: clicking an agent opens just its own session conversation (27 lines, 3 "starts session") and the highlight moves instantly', session.sel === target.id && session.filter === target.id && session.rows.length === 27 && session.rows.filter((r) => /starts session/.test(r)).length === 3, { sel: session.sel, filter: session.filter, count: session.rows.length, starts: session.rows.filter((r) => /starts session/.test(r)).length });
     for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`await w(300);`); await shot(`main-logs-session-${t}`); }
     await ex(`$('#logagents .logagent-row[data-id=""]').click(); await w(200);`);
     await ex(`$('#tabs button[data-tab=wiki]').click(); await refresh(); sel.page = null; renderWiki(); await w(300);`);

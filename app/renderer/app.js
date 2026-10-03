@@ -2143,12 +2143,12 @@ const logTeamNodes = () => S.allNodes.filter((n) => teamScoped(sel.logTeam, n.id
 const obsIdleOpen = new Set();
 function renderObs() {
   if (!$('#tab-obs').classList.contains('active')) return;
-  const okey = [S.v && S.v.project, S.v && S.v.teams, S.v && S.v.settings, ctx.p, logs.length, (logs[logs.length - 1] || {}).at, S.tasks.length, sel.logTeam, S.orch.runCost, S.orch.runTokens, agentStamp()].join('|');
+  let cur = $('#logfilter').value; // clicking a row changes only this, so it must gate the rebuild (t_h0a1c2fa bug 1)
+  const okey = [S.v && S.v.project, S.v && S.v.teams, S.v && S.v.settings, ctx.p, logs.length, (logs[logs.length - 1] || {}).at, S.tasks.length, sel.logTeam, S.orch.runCost, S.orch.runTokens, agentStamp(), cur].join('|');
   if (okey === obsSig) return; obsSig = okey;
   const teams = (S.project && S.project.teams) || [];
   const tf = $('#logteam'); tf.innerHTML = '<option value="">All teams</option>' + teams.map((t) => `<option value="${t.id}">${esc(t.name)}</option>`).join(''); tf.value = sel.logTeam;
   const nodes = logTeamNodes();
-  let cur = $('#logfilter').value;
   if (cur && !nodes.some((n) => n.id === cur)) cur = '';
   const counts = {}; let total = 0;
   const ids = new Set(nodes.map((n) => n.id));
