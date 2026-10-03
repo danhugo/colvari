@@ -66,7 +66,10 @@ fs.mkdirSync(OUT, { recursive: true });
 // GUI test mode: isolated data root, no single-instance lock, procguard on spawned children.
 process.env.AGENTS_SQUAD_SMOKE = '1';
 process.env.AGENTS_SQUAD_PROJECT = fs.mkdtempSync(path.join(os.tmpdir(), 'squad-realperf-root-'));
-process.env.AGENTS_SQUAD_TEST_TIMEOUT_MS = String(AGENT_START_TIMEOUT_MS + QUEUE_MS + TRACE_MS + STREAM_MS + REPS * 30000 + SCROLL_REPS * 40000 + 420000);
+// The app's test-instance guard force-exits at this budget; the formula is optimistic when the
+// 5-agent campaigns eat their 30 s miss-timeouts under real load (t_a2566d54: a full 5-agent arm
+// died at 29 min with phases still running). PERF_BUDGET_MS overrides for those arms.
+process.env.AGENTS_SQUAD_TEST_TIMEOUT_MS = String(Number(process.env.PERF_BUDGET_MS || 0) || AGENT_START_TIMEOUT_MS + QUEUE_MS + TRACE_MS + STREAM_MS + REPS * 30000 + SCROLL_REPS * 40000 + 420000);
 process.env.AGENTS_SQUAD_DEV = '0';
 process.on('exit', () => { try { fs.rmSync(process.env.AGENTS_SQUAD_PROJECT, { recursive: true, force: true, maxRetries: 3 }); } catch {} });
 if (!process.env.AGENTS_SQUAD_PROJECT.startsWith(os.tmpdir())) throw new Error('[realperf] AGENTS_SQUAD_PROJECT must be an isolated temp root');

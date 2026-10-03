@@ -18,8 +18,52 @@ const WAKE = { SWEEP_MS: 1000, DEBOUNCE_MS: 1500, MIN_GAP_MS: 5 * 60 * 1000, MAX
 // inbox per idle agent (orch.wakeUnread), so a sweep over this duration is a UI jank signal
 // worth logging — the same instrumentation the stall watchdog carries for its own sweep.
 
+// A stopped or paused project drops its wake timers: nothing armed may outlive the pause.
+function clearWakeTimers(orch) {
+  for (const t of orch.wakeTimers.values()) clearTimeout(t.timer);
+  orch.wakeTimers.clear();
+}
+
+// Debounce: a burst of messages coalesces into the one dispatch this timer fires. At most one
+// pending wake per agent: the wakeTimers entry IS the dedupe key.
+function armWakeTimer(orch, nodeId, st, now) {
+  if (orch.wakeTimers.has(nodeId)) return;
+  st.armed++;
+  const dueAt = now + WAKE.DEBOUNCE_MS;
+  orch.wakeTimers.set(nodeId, { dueAt, timer: setTimeout(() => {
+    orch.wakeTimers.delete(nodeId);
+    orch.dispatchWake(nodeId).catch((e) => orch.log(nodeId, 'error', 'wake dispatch: ' + e.message));
+  }, WAKE.DEBOUNCE_MS) });
+}
+
+// One idle agent's slice of the sweep: refresh its unread count (clearing a stale wakePending when
+// the inbox drained) and arm its debounce dispatch. Returns whether the agent had unread messages.
+function sweepAgent(orch, node, a, team, st, now) {
+  const unread = orch.wakeUnread(node.id, team);
+  if (!unread.length) {
+    if (a.wakePending) { a.wakePending = null; orch.changed(); }
+    return false;
+  }
+  // Per-agent wake debounce: while an agent runs (task or wake), messages stay queued unread —
+  // never a parallel run. Once idle, unread teammate and human messages wake the agent on every
+  // sweep, burst-coalesced by the debounce timer: message wakes are never suppressed
+  // (t_9e4b4805 — the old MIN_GAP_MS window delayed teammate messages while the agent sat idle;
+  // the pair cap in dispatchWake is the ping-pong guard, and human senders are exempt from it).
+  // Task dispatch is NOT debounced either (an assigned/unblocked task reaches the agent right
+  // away and its prompt carries the unread count); system wakes never enter this sweep.
+  const prev = a.wakePending;
+  if (!prev || prev.count !== unread.length) {
+    // nextWakeAt is the armed timer's due time; recomputed only on a transition so an unchanged
+    // pending state does not churn a state push every sweep.
+    a.wakePending = { count: unread.length, suppressed: false, nextWakeAt: (prev && prev.nextWakeAt) || now + WAKE.DEBOUNCE_MS };
+    orch.changed();
+  }
+  armWakeTimer(orch, node.id, st, now);
+  return true;
+}
+
 function sweepWakes(orch) {
-  if (orch.userStopped || orch.dispatchPaused) { for (const t of orch.wakeTimers.values()) clearTimeout(t.timer); orch.wakeTimers.clear(); return; }
+  if (orch.userStopped || orch.dispatchPaused) { clearWakeTimers(orch); return; }
   const st = orch._wakeStats || (orch._wakeStats = { sweeps: 0, totalMs: 0, maxMs: 0, armed: 0 });
   const sweepStart = Date.now();
   let scanned = 0, withUnread = 0;
@@ -30,36 +74,7 @@ function sweepWakes(orch) {
       const a = orch.agent(node.id);
       if (orch.procs.has(node.id) || a.status === 'working') continue;
       scanned++;
-      const unread = orch.wakeUnread(node.id, team);
-      if (!unread.length) {
-        if (a.wakePending) { a.wakePending = null; orch.changed(); }
-        continue;
-      }
-      // Per-agent wake debounce: while an agent runs (task or wake), messages stay queued unread —
-      // never a parallel run. Once idle, unread teammate and human messages wake the agent on every
-      // sweep, burst-coalesced by the debounce timer below: message wakes are never suppressed
-      // (t_9e4b4805 — the old MIN_GAP_MS window delayed teammate messages while the agent sat idle;
-      // the pair cap in dispatchWake is the ping-pong guard, and human senders are exempt from it).
-      // Task dispatch is NOT debounced either (an assigned/unblocked task reaches the agent right
-      // away and its prompt carries the unread count); system wakes never enter this sweep.
-      const prev = a.wakePending;
-      withUnread++;
-      if (!prev || prev.count !== unread.length) {
-        // nextWakeAt is the armed timer's due time; recomputed only on a transition so an unchanged
-        // pending state does not churn a state push every sweep.
-        a.wakePending = { count: unread.length, suppressed: false, nextWakeAt: (prev && prev.nextWakeAt) || now + WAKE.DEBOUNCE_MS };
-        orch.changed();
-      }
-      // Debounce: a burst of messages coalesces into the one dispatch this timer fires. At most one
-      // pending wake per agent: the wakeTimers entry IS the dedupe key.
-      if (!orch.wakeTimers.has(node.id)) {
-        st.armed++;
-        const dueAt = now + WAKE.DEBOUNCE_MS;
-        orch.wakeTimers.set(node.id, { dueAt, timer: setTimeout(() => {
-          orch.wakeTimers.delete(node.id);
-          orch.dispatchWake(node.id).catch((e) => orch.log(node.id, 'error', 'wake dispatch: ' + e.message));
-        }, WAKE.DEBOUNCE_MS) });
-      }
+      if (sweepAgent(orch, node, a, team, st, now)) withUnread++;
     }
   } catch (e) { orch.log(null, 'error', 'wake sweep: ' + e.message); }
   const sweepMs = Date.now() - sweepStart;

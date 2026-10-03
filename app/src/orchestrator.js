@@ -303,6 +303,7 @@ class Orchestrator extends EventEmitter {
     // (modelStats, timeline, wiki, nodeTeams, logs) are memoized by store file signatures so repeated
     // snapshots with unchanged files cost stats instead of re-reading and re-parsing multi-MB JSON.
     this._memo = new Map(); // key -> { sig, val }
+    this._ledgerLastMs = 0; this._ledgerRebuilds = 0; this._ledgerHits = 0; // ledger() instrumentation (t_fd033209)
     this._logTail = null; // { sig, size, entries } — incremental tail of logs.jsonl
   }
   // Memoize fn by a cheap signature string: recompute only when the sig differs from last time.
@@ -392,7 +393,25 @@ class Orchestrator extends EventEmitter {
   }
   // Per-key usage ledger over the persisted runs (see usage.js usageLedger): one row per
   // {runtime, provider, model}, plus byAgent/byTask groupings. Memoized on the runs file signature.
-  ledger() { return this._memoBy('ledger', this.sig('runs'), () => U.usageLedger(this.runsMemo())); }
+  // Instrumented: slow rebuilds log a timing line (last rebuild kept on _ledgerLastMs, hit/rebuild
+  // counts on _ledgerHits/_ledgerRebuilds) so a large run history's aggregation cost and how much
+  // the runs-signature memo absorbs between writes stay visible on the perf board.
+  ledger() {
+    const sig = this.sig('runs');
+    const memo = this._memo ||= new Map();
+    const cached = memo.get('ledger');
+    if (cached && cached.sig === sig) this._ledgerHits = (this._ledgerHits || 0) + 1;
+    return this._memoBy('ledger', sig, () => {
+      const t0 = Date.now();
+      const led = U.usageLedger(this.runsMemo());
+      const ms = Date.now() - t0;
+      this._ledgerLastMs = ms;
+      this._ledgerRebuilds = (this._ledgerRebuilds || 0) + 1;
+      const runs = (led.rows || []).reduce((a, r) => a + (r.runs || 0), 0);
+      if (ms >= 50) this.log(null, 'system', `usage ledger rebuilt in ${ms} ms over ${(led.rows || []).length} key(s) / ${runs} run(s); ${this._ledgerHits || 0} memo hit(s) since boot`);
+      return led;
+    });
+  }
   // When per-key usage tracking started (older runs are dropped on migration — store.migrateUsageLedger);
   // null when the project predates the field or has no meta yet.
   usageSince() { try { const m = this.store.meta(); return (m && m.usageTrackingSince) || null; } catch { return null; } }
