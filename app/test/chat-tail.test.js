@@ -140,3 +140,37 @@ test('prependPlan: null when the DOM is not the exact tail (append raced the gro
   assert.equal(Chat.prependPlan(fps(dom), mutated, 5), null);
   assert.equal(Chat.prependPlan(fps(dom), [ev(5, 'a'), ev(6, 'b')], 2), null); // nothing older to add
 });
+
+// t_7e53747c: progressive first paint splits the page at a group boundary — the seam must be one
+// a one-shot render (mergeGroups) would also keep separate, and both halves must tile the page.
+test('splitPage: splits at a group boundary, halves tile the page', () => {
+  const items = [];
+  for (let i = 0; i < 80; i++) items.push({ at: i * 1000, who: i % 2 ? 'a' : 'b', type: 'message', text: 'm' + i });
+  const sp = Chat.splitPage(items);
+  assert.ok(sp);
+  assert.deepEqual(sp.head.concat(sp.tail), items); // exact tiling, order preserved
+  assert.ok(sp.tail.length >= 36, 'tail is at least the newest window');
+  // seam not mergeable: head-last and tail-first differ in author or one is a question
+  assert.ok(sp.head.length && sp.tail.length);
+  const seamA = sp.head[sp.head.length - 1], seamB = sp.tail[0];
+  assert.ok(seamA.who !== seamB.who || seamA.type === 'question' || seamB.type === 'question');
+});
+
+test('splitPage: the seam respects question boundaries in a same-author run', () => {
+  const items = [];
+  for (let i = 0; i < 80; i++) items.push({ at: i * 1000, who: 'a', type: 'message', text: 'm' + i });
+  items[40].type = 'question'; // question mid-run: the only non-mergeable seam must land there
+  const sp = Chat.splitPage(items);
+  assert.ok(sp);
+  const seamA = sp.head[sp.head.length - 1], seamB = sp.tail[0];
+  assert.ok(seamA.who !== seamB.who || seamA.type === 'question' || seamB.type === 'question');
+  assert.deepEqual(sp.head.concat(sp.tail), items);
+});
+
+test('splitPage: null below the threshold and for un-splittable pages', () => {
+  assert.equal(Chat.splitPage([{ at: 1, who: 'a', type: 'message', text: 'x' }]), null);
+  const few = []; for (let i = 0; i < 40; i++) few.push({ at: i, who: 'a', type: 'message', text: 'm' + i });
+  assert.equal(Chat.splitPage(few), null, 'below minLen');
+  const oneRun = []; for (let i = 0; i < 80; i++) oneRun.push({ at: i * 1000, who: 'a', type: 'message', text: 'm' + i });
+  assert.equal(Chat.splitPage(oneRun), null, 'one mergeable run has no valid seam');
+});

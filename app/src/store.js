@@ -236,16 +236,29 @@ class Store {
   // One-shot lock attempt for periodic background work on the main thread: never spins. Contention
   // (an agent's MCP process mid-write-burst) used to block the whole main thread in sleepSync(10)
   // slices here — getAll queued behind the spin and measured as a multi-second stall (Quinn
-  // t_f4f6d15e). Callers must be safe to skip a round; the next tick retries.
+  // t_f4f6d15e). A stale lock is taken over with withLock's own steal policy (t_7e53747c); a live
+  // holder means the caller skips this round (safe to retry next tick). Release removes only a
+  // lock whose pid is still ours — a stealer that took it over mid-hold must keep its lock.
   withLockTry(fn) {
     const lock = path.join(this.dir, '.lock');
-    try { fs.mkdirSync(lock); } catch { return false; }
+    try { fs.mkdirSync(lock); } catch (e) {
+      if (e.code !== 'EEXIST') throw e;
+      if (!lockHolderDead(lock)) return false;
+      const stolen = lock + '.stolen.' + process.pid;
+      try { fs.rmSync(stolen, { recursive: true, force: true }); fs.renameSync(lock, stolen); fs.rmSync(stolen, { recursive: true, force: true }); } catch { return false; }
+      try { fs.mkdirSync(lock); } catch { return false; }
+    }
     try {
       const tmp = path.join(lock, 'pid.' + process.pid + '.tmp');
       fs.writeFileSync(tmp, String(process.pid));
       fs.renameSync(tmp, path.join(lock, 'pid'));
     } catch {}
-    try { fn(); return true; } finally { try { fs.rmSync(lock, { recursive: true, force: true }); } catch {} }
+    try { fn(); return true; } finally {
+      let ours = true;
+      try { ours = fs.readFileSync(path.join(lock, 'pid'), 'utf8').trim() === String(process.pid); }
+      catch (e) { ours = e.code === 'ENOENT'; }
+      if (ours) { try { fs.rmSync(lock, { recursive: true, force: true }); } catch {} }
+    }
   }
   withLock(fn) {
     const lock = path.join(this.dir, '.lock');
@@ -377,7 +390,9 @@ class Store {
   // hand edits would otherwise silently diverge from what the board tools handed out.
   _recordHash(file, data) {
     const h = this._readHashes() || {};
-    h[path.basename(file)] = this._sha256(data);
+    let sig = '';
+    try { const st = fs.statSync(path.join(this.tasksDir(), file)); sig = st.size + ':' + st.mtimeMs; } catch {}
+    h[path.basename(file)] = { sig, hash: this._sha256(data) };
     this._saveHashes(h);
   }
   // Callers hold the .lock (all writes happen inside _withTasks/_migrate/withLock). Writes are
@@ -425,23 +440,31 @@ class Store {
     const hit = this._tcache && this._tcache.get(f);
     if (hit && hit.sig === sig) return hit.task;
     let task; try { task = JSON.parse(fs.readFileSync(p, 'utf8')); } catch { if (this._tcache) this._tcache.delete(f); return null; }
-    try { const st2 = fs.statSync(p); if (st2.size + ':' + st2.mtimeMs === sig) (this._tcache || (this._tcache = new Map())).set(f, { sig, task }); } catch {}
+    try { const st2 = fs.statSync(p); if (st2.size + ':' + st2.mtimeMs === sig) (this._tcache || (this._tcache = new Map())).set(f, { sig, task, str: JSON.stringify(task) }); } catch {}
     return task;
   }
   // Read-modify-write over the whole task set under ONE lock hold. fn mutates the array in place
   // (push/splice/field edits); tasks whose JSON changed are rewritten, removed ids unlinked.
+  // The before-image reuses the per-file cache's compact form (t_7e53747c): the old code
+  // stringified every task twice per write, all inside the lock — every agent MCP call paid it,
+  // and main-process writers queued behind those holds.
   _withTasks(fn) {
     if (this.cache && !this.cache.closed) this.cache.prewarm();
     this._ensureBoard();
     return this.withLock(() => {
       const tasks = this._taskFiles().map((f) => this._readTaskFile(f)).filter(Boolean);
-      const before = new Map(tasks.map((t) => [t.id, JSON.stringify(t)]));
+      const beforeIds = new Set(tasks.map((t) => t.id));
+      const beforeStr = new Map();
+      for (const t of tasks) {
+        const hit = this._tcache && this._tcache.get(t.id + '.json');
+        beforeStr.set(t, hit && hit.str !== undefined ? hit.str : JSON.stringify(t));
+      }
       let r;
       try { r = fn(tasks); }
       catch (e) { this._tcache = this._tlast = null; this._ownDir = undefined; throw e; } // fn may have mutated cached tasks it never wrote
-      for (const t of tasks) if (JSON.stringify(t) !== before.get(t.id)) this._writeTask(t);
-      const ids = new Set(tasks.map((t) => t.id));
-      for (const tid0 of before.keys()) if (!ids.has(tid0)) this._unlinkTask(tid0);
+      for (const t of tasks) if (JSON.stringify(t) !== beforeStr.get(t)) this._writeTask(t);
+      for (const t of tasks) beforeIds.delete(t.id);
+      for (const tid0 of beforeIds) this._unlinkTask(tid0);
       return r;
     });
   }
@@ -494,7 +517,13 @@ class Store {
   // Baseline the hash map from disk (migration just wrote everything; nothing to warn about).
   _snapshotTaskHashes() {
     const h = {};
-    for (const f of this._taskFiles()) { try { h[f] = this._sha256(fs.readFileSync(path.join(this.tasksDir(), f))); } catch {} }
+    for (const f of this._taskFiles()) {
+      try {
+        const fp = path.join(this.tasksDir(), f);
+        const st = fs.statSync(fp);
+        h[f] = { sig: st.size + ':' + st.mtimeMs, hash: this._sha256(fs.readFileSync(fp)) };
+      } catch {}
+    }
     try { this._saveHashes(h); } catch {}
   }
   _verifyTaskIntegrity() {
@@ -506,11 +535,21 @@ class Store {
         let changed = false;
         for (const f of this._taskFiles()) {
           seen.add(f);
+          // Sig-keyed (t_7e53747c): while the size:mtime pair still matches the recorded hash the
+          // content cannot have changed (every write renames) — skip the read+sha256. This loop
+          // used to re-hash ALL task files under the lock on the first board call of EVERY new
+          // process, and every agent run spawns a fresh board MCP process: a full board hash at
+          // every run start held the lock while dispatches queued behind it.
+          const prev = hashes[f];
+          let sig = null;
+          try { const st = fs.statSync(path.join(this.tasksDir(), f)); sig = st.size + ':' + st.mtimeMs; } catch { continue; }
+          if (prev && typeof prev === 'object' && prev.sig === sig) continue;
           let h = null;
           try { h = this._sha256(fs.readFileSync(path.join(this.tasksDir(), f))); } catch { continue; }
-          if (hashes[f] && hashes[f] !== h) this._logStore(`out-of-band edit: .squad/board/tasks/${f} was modified outside the board tools; adopting the file as-is`);
-          else if (!hashes[f]) this._logStore(`out-of-band file: .squad/board/tasks/${f} appeared outside the board tools; adopting it as a task`);
-          if (hashes[f] !== h) { hashes[f] = h; changed = true; }
+          const prevHash = typeof prev === 'string' ? prev : prev && prev.hash;
+          if (prev && prevHash !== h) this._logStore(`out-of-band edit: .squad/board/tasks/${f} was modified outside the board tools; adopting the file as-is`);
+          else if (!prev) this._logStore(`out-of-band file: .squad/board/tasks/${f} appeared outside the board tools; adopting it as a task`);
+          if (prevHash !== h || typeof prev === 'string') { hashes[f] = { sig, hash: h }; changed = true; } // plain-string entries upgrade too
         }
         for (const f of Object.keys(hashes)) if (!seen.has(f)) { this._logStore(`out-of-band delete: .squad/board/tasks/${f} is gone`); delete hashes[f]; changed = true; }
         if (changed) this._saveHashes(hashes);
@@ -1098,8 +1137,16 @@ class Store {
   }
   _writeRuns(runs) {
     const tmp = this.file('runs') + '.' + process.pid + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify({ runs }));
-    fs.renameSync(tmp, this.file('runs'));
+    try {
+      fs.writeFileSync(tmp, JSON.stringify({ runs }));
+      fs.renameSync(tmp, this.file('runs'));
+    } catch (e) {
+      // The caller already mutated the shared cached array; the disk never saw it. Drop the memo
+      // so the next read re-parses the file instead of serving a phantom record (t_7e53747c).
+      this._runsMemo = null;
+      try { fs.rmSync(tmp, { force: true }); } catch {}
+      throw e;
+    }
     try { const st = fs.statSync(this.file('runs')); this._runsMemo = { sig: st.size + ':' + st.mtimeMs, runs }; } catch { this._runsMemo = null; }
   }
   addRun(r) {

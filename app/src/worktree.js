@@ -292,19 +292,22 @@ function sweepWorktrees(opts = {}) {
 
 const DU = { TTL_MS: 60_000 };
 const duCache = new Map(); // repo root -> { at, val }
-const duRoots = new Map(); // repoDir -> resolved worktrees root (null when not a repo top-level)
+const duRoots = new Map(); // repoDir -> resolved worktrees root | { bad, at } (failures retry)
+const DU_ROOT_RETRY_MS = 600_000; // a failed `git rev-parse` (repo not born yet) retries after 10 min, not every poll
 // Disk use of a repo's .squad/worktrees: { count, bytes }. bytes via `du -sk` (never follows
 // symlinks, so a linked node_modules costs only the link); cached for a TTL so a header poll
 // cannot hammer the filesystem. Async — callers (IPC) must not block the main process. The root
 // resolution and worktree listing are also behind the TTL now (t_1fb02462): the poll used to run
-// a synchronous `git rev-parse` spawn on the main process every call, rain or shine.
+// a synchronous `git rev-parse` spawn on the main process every call, rain or shine. Failed
+// resolutions retry after DU_ROOT_RETRY_MS instead of caching null forever (t_7e53747c).
 async function diskUsage(repoDir, opts = {}) {
   const ttl = opts.ttlMs ?? DU.TTL_MS;
-  let root = duRoots.get(repoDir);
-  if (root === undefined) {
-    try { root = git(repoDir, ['rev-parse', '--show-toplevel']); } catch { root = null; }
-    duRoots.set(repoDir, root);
+  let entry = duRoots.get(repoDir);
+  if (entry && entry.bad && Date.now() - entry.at > (opts.rootRetryMs ?? DU_ROOT_RETRY_MS)) entry = undefined;
+  if (entry === undefined) {
+    try { entry = git(repoDir, ['rev-parse', '--show-toplevel']); duRoots.set(repoDir, entry); } catch { duRoots.set(repoDir, { bad: true, at: Date.now() }); }
   }
+  const root = entry && !entry.bad ? entry : null;
   if (!root) return { count: 0, bytes: 0 };
   const cached = duCache.get(root);
   if (!opts.force && cached && Date.now() - cached.at < ttl) return cached.val;
