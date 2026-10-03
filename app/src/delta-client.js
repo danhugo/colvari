@@ -1,6 +1,9 @@
 // The 'delta' push-channel contract (t_39bf39ac, perf track 2), shared by the renderer (script
 // tag, like the other src/*.js the page loads) and the node tests (require). Kept dependency-free
-// and pure so both sides exercise the exact same code.
+// and pure so both sides exercise the exact same code. Batch shapes: keyed patches {type:'task'|
+// 'wiki'|'orch'|'messages'|'inbox', id?, set|del} that patch() folds into the renderer's store,
+// the append-only {type:'logs', set:[line...]} batch (t_d22a6cf2, handled by the caller — log
+// lines live outside S) and {type:'runs'}/{type:'resync'} which the caller handles before patch().
 (function (root, factory) {
   const api = factory();
   if (typeof module === 'object' && module.exports) module.exports = api; else root.DeltaClient = api;
