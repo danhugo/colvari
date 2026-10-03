@@ -296,3 +296,174 @@ function fakeGit(opts = {}) {
 }
 const fakeNpm = () => (args) => (args[0] === 'run' ? { code: 0, out: 'built' } : args[0] === 'test' ? { code: 0, out: 'all pass' } : { code: 0, out: '' });
 const watcherStore = (dir) => ({ dir, settings: { autoRestart: false }, getSettings: () => ({ autoRestart: false }), saveSettings: (s) => Object.assign({ autoRestart: false }, s), appendLog: () => {} });
+
+// ---- t_2fdf83dc: the stale pending count and the silent no-op (plan review t_f3af22e8) ----
+// The bug: with the target commit already running, the chip kept saying "restart pending
+// (5 changes)", Restart now logged "skipped — target … is the commit already running" and
+// returned nothing, and the stale tally + armed schedule stuck around. The contract (Cato's
+// approved critique, as shipped in t_f6d37ca4): the chip's count is the commits the running
+// build is behind; the no-op paths (restart-now click, watcher skip guard) clear the stale
+// tally, disarm the schedule and return explicit feedback instead of nothing, so the gate
+// lifts and the chip row disappears.
+const { execSync } = require('child_process');
+const Alerts = require('../src/alerts');
+
+// Real repo fixture: one boot commit, then N empty commits on top -> target ahead by N.
+const qaRepo = (extra) => {
+  const repo = tmp('squad-restart-qa-repo-');
+  const g = (a) => execSync(`git -C "${repo}" -c user.email=t@t -c user.name=t ${a}`);
+  g('init -q');
+  g('commit --allow-empty -qm boot');
+  const sha0 = execSync(`git -C "${repo}" rev-parse HEAD`).toString().trim();
+  for (let i = 0; i < extra; i++) g(`commit --allow-empty -qm c${i}`);
+  const tip = execSync(`git -C "${repo}" rev-parse HEAD`).toString().trim();
+  return { repo, sha0, tip };
+};
+const chipRow = (st) => Alerts.collect({ devMode: true, rst: st }).find((x) => x.kind === 'restart-pending') || null;
+const clearedPending = (rp) => !rp || (!(Number(rp.count)) && !rp.scheduledNow && !rp.afterTaskId && !rp.firedAt);
+
+test('qa: restart-now at the running commit returns {status:noop}, clears the stale count and hides the chip (t_2fdf83dc)', async () => {
+  const d = tmp('squad-restart-qa-');
+  const { repo, sha0 } = qaRepo(0);
+  const s = new Store(path.join(d, 'p'));
+  s.addNode({ name: 'PM', role: 'PM' });
+  s.addNode({ name: 'A', role: 'Dev' });
+  const o = new Orchestrator(s, { repoDir: repo }); // boot records buildSha = sha0
+  clearInterval(o._wakeTimer); clearInterval(o._stallTimer); clearInterval(o._tickTimer); clearInterval(o._restartTimer);
+  const up = wireUpdater(o);
+  o.updater = up;
+  assert.equal((s.meta() || {}).buildSha, sha0, 'pre: the running build sha is recorded');
+  // The bug's exact state: the tally said 5 changes and pointed at the sha that already runs.
+  s.setRestartPending({ count: 5, sha: sha0, since: new Date().toISOString(), scheduledNow: true, firedAt: new Date().toISOString(), firedCount: 5 });
+  o.sweepRestart();
+  assert.equal(o._restartGate, true, 'pre: the stale schedule froze new dispatch');
+  assert.ok(chipRow(o.restartState()), 'pre: the chip is up');
+
+  const res = await o.restartNow();
+  assert.ok(res && typeof res === 'object', 'the click returns an explicit result, not undefined');
+  assert.equal(res.status, 'noop', 'target == running: the result says noop');
+  assert.ok(typeof res.message === 'string' && res.message, 'with human-readable feedback for the toast');
+  assert.equal(up.calls.length, 0, 'nothing drains: there is no restart to run');
+  assert.ok(clearedPending(s.restartPending()), 'the stale tally and schedule are cleared');
+
+  o.sweepRestart(); // the next scheduler pass any tick would run
+  const st = o.restartState();
+  assert.equal(st.pendingCount, 0, 'count 0');
+  assert.equal(st.scheduledNow, false);
+  assert.equal(st.scheduledAfter, null);
+  assert.equal(o._restartGate, false, 'the gate lifts — the team unfreezes');
+  assert.equal(chipRow(st), null, 'the chip row is gone');
+});
+
+test('qa: a target N commits ahead reads count N and the noop decision uses the derived distance (t_2fdf83dc)', async () => {
+  const d = tmp('squad-restart-qa-');
+  const { repo, sha0 } = qaRepo(0);
+  const s = new Store(path.join(d, 'p'));
+  s.addNode({ name: 'PM', role: 'PM' });
+  s.addNode({ name: 'A', role: 'Dev' });
+  const o = new Orchestrator(s, { repoDir: repo }); // boot: buildSha = sha0
+  clearInterval(o._wakeTimer); clearInterval(o._stallTimer); clearInterval(o._tickTimer); clearInterval(o._restartTimer);
+  const up = wireUpdater(o);
+  o.updater = up;
+  assert.equal((s.meta() || {}).buildSha, sha0, 'pre: the running build sha is recorded');
+  // Three commits land AFTER boot: the target tip is 3 ahead of the running build.
+  const g = (a) => execSync(`git -C "${repo}" -c user.email=t@t -c user.name=t ${a}`);
+  for (let i = 0; i < 3; i++) g(`commit --allow-empty -qm c${i}`);
+  const tip = execSync(`git -C "${repo}" rev-parse HEAD`).toString().trim();
+  // The tally the merge site stores IS the distance (buildSha..tip = 3): the chip reads N.
+  s.setRestartPending({ count: 3, sha: tip, since: new Date().toISOString() });
+  const st = o.restartState();
+  assert.equal(st.targetSha, tip);
+  assert.equal(st.pendingCount, 3, 'the chip reads the commits the running build is behind');
+  const row = chipRow(st);
+  assert.ok(row && /3 commits behind/.test(row.text), `the row says so: ${row && row.text}`);
+
+  // A stale tally (say 1) cannot mute a real update: the noop decision reads the derived
+  // distance (3 commits), not the stored count.
+  s.setRestartPending({ count: 1 });
+  const res = await o.restartNow();
+  assert.ok(res && res.status === 'scheduled', 'a genuinely ahead target reports scheduled');
+  assert.equal(up.calls.length, 1, 'the drain flow starts');
+});
+
+test('qa: the watcher skip guard clears the stale tally and disarms so the gate lifts (t_2fdf83dc)', async () => {
+  const d = tmp('squad-restart-qa-');
+  const { repo, sha0 } = qaRepo(0);
+  const s = new Store(path.join(d, 'p'));
+  s.addNode({ name: 'PM', role: 'PM' });
+  s.addNode({ name: 'A', role: 'Dev' });
+  const o = new Orchestrator(s, { repoDir: repo });
+  clearInterval(o._wakeTimer); clearInterval(o._stallTimer); clearInterval(o._tickTimer); clearInterval(o._restartTimer);
+  o.updater = wireUpdater(o);
+  // A fired schedule that stood down: the bug's stuck state (its log line fires below).
+  s.setRestartPending({ count: 5, sha: sha0, since: new Date().toISOString(), scheduledNow: true, firedAt: new Date().toISOString(), firedCount: 5 });
+  o.sweepRestart();
+  assert.equal(o._restartGate, true, 'pre: gate armed by the stale schedule');
+
+  const relaunches = [];
+  const git0 = (args) => {
+    const j = args.join(' ');
+    if (j === 'rev-parse --abbrev-ref HEAD') return { code: 0, out: 'master' };
+    if (j === 'rev-parse HEAD') return { code: 0, out: sha0 };
+    if (j.startsWith('fetch')) return { code: 0, out: '' };
+    if (j === 'rev-parse origin/master') return { code: 0, out: sha0 };
+    if (j.startsWith('rev-list --count')) return { code: 0, out: '0' }; // sha0..sha0: truly 0
+    if (j === 'status --porcelain') return { code: 0, out: '' };
+    return { code: 0, out: '' };
+  };
+  const w = new UpdateWatcher({
+    store: s, repoDir: repo, pollMs: 3.6e6, git: git0, npm: fakeNpm(), bootSha: sha0,
+    relaunch: () => relaunches.push(1), procCount: () => 0, setPaused: () => {}, drainTimeoutMs: 100,
+  });
+  clearInterval(w._timer);
+  w.restartScheduled('scheduled restart (now)');
+  await waitFor(() => clearedPending(s.restartPending()), 4000);
+  assert.equal(relaunches.length, 0, 'nothing relaunched onto the running commit');
+  assert.equal(w.phase, 'idle', 'the flow stood down without a drain');
+  o.sweepRestart();
+  assert.equal(o._restartGate, false, 'the gate lifts after the stand-down');
+  const st = o.restartState();
+  assert.equal(st.pendingCount, 0);
+  assert.equal(st.scheduledNow, false);
+  assert.equal(chipRow(st), null, 'chip hidden');
+});
+
+test('qa: an armed stale schedule heals through the fire -> stand-down chain (t_2fdf83dc)', async () => {
+  const d = tmp('squad-restart-qa-');
+  const { repo, sha0 } = qaRepo(0);
+  const s = new Store(path.join(d, 'p'));
+  s.addNode({ name: 'PM', role: 'PM' });
+  s.addNode({ name: 'A', role: 'Dev' });
+  const relaunches = [];
+  const git0 = (args) => {
+    const j = args.join(' ');
+    if (j === 'rev-parse --abbrev-ref HEAD') return { code: 0, out: 'master' };
+    if (j === 'rev-parse HEAD') return { code: 0, out: sha0 };
+    if (j.startsWith('fetch')) return { code: 0, out: '' };
+    if (j === 'rev-parse origin/master') return { code: 0, out: sha0 };
+    if (j.startsWith('rev-list --count')) return { code: 0, out: '0' }; // sha0..sha0: truly 0
+    if (j === 'status --porcelain') return { code: 0, out: '' };
+    return { code: 0, out: '' };
+  };
+  // The REAL watcher wired the way main.js does it: the orchestrator's fire lands in the
+  // watcher's flow, whose stand-down must clear the stale state.
+  const w = new UpdateWatcher({
+    store: s, repoDir: repo, pollMs: 3.6e6, git: git0, npm: fakeNpm(), bootSha: sha0,
+    relaunch: () => relaunches.push(1), procCount: () => 0, setPaused: () => {}, drainTimeoutMs: 100,
+  });
+  clearInterval(w._timer);
+  const o = new Orchestrator(s, { repoDir: repo });
+  clearInterval(o._wakeTimer); clearInterval(o._stallTimer); clearInterval(o._tickTimer); clearInterval(o._restartTimer);
+  o.updater = w;
+  // Boot left a stale armed schedule behind (not fired: boot's fired-marker consumer misses it).
+  s.setRestartPending({ count: 5, sha: sha0, since: new Date().toISOString(), scheduledNow: true });
+  o.sweepRestart(); // fires the armed schedule into the watcher
+  await waitFor(() => clearedPending(s.restartPending()), 4000);
+  assert.equal(relaunches.length, 0, 'nothing relaunched onto the running commit');
+  o.sweepRestart();
+  assert.equal(o._restartGate, false, 'the gate lifts after the stand-down');
+  const st = o.restartState();
+  assert.equal(st.pendingCount, 0);
+  assert.equal(st.scheduledNow, false);
+  assert.equal(chipRow(st), null, 'chip hidden');
+});
