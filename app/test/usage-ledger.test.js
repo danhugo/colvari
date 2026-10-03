@@ -118,6 +118,21 @@ test('ledger() instrumentation counts rebuilds vs memo hits and stays quiet unde
   assert.equal(o._ledgerHits, 2);
 });
 
+test('usageLedger() instrumentation accumulates per-call stats including the synthesized fallback', () => {
+  U.usageLedger.stats = { calls: 0, runs: 0, entries: 0, synthesized: 0, lastMs: 0 }; // isolate from earlier suites
+  const a = U.newRun({ runtime: 'claude', model: 'claude-sonnet-4-5', inputTokens: 10, outputTokens: 5 });
+  U.usageLedger([a]);
+  let st = U.usageLedger.stats;
+  assert.equal(st.calls, 1); assert.equal(st.runs, 1); assert.equal(st.entries, 1);
+  assert.equal(st.synthesized, 1, 'a run without a persisted ledger is served by the flat fallback');
+  assert.ok(typeof st.lastMs === 'number' && st.lastMs >= 0);
+  const b = { ...a, id: 'r_other', ledger: [{ runtime: 'claude', provider: 'api', model: 'claude-sonnet-4-5', inputTokens: 3, outputTokens: 1, costUsd: 0.01, costSource: 'reported', billed: 0.01 }] };
+  U.usageLedger([a, b]);
+  st = U.usageLedger.stats;
+  assert.equal(st.calls, 2); assert.equal(st.runs, 3); assert.equal(st.entries, 3, 'entries accumulate like the other counters');
+  assert.equal(st.synthesized, 2, 'the flat straggler synthesizes again; the persisted-ledger run does not count');
+});
+
 // ---- account-keyed rows (t_f514cc2e): firstParty==subscription for claude, legacy runtime-less
 // runs attribute to claude, one cost definition (apiEq vs billed) ----
 

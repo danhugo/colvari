@@ -140,16 +140,36 @@ function renderAll() {
 // The sidebar Inbox badge is always-visible chrome: it tracks the inbox count on every render,
 // not only while the inbox tab itself is drawn — an inline update inside renderInbox left the
 // badge stale whenever items landed while another tab was active.
+// Debounced (t_94f9b9f0): a render burst (state pushes while agents stream) used to pay the DOM
+// write once per render. The first change in a burst still writes this frame — the badge never
+// lags its render, so the every-render chrome contract holds — and further changes inside the
+// 100ms window collapse into one trailing write that re-reads S.inbox at fire time, so the last
+// value always lands even if the count flipped and flipped back mid-burst.
 // Perf instrumentation (t_f6b343a5): ring of recent durations + slow-call count, inspect via
-// window.__perf.inboxBadge — nothing is logged unless a call exceeds SLOW_MS.
+// window.__perf.inboxBadge — nothing is logged unless a write exceeds SLOW_MS.
 const PERF = { inboxBadge: { samples: [], slow: 0, SLOW_MS: 2 } };
-function renderInboxBadge() {
+const IB_DEBOUNCE_MS = 100;
+let ibTimer = null; // pending trailing write, or the leading write's coalescing-window expiry
+let ibShown = null; // value currently in the DOM
+function ibBadgeWrite() {
   const t0 = performance.now();
-  $('#inbox-tab-badge').textContent = (S.inbox || []).length ? String(S.inbox.length) : '';
+  ibShown = (S.inbox || []).length ? String(S.inbox.length) : '';
+  $('#inbox-tab-badge').textContent = ibShown;
   const ms = performance.now() - t0;
   const p = PERF.inboxBadge;
   p.samples.push(ms); if (p.samples.length > 120) p.samples.shift();
   if (ms > p.SLOW_MS) { p.slow++; console.debug('inbox badge render slow', ms.toFixed(2), 'ms'); }
+}
+function renderInboxBadge() {
+  const want = (S.inbox || []).length ? String(S.inbox.length) : '';
+  if (want === ibShown) return; // unchanged since the last write: no DOM work, no timer churn
+  if (ibTimer !== null) { // inside a burst window: collapse to one trailing write
+    clearTimeout(ibTimer);
+    ibTimer = setTimeout(() => { ibTimer = null; ibBadgeWrite(); }, IB_DEBOUNCE_MS);
+    return;
+  }
+  ibBadgeWrite(); // leading edge: the first change of a burst lands this frame
+  ibTimer = setTimeout(() => { ibTimer = null; }, IB_DEBOUNCE_MS);
 }
 window.__perf = PERF;
 // The always-visible chrome (Perry's contract, t_8d586961): badges, counts and the restart chip
@@ -2359,7 +2379,8 @@ const repinBottom = (box) => { const top = box.scrollTop; requestAnimationFrame(
 let logSeq = 0, logTailSeq = 0, logTailAt = 0;
 $('#log').addEventListener('scroll', () => { const box = $('#log');
   if (box.scrollTop < 80 && renderLog.total > logWin) { logWin += LOG_PAGE; renderLog(); }
-  else if (box.scrollTop + box.clientHeight >= box.scrollHeight - 20 && logWin > LOG_PAGE) { logWin = LOG_PAGE; renderLog(); } });
+  else if (box.scrollTop + box.clientHeight >= box.scrollHeight - 20 && logWin > LOG_PAGE) { logWin = LOG_PAGE; renderLog(); }
+  else if (logTailDirty && box.scrollTop + box.clientHeight >= box.scrollHeight - 20) renderLog(); });
 // Signature of exactly what the log DOM shows — shared by the full render and the fast-append
 // path, so a redundant renderLog after an append early-returns.
 const logKey = () => [ctx.p, logs.length, (logs[logs.length - 1] || {}).at, logWin, $('#logfilter').value, $('#logsearch').value, [...logLevels].join(), sel.logTeam, logsLoaded.has(ctx.p)].join('|');
@@ -2396,7 +2417,7 @@ function renderLog() {
   const older = page.hidden ? `<button id="log-older" class="olderbar linklike">↑ ${page.hidden} earlier line${page.hidden === 1 ? '' : 's'} — scroll up or click to load</button>` : '';
   box.innerHTML = rows.length ? (hiddenInfo ? `<p class="muted logempty">${hiddenInfo} info line(s) hidden by the level filter — showing all. <button id="log-showall" class="linklike">Show all</button></p>` : '') + older +
     Subagents.nestRows(page.items, subRecOf, null).map((x) => x.kind === 'sub' ? subBlockHtml(x) : logRow(x.l)).join('') : `<p class="muted logempty">${empty}</p>`;
-  logTailAt = tailAt; logTailSeq = tailSeq; logSig = lkey; // stamped only after the DOM actually built: a throw mid-build (malformed line, bad subagent record) must not mark the pane as rendered — renderLog would then early-return forever and freeze it
+  logTailAt = tailAt; logTailSeq = tailSeq; logSig = lkey; logTailDirty = false; // stamped only after the DOM actually built: a throw mid-build (malformed line, bad subagent record) must not mark the pane as rendered — renderLog would then early-return forever and freeze it
   const sa = document.getElementById('log-showall'); if (sa) sa.onclick = () => { logLevels.add('info'); logLevels.add('warn'); logLevels.add('error'); renderLogLevelChips(); renderLog(); };
   const ob = document.getElementById('log-older'); if (ob) ob.onclick = () => { logWin += LOG_PAGE; renderLog(); };
   bindSubToggles(renderLog);
@@ -3484,7 +3505,7 @@ squad.on('runtime-available', onRtaPush); squad.on('runtimeAvailable', onRtaPush
 // Streamed log lines (t_8d586961): pushes arrive one per tool event; a full renderLog per line
 // rebuilt the whole window each time (~56ms at profile sizes). Coalesce to one flush per frame
 // and, while the view is pinned to the live tail with trivial filters, append only the new rows.
-let logFlushQueued = false;
+let logFlushQueued = false, logTailDirty = false;
 function scheduleLogRender() {
   if (document.hidden) return; // hidden window: rAF is stalled and the fallback would only build DOM nobody sees; the catch-up refresh on visible redraws the tail
   if (logFlushQueued) return; logFlushQueued = true;
@@ -3495,7 +3516,17 @@ function scheduleLogRender() {
 function flushLogTail() {
   // One malformed streamed line must not kill the scheduler: the throw would otherwise recur on
   // every queued flush, taking renderLive's task-detail refresh down with it.
-  try { if ($('#tab-obs').classList.contains('active') && !appendLogTail()) renderLog(); }
+  try {
+    if ($('#tab-obs').classList.contains('active') && !appendLogTail()) {
+      const box = $('#log');
+      // Reading history while the stream runs: the user is scrolled away from the tail, so every
+      // flush would rebuild the whole window (~56ms at profile sizes) only to anchor-scroll back
+      // to the same rows. Defer the rebuild — the scroll handler rebuilds once when the tail
+      // comes back into view (any explicit renderLog also clears it via its stamp).
+      if (box && renderLog.winItems && box.scrollTop + box.clientHeight < box.scrollHeight - 20) logTailDirty = true;
+      else renderLog();
+    }
+  }
   catch (e) { console.warn('log pane flush failed', e); }
   renderLive(); // board task-detail pane follows the stream even while Obs is hidden
 }
