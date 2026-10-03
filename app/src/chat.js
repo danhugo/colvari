@@ -190,18 +190,21 @@
   }
 
   // Progressive first paint (t_7e53747c): split a full page into {head, tail} at a group boundary
-  // so the newest ~tailMin events render first and the older half prepends next frame. The seam is
+  // so the newest ~tailMin events render first and the older half prepends over the next frames
+  // (the renderer chunks headGroups adaptively — a single big rAF measured 60ms, still a long
+  // task). The seam is
   // walked back past same-author non-question neighbours — mergeGroups re-joins those, so a seam
   // there would render an extra header and un-merged repeats that one full render never shows.
   // Returns null below minLen (single-phase render) or when no split point exists.
-  function splitPage(items, minLen = 60, tailMin = 36) {
+  function splitPage(items, minLen = 28, tailMin = 20) {
     if (!items || items.length < minLen) return null;
     const groups = group(items);
     let n = 0, cut = 0;
     for (let gi = groups.length - 1; gi >= 0; gi--) { n += groups[gi].items.length; if (n >= tailMin) { cut = gi; break; } }
     while (cut > 0 && groups[cut].who === groups[cut - 1].who && groups[cut].items[0].type !== 'question' && groups[cut - 1].items[0].type !== 'question') cut--;
     if (cut <= 0) return null;
-    return { head: groups.slice(0, cut).flatMap((g) => g.items), tail: groups.slice(cut).flatMap((g) => g.items) };
+    const headGroups = groups.slice(0, cut);
+    return { head: headGroups.flatMap((g) => g.items), tail: groups.slice(cut).flatMap((g) => g.items), headGroups };
   }
 
   // Collapse consecutive identical messages (same type/target/text) from one author into one bubble + a ×N

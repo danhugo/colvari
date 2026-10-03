@@ -149,7 +149,7 @@ test('splitPage: splits at a group boundary, halves tile the page', () => {
   const sp = Chat.splitPage(items);
   assert.ok(sp);
   assert.deepEqual(sp.head.concat(sp.tail), items); // exact tiling, order preserved
-  assert.ok(sp.tail.length >= 36, 'tail is at least the newest window');
+  assert.ok(sp.tail.length >= 20, 'tail is at least the newest window');
   // seam not mergeable: head-last and tail-first differ in author or one is a question
   assert.ok(sp.head.length && sp.tail.length);
   const seamA = sp.head[sp.head.length - 1], seamB = sp.tail[0];

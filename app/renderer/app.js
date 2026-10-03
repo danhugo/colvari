@@ -2934,18 +2934,34 @@ function renderChatBody() {
   syncThreadPanel(ev, workingT);
   bindChatBubbles($('#tab-chat'));
   if (headItems) {
+    // The older half goes in across frames, adaptively chunked: one big rAF still measured 60ms
+    // (a long task wherever it runs). Each frame builds+inserts as many groups as fit ~24ms,
+    // grows the books by exactly what it inserted, and re-anchors; a superseded generation stops
+    // early — the next draw heals the remaining books (a short books list plans a rebuild).
     const endTop = room.scrollTop, endH = room.scrollHeight; // phase-A end state for the re-anchor
-    requestAnimationFrame(() => {
-      if (CH.renderGen !== myGen) return; // a newer draw owns the room; it heals the books itself
+    const groups2 = split.headGroups; const perGroupFps = groups2.map((grp) => grp.items.map((e) => Chat.eventFp(e, subRecOf)));
+    let gi = 0, chunk = 6;
+    const step = () => {
+      if (CH.renderGen !== myGen || gi >= groups2.length) return; // a newer draw owns the room; it heals the books itself
+      const t0 = performance.now();
+      const take = groups2.slice(gi, gi + chunk);
       const t = document.createElement('template');
-      t.innerHTML = renderGroups(headItems, workingT);
+      t.innerHTML = renderGroups(take.flatMap((grp) => grp.items), workingT);
       const ob2 = $('#chat-older'); const anchor = ob2 ? ob2.nextSibling : room.firstChild;
       room.insertBefore(t.content, anchor);
-      CH.evFp = headFps.concat(tailFps);
+      let fps = CH.evFp;
+      for (let k = take.length - 1; k >= 0; k--) fps = perGroupFps[gi + k].concat(fps);
+      CH.evFp = fps;
       bindChatBubbles(t);
       if (room.scrollHeight - room.scrollTop - room.clientHeight < 40) { room.scrollTop = room.scrollHeight; repinBottom(room); }
       else room.scrollTop = Chat.anchorScroll(endTop, endH, room.scrollHeight);
-    });
+      gi += take.length;
+      if (gi < groups2.length) {
+        chunk = Math.max(2, Math.min(24, Math.round(chunk * 24 / Math.max(1, performance.now() - t0))));
+        requestAnimationFrame(step);
+      }
+    };
+    requestAnimationFrame(step);
   }
 }
 // Thread links and ask-human answer forms ride the bubbles; both paths (full render and tail
@@ -2987,6 +3003,7 @@ function applyChatAppend(ev, plan, workingT) {
   if (cut < 0 && alignFrom + alignLen < target.length) cut = alignFrom + alignLen; // fresh events past the drawn stretch
   if (cut < 0) { // nothing to re-render: books unchanged (a no-op or eviction-only draw)
     if (evicted) CH.evFp = CH.evFp.slice(evicted);
+    CH.renderGen = (CH.renderGen || 0) + 1; // owns the room: pending split chunks must stop
     patchChatAvatars(room, workingT);
     finishAppend(room, ev, win, ob, workingT);
     return true;
@@ -3005,6 +3022,7 @@ function applyChatAppend(ev, plan, workingT) {
   room.appendChild(t.content);
   bindChatBubbles(t);
   CH.evFp = keptFps.concat(rebuild.map((e) => Chat.eventFp(e, subRecOf)));
+  CH.renderGen = (CH.renderGen || 0) + 1; // owns the room: pending split chunks must stop
   patchChatAvatars(room, workingT);
   finishAppend(room, ev, win, ob, workingT);
   return true;
@@ -3062,6 +3080,7 @@ function applyChatPrepend(ev, workingT, prevTop, prevH) {
     bindChatBubbles(t);
   }
   CH.evFp = target.map((e) => Chat.eventFp(e, subRecOf));
+  CH.renderGen = (CH.renderGen || 0) + 1; // owns the room: pending split chunks must stop
   CH.domWin = win;
   if (ob) { const hidden = ev.length - win; const label = `↑ ${hidden} earlier message${hidden === 1 ? '' : 's'} — scroll up or click to load`;
     if (hidden > 0) { if (ob.textContent !== label) ob.textContent = label; }
