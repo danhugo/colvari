@@ -2358,8 +2358,11 @@ function renderLog() {
   const teamIds = sel.logTeam ? new Set(logTeamNodes().map((n) => n.id)) : null;
   const box = $('#log'); const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 20;
   const prevH = box.scrollHeight, prevTop = box.scrollTop;
-  const all = logs.filter((l) => l.projectId === ctx.p && (!teamIds || teamIds.has(l.nodeId)));
-  const base = all.filter((l) => (!f || l.nodeId === f) && (!q || (l.text || '').toLowerCase().includes(q)));
+  // Malformed stored lines (null entry, non-string text from a bad push) must be skipped or
+  // stringified here — a throw mid-build leaves logSig unstamped, so every later render throws
+  // again and the pane freezes (logRow's own guard would never be reached).
+  const all = logs.filter((l) => l && l.projectId === ctx.p && (!teamIds || teamIds.has(l.nodeId)));
+  const base = all.filter((l) => (!f || l.nodeId === f) && (!q || String(l.text ?? '').toLowerCase().includes(q)));
   base.sort((a, b) => (a.at || 0) - (b.at || 0));
   let rows = base.filter((l) => logLevels.has(severityOf(l)));
   let hiddenInfo = 0;
@@ -2768,10 +2771,13 @@ function renderSettings() {
   $('#pr-save').onclick = act(async () => { const name = $('#pr-name').value.trim(); if (!name) return; await call('savePreset', { name, systemPrompt: $('#pr-prompt').value, allowedTools: $('#pr-allowed').value, disallowedTools: $('#pr-disallowed').value, permissionMode: $('#pr-perm').value }); refresh(); });
   // Clamp every number to its declared min/max: the HTML attrs only constrain spinner clicks, and
   // `+x || fallback` lets a hand-typed negative through (e.g. -5 concurrency, a negative budget
-  // that disables the limit it was meant to enforce).
-  $('#st-save').onclick = act(async () => { await call('saveSettings', { claudePath: $('#st-claude').value.trim() || 'claude', maxConcurrency: Math.max(1, Math.min(8, +$('#st-conc').value || 2)), maxRuns: Math.max(1, +$('#st-runs').value || 30), permissionMode: $('#st-perm').value,
-    budgetUsd: Math.max(0, +$('#st-budgetusd').value || 0), budgetTokens: Math.max(0, +$('#st-budgettok').value || 0), requireApproval: $('#st-approval').checked, notifications: $('#st-notify').checked, stuckMinutes: Math.max(1, +$('#st-stuck').value || 5),
-    stallTimeoutMin: Math.max(1, +$('#st-stall').value || 10),
+  // that disables the limit it was meant to enforce). Typed numbers clamp; only empty/garbage
+  // input takes the default — `+0 || fb` misread a hand-typed 0 as "empty" and saved the default
+  // instead of the min (0 max-runs meant "no cap" to the user but stored 30, 0 concurrency 2).
+  const numv = (id, fb, lo, hi) => { const v = $('#' + id).value.trim(); if (v === '' || !Number.isFinite(+v)) return fb; return Math.max(lo, hi === undefined ? +v : Math.min(hi, +v)); };
+  $('#st-save').onclick = act(async () => { await call('saveSettings', { claudePath: $('#st-claude').value.trim() || 'claude', maxConcurrency: numv('st-conc', 2, 1, 8), maxRuns: numv('st-runs', 30, 1), permissionMode: $('#st-perm').value,
+    budgetUsd: Math.max(0, +$('#st-budgetusd').value || 0), budgetTokens: Math.max(0, +$('#st-budgettok').value || 0), requireApproval: $('#st-approval').checked, notifications: $('#st-notify').checked, stuckMinutes: numv('st-stuck', 5, 1),
+    stallTimeoutMin: numv('st-stall', 10, 1),
     maxAgents: Math.max(1, parseInt($('#st-maxagents').value, 10) || 6), teamChangeApproval: $('#st-tcappr').value === 'auto' ? 'auto' : 'ask',
     autoCompactPct: Math.max(0, Math.min(95, +$('#st-autocompactpct').value || 0)) }); refresh(); });
   renderUpdSettings();
@@ -3491,7 +3497,7 @@ function appendLogTail() {
   if (box.scrollTop + box.clientHeight < box.scrollHeight - 20 || !$('#logauto').checked) return false;
   const f = $('#logfilter').value;
   const teamIds = sel.logTeam ? new Set(logTeamNodes().map((n) => n.id)) : null;
-  const fresh = logs.filter((l) => l.projectId === ctx.p && (!teamIds || teamIds.has(l.nodeId)) && (!f || l.nodeId === f) && (l._seq === undefined || l._seq > logTailSeq));
+  const fresh = logs.filter((l) => l && l.projectId === ctx.p && (!teamIds || teamIds.has(l.nodeId)) && (!f || l.nodeId === f) && (l._seq === undefined || l._seq > logTailSeq));
   // logTailSeq is NOT advanced here: a throw inside the row build below would otherwise stamp the
   // cursor past lines the DOM never received, hiding them for good. It moves only after the append
   // succeeded (or when nothing new needed drawing); a bail just falls back to a full render.
