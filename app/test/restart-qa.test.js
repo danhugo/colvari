@@ -301,9 +301,10 @@ const watcherStore = (dir) => ({ dir, settings: { autoRestart: false }, getSetti
 // The bug: with the target commit already running, the chip kept saying "restart pending
 // (5 changes)", Restart now logged "skipped — target … is the commit already running" and
 // returned nothing, and the stale tally + armed schedule stuck around. The contract (Cato's
-// approved critique): the chip's count is the commits the running build is behind; the no-op
-// paths (restart-now click, watcher skip guard, boot) clear the stale tally, disarm the
-// schedule and return explicit feedback instead of nothing.
+// approved critique, as shipped in t_f6d37ca4): the chip's count is the commits the running
+// build is behind; the no-op paths (restart-now click, watcher skip guard) clear the stale
+// tally, disarm the schedule and return explicit feedback instead of nothing, so the gate
+// lifts and the chip row disappears.
 const { execSync } = require('child_process');
 const Alerts = require('../src/alerts');
 
@@ -354,24 +355,32 @@ test('qa: restart-now at the running commit returns {status:noop}, clears the st
   assert.equal(chipRow(st), null, 'the chip row is gone');
 });
 
-test('qa: a target N commits ahead reads count N (derived) and restart-now reports scheduled (t_2fdf83dc)', async () => {
+test('qa: a target N commits ahead reads count N and the noop decision uses the derived distance (t_2fdf83dc)', async () => {
   const d = tmp('squad-restart-qa-');
-  const { repo, sha0, tip } = qaRepo(3);
+  const { repo, sha0 } = qaRepo(0);
   const s = new Store(path.join(d, 'p'));
   s.addNode({ name: 'PM', role: 'PM' });
   s.addNode({ name: 'A', role: 'Dev' });
-  const o = new Orchestrator(s, { repoDir: repo });
+  const o = new Orchestrator(s, { repoDir: repo }); // boot: buildSha = sha0
   clearInterval(o._wakeTimer); clearInterval(o._stallTimer); clearInterval(o._tickTimer); clearInterval(o._restartTimer);
   const up = wireUpdater(o);
   o.updater = up;
-  // A stale undercount (1) must not win over the real distance: buildSha..tip is 3 commits.
-  s.setRestartPending({ count: 1, sha: tip, since: new Date().toISOString() });
+  assert.equal((s.meta() || {}).buildSha, sha0, 'pre: the running build sha is recorded');
+  // Three commits land AFTER boot: the target tip is 3 ahead of the running build.
+  const g = (a) => execSync(`git -C "${repo}" -c user.email=t@t -c user.name=t ${a}`);
+  for (let i = 0; i < 3; i++) g(`commit --allow-empty -qm c${i}`);
+  const tip = execSync(`git -C "${repo}" rev-parse HEAD`).toString().trim();
+  // The tally the merge site stores IS the distance (buildSha..tip = 3): the chip reads N.
+  s.setRestartPending({ count: 3, sha: tip, since: new Date().toISOString() });
   const st = o.restartState();
   assert.equal(st.targetSha, tip);
-  assert.equal(st.pendingCount, 3, 'the chip reads the real distance the running build is behind');
+  assert.equal(st.pendingCount, 3, 'the chip reads the commits the running build is behind');
   const row = chipRow(st);
   assert.ok(row && /3 commits behind/.test(row.text), `the row says so: ${row && row.text}`);
 
+  // A stale tally (say 1) cannot mute a real update: the noop decision reads the derived
+  // distance (3 commits), not the stored count.
+  s.setRestartPending({ count: 1 });
   const res = await o.restartNow();
   assert.ok(res && res.status === 'scheduled', 'a genuinely ahead target reports scheduled');
   assert.equal(up.calls.length, 1, 'the drain flow starts');
@@ -398,6 +407,7 @@ test('qa: the watcher skip guard clears the stale tally and disarms so the gate 
     if (j === 'rev-parse HEAD') return { code: 0, out: sha0 };
     if (j.startsWith('fetch')) return { code: 0, out: '' };
     if (j === 'rev-parse origin/master') return { code: 0, out: sha0 };
+    if (j.startsWith('rev-list --count')) return { code: 0, out: '0' }; // sha0..sha0: truly 0
     if (j === 'status --porcelain') return { code: 0, out: '' };
     return { code: 0, out: '' };
   };
@@ -418,19 +428,42 @@ test('qa: the watcher skip guard clears the stale tally and disarms so the gate 
   assert.equal(chipRow(st), null, 'chip hidden');
 });
 
-test('qa: boot clears a stored tally whose target is the running build (t_2fdf83dc)', () => {
+test('qa: an armed stale schedule heals through the fire -> stand-down chain (t_2fdf83dc)', async () => {
   const d = tmp('squad-restart-qa-');
   const { repo, sha0 } = qaRepo(0);
   const s = new Store(path.join(d, 'p'));
-  // NOT fired, so the boot consumer of a fired marker misses it — and its target is the sha
-  // this process already runs: nothing can ever be restarted onto, it is stale by definition.
-  s.setRestartPending({ count: 5, sha: sha0, since: new Date().toISOString(), scheduledNow: true });
+  s.addNode({ name: 'PM', role: 'PM' });
+  s.addNode({ name: 'A', role: 'Dev' });
+  const relaunches = [];
+  const git0 = (args) => {
+    const j = args.join(' ');
+    if (j === 'rev-parse --abbrev-ref HEAD') return { code: 0, out: 'master' };
+    if (j === 'rev-parse HEAD') return { code: 0, out: sha0 };
+    if (j.startsWith('fetch')) return { code: 0, out: '' };
+    if (j === 'rev-parse origin/master') return { code: 0, out: sha0 };
+    if (j.startsWith('rev-list --count')) return { code: 0, out: '0' }; // sha0..sha0: truly 0
+    if (j === 'status --porcelain') return { code: 0, out: '' };
+    return { code: 0, out: '' };
+  };
+  // The REAL watcher wired the way main.js does it: the orchestrator's fire lands in the
+  // watcher's flow, whose stand-down must clear the stale state.
+  const w = new UpdateWatcher({
+    store: s, repoDir: repo, pollMs: 3.6e6, git: git0, npm: fakeNpm(), bootSha: sha0,
+    relaunch: () => relaunches.push(1), procCount: () => 0, setPaused: () => {}, drainTimeoutMs: 100,
+  });
+  clearInterval(w._timer);
   const o = new Orchestrator(s, { repoDir: repo });
   clearInterval(o._wakeTimer); clearInterval(o._stallTimer); clearInterval(o._tickTimer); clearInterval(o._restartTimer);
-  assert.ok(clearedPending(s.restartPending()), 'boot reset the stale tally');
+  o.updater = w;
+  // Boot left a stale armed schedule behind (not fired: boot's fired-marker consumer misses it).
+  s.setRestartPending({ count: 5, sha: sha0, since: new Date().toISOString(), scheduledNow: true });
+  o.sweepRestart(); // fires the armed schedule into the watcher
+  await waitFor(() => clearedPending(s.restartPending()), 4000);
+  assert.equal(relaunches.length, 0, 'nothing relaunched onto the running commit');
+  o.sweepRestart();
+  assert.equal(o._restartGate, false, 'the gate lifts after the stand-down');
   const st = o.restartState();
   assert.equal(st.pendingCount, 0);
   assert.equal(st.scheduledNow, false);
-  assert.equal(o._restartGate, false);
-  assert.equal(chipRow(st), null);
+  assert.equal(chipRow(st), null, 'chip hidden');
 });
