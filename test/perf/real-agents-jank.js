@@ -39,7 +39,7 @@ const AGENTS = Math.max(1, Number(process.env.PERF_AGENTS || 2));
 const TASKS_PER_AGENT = Math.max(1, Number(process.env.PERF_TASKS_PER_AGENT || 3));
 const REPS = Math.max(2, Number(process.env.PERF_REPS || 6));
 const SCROLL_REPS = Math.max(1, Number(process.env.PERF_SCROLL_REPS || 3));
-const TRACE_MS = Number(process.env.PERF_TRACE_MS || 30000);
+const TRACE_MS = Number(process.env.PERF_TRACE_MS || 60000);
 const STREAM_MS = Math.max(10000, Number(process.env.PERF_STREAM_MS || 30000));
 const WARM_MS = Number(process.env.PERF_WARM_MS || 5000);
 const SEED_TASKS = Number(process.env.PERF_SEED_TASKS || 550);
@@ -382,7 +382,7 @@ async function chatOpenCampaign(reps) {
       await clickAt(tabXY);
       recs.push(await ex(`return window.__jank.settle()`));
     }
-    const thrXY = await ex(`const b = document.querySelector('#chat-room [data-thread]'); if (!b) return null; const r = b.getBoundingClientRect(); return [Math.round(r.x + r.width / 2), Math.round(r.y + Math.min(14, r.height / 2))];`);
+    const thrXY = await ex(`const els = [...document.querySelectorAll('#chat-room [data-thread]')]; for (const b of els) { const r = b.getBoundingClientRect(); if (r.top >= 0 && r.bottom <= innerHeight && r.height > 4) return [Math.round(r.x + r.width / 2), Math.round(r.y + Math.min(14, r.height / 2))]; } return null;`);
     if (thrXY) {
       await ex(`return window.__jank.arm('thread:open', 'threadOpen', 8000)`);
       await clickAt(thrXY);
@@ -482,6 +482,7 @@ async function main() {
   await sampler;
   const trace = await stopTrace();
   const summary = await ex(summaryJs);
+  summary.trace = trace;
   summary.chatOpenSamples = probeRecs;
   summary.scroll = scrollRecs;
 
@@ -519,6 +520,10 @@ async function main() {
     state: streamPushes.filter((p) => p.channel === 'state').length, log: streamPushes.filter((p) => p.channel === 'log').length,
     kbPerSec: +(streamPushes.reduce((s, p) => s + p.bytes, 0) / 1024 / (STREAM_MS / 1000)).toFixed(1),
   };
+  if (summary.streamPushes.log < 10) { // agents finished early: the "streaming" scenario silently became idle
+    const diag = await ex(`return { working: Object.values(S.orch.agents || {}).filter((a) => a.status === 'working').length, running: !!S.orch.running, todo: S.tasks.filter((t) => t.status === 'todo').length, logTail: logs.slice(-6).map((l) => l.kind + ': ' + String(l.text).slice(0, 120)) }`).catch(() => ({}));
+    throw new Error('stream window had ' + summary.streamPushes.log + ' log pushes — agents were not streaming. Diagnostics: ' + JSON.stringify(diag, null, 2));
+  }
   summary.io = { streamWindow: ioWin, eventLoopMs: (() => { const us = (ns) => +((ns || 0) / 1000).toFixed(2); return { p50: us(EL.percentile(50)), p95: us(EL.percentile(95)), max: us(EL.max) }; })(), slowestCallsMs: [...IO.slowest], maxMsPerCall: +IO.maxMs.toFixed(2) };
   summary.env = {
     agents: AGENTS, tasksPerAgent: TASKS_PER_AGENT, reps: REPS, scrollReps: SCROLL_REPS, traceMs: trace.windowMs || TRACE_MS,
