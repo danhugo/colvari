@@ -29,6 +29,15 @@ const makeGroup = (who, cnt) => ({
 });
 const matches = (n, sel) => n.classes && n.classes.has(sel.slice(1));
 
+// Real DOM semantics: appendChild/insertBefore MOVE the nodes out of the source — the source
+// (a template's content) is drained. Production must bind before moving (t_c69c2170).
+function moveChildren(room, x, put) {
+  const src = x.children;
+  if (!Array.isArray(src)) return;
+  for (const c of [...src]) { c.parent = room; put(c); }
+  src.length = 0;
+}
+
 function buildRenderer(env) {
   const room = env.room;
   const stubs = {
@@ -43,7 +52,7 @@ function buildRenderer(env) {
     mergeGroups: (gs) => gs,
     needsYou: () => env.ask,
     renderGroups: (events) => { env.__renderCaptured = events; env.__rendered = events.map((e) => { const g = makeGroup(e.who, 1); g.parent = room; return g; }); return ''; },
-    bindChatBubbles: (scope) => { env.__bound.push(scope); },
+    bindChatBubbles: (scope) => { env.__bound.push(scope); for (const n of (scope && scope.children) || []) env.__boundNodes.push(n); },
     repinBottom: () => { env.__repins++; },
     updateNewPill: () => { env.__pills++; },
     subRecOf: () => null,
@@ -54,8 +63,8 @@ function buildRenderer(env) {
 
 function makeRoom(groups, withOb) {
   const room = { children: [], scrollTop: 0, scrollHeight: 100, clientHeight: 50,
-    appendChild(x) { for (const c of x.children) { c.parent = room; room.children.push(c); } },
-    insertBefore(x, anchor) { let i = anchor ? room.children.indexOf(anchor) : 0; for (const c of x.children) { c.parent = room; room.children.splice(i++, 0, c); } },
+    appendChild(x) { moveChildren(room, x, (c) => room.children.push(c)); },
+    insertBefore(x, anchor) { let i = anchor ? room.children.indexOf(anchor) : 0; moveChildren(room, x, (c) => room.children.splice(i++, 0, c)); },
     querySelectorAll(sel) { return room.children.filter((c) => matches(c, sel)); },
     querySelector(sel) { return room.children.find((c) => matches(c, sel)) || null; },
     get firstChild() { return room.children[0] || null; } };
@@ -73,7 +82,7 @@ function envFor(drawn, groups, win, withOb) {
   const env = { room, CH: { thread: null, win, domWin: win, evFp: fps(drawn), pendingNew: 1, thKey: null },
     S: { tasks: [], orch: { agents: {} }, allNodes: [] }, ask: new Set(),
     els: { '#chat-older': ob, '#chat-thread': { classes: new Set(), classList: { toggle() {} }, innerHTML: '' }, '#ch-close': { onclick: null }, '#chat-newpill': { classes: new Set(['hidden']), querySelector: () => ({ textContent: '' }) } },
-    __rendered: [], __renderCaptured: null, __bound: [], __repins: 0, __pills: 0 };
+    __rendered: [], __renderCaptured: null, __bound: [], __boundNodes: [], __repins: 0, __pills: 0 };
   return env;
 }
 
@@ -197,4 +206,30 @@ test('append: a mutated first group re-renders the whole window once, no duplica
   assert.equal(R.applyChatAppend(feed, plan, new Set()), true);
   assert.deepEqual(env.room.children.map((g) => g.dataset.who), ['a', 'b', 'c', 'b']);
   assert.deepEqual(env.CH.evFp, fps(feed));
+});
+
+test('append: fresh bubbles are bound before the fragment insert drains the template (t_c69c2170)', () => {
+  const feed = [ev(1, 'a'), ev(2, 'a'), ev(3, 'b'), ev(4, 'b'), ev(5, 'a'), ev(6, 'a'), ev(7, 'b'), ev(8, 'a')];
+  const groups = [makeGroup('a', 2), makeGroup('b', 2), makeGroup('a', 2)]; // drawn from events 1..6
+  const env = envFor(feed.slice(0, 6), groups, 100, false);
+  const R = buildRenderer(env);
+  const plan = Chat.tailPlan(env.CH.evFp, feed, 100);
+  assert.ok(plan);
+  assert.equal(R.applyChatAppend(feed, plan, new Set()), true);
+  const fresh = env.room.children.slice(3); // the rebuilt tail groups
+  assert.ok(fresh.length >= 1, 'fresh groups joined the room');
+  for (const g of fresh) assert.ok(env.__boundNodes.includes(g), 'fresh group got its thread/question handlers while still in the fragment');
+});
+
+test('prepend: the older page is bound before the fragment insert drains the template (t_c69c2170)', () => {
+  const feed = [ev(1, 'a'), ev(2, 'b'), ev(3, 'c'), ev(4, 'd'), ev(5, 'a'), ev(6, 'b'), ev(7, 'c'), ev(8, 'd'), ev(9, 'a'), ev(10, 'b')];
+  const groups = [makeGroup('a', 1), makeGroup('b', 1), makeGroup('c', 1), makeGroup('d', 1), makeGroup('a', 1), makeGroup('b', 1)]; // events 5..10, win 6
+  const env = envFor(feed.slice(4), groups, 6, true);
+  const R = buildRenderer(env);
+  env.CH.win = 10; // chatGrow grew the window
+  env.els['#chat-older'].nextSibling = env.room.children[0];
+  assert.equal(R.applyChatPrepend(feed, new Set(), 0, 100), true);
+  const inserted = env.room.children.slice(0, 4); // the older slice joined at the top
+  assert.equal(inserted.length, 4);
+  for (const g of inserted) assert.ok(env.__boundNodes.includes(g), 'prepended group got its handlers while still in the fragment');
 });
