@@ -70,3 +70,48 @@ test('withLockTry: runs when free, skips fast when contended, leaves no stale lo
   assert.equal(ran, 1, 'the body never ran under contention');
   fs.rmSync(dir + '/.lock', { recursive: true, force: true });
 });
+
+test('withLockTry: takes over a stale lock (dead holder), leaves a live one alone', () => {
+  const dir = mktemp('squad-');
+  const s = new Store(dir);
+  const lock = dir + '/.lock';
+  fs.mkdirSync(lock);
+  fs.writeFileSync(lock + '/pid', '99999999'); // nothing can own this pid
+  let ran = 0;
+  assert.equal(s.withLockTry(() => { ran++; }), true, 'stale lock stolen per the withLock policy');
+  assert.equal(ran, 1);
+  assert.ok(!fs.existsSync(lock), 'stolen lock released after the run');
+  fs.mkdirSync(lock);
+  fs.writeFileSync(lock + '/pid', String(process.pid)); // a live holder: skip, never steal
+  assert.equal(s.withLockTry(() => { ran++; }), false);
+  assert.equal(ran, 1);
+  assert.ok(fs.existsSync(lock), 'live lock untouched');
+  fs.rmSync(lock, { recursive: true, force: true });
+});
+
+test('withLockTry: a lock stolen mid-hold is not deleted (release checks the pid)', () => {
+  const dir = mktemp('squad-');
+  const s = new Store(dir);
+  const lock = dir + '/.lock';
+  s.withLockTry(() => { // simulate a stealer replacing the pid while we hold
+    fs.writeFileSync(lock + '/pid.tmp', '99999999');
+    fs.renameSync(lock + '/pid.tmp', lock + '/pid');
+  });
+  assert.ok(fs.existsSync(lock), 'the stealer\'s lock survives our release');
+  assert.equal(fs.readFileSync(lock + '/pid', 'utf8').trim(), '99999999');
+  fs.rmSync(lock, { recursive: true, force: true });
+});
+
+test('runs: a failed write drops the memo so the phantom record never serves', () => {
+  const dir = mktemp('squad-');
+  const s = new Store(dir);
+  s.addRun({ id: 'ok1', n: 1 });
+  fs.chmodSync(dir, 0o500); // writes into the store dir now fail
+  let threw = false;
+  try { s.addRun({ id: 'phantom', n: 2 }); } catch { threw = true; }
+  assert.ok(threw, 'the write error propagates');
+  fs.chmodSync(dir, 0o700);
+  const rs = s.listRuns();
+  assert.equal(rs.length, 1, 'memo dropped: re-read from disk, no phantom');
+  assert.equal(rs[0].id, 'ok1');
+});

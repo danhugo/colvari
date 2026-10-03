@@ -427,3 +427,19 @@ test('startup sweep wiring: Orchestrator.start() sweeps removable worktrees befo
     assert.strictEqual(fs.existsSync(dir), false, 'removable worktree swept during start(), before any agent could spawn');
   } finally { o.stop(); }
 });
+
+// t_7e53747c: a failed root resolution must not be cached forever — the repo may come into being
+// later (first-run creates it after the header's first poll); the disk pill would stay at 0.
+test('diskUsage: a failed root resolution retries instead of caching null forever', async () => {
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'wt-norepo-'))); // not a git repo yet
+  const before = await WT.diskUsage(dir, { force: true });
+  assert.strictEqual(before.count, 0, 'not a repo: zero worktrees');
+  g(dir, 'init', '-q', '-b', 'main');
+  fs.writeFileSync(path.join(dir, 'a.txt'), 'base\n');
+  g(dir, 'add', '.'); g(dir, 'commit', '-q', '-m', 'init');
+  WT.ensureWorktree(dir, 't_lc11');
+  const cached = await WT.diskUsage(dir, { force: true });
+  assert.strictEqual(cached.count, 0, 'the bad root entry is still honored inside the retry window');
+  const retried = await WT.diskUsage(dir, { force: true, rootRetryMs: 1 });
+  assert.strictEqual(retried.count, 1, 'past the retry window the root resolves and the worktree shows');
+});

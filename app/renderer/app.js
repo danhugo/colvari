@@ -2929,8 +2929,18 @@ function renderChatBody() {
     }
   }
   CH.stamp = stamp; CH.workKey = workKey;
-  CH.evFp = page.items.map((e) => Chat.eventFp(e, subRecOf));
-  room.innerHTML = page.items.length ? (page.hidden ? `<button id="chat-older" class="olderbar linklike">↑ ${page.hidden} earlier message${page.hidden === 1 ? '' : 's'} — scroll up or click to load</button>` : '') + renderGroups(page.items, workingT)
+  // Progressive first paint (t_7e53747c): the cold render of a full page (100 events, fat board)
+  // measured 87ms under load — over the 50ms bar. Split at a GROUP boundary (Chat.group is what
+  // renderGroups applies anyway, so two half-renders group exactly like one) and prepend the
+  // older half on the next frame: the newest groups — what the user came to read — paint first.
+  const split = Chat.splitPage(page.items);
+  const headItems = split && split.head, tailItems = split ? split.tail : page.items;
+  const headFps = split ? split.head.map((e) => Chat.eventFp(e, subRecOf)) : null;
+  const tailFps = tailItems.map((e) => Chat.eventFp(e, subRecOf));
+  CH.evFp = tailFps;
+  CH.renderGen = (CH.renderGen || 0) + 1;
+  const myGen = CH.renderGen;
+  room.innerHTML = page.items.length ? (page.hidden ? `<button id="chat-older" class="olderbar linklike">↑ ${page.hidden} earlier message${page.hidden === 1 ? '' : 's'} — scroll up or click to load</button>` : '') + renderGroups(tailItems, workingT)
     : sel.chatTeam ? '<p class="muted logempty" data-testid="chat-empty-team">No messages for this team.</p>'
     : S.team.nodes.length ? `<div class="cempty"><svg class="brandmark big" viewBox="0 0 32 32" aria-hidden="true"><path d="M23 9A10 10 0 1 0 23 23" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/><g fill="currentColor"><circle cx="23" cy="9" r="3.6"/><circle cx="6" cy="16" r="3.6"/><circle cx="23" cy="23" r="3.6"/></g></svg><b>#company is quiet</b>Type a goal below, or @mention an agent (e.g. <code>@${esc(S.team.nodes[0].name)} write hello.txt</code>).</div>` : '<div class="cempty"><svg class="brandmark big" viewBox="0 0 32 32" aria-hidden="true"><path d="M23 9A10 10 0 1 0 23 23" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/><g fill="currentColor"><circle cx="23" cy="9" r="3.6"/><circle cx="6" cy="16" r="3.6"/><circle cx="23" cy="23" r="3.6"/></g></svg><b>No team yet</b>Create your team in the Team tab (or use the first-run guide), then chat with it here.</div>';
   if (atBottom) { CH.win = Chat.PAGE; room.scrollTop = room.scrollHeight; repinBottom(room); CH.pendingNew = 0; }
@@ -2940,6 +2950,36 @@ function renderChatBody() {
   updateNewPill();
   syncThreadPanel(ev, workingT);
   bindChatBubbles($('#tab-chat'));
+  if (headItems) {
+    // The older half goes in across frames, adaptively chunked: one big rAF still measured 60ms
+    // (a long task wherever it runs). Each frame builds+inserts as many groups as fit ~24ms,
+    // grows the books by exactly what it inserted, and re-anchors; a superseded generation stops
+    // early — the next draw heals the remaining books (a short books list plans a rebuild).
+    const endTop = room.scrollTop, endH = room.scrollHeight; // phase-A end state for the re-anchor
+    const groups2 = split.headGroups; const perGroupFps = groups2.map((grp) => grp.items.map((e) => Chat.eventFp(e, subRecOf)));
+    let gi = 0, chunk = 6;
+    const step = () => {
+      if (CH.renderGen !== myGen || gi >= groups2.length) return; // a newer draw owns the room; it heals the books itself
+      const t0 = performance.now();
+      const take = groups2.slice(gi, gi + chunk);
+      const t = document.createElement('template');
+      t.innerHTML = renderGroups(take.flatMap((grp) => grp.items), workingT);
+      const ob2 = $('#chat-older'); const anchor = ob2 ? ob2.nextSibling : room.firstChild;
+      room.insertBefore(t.content, anchor);
+      let fps = CH.evFp;
+      for (let k = take.length - 1; k >= 0; k--) fps = perGroupFps[gi + k].concat(fps);
+      CH.evFp = fps;
+      bindChatBubbles(t);
+      if (room.scrollHeight - room.scrollTop - room.clientHeight < 40) { room.scrollTop = room.scrollHeight; repinBottom(room); }
+      else room.scrollTop = Chat.anchorScroll(endTop, endH, room.scrollHeight);
+      gi += take.length;
+      if (gi < groups2.length) {
+        chunk = Math.max(2, Math.min(24, Math.round(chunk * 24 / Math.max(1, performance.now() - t0))));
+        requestAnimationFrame(step);
+      }
+    };
+    requestAnimationFrame(step);
+  }
 }
 // Thread links and ask-human answer forms ride the bubbles; both paths (full render and tail
 // append) wire them through here — property assignment, so re-binding over old nodes is a no-op.
@@ -2983,6 +3023,7 @@ function applyChatAppend(ev, plan, workingT) {
   if (cut < 0 && alignFrom + alignLen < target.length) cut = alignFrom + alignLen; // fresh events past the drawn stretch
   if (cut < 0) { // nothing to re-render: books unchanged (a no-op or eviction-only draw)
     if (evicted) CH.evFp = CH.evFp.slice(evicted);
+    CH.renderGen = (CH.renderGen || 0) + 1; // owns the room: pending split chunks must stop
     patchChatAvatars(room, workingT);
     finishAppend(room, ev, win, ob, workingT);
     return true;
@@ -3001,6 +3042,7 @@ function applyChatAppend(ev, plan, workingT) {
   bindChatBubbles(t.content); // bind BEFORE the insert moves the nodes out — a drained template matches nothing
   room.appendChild(t.content);
   CH.evFp = keptFps.concat(rebuild.map((e) => Chat.eventFp(e, subRecOf)));
+  CH.renderGen = (CH.renderGen || 0) + 1; // owns the room: pending split chunks must stop
   patchChatAvatars(room, workingT);
   finishAppend(room, ev, win, ob, workingT);
   return true;
@@ -3058,6 +3100,7 @@ function applyChatPrepend(ev, workingT, prevTop, prevH) {
     room.insertBefore(t.content, anchor);
   }
   CH.evFp = target.map((e) => Chat.eventFp(e, subRecOf));
+  CH.renderGen = (CH.renderGen || 0) + 1; // owns the room: pending split chunks must stop
   CH.domWin = win;
   if (ob) { const hidden = ev.length - win; const label = `↑ ${hidden} earlier message${hidden === 1 ? '' : 's'} — scroll up or click to load`;
     if (hidden > 0) { if (ob.textContent !== label) ob.textContent = label; }
