@@ -109,7 +109,11 @@ async function refresh() {
   chatBump(); // applied changes may cover the sections deltas do not carry (team/nodes) — the chat epoch must follow
   usCache = null; // this refresh changed state: the alerts/meter must read fresh usageStatus, not the 1s-shared result of a pre-change fetch (a stale hit rendered the limits chip hidden forever — no later render re-checks it; gui-e2e topbar red)
   try { localStorage.setItem('ctx', JSON.stringify(ctx)); } catch {}
-  renderAll();
+  // Debounced draw (t_ae99a65e): refresh's full render joins the same coalesced queue the delta
+  // path draws from, so the 2s backstop poll and the visibility catch-up no longer stack a second
+  // full renderAll on a delta draw in the same frame while agents stream. Idle single-shot refreshes
+  // (user actions) still draw on the scheduler's next tick — last + minMs is in the past, timeout 0.
+  renderSched.bump();
 }
 const nodeName = (id) => (S.allNodes.find((n) => n.id === id) || {}).name || (id ? id : 'unassigned');
 // Tab-scoped rendering (t_8d586961): renderAll draws the always-visible chrome plus ONLY the
