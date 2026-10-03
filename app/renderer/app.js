@@ -507,7 +507,10 @@ $('#importfile').onchange = act(async (e) => {
 // never size against a hidden (0-width) layout. obs and chat keep their signatures instead: their
 // DOM stays valid across the hide, so a revisit is a no-op when nothing moved, an incremental
 // tail-append when only new log lines arrived (flushLogTail), and a full rebuild only on real
-// content change. team/wiki/settings/inbox have no signature — renderAll rebuilds them whenever shown.
+// content change. team/settings/inbox have no signature — renderAll rebuilds them whenever shown.
+// wiki does keep one (t_9bb0596c): its list is plain DOM that stays valid across a hide, so with a
+// signature the every-poll renderAll tick no longer rebuilds the page list (and re-wires its click
+// handlers) when no page, search or selection moved.
 const TAB_RESIG = {
   board: () => { boardSig = null; },
   obs: () => { obsSig = null; },
@@ -2147,8 +2150,16 @@ function md(src) {
     .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
     .replace(/\n{2,}/g, '<br><br>'))).join('');
 }
+let wkSig = null;
 function renderWiki() {
+  // Signature like obsSig (see TAB_RESIG note): every state poll ran through here and rebuilt the
+  // page list + re-wired its handlers even with nothing changed. updatedAt changes on any write, so
+  // keying on titles+updatedAt+author+search+selection can't miss a real edit (including another
+  // agent rewriting the page mid-session).
   const q = ($('#wk-search').value || '').trim().toLowerCase();
+  const pages = Object.keys(S.wiki).sort().map((t) => `${t}|${S.wiki[t].updatedAt || ''}|${S.wiki[t].author || ''}`).join(';');
+  const key = [ctx.p, pages, q, sel.page || '', wikiEdit].join('|');
+  if (key === wkSig) return; wkSig = key;
   const titles = Object.keys(S.wiki).sort().filter((t) => !q || t.toLowerCase().includes(q) || (S.wiki[t].content || '').toLowerCase().includes(q));
   const all = Object.keys(S.wiki).length;
   $('#wikipages').innerHTML = titles.length
