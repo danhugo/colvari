@@ -57,6 +57,20 @@ process.env.AGENTS_SQUAD_DEV = '0';
 process.on('exit', () => { try { fs.rmSync(process.env.AGENTS_SQUAD_PROJECT, { recursive: true, force: true, maxRetries: 3 }); } catch {} });
 if (!process.env.AGENTS_SQUAD_PROJECT.startsWith(os.tmpdir())) throw new Error('[realperf] AGENTS_SQUAD_PROJECT must be an isolated temp root');
 
+// Track every child this harness spawns so a wedged teardown can SIGKILL exactly OUR
+// helpycode children (never anything else — the live app runs the same binary).
+const cp = require('child_process');
+const MY_CHILDREN = new Set();
+{
+  const origSpawn = cp.spawn;
+  cp.spawn = function (...a) {
+    const child = origSpawn.apply(this, a);
+    try { if (child && child.pid) { MY_CHILDREN.add(child.pid); child.once('exit', () => MY_CHILDREN.delete(child.pid)); } } catch {}
+    return child;
+  };
+}
+const killMyChildren = () => { for (const pid of [...MY_CHILDREN]) { try { process.kill(pid, 'SIGKILL'); } catch {} } MY_CHILDREN.clear(); };
+
 // Per-IPC-call durations + push sizes, wrapped before main.js registers handlers.
 const { ipcMain } = require('electron');
 const PERF_IPC = [];
@@ -108,13 +122,27 @@ app.on('web-contents-created', (_e, contents) => {
   contents.on('did-finish-load', async () => {
     wc = contents;
     try { await main(); } catch (e) { failed = true; console.error('[realperf] failed:', e && e.stack || e); }
-    if (failed) { try { await ex(`await call('stop')`); } catch {} await WAIT(1500); }
+    if (failed) { try { await stopOrchestrator(); } catch {} await WAIT(1000); }
     app.exit(failed ? 1 : 0);
+    setTimeout(() => { killMyChildren(); process.exit(failed ? 1 : 0); }, 3000).unref();
   });
 });
 
 const ex = (js) => wc.executeJavaScript(`(async () => { const w = (ms) => new Promise((r) => setTimeout(r, ms)); const $ = (s) => document.querySelector(s); ${js} })()`);
+// exT: like ex but rejects after ms — a wedged/crashed renderer must never hang the run tail.
+const exT = (js, ms) => Promise.race([ex(js), WAIT(ms || 30000).then(() => { throw new Error('ex-timeout'); })]);
 const jsq = (v) => JSON.stringify(v);
+
+// Orchestrator stop: call('stop') can hang forever when real helpycode children ignore its
+// kill (observed twice) — time-box it, then SIGKILL exactly our recorded children.
+async function stopOrchestrator() {
+  try { await Promise.race([exT(`await call('stop')`, 15000), WAIT(16000).then(() => { throw new Error('stop-timeout'); })]); }
+  catch (e) { console.error('[realperf] stop did not settle:', e.message); }
+  killMyChildren();
+  await WAIT(800);
+}
+// Last-resort watchdog: a promise-hang anywhere must not leave an instance lingering.
+setTimeout(() => { console.error('[realperf] WATCHDOG: force exit'); killMyChildren(); try { app.exit(3); } catch {} }, Number(process.env.PERF_MAX_MS || 20 * 60000)).unref();
 
 // ---- in-page instrumentation -------------------------------------------------------------
 const INSTRUMENT = `
@@ -415,6 +443,7 @@ async function scrollCampaign(reps) {
       if (s % 8 === 7) { const inf = await ex(`return window.__jank.scrollInfo()`); if (inf.top <= 90) break; }
     }
     await WAIT(300);
+    const mid = await ex(`return window.__jank.scrollInfo()`); // captured at the top: prepend grew the DOM
     for (let s = 0; s < 40; s++) { // back to the bottom (window shrink redraw)
       await wheelAt(xy, 240);
       await WAIT(16);
@@ -422,7 +451,7 @@ async function scrollCampaign(reps) {
       if (inf.h - inf.top - inf.ch < 100) break;
     }
     const after = await ex(`return window.__jank.scrollInfo()`);
-    recs.push({ rep: i, wallMs: Date.now() - t0, groupsBefore: before.groups, groupsAfter: after.groups, grew: after.groups > before.groups });
+    recs.push({ rep: i, wallMs: Date.now() - t0, groupsBefore: before.groups, groupsAfter: after.groups, grew: mid.groups > before.groups });
     await phase('stream');
     await WAIT(400);
   }
@@ -470,8 +499,22 @@ async function main() {
   await phase('stream');
   const streamT0 = Date.now();
   const pushesAtStreamStart = PERF_PUSH.length;
+  // Wait for actual streaming before measuring the untouched window: real model runs have
+  // quiet lulls (thinking/API latency) where no log lines flow for tens of seconds.
+  {
+    let waited = 0, lastPushes = PERF_PUSH.length;
+    while (waited < 150000) {
+      await WAIT(5000); waited += 5000;
+      const now = PERF_PUSH.length;
+      if (now > lastPushes + 3) break;
+      lastPushes = now;
+    }
+    console.log(`[realperf] stream window: waited ${waited} ms for pushes to flow`);
+  }
+  const measuredT0 = Date.now();
   await WAIT(STREAM_MS);
   const streamPushes = PERF_PUSH.slice(pushesAtStreamStart);
+  const streamWindowSecs = (Date.now() - measuredT0) / 1000;
   const ioWin = { calls: IO.winCalls, totalMs: +IO.winTotalMs.toFixed(1) };
   IO.winCalls = 0; IO.winTotalMs = 0;
   EL.enable();
@@ -516,9 +559,9 @@ async function main() {
     byName: Object.fromEntries(Object.entries(byName).map(([k, v]) => [k, { n: v.n, perSec: +(v.n / winSecs).toFixed(2), msP50: q(v.ms, 0.5), msP95: q(v.ms, 0.95), msMax: v.ms.length ? Math.max(...v.ms) : 0 }]).sort((a, b) => b[1].n - a[1].n).slice(0, 14)),
   };
   summary.streamPushes = {
-    n: streamPushes.length, perSec: +(streamPushes.length / (STREAM_MS / 1000)).toFixed(2),
+    n: streamPushes.length, perSec: +(streamPushes.length / streamWindowSecs).toFixed(2),
     state: streamPushes.filter((p) => p.channel === 'state').length, log: streamPushes.filter((p) => p.channel === 'log').length,
-    kbPerSec: +(streamPushes.reduce((s, p) => s + p.bytes, 0) / 1024 / (STREAM_MS / 1000)).toFixed(1),
+    kbPerSec: +(streamPushes.reduce((s, p) => s + p.bytes, 0) / 1024 / streamWindowSecs).toFixed(1),
   };
   if (summary.streamPushes.log < 10) { // agents finished early: the "streaming" scenario silently became idle
     const diag = await ex(`return { working: Object.values(S.orch.agents || {}).filter((a) => a.status === 'working').length, running: !!S.orch.running, todo: S.tasks.filter((t) => t.status === 'todo').length, logTail: logs.slice(-6).map((l) => l.kind + ': ' + String(l.text).slice(0, 120)) }`).catch(() => ({}));
@@ -537,7 +580,7 @@ async function main() {
   fs.writeFileSync(path.join(OUT, 'real-agents-jank.md'), markdown(summary));
   console.log('\n' + markdown(summary));
   console.log(`[realperf] wrote ${path.join(OUT, 'real-agents-jank.json')}`);
-  await ex(`await call('stop')`);
+  await stopOrchestrator();
   await WAIT(1500);
 }
 
