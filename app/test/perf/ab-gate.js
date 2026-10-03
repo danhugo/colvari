@@ -19,14 +19,15 @@
  *
  * Exit code: 0 PASS, 1 FAIL, 2 INVALID (dropped + quiet-unsettled over 20% / too-few samples — rerun).
  */
-const { execFileSync, spawn } = require('child_process');
+const { execFileSync } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const HE = require('../harness/harness-electron');
 
 const APP = path.resolve(__dirname, '../..');
 const HARNESS = path.join(__dirname, 'click-latency.js');
-const ELECTRON = process.env.PERF_ELECTRON || path.join(APP, 'node_modules/.bin/electron');
+const ELECTRON = process.env.PERF_ELECTRON || undefined; // default: the real Electron binary via electronBin()
 const REPS = Math.max(1, Number(process.env.PERF_CLICK_REPS || 8));
 const PAIRS = Math.max(0, Number(process.env.PERF_PAIRS || 3));
 const WARM_MS = Number(process.env.PERF_WARM_MS || 4000);
@@ -100,7 +101,11 @@ async function runOne(label, { wtDir, outDir, traceMs, env }) {
   fs.mkdirSync(outDir, { recursive: true });
   const pre = os.loadavg();
   const t0 = Date.now();
-  const child = spawn(ELECTRON, [HARNESS], {
+  // Harness spawn (t_98eed830): own process group + run marker, so the run dies with this
+  // driver (group kill on exit/signal/error here, parent watchdog in the app) and any leftover
+  // is reappable by pidfile at the next boot — never by name.
+  const child = HE.spawnHarness(ELECTRON || HE.electronBin(), [HARNESS], {
+    label: `ab-${label}`,
     env: { ...process.env, PERF_APP_DIR: path.join(wtDir, 'app'), PERF_OUT: outDir, PERF_CLICK_REPS: String(REPS), ...(traceMs ? { PERF_TRACE_MS: String(traceMs) } : {}), ...env },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -126,7 +131,7 @@ async function runOne(label, { wtDir, outDir, traceMs, env }) {
 }
 function exitWithTimeout(child, ms, label) {
   return new Promise((resolve) => {
-    const killer = setTimeout(() => { console.error(`[ab] ${label}: timeout, killing pid ${child.pid}`); child.kill('SIGKILL'); }, ms);
+    const killer = setTimeout(() => { console.error(`[ab] ${label}: timeout, killing process group of pid ${child.pid}`); void HE.killGroup(child.pid, { log: (m) => console.error(`[ab] ${label}: ${m}`) }); }, ms);
     child.once('close', (code, sig) => { clearTimeout(killer); resolve(code == null ? (sig ? -1 : 1) : code); });
   });
 }

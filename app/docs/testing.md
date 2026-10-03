@@ -123,3 +123,30 @@ dirs were swept, and `git worktree list` for the repo is unchanged. Total tmpdir
 are printed as evidence but never asserted — unrelated processes write to the system tmpdir
 concurrently. Unit coverage for the sweep decision, the rm guard and the root/descendant split
 is in `test/tmpdir-harness.test.js` (sandbox-only; it never sweeps the real tmpdir).
+
+## Harness Electron lifecycle (t_98eed830)
+
+Every Electron a harness starts — `test/perf/*` mains, the ab-gate and profile drivers,
+gui-e2e/smoke instances — belongs to its run, not to the desktop:
+
+- **Marker**: the run is marked with `AGENTS_SQUAD_HARNESS_RUN=<id>` (env) plus an exact
+  `--squad-harness-run=<id>` argv nonce. `npm test`/gui-e2e/smoke instances that were started
+  without a driver self-mark in TEST_MODE. Production launches carry no marker.
+- **Record**: the app writes its own pidfile to `<real tmpdir>/agents-squad-harness-pids/<id>.json`
+  (`src/harness-sweep.js`): pid, live pgid, exact start time, marker, owner pid + owner start
+  time. Atomic tmp+rename, one file per run, removed on any clean quit.
+- **Parent watchdog**: a marked app quits itself when its owner disappears — the recorded owner
+  pid vanishes, or the live ppid has reparented to launchd. This covers driver SIGKILL, crashes
+  and drain cuts, where no driver exit handler can fire (a hard timeout cannot cover SIGKILL
+  either).
+- **Driver kills**: drivers spawn through `test/harness/harness-electron.js`
+  (`spawnHarness`): detached (own process group, real Electron binary), group kill on driver
+  exit/SIGINT/SIGTERM/uncaught error and on the driver's own hard timeout — SIGTERM, 2 s grace,
+  SIGKILL, always against the live pgid.
+- **Boot sweep**: at every app boot `sweep()` reaps ONLY pidfile-recorded runs whose recorded
+  owner is dead — and only after the live process proves its identity (recorded start time
+  matches, recorded marker present in argv or env). Recycled pids, marker mismatches, malformed
+  records: pidfile deleted, nothing signalled. Processes are never matched by name; the sweep
+  skips its own pid and ancestors and logs every decision.
+
+Unit coverage (including the negative cases) is in `test/harness-sweep.test.js`.
