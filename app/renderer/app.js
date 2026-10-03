@@ -2037,7 +2037,10 @@ $('#nt-add').onclick = async () => {
   $('#nt-title').value = ''; $('#nt-desc').value = ''; sel.task = t.id; refresh();
 };
 
-const taskTitle = (id) => (S.tasks.find((x) => x.id === id) || {}).title || id;
+// Memoized per S.tasks identity (t_1fb02462): every thread-linked bubble does this O(tasks) scan;
+// deltas replace the array wholesale, so identity is the invalidation key.
+const taskTitle = (() => { let memo = null; return (id) => { if (!memo || memo.tasks !== S.tasks) memo = { tasks: S.tasks, map: new Map() };
+  let v = memo.map.get(id); if (v === undefined) { v = (S.tasks.find((x) => x.id === id) || {}).title || id; memo.map.set(id, v); } return v; }; })();
 function openBlockers(t) { return (t.blockedBy || []).filter((id) => { const x = S.tasks.find((y) => y.id === id); return x && x.status !== 'done'; }); }
 // Per-task live view: the last log lines of the agent working on the selected task.
 function renderLive() {
@@ -2156,9 +2159,15 @@ function logRow(l) {
 // Records live on the owning agent (S.orch.agents[id].subagents) for the current run and persist per
 // run in RUNS[i].subagents; a child log row carries subagentId. Unknown ids render a minimal block.
 function subRecOf(sid) {
-  for (const a of Object.values(S.orch.agents || {})) { const r = (a.subagents || []).find((x) => x.id === sid); if (r) return r; }
-  for (const r of RUNS) { const x = (r.subagents || []).find((y) => y.id === sid); if (x) return x; }
-  return null;
+  // Per-draw index (t_1fb02462): renderers reset CH.subIndex before walking bubbles. Lookups used
+  // to scan every agent's subagents and then every run — several times per subagent bubble — which
+  // is O(runs) per call once records persist. Priority is unchanged: live agent records beat runs.
+  let m = CH.subIndex;
+  if (!m) { m = new Map();
+    for (const a of Object.values(S.orch.agents || {})) for (const x of (a.subagents || [])) if (x && x.id && !m.has(x.id)) m.set(x.id, x);
+    for (const r of RUNS || []) for (const x of (r.subagents || [])) if (x && x.id && !m.has(x.id)) m.set(x.id, x);
+    CH.subIndex = m; }
+  return m.get(sid) || null;
 }
 const subOpen = new Set(); // expanded subagent block ids (survives re-renders within the session)
 function subMetaTxt(rec) {
@@ -2207,6 +2216,7 @@ $('#log').addEventListener('scroll', () => { const box = $('#log');
 // path, so a redundant renderLog after an append early-returns.
 const logKey = () => [ctx.p, logs.length, (logs[logs.length - 1] || {}).at, logWin, $('#logfilter').value, $('#logsearch').value, [...logLevels].join(), sel.logTeam, logsLoaded.has(ctx.p)].join('|');
 function renderLog() {
+  CH.subIndex = null; // per-draw subagent record index (see subRecOf)
   if (!$('#tab-obs').classList.contains('active')) return;
   const lkey = logKey();
   if (lkey === logSig) return; logSig = lkey;
@@ -2816,10 +2826,13 @@ const groupHeadHtml = (g) => { const w = who(g.who);
 // data-cnt = event count of the group (repeat-collapsed bubbles carry it in .count) — the append
 // path slides the window from the front in whole groups and needs the count to keep the books.
 const renderGroups = (events, working) => { const ask = needsYou(); return mergeGroups(Chat.group(events)).map((g) => { const w = who(g.who); const cnt = g.items.reduce((a, it) => a + (it.count || 1), 0);
-  return `<div class="cgroup${w.human ? ' self' : ''}" data-cnt="${cnt}">${avatarHtml(g.who, working, ask)}<div class="cbody">${groupHeadHtml(g)}${bubbleRuns(g.items)}</div></div>`; }).join(''); };
+  return `<div class="cgroup${w.human ? ' self' : ''}" data-cnt="${cnt}" data-who="${esc(g.who)}">${avatarHtml(g.who, working, ask)}<div class="cbody">${groupHeadHtml(g)}${bubbleRuns(g.items)}</div></div>`; }).join(''); };
 // Sticky "Your turn" bar above the composer: every pending ask_human question/approval.
 function renderYourTurn(ev) {
   const seen = new Set((S.inbox || []).map((i) => i.id)); const items = [...(S.inbox || []), ...ev.filter((e) => e.type === 'question' && !seen.has(e.inboxId)).map((e) => ({ id: e.inboxId, nodeId: e.who, question: e.text, choices: e.choices, kind: 'question' }))]; const bar = $('#chat-yourturn'); bar.classList.toggle('hidden', !items.length);
+  const key = items.map((i) => `${i.id}:${i.question}:${(i.choices || []).join()}`).join('|');
+  if (key === CH.ytKey) return; // unchanged: keep the bound DOM (t_1fb02462 — this rebuilt every draw)
+  CH.ytKey = key;
   bar.innerHTML = items.length ? `<div class="yt-head"><span class="yt-badge">!</span><b>Your turn</b><span class="muted">${items.length} waiting</span></div>` + items.map((i) => `<div class="yt-item" data-iid="${i.id}"><b>${esc(nodeName(i.nodeId))}</b> <span>${esc(i.question)}</span><span class="spacer"></span>${(i.kind === 'approval' ? ['approve'] : i.choices || []).map((c) => `<button class="primary yt-choice" data-v="${esc(c)}">${esc(c)}</button>`).join('')}<input class="yt-ans" placeholder="${i.kind === 'approval' ? 'Request changes…' : 'Answer…'}"><button class="yt-send">Send</button></div>`).join('') : '';
   bar.querySelectorAll('.yt-item').forEach((d) => { const answer = (v) => act(async () => { if (!v) return; await call('answerInbox', d.dataset.iid, v); refresh(); })();
     d.querySelectorAll('.yt-choice').forEach((b) => b.onclick = () => answer(b.dataset.v)); d.querySelector('.yt-send').onclick = () => answer(d.querySelector('.yt-ans').value.trim());
@@ -2859,6 +2872,7 @@ function renderChatBody() {
   fillTeamSelect($('#chatteam'), sel.chatTeam, (S.project && S.project.teams) || []);
   const working = new Set(Object.keys(S.orch.agents || {}).filter((id) => S.orch.agents[id].status === 'working'));
   const L = projLogs();
+  CH.subIndex = null; // per-draw subagent record index (see subRecOf)
   let ev = Chat.roomEvents(L, S.tasks, S.messages, S.inbox, Chat.MAX, subRecOf); // capped to the last Chat.MAX (500) events
   if (sel.chatTeam) { ev = ev.filter(chatInScope); for (const e of ev) e._tb = crossTeamOf(e); } // team scope + cross-team badges (t_1158f757)
   CH.ev = ev;
@@ -2873,30 +2887,41 @@ function renderChatBody() {
   // count events newer than the previous tail instead.
   const delta = ev.filter((e) => e.at > (CH.evTailAt ?? -Infinity)).length;
   if (ev.length) CH.evTailAt = ev[ev.length - 1].at;
-  // Everything besides pure tail-append data the room DOM carries: scope/thread/window state, the
-  // working/needs-you rings in group avatars, and node identity (names, roles, badges, faces).
-  const stamp = [sel.chatTeam || '', CH.thread || '', [...workingT].sort().join(), [...needsYou()].sort().join(),
-    S.allNodes.map((n) => n.id + n.name + n.role + (n.runtime || '') + (n.model || '') + (n.avatarSeed || '')).join()].join('|');
-  // Fast tail append (t_fe51eee9): pinned to the bottom, nothing but new trailing events — extend
-  // the last group / append new groups instead of rebuilding every group (the #1 streaming cost
-  // left in the room, ~100 groups of innerHTML + full relayout per burst draw). Any surprise falls
-  // back to the full render below, which is always correct.
-  if (atBottom && CH.evDom && CH.stamp === stamp) {
-    const plan = Chat.tailPlan(CH.evDom, ev, CH.win || Chat.PAGE);
-    if (plan && applyChatAppend(ev, plan, workingT)) return;
-  }  CH.stamp = stamp;
-  CH.evDom = page.items;
+  // Hard stamp: everything whose change must rebuild the room from scratch — scope, thread, and
+  // node identity (names/roles/badges/faces are baked into every bubble). The working/needs-you
+  // rings deliberately live OUTSIDE it now (t_1fb02462): with them in, every run start/finish
+  // force-rebuilt all ~100 groups — the top streaming cost in Quinn's real-agent trace
+  // (t_f4f6d15e) — where a class toggle on the drifted avatars is enough.
+  const stamp = [sel.chatTeam || '', CH.thread || '',
+    S.allNodes.map((n) => n.id + n.name + n.role + (n.runtime || '') + (n.model || '') + (n.avatarSeed || '')).join(),
+    sel.chatTeam ? S.allNodes.map((n) => n.id + (n.teamId || '')).join() : ''].join('|'); // team moves change chatInScope's filter output
+  const workKey = [...workingT].sort().join() + '|' + [...needsYou()].sort().join();
+  if (CH.stamp === stamp && CH.evFp && CH.evFp.length) {
+    // Scroll-up window growth (chatGrow): prepend the next older page instead of rebuilding.
+    if (!atBottom && (CH.win || Chat.PAGE) > (CH.domWin || 0) && applyChatPrepend(ev, workingT, prevTop, prevH)) { CH.workKey = workKey; return; }
+    if (atBottom) {
+      const plan = Chat.tailPlan(CH.evFp, ev, CH.win || Chat.PAGE, subRecOf);
+      if (plan && applyChatAppend(ev, plan, workingT)) { CH.workKey = workKey; return; }
+      if (!plan && (CH.domWin || 0) === (CH.win || Chat.PAGE)) {
+        // Nothing in the feed the DOM can absorb and the window didn't move: at most the chrome
+        // drifted. Patch the rings and skip the rebuild (a no-op draw used to fall through to a
+        // full innerHTML of every group).
+        if (CH.workKey !== workKey) { patchChatAvatars(room, workingT); CH.workKey = workKey; }
+        return;
+      }
+    }
+  }
+  CH.stamp = stamp; CH.workKey = workKey;
+  CH.evFp = page.items.map((e) => Chat.eventFp(e, subRecOf));
   room.innerHTML = page.items.length ? (page.hidden ? `<button id="chat-older" class="olderbar linklike">↑ ${page.hidden} earlier message${page.hidden === 1 ? '' : 's'} — scroll up or click to load</button>` : '') + renderGroups(page.items, workingT)
     : sel.chatTeam ? '<p class="muted logempty" data-testid="chat-empty-team">No messages for this team.</p>'
     : S.team.nodes.length ? `<div class="cempty"><svg class="brandmark big" viewBox="0 0 32 32" aria-hidden="true"><path d="M23 9A10 10 0 1 0 23 23" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/><g fill="currentColor"><circle cx="23" cy="9" r="3.6"/><circle cx="6" cy="16" r="3.6"/><circle cx="23" cy="23" r="3.6"/></g></svg><b>#company is quiet</b>Type a goal below, or @mention an agent (e.g. <code>@${esc(S.team.nodes[0].name)} write hello.txt</code>).</div>` : '<div class="cempty"><svg class="brandmark big" viewBox="0 0 32 32" aria-hidden="true"><path d="M23 9A10 10 0 1 0 23 23" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/><g fill="currentColor"><circle cx="23" cy="9" r="3.6"/><circle cx="6" cy="16" r="3.6"/><circle cx="23" cy="23" r="3.6"/></g></svg><b>No team yet</b>Create your team in the Team tab (or use the first-run guide), then chat with it here.</div>';
   if (atBottom) { CH.win = Chat.PAGE; room.scrollTop = room.scrollHeight; repinBottom(room); CH.pendingNew = 0; }
   else { room.scrollTop = Chat.anchorScroll(prevTop, prevH, room.scrollHeight); CH.pendingNew = (CH.pendingNew || 0) + delta; }
+  CH.domWin = CH.win || Chat.PAGE; // the window the DOM now shows (after the at-bottom reset)
   const ob = $('#chat-older'); if (ob) ob.onclick = chatGrow;
   updateNewPill();
-  const th = $('#chat-thread'); const t = S.tasks.find((x) => x.id === CH.thread); th.classList.toggle('hidden', !t);
-  if (t) { const tev = ev.filter((e) => e.taskId === t.id);
-    th.innerHTML = `<div class="chat-head"><b>🧵 ${esc(t.title)}</b><span class="role">${esc(t.status)}</span><span class="spacer"></span><button id="ch-close" title="Close thread">✕</button></div><div id="chat-threadroom">${tev.length ? renderGroups(tev, workingT) : '<p class="muted" style="padding:16px">Nothing in this thread yet.</p>'}</div>`;
-    $('#ch-close').onclick = () => { CH.thread = null; chatSched.force(); }; }
+  syncThreadPanel(ev, workingT);
   bindChatBubbles($('#tab-chat'));
 }
 // Thread links and ask-human answer forms ride the bubbles; both paths (full render and tail
@@ -2908,52 +2933,157 @@ function bindChatBubbles(scope) {
     d.querySelectorAll('.ch-choice').forEach((b) => b.onclick = () => answer(b.dataset.v)); d.querySelector('.ch-send').onclick = () => answer(d.querySelector('.ch-ans').value.trim());
   });
 }
-// Extend the room with plan.fresh (t_fe51eee9): slide the window from the front in whole groups,
-// continue the last remaining group when the new events share its author (rebuilding that group's
-// body — repeat badges and handoff runs may re-collapse), append new groups for the rest, and
-// refresh the older-bar count. Whole-group eviction keeps up to one group of extra scrollback at
-// the front (a partial group can't be evicted without splitting bubbles) — the fp-verified window
-// is exact regardless, and the next full render realigns the top edge. Returns false when the DOM
-// shape doesn't match the plan — the caller falls back to the full render, which overwrites
-// whatever was touched here.
+// Turn the drawn room into plan.target with the least DOM work (t_1fb02462, extending t_fe51eee9):
+// whole-group eviction of what fits before the slide, keep every group fully fp-confirmed, remove
+// and re-render from the first group that isn't (a late tool result or subagent update patches its
+// own group only), and patch the working/needs-you rings that full renders used to rebuild the
+// room for. Books stay exact: CH.evFp mirrors the DOM after every step, front drift included.
+// Returns false when the DOM shape doesn't match the plan — the caller falls back to the full
+// render, which overwrites whatever was touched here.
 function applyChatAppend(ev, plan, workingT) {
   const room = $('#chat-room');
   const win = CH.win || Chat.PAGE;
   const ob = $('#chat-older');
   if ((ev.length > win) !== !!ob) return false; // the window boundary moved: draw it in a full render
-  const dom = CH.evDom;
-  const evict = dom.length - plan.keep;
-  let evicted = 0;
-  if (evict > 0) for (let g = room.querySelector('.cgroup'); g && evicted + (+g.dataset.cnt || 1) <= evict; g = room.querySelector('.cgroup')) { evicted += +g.dataset.cnt || 1; g.remove(); }
-  const domNow = dom.slice(evicted); // old events still in the DOM (evicted counts actual events)
-  const items = domNow.concat(plan.fresh);
-  if (items.length > ev.length) return false; // bookkeeping lost the thread of the feed: rebuild
-  // The boundary group: trailing run of same-author non-question events in items — the same
-  // content a full render's Chat.group would produce for this window.
-  let runStart = items.length - 1;
-  if (items[runStart].type === 'question') runStart = items.length; // questions never join a run
-  else { const rw = items[runStart].who;
-    while (runStart > 0 && items[runStart - 1].who === rw && items[runStart - 1].type !== 'question') runStart--; }
-  if (runStart < domNow.length) { // the run continues the DOM's last group: rebuild its body in place
-    const groups = room.querySelectorAll('.cgroup');
-    const lastGroup = groups[groups.length - 1];
-    if (!lastGroup || !lastGroup.querySelector('.cbody')) return false;
-    const run = Chat.collapseRepeats(items.slice(runStart));
-    lastGroup.querySelector('.cbody').innerHTML = groupHeadHtml({ who: run[0].who, at: run[0].at }) + bubbleRuns(run);
-    lastGroup.dataset.cnt = String(items.slice(runStart).reduce((a, it) => a + (it.count || 1), 0));
-  } else if (runStart < items.length) { // the run starts inside the fresh events: they form new groups
-    const t = document.createElement('template');
-    t.innerHTML = renderGroups(items.slice(runStart), workingT);
-    room.appendChild(t.content);
+  const { target, slide, alignFrom, alignLen } = plan;
+  const confFrom = slide + alignFrom, confTo = slide + alignFrom + alignLen; // confirmed DOM range
+  // Walk the groups in DOM order, tracking each group's event range: fully pre-slide groups are
+  // evicted, a group straddling the slide survives as front drift (bounded by one group, books
+  // stay exact), confirmed groups stay untouched, and `cut` marks the first group to re-render.
+  const groups = [...room.querySelectorAll('.cgroup')];
+  let off = 0, evicted = 0, keptLen = 0, cut = -1;
+  for (const g of groups) {
+    const cnt = +g.dataset.cnt || 1; const end = off + cnt;
+    if (end <= slide) { evicted += cnt; g.remove(); off = end; continue; }
+    if (off < slide) { keptLen += cnt; off = end; continue; } // drift straddler: keep
+    if (off >= confFrom && end <= confTo) { keptLen += cnt; off = end; continue; }
+    if (cut < 0) cut = off - slide;
+    off = end;
   }
-  CH.evDom = items;
+  if (cut < 0 && alignFrom + alignLen < target.length) cut = alignFrom + alignLen; // fresh events past the drawn stretch
+  if (cut < 0) { // nothing to re-render: books unchanged (a no-op or eviction-only draw)
+    if (evicted) CH.evFp = CH.evFp.slice(evicted);
+    patchChatAvatars(room, workingT);
+    finishAppend(room, ev, win, ob, workingT);
+    return true;
+  }
+  const rebuild = target.slice(cut);
+  if (!rebuild.length) return false; // bookkeeping lost the thread of the feed: rebuild
+  const keptFps = CH.evFp.slice(evicted, evicted + keptLen);
+  // Remove the stale tail groups (from `cut` on) — everything after the last kept group.
+  for (let i = groups.length - 1; i >= 0; i--) {
+    const g = groups[i]; const cnt = +g.dataset.cnt || 1;
+    off -= cnt;
+    if (off >= evicted + keptLen) g.remove(); else break;
+  }
+  const t = document.createElement('template');
+  t.innerHTML = renderGroups(rebuild, workingT);
+  room.appendChild(t.content);
+  bindChatBubbles(t);
+  CH.evFp = keptFps.concat(rebuild.map((e) => Chat.eventFp(e, subRecOf)));
+  patchChatAvatars(room, workingT);
+  finishAppend(room, ev, win, ob, workingT);
+  return true;
+}
+// Shared tail of the append path: older-bar label, scroll pin, new pill. The thread panel is
+// synced separately (syncThreadPanel) so append-only draws keep it current without a full render.
+function finishAppend(room, ev, win, ob, workingT) {
+  if (ob) { const hidden = ev.length - win; const label = `↑ ${hidden} earlier message${hidden === 1 ? '' : 's'} — scroll up or click to load`;
+    if (hidden > 0) { if (ob.textContent !== label) ob.textContent = label; }
+    else ob.remove(); }
   CH.pendingNew = 0;
-  if (ob) { const hidden = ev.length - win; const label = `↑ ${hidden} earlier message${hidden === 1 ? '' : 's'} — scroll up or click to load`; if (ob.textContent !== label) ob.textContent = label; }
-  bindChatBubbles($('#tab-chat'));
   room.scrollTop = room.scrollHeight;
   repinBottom(room);
   updateNewPill();
+  syncThreadPanel(ev, workingT);
+}
+// Prepend the next older page (chatGrow) without rebuilding the room (t_1fb02462 — the scroll-up
+// prepend was a whole-room innerHTML at fat feeds, the 1.3s worst frame in Quinn's trace). The
+// fp-verified older slice renders into a fragment inserted under the older bar; a slice ending in
+// the same author/minute as the room's first group merges into it (rebuilding just that group's
+// body), exactly what one full render's Chat.group would have produced. The viewport is anchored
+// twice: immediately (placeholder heights from content-visibility) and again after paint.
+function applyChatPrepend(ev, workingT, prevTop, prevH) {
+  const room = $('#chat-room');
+  const win = CH.win || Chat.PAGE;
+  const plan = Chat.prependPlan(CH.evFp, ev, win, subRecOf);
+  if (!plan) return false;
+  const ob = $('#chat-older');
+  const { target, slice } = plan;
+  const groupsNew = mergeGroups(Chat.group(slice));
+  let fragItems = slice;
+  if (groupsNew.length) {
+    const lastNew = groupsNew[groupsNew.length - 1];
+    const first = room.querySelector('.cgroup');
+    const firstCnt = first ? +first.dataset.cnt || 1 : 0;
+    const firstItems = target.slice(slice.length, slice.length + firstCnt); // the room's first group's events
+    if (first && firstItems.length && firstCnt <= firstItems.length && lastNew.who === firstItems[0].who
+      && firstItems[0].type !== 'question' && lastNew.items[0].type !== 'question'
+      && firstItems[0].at - lastNew.items[lastNew.items.length - 1].at < Chat.GROUP_MS) {
+      // merge: the boundary group re-collapses over both halves
+      const merged = [...lastNew.items, ...firstItems];
+      fragItems = slice.slice(0, slice.length - lastNew.items.length);
+      const body = first.querySelector('.cbody');
+      if (!body) return false;
+      body.innerHTML = groupHeadHtml({ who: merged[0].who, at: merged[0].at }) + bubbleRuns(Chat.collapseRepeats(merged));
+      first.dataset.cnt = String(merged.reduce((a, it) => a + (it.count || 1), 0));
+      bindChatBubbles(first);
+    }
+  }
+  if (fragItems.length) {
+    const t = document.createElement('template');
+    t.innerHTML = renderGroups(fragItems, workingT);
+    const anchor = ob ? ob.nextSibling : room.firstChild;
+    room.insertBefore(t.content, anchor);
+    bindChatBubbles(t);
+  }
+  CH.evFp = target.map((e) => Chat.eventFp(e, subRecOf));
+  CH.domWin = win;
+  if (ob) { const hidden = ev.length - win; const label = `↑ ${hidden} earlier message${hidden === 1 ? '' : 's'} — scroll up or click to load`;
+    if (hidden > 0) { if (ob.textContent !== label) ob.textContent = label; }
+    else ob.remove(); }
+  // Anchor: the fresh content adds (new - prev) px above the viewport; content-visibility
+  // resolves the prepended rows' real heights on paint, so re-anchor once the frame settles.
+  room.scrollTop = Chat.anchorScroll(prevTop, prevH, room.scrollHeight);
+  const want = room.scrollTop;
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    if (Math.abs(room.scrollTop - want) < 2) room.scrollTop = Chat.anchorScroll(prevTop, prevH, room.scrollHeight);
+  }));
+  syncThreadPanel(ev, workingT);
   return true;
+}
+// Working/needs-you rings live in the group avatars; append/prepend/no-op draws don't touch their
+// HTML, so ring changes (a run starting or stopping) patch class-wise here. Group authorship comes
+// from the books (CH.evFp mirrors the DOM), so legacy groups without data-who are covered too.
+function patchChatAvatars(room, workingT) {
+  const ask = needsYou(); const fps = CH.evFp || [];
+  let i = 0;
+  room.querySelectorAll('.cgroup').forEach((g) => {
+    const cnt = +g.dataset.cnt || 1;
+    const id = i < fps.length ? fps[i].slice(0, fps[i].indexOf('|')) : g.dataset.who || null;
+    i += cnt;
+    if (!id) return;
+    const av = g.querySelector('.avatar'); if (!av) return;
+    const w = workingT.has(id), a = ask.has(id);
+    if (av.classList.contains('working') !== w) av.classList.toggle('working', w);
+    if (av.classList.contains('ask') !== a) av.classList.toggle('ask', a);
+    const nm = who(id); const title = nm.name + (w ? ' · working' : a ? ' · needs you' : '');
+    if (av.getAttribute('title') !== title) av.setAttribute('title', title);
+  });
+}
+// Thread panel: kept current on every draw path, but only rebuilt when its events actually moved
+// (a full rebuild per draw would reintroduce the per-draw innerHTML cost for open threads).
+function syncThreadPanel(ev, workingT) {
+  const th = $('#chat-thread'); const t = S.tasks.find((x) => x.id === CH.thread);
+  th.classList.toggle('hidden', !t);
+  if (!t) return;
+  const wt = workingT || new Set(Object.keys(S.orch.agents || {}).filter((id) => S.orch.agents[id].status === 'working'));
+  const tev = ev.filter((e) => e.taskId === t.id);
+  const key = tev.map((e) => Chat.eventFp(e, subRecOf)).join();
+  if (key === CH.thKey) return;
+  CH.thKey = key;
+  th.innerHTML = `<div class="chat-head"><b>🧵 ${esc(t.title)}</b><span class="role">${esc(t.status)}</span><span class="spacer"></span><button id="ch-close" title="Close thread">✕</button></div><div id="chat-threadroom">${tev.length ? renderGroups(tev, wt) : '<p class="muted" style="padding:16px">Nothing in this thread yet.</p>'}</div>`;
+  $('#ch-close').onclick = () => { CH.thread = null; CH.thKey = null; chatSched.force(); };
 }
 function chatPreview() {
   const v = $('#chat-input').value; const p = Chat.parseComposer(v, S.team.nodes); const pv = $('#chat-preview');
