@@ -1106,7 +1106,7 @@ function edgeGeom(a, b, off, obs = [], seed = 0) {
     return null;
   };
   const r = solve() || detour();
-  if (!r) { const p1 = [A.x + NW, A.y + NH / 2 + off * 0.6], p2 = [B.x, B.y + NH / 2 + off * 0.6], rail = (p1[0] + p2[0]) / 2 + off; return { d: orthPath([p1, [rail, p1[1]], [rail, p2[1]], p2].map(P)), mid: P([rail, (p1[1] + p2[1]) / 2]), n: flip ? [1, 0] : [0, 1] }; }
+  if (!r) { const { p1, p2 } = anchors(), rail = (p1[0] + p2[0]) / 2 + off; return { d: orthPath([p1, [rail, p1[1]], [rail, p2[1]], p2].map(P)), mid: P([rail, (p1[1] + p2[1]) / 2]), n: flip ? [1, 0] : [0, 1] }; }
   return { d: orthPath(r.pts.map(P)), mid: P(r.mid), n: flip ? [r.n[1], r.n[0]] : r.n };
 }
 const overlaps = (r, q) => r.x < q.x + q.w && q.x < r.x + r.w && r.y < q.y + q.h && q.y < r.y + r.h;
