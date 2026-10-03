@@ -888,24 +888,39 @@ const teamHue = (teamId) => {
   _teamHue.set(teamId, hue);
   return hue;
 };
+// O(1) id → node/task indexes (t_94b8df1f): chat open/switch used to scan allNodes and the whole
+// task list linearly per event — a grown 550-task board turned teamSwitch into a 139ms long task
+// inside taskTeamOf. Both caches invalidate on array identity: refresh() swaps the arrays
+// wholesale, deltas mutate entries in place, so an entry may trail one refresh cycle (the same
+// tolerance the taskTitle memo accepted); misses (new/unknown ids) fall back to the linear scan
+// and fill the cache in.
+const _idx = {};
+const nodeById = (id) => { if (_idx.nodes !== S.allNodes) { _idx.nodes = S.allNodes; _idx.nodeMap = new Map(); }
+  let v = _idx.nodeMap.get(id); if (v === undefined) { v = S.allNodes.find((x) => x.id === id) || null; _idx.nodeMap.set(id, v); } return v; };
+const taskById = (id) => { if (_idx.tasks !== S.tasks) { _idx.tasks = S.tasks; _idx.taskMap = new Map(); }
+  let v = _idx.taskMap.get(id); if (v === undefined) { v = S.tasks.find((x) => x.id === id) || null; _idx.taskMap.set(id, v); } return v; };
 const agentColor = (id) => {
-  const n = S.allNodes.find((x) => x.id === id);
+  const n = nodeById(id);
   const hue = n ? teamHue(n.teamId) : 0;
   if (hue) return hue;
   let h = 0; for (const c of String(id)) h = (h * 31 + c.charCodeAt(0)) >>> 0; return (h % 8) + 1;
 };
+// Step within the team (0-2 colour mix) — the per-call filter here allocated a fresh array for
+// every avatar on every draw; memoize per allNodes identity like the id indexes above.
 const agentStep = (id) => {
-  const n = S.allNodes.find((x) => x.id === id);
+  const n = nodeById(id);
   if (!n || !n.teamId) return 0;
-  const i = S.allNodes.filter((x) => x.teamId === n.teamId).findIndex((x) => x.id === id);
-  return i < 0 ? 0 : i % 3;
+  if (_idx.steps !== S.allNodes) { _idx.steps = S.allNodes; _idx.stepMap = new Map(); }
+  let s = _idx.stepMap.get(id);
+  if (s === undefined) { const i = S.allNodes.filter((x) => x.teamId === n.teamId).findIndex((x) => x.id === id); s = i < 0 ? 0 : i % 3; _idx.stepMap.set(id, s); }
+  return s;
 };
 // Team scoping (t_1158f757): one predicate shared by the Logs/Chat/Board team filters.
 // team = '' (All teams) passes everything; an id that is not a team node never passes a
 // real team — chat events get their own "no team anywhere stays visible" rule on top.
-const nodeTeamOf = (id) => { const n = S.allNodes.find((x) => x.id === id); return (n && n.teamId) || null; };
+const nodeTeamOf = (id) => { const n = id ? nodeById(id) : null; return (n && n.teamId) || null; };
 const teamScoped = (team, id) => !team || nodeTeamOf(id) === team;
-const taskTeamOf = (tid) => { const t = S.tasks.find((x) => x.id === tid); return t ? nodeTeamOf(t.assignee) : null; };
+const taskTeamOf = (tid) => { const t = tid ? taskById(tid) : null; return t ? nodeTeamOf(t.assignee) : null; };
 const teamNameOf = (tid) => (((S.project || {}).teams) || []).find((t) => t.id === tid);
 // Cross-team badge: small pill with the other team's name, tinted by its teamHue.
 const teamBadge = (tid) => { const tm = teamNameOf(tid); const name = tm ? tm.name : tid;
@@ -1913,12 +1928,15 @@ function cardHtml(t) {
     bl.length ? `<span class="tag blocked" title="waits for: ${esc(bl.map(taskTitle).join(', '))}">Blocked by ${esc(taskTitle(bl[0]).slice(0, 28))}${bl.length > 1 ? ` +${bl.length - 1}` : ''}</span>` : ready ? '<span class="tag ready" title="Ready">Ready</span>' : '',
     t.awaitingApproval ? '<span class="tag approval" title="needs approval">needs approval</span>' : ''].join('');
   const snippet = String(t.description || '').replace(/\s+/g, ' ').trim();
-  return `<div class="card ${sel.task === t.id ? 'sel' : ''}${t.awaitingApproval ? ' approval' : ''}" data-id="${t.id}"><b>${esc(t.title)}</b>${snippet && snippet !== t.title ? `<span class="cdesc" title="${esc(snippet)}">${esc(clipText(snippet, 100))}</span>` : ''}${tags ? `<span class="ctags">${tags}</span>` : ''}<small class="cmeta">${priorityBadge(t)}${t.assignee ? ((w) => `<span class="avatar sm" style="background:${avatarBg(w)}" title="${esc(w.name)}">${avatarBody(t.assignee, w)}</span><span class="cname">${esc(w.name)}</span>`)(who(t.assignee)) : '<span class="muted">unassigned</span>'}<span class="cago" title="last updated">${ago(t.updatedAt) || '—'}</span>${t.comments.length ? `<span class="ccount" title="${t.comments.length} comment${t.comments.length === 1 ? '' : 's'}">💬 ${t.comments.length}</span>` : ''}</small></div>`;
+  const nCmts = (t.comments || []).length; // a task without a comments array must not kill the whole board render
+  const cmtWord = nCmts === 1 ? 'comment' : 'comments';
+  return `<div class="card ${sel.task === t.id ? 'sel' : ''}${t.awaitingApproval ? ' approval' : ''}" data-id="${t.id}"><b>${esc(t.title)}</b>${snippet && snippet !== t.title ? `<span class="cdesc" title="${esc(snippet)}">${esc(clipText(snippet, 100))}</span>` : ''}${tags ? `<span class="ctags">${tags}</span>` : ''}<small class="cmeta">${priorityBadge(t)}${t.assignee ? ((w) => `<span class="avatar sm" style="background:${avatarBg(w)}" title="${esc(w.name)}">${avatarBody(t.assignee, w)}</span><span class="cname">${esc(w.name)}</span>`)(who(t.assignee)) : '<span class="muted">unassigned</span>'}<span class="cago" title="last updated">${ago(t.updatedAt) || '—'}</span>${nCmts ? `<span class="ccount" title="${nCmts} ${cmtWord}">💬 ${nCmts}</span>` : ''}</small></div>`;
 }
 function patchBoardColumns(tasks) {
   const colsEl = $('#columns');
   boardCols.forEach((st, ci) => {
-    const total = tasks.filter((t) => t.status === st).length;
+    const colTasks = tasks.filter((t) => t.status === st); // one pass serves the header count and the card list
+    const total = colTasks.length;
     const fold = st === 'done' && !doneOpen;
     let col = colsEl.querySelector(':scope > .col.' + st);
     if (!col) { col = tplEl(`<div class="col ${st}"></div>`); colsEl.appendChild(col); }
@@ -1938,7 +1956,7 @@ function patchBoardColumns(tasks) {
       if (!hint) { hint = tplEl('<div class="hint-first" data-testid="board-empty-team"></div>'); h3.after(hint); }
       if (hint.textContent !== wantHint) hint.textContent = wantHint;
     } else if (hint) { hint.remove(); hint = null; } // detach from `prev` too: cards must not insert after a removed node
-    const want = fold ? [] : st === 'done' ? doneCards(tasks) : tasks.filter((t) => t.status === st).slice().sort(byPriorityThenTitle);
+    const want = fold ? [] : st === 'done' ? doneCards(tasks) : colTasks.slice().sort(byPriorityThenTitle);
     const have = new Map(); // existing cards by task id (external duplicates are dropped, first wins)
     for (const el of [...col.children]) {
       if (!el.classList.contains('card')) continue;
@@ -2037,10 +2055,9 @@ $('#nt-add').onclick = async () => {
   $('#nt-title').value = ''; $('#nt-desc').value = ''; sel.task = t.id; refresh();
 };
 
-// Memoized per S.tasks identity (t_1fb02462): every thread-linked bubble does this O(tasks) scan;
-// deltas replace the array wholesale, so identity is the invalidation key.
-const taskTitle = (() => { let memo = null; return (id) => { if (!memo || memo.tasks !== S.tasks) memo = { tasks: S.tasks, map: new Map() };
-  let v = memo.map.get(id); if (v === undefined) { v = (S.tasks.find((x) => x.id === id) || {}).title || id; memo.map.set(id, v); } return v; }; })();
+// Thread-linked bubble titles ride the shared taskById index (t_94b8df1f) instead of a private
+// per-S.tasks memo.
+const taskTitle = (id) => { const t = id ? taskById(id) : null; return (t && t.title) || id; };
 function openBlockers(t) { return (t.blockedBy || []).filter((id) => { const x = S.tasks.find((y) => y.id === id); return x && x.status !== 'done'; }); }
 // Per-task live view: the last log lines of the agent working on the selected task.
 function renderLive() {
@@ -2767,7 +2784,7 @@ const crossTeamOf = (e) => { const st = sel.chatTeam; if (!st) return null;
   const a = nodeTeamOf(e.who); if (a && a !== st) return a;
   const b = nodeTeamOf(e.to); if (b && b !== st) return b;
   const tt = e.taskId ? taskTeamOf(e.taskId) : null; return tt && tt !== st ? tt : null; };
-const who = (id) => { const n = S.allNodes.find((x) => x.id === id); return n ? { name: n.name, role: n.role, color: agentVar(n.id), bg: roleBg(n.role), ini: Chat.initials(n.name), lead: isLeadRole(n.role) } : id === 'human' ? { name: 'You', role: '', color: 'transparent', ini: '', human: true } : { name: id || 'system', role: '', color: 'var(--bg-hover)', ini: '⚙', sys: true }; };
+const who = (id) => { const n = nodeById(id); return n ? { name: n.name, role: n.role, color: agentVar(n.id), bg: roleBg(n.role), ini: Chat.initials(n.name), lead: isLeadRole(n.role) } : id === 'human' ? { name: 'You', role: '', color: 'transparent', ini: '', human: true } : { name: id || 'system', role: '', color: 'var(--bg-hover)', ini: '⚙', sys: true }; };
 function bubble(e) {
   const link = e.taskId && !CH.thread ? ` data-thread="${e.taskId}"` : ''; const tt = link ? taskTitle(e.taskId) : ''; const tl = link && !e._sameTask ? `<span class="tlink" title="${esc(tt)}">↳ ${esc(tt)}</span>` : '';
   const rep = e.count > 1 ? `<span class="repeat" title="repeated ${e.count} times">×${e.count}</span>` : '';
@@ -2809,7 +2826,7 @@ const needsYou = () => new Set([...(S.inbox || []).map((i) => i.nodeId), ...CH.a
 // Agents wear a DiceBear face (wiki decision-dicebear-avatars) over their role colour; human/system keep initials/glyph.
 // avatarUri.faceSvg drops DiceBear's coloured background rect so the role token shows behind the face.
 const faceCache = new Map();
-const faceUri = (id, seed) => { seed = seed || ((S.allNodes || []).find((x) => x.id === id) || {}).avatarSeed || id; let u = faceCache.get(seed);
+const faceUri = (id, seed) => { seed = seed || ((nodeById(id) || {}).avatarSeed || id); let u = faceCache.get(seed);
   if (!u) { u = 'data:image/svg+xml;utf8,' + encodeURIComponent(avatarUri.faceSvg(seed));
     faceCache.set(seed, u); }
   return u; };
@@ -2822,7 +2839,7 @@ const bubbleRuns = (items) => { const out = []; items.forEach((it, k) => { it._s
 // One group's name/time header (shared by the full render and the append path, which rebuilds a
 // group's body in place without touching its avatar).
 const groupHeadHtml = (g) => { const w = who(g.who);
-  return `<div class="cname">${esc(w.name)}${w.role ? `<span class="role">${esc(w.role)}</span>` : ''}${w.human ? '' : vbadge((S.allNodes || []).find((n) => n.id === g.who))}<time>${new Date(g.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time></div>`; };
+  return `<div class="cname">${esc(w.name)}${w.role ? `<span class="role">${esc(w.role)}</span>` : ''}${w.human ? '' : vbadge(nodeById(g.who))}<time>${new Date(g.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time></div>`; };
 // data-cnt = event count of the group (repeat-collapsed bubbles carry it in .count) — the append
 // path slides the window from the front in whole groups and needs the count to keep the books.
 const renderGroups = (events, working) => { const ask = needsYou(); return mergeGroups(Chat.group(events)).map((g) => { const w = who(g.who); const cnt = g.items.reduce((a, it) => a + (it.count || 1), 0);
@@ -2966,6 +2983,9 @@ function renderChatBody() {
 }
 // Thread links and ask-human answer forms ride the bubbles; both paths (full render and tail
 // append) wire them through here — property assignment, so re-binding over old nodes is a no-op.
+// The patch paths must pass a LIVE scope (the fragment before its nodes move into the room, or an
+// in-place rebuilt group): a template drained by appendChild/insertBefore matches nothing and
+// silently leaves the fresh bubbles dead (t_c69c2170).
 function bindChatBubbles(scope) {
   scope.querySelectorAll('[data-thread]').forEach((b) => b.onclick = () => { CH.thread = b.dataset.thread; chatSched.force(); });
   scope.querySelectorAll('.bubble.question').forEach((d) => {
@@ -3019,8 +3039,8 @@ function applyChatAppend(ev, plan, workingT) {
   }
   const t = document.createElement('template');
   t.innerHTML = renderGroups(rebuild, workingT);
+  bindChatBubbles(t.content); // bind BEFORE the insert moves the nodes out — a drained template matches nothing
   room.appendChild(t.content);
-  bindChatBubbles(t);
   CH.evFp = keptFps.concat(rebuild.map((e) => Chat.eventFp(e, subRecOf)));
   CH.renderGen = (CH.renderGen || 0) + 1; // owns the room: pending split chunks must stop
   patchChatAvatars(room, workingT);
@@ -3075,9 +3095,9 @@ function applyChatPrepend(ev, workingT, prevTop, prevH) {
   if (fragItems.length) {
     const t = document.createElement('template');
     t.innerHTML = renderGroups(fragItems, workingT);
+    bindChatBubbles(t.content); // bind BEFORE the insert moves the nodes out — a drained template matches nothing
     const anchor = ob ? ob.nextSibling : room.firstChild;
     room.insertBefore(t.content, anchor);
-    bindChatBubbles(t);
   }
   CH.evFp = target.map((e) => Chat.eventFp(e, subRecOf));
   CH.renderGen = (CH.renderGen || 0) + 1; // owns the room: pending split chunks must stop
