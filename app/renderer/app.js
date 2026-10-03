@@ -1941,8 +1941,23 @@ function cardHtml(t) {
   const cmtWord = nCmts === 1 ? 'comment' : 'comments';
   return `<div class="card ${sel.task === t.id ? 'sel' : ''}${t.awaitingApproval ? ' approval' : ''}" data-id="${t.id}"><b>${esc(t.title)}</b>${snippet && snippet !== t.title ? `<span class="cdesc" title="${esc(snippet)}">${esc(clipText(snippet, 100))}</span>` : ''}${tags ? `<span class="ctags">${tags}</span>` : ''}<small class="cmeta">${priorityBadge(t)}${t.assignee ? ((w) => `<span class="avatar sm" style="background:${avatarBg(w)}" title="${esc(w.name)}">${avatarBody(t.assignee, w)}</span><span class="cname">${esc(w.name)}</span>`)(who(t.assignee)) : '<span class="muted">unassigned</span>'}<span class="cago" title="last updated">${ago(t.updatedAt) || '—'}</span>${nCmts ? `<span class="ccount" title="${nCmts} ${cmtWord}">💬 ${nCmts}</span>` : ''}</small></div>`;
 }
+// Card-html memo (t_d6c2be24): every store write (any comment, any run push) bumps the board
+// version, and the old path met that by re-running cardHtml for ALL cards — ~500 html strings on
+// the grown board, rebuilt just to be diffed — even though only one card's inputs had moved. The
+// memo keys each card's html on exactly what cardHtml reads: the task's own updatedAt (the store
+// bumps it on every task mutation, comments included), the global env (agent states, running set,
+// restart gate, dev mode, team scope, the board's status mix and size, agent names), the rendered
+// age label (the only clock-driven part) and whether this card is the selected one.
+const cardHtmlCache = new Map(); // task id -> { key, html }
+const cardHtmlCached = (t, envKey) => {
+  const key = `${envKey}|${t.updatedAt || ''}|${ago(t.updatedAt)}|${sel.task === t.id ? 1 : 0}`;
+  let c = cardHtmlCache.get(t.id);
+  if (!c || c.key !== key) cardHtmlCache.set(t.id, c = { key, html: cardHtml(t) });
+  return c.html;
+};
 function patchBoardColumns(tasks) {
   const colsEl = $('#columns');
+  const envKey = [agentStamp(), JSON.stringify(S.orch.running || null), rst.scheduledAfter || '', rst.gating.join(), upd.devMode !== false, sel.boardTeam || '', S.tasks.length, S.tasks.map((x) => x.status[0]).join(''), S.allNodes.map((n) => n.name).join()].join('|');
   boardCols.forEach((st, ci) => {
     const colTasks = tasks.filter((t) => t.status === st); // one pass serves the header count and the card list
     const total = colTasks.length;
@@ -1975,7 +1990,7 @@ function patchBoardColumns(tasks) {
     for (const [id, el] of have) if (!wantIds.has(id)) { el.remove(); have.delete(id); }
     let prev = hint || h3;
     for (let i = 0; i < want.length; i++) {
-      const t = want[i]; const html = cardHtml(t);
+      const t = want[i]; const html = cardHtmlCached(t, envKey);
       let el = have.get(t.id);
       if (el && cardSigs.get(el) !== html) { const nu = tplEl(html); el.replaceWith(nu); have.set(t.id, el = nu); }
       if (!el) { el = tplEl(html); have.set(t.id, el); }
@@ -1990,6 +2005,7 @@ function patchBoardColumns(tasks) {
       if (tb.textContent !== label) tb.textContent = label;
     } else if (tb) tb.remove();
   });
+  if (cardHtmlCache.size > tasks.length) { const live = new Set(tasks.map((t) => t.id)); for (const id of cardHtmlCache.keys()) if (!live.has(id)) cardHtmlCache.delete(id); }
 }
 function renderBoard() {
   if (!$('#tab-board').classList.contains('active')) return;
