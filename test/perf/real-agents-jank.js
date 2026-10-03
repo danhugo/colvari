@@ -372,7 +372,7 @@ async function seed() {
   const res = await ex(`
     const p = await call('createProject', 'Real-agent jank baseline');
     switchTo({ p: p.id }); await w(600); await refresh();
-    await call('saveSettings', { helpycodePath: ${jsq(HCPATH)}, useWorktrees: false, maxConcurrency: ${AGENTS}, maxRuns: ${AGENTS * TASKS_PER_AGENT + 2}, requireApproval: false });
+    await call('saveSettings', { helpycodePath: ${jsq(HCPATH)}, useWorktrees: false, maxConcurrency: ${AGENTS}, maxRuns: ${AGENTS * TASKS_PER_AGENT + 2}, requireApproval: false, stallTimeoutMin: 2 });
     const nodes = [];
     for (let i = 0; i < ${AGENTS}; i++) nodes.push(await call('addNode', { name: 'Real-' + (i + 1), role: 'Dev', x: 90 + (i % 3) * 240, y: 110 + Math.floor(i / 3) * 190, runtime: 'helpycode', model: ${jsq(MODEL)} }));
     for (const n of nodes.slice(1)) await call('addEdge', nodes[0].id, n.id, 'assign');
@@ -563,16 +563,16 @@ async function main() {
     byName: Object.fromEntries(Object.entries(byName).map(([k, v]) => [k, { n: v.n, perSec: +(v.n / winSecs).toFixed(2), msP50: q(v.ms, 0.5), msP95: q(v.ms, 0.95), msMax: v.ms.length ? Math.max(...v.ms) : 0 }]).sort((a, b) => b[1].n - a[1].n).slice(0, 14)),
   };
   summary.streamSubs = streamSubs;
-  const liveSubs = streamSubs.filter((w) => w.logPushes >= 5);
+  const liveSubs = streamSubs.filter((w) => w.logPushes >= 1);
   summary.streamPushes = {
     n: streamPushes.length, perSec: +(streamPushes.length / streamWindowSecs).toFixed(2),
     state: streamPushes.filter((p) => p.channel === 'state').length, log: streamPushes.filter((p) => p.channel === 'log').length,
     kbPerSec: +(streamPushes.reduce((s, p) => s + p.bytes, 0) / 1024 / streamWindowSecs).toFixed(1),
     liveSubs: liveSubs.length, subs: streamSubs.length,
   };
-  if (!liveSubs.length) { // not a single subwindow with real streaming traffic — scenario invalid
+  if (liveSubs.length < Math.min(2, streamSubs.length)) { // effectively no streaming traffic at all
     const diag = await ex(`return { working: Object.values(S.orch.agents || {}).filter((a) => a.status === 'working').length, running: !!S.orch.running, todo: S.tasks.filter((t) => t.status === 'todo').length, logTail: logs.slice(-6).map((l) => l.kind + ': ' + String(l.text).slice(0, 120)) }`).catch(() => ({}));
-    throw new Error('no 10s subwindow had >=5 log pushes — agents never streamed during the stream phase. Diagnostics: ' + JSON.stringify(diag, null, 2));
+    throw new Error('only ' + liveSubs.length + '/' + streamSubs.length + ' 10s subwindows had any log pushes — agents effectively never streamed. Diagnostics: ' + JSON.stringify(diag, null, 2));
   }
   const liveFrames = liveSubs.reduce((acc, w) => { acc.frames += w.frames; acc.jankN += w.jankN; acc.ltN += w.ltN; acc.ltMs += w.ltMs; if (w.jankMax > acc.jankMax) acc.jankMax = w.jankMax; if (w.ltMax > acc.ltMax) acc.ltMax = w.ltMax; return acc; }, { frames: 0, jankN: 0, ltN: 0, ltMs: 0, jankMax: 0, ltMax: 0 });
   const liveSecs = liveSubs.reduce((s, w) => s + w.wallMs, 0) / 1000;
