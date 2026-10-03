@@ -1879,6 +1879,91 @@ const agentStamp = () => Object.entries(S.orch.agents || {}).map(([k, a]) => `${
 let showAllDone = false; let doneOpen = true; // open by default: the 20 most recent done tasks show without a click
 // Done column: the 20 most recently updated, but a selected card is never allowed to vanish under the fold (t_db029901).
 const doneCards = (list) => { const all = list.filter((t) => t.status === 'done').slice().sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || ''))); if (showAllDone) return all.slice().sort(byPriorityThenTitle); const top = all.slice(0, 20); const s = all.find((x) => x.id === sel.task); if (s && !top.includes(s)) { top.pop(); top.push(s); } return top; };
+// Keyed card patching (wiki paperclip-vs-us-perf #4, t_fe51eee9): instead of rebuilding the whole
+// #columns innerHTML on every change — which repainted all 300 cards, dropped hover/focus and
+// reset column scroll — each column diffs its card list by task id. A card whose HTML string is
+// unchanged is not touched at all; only inserts, removals, content changes and reorders move DOM.
+const boardCols = ['todo', 'in_progress', 'waiting_for_human', 'review', 'merge_conflict', 'done'];
+const cardSigs = new WeakMap(); // card element -> html it was built from
+const tplEl = (html) => { const t = document.createElement('template'); t.innerHTML = html.trim(); return t.content.firstElementChild; };
+const colHead = (st, total) => st === 'done'
+  ? (doneOpen ? '▾ ' : '▸ ') + (showAllDone || total <= 20 ? `done (${total})` : `done 20/${total}`)
+  : `${st.replaceAll('_', ' ')} (${total})`;
+// One card's html — the exact markup the old full rebuild produced, as a string of the task and
+// the worker/priority/blocker state it renders; diffing these strings is what skips DOM work.
+function cardHtml(t) {
+  const bl = openBlockers(t); const w = (S.orch.agents[t.assignee] || {});
+  // Worker state must match reality: an agent with a live run is busy — on THIS task (or an
+  // unattributed wake run for it) reads "live", on another task reads "working elsewhere",
+  // and only an assignee with no live process at all earns "No worker".
+  const running = t.assignee && runningIds().includes(t.assignee);
+  const busy = w.status === 'working' || (!w.status && running);
+  const ip = t.status === 'in_progress';
+  const live = ip && busy && (w.taskId == null || w.taskId === t.id);
+  const busyOther = ip && busy && !live;
+  const noWorker = ip && t.assignee && !busy;
+  const ready = !bl.length && ['todo', 'backlog'].includes(t.status);
+  const cbt = sel.boardTeam ? nodeTeamOf(t.createdBy) : null; // cross-team: created by another team
+  const tags = [cbt && cbt !== sel.boardTeam ? teamBadge(cbt) : '',
+    live ? '<span class="tag live" title="live">live</span>' : '',
+    busyOther ? `<span class="tag elsewhere" title="${esc(nodeName(t.assignee))} is working on ${esc(taskTitle(w.taskId))}">working elsewhere</span>` : '',
+    noWorker ? `<span class="tag noworker" title="in_progress but no live agent process for ${esc(nodeName(t.assignee))}">No worker</span>` : '',
+    stallTag(t),
+    (upd.devMode !== false && rstGated(t)) ? `<span class="tag rstwait" title="held back by the restart gate${rst.scheduledAfter ? ` — starts after the core restart (after ${esc(shortTaskId(rst.scheduledAfter))})` : ' — starts after the core restarts'}">waits for restart</span>` : '',
+    bl.length ? `<span class="tag blocked" title="waits for: ${esc(bl.map(taskTitle).join(', '))}">Blocked by ${esc(taskTitle(bl[0]).slice(0, 28))}${bl.length > 1 ? ` +${bl.length - 1}` : ''}</span>` : ready ? '<span class="tag ready" title="Ready">Ready</span>' : '',
+    t.awaitingApproval ? '<span class="tag approval" title="needs approval">needs approval</span>' : ''].join('');
+  const snippet = String(t.description || '').replace(/\s+/g, ' ').trim();
+  return `<div class="card ${sel.task === t.id ? 'sel' : ''}${t.awaitingApproval ? ' approval' : ''}" data-id="${t.id}"><b>${esc(t.title)}</b>${snippet && snippet !== t.title ? `<span class="cdesc" title="${esc(snippet)}">${esc(clipText(snippet, 100))}</span>` : ''}${tags ? `<span class="ctags">${tags}</span>` : ''}<small class="cmeta">${priorityBadge(t)}${t.assignee ? ((w) => `<span class="avatar sm" style="background:${avatarBg(w)}" title="${esc(w.name)}">${avatarBody(t.assignee, w)}</span><span class="cname">${esc(w.name)}</span>`)(who(t.assignee)) : '<span class="muted">unassigned</span>'}<span class="cago" title="last updated">${ago(t.updatedAt) || '—'}</span>${t.comments.length ? `<span class="ccount" title="${t.comments.length} comment${t.comments.length === 1 ? '' : 's'}">💬 ${t.comments.length}</span>` : ''}</small></div>`;
+}
+function patchBoardColumns(tasks) {
+  const colsEl = $('#columns');
+  boardCols.forEach((st, ci) => {
+    const total = tasks.filter((t) => t.status === st).length;
+    const fold = st === 'done' && !doneOpen;
+    let col = colsEl.querySelector(':scope > .col.' + st);
+    if (!col) { col = tplEl(`<div class="col ${st}"></div>`); colsEl.appendChild(col); }
+    if (colsEl.children[ci] !== col) colsEl.insertBefore(col, colsEl.children[ci] || null);
+    const cls = `col ${st}${fold ? ' folded' : ''}`;
+    if (col.className !== cls) col.className = cls;
+    let h3 = col.__h3;
+    if (!h3 || h3.parentElement !== col) {
+      h3 = document.createElement('h3'); col.prepend(h3); col.__h3 = h3;
+      if (st === 'done') { h3.id = 'done-h'; h3.style.cursor = 'pointer'; h3.title = 'Toggle done'; }
+    }
+    const head = colHead(st, total);
+    if (h3.innerHTML !== head) h3.innerHTML = head;
+    let hint = col.querySelector(':scope > .hint-first');
+    if (st === 'todo' && !tasks.length) {
+      const wantHint = sel.boardTeam && S.tasks.length ? 'No tasks for this team.' : 'Create a goal task, assign it to an agent (usually the PM), then press Run.';
+      if (!hint) { hint = tplEl('<div class="hint-first" data-testid="board-empty-team"></div>'); h3.after(hint); }
+      if (hint.textContent !== wantHint) hint.textContent = wantHint;
+    } else if (hint) { hint.remove(); hint = null; } // detach from `prev` too: cards must not insert after a removed node
+    const want = fold ? [] : st === 'done' ? doneCards(tasks) : tasks.filter((t) => t.status === st).slice().sort(byPriorityThenTitle);
+    const have = new Map(); // existing cards by task id (external duplicates are dropped, first wins)
+    for (const el of [...col.children]) {
+      if (!el.classList.contains('card')) continue;
+      if (have.has(el.dataset.id)) el.remove(); else have.set(el.dataset.id, el);
+    }
+    const wantIds = new Set(want.map((t) => t.id));
+    for (const [id, el] of have) if (!wantIds.has(id)) { el.remove(); have.delete(id); }
+    let prev = hint || h3;
+    for (let i = 0; i < want.length; i++) {
+      const t = want[i]; const html = cardHtml(t);
+      let el = have.get(t.id);
+      if (el && cardSigs.get(el) !== html) { const nu = tplEl(html); el.replaceWith(nu); have.set(t.id, el = nu); }
+      if (!el) { el = tplEl(html); have.set(t.id, el); }
+      cardSigs.set(el, html);
+      if (prev.nextSibling !== el) prev.after(el); // no-op when already in place: the card keeps hover/focus
+      prev = el;
+    }
+    let tb = col.querySelector(':scope > button#toggle-done');
+    if (st === 'done' && !fold && total > 20) {
+      const label = showAllDone ? 'Show recent only' : 'Show all done';
+      if (!tb) { tb = tplEl('<button class="ghost" id="toggle-done"></button>'); col.appendChild(tb); }
+      if (tb.textContent !== label) tb.textContent = label;
+    } else if (tb) tb.remove();
+  });
+}
 function renderBoard() {
   if (!$('#tab-board').classList.contains('active')) return;
   fillTeamSelect($('#boardteam'), sel.boardTeam, (S.project && S.project.teams) || []);
@@ -1891,32 +1976,7 @@ function renderBoard() {
   // Team scope (t_1158f757): a team view lists tasks whose assignee is in it (unassigned are
   // teamless and hide); All teams ('') lists everything. The detail panel stays global.
   const tasks = S.tasks.filter((t) => teamScoped(sel.boardTeam, t.assignee));
-  $('#columns').innerHTML = ['todo', 'in_progress', 'waiting_for_human', 'review', 'merge_conflict', 'done'].map((st) => { const total = tasks.filter((t) => t.status === st).length; const fold = st === 'done' && !doneOpen; return `<div class="col ${st}${fold ? ' folded' : ''}"><h3 ${st === 'done' ? 'id="done-h" style="cursor:pointer" title="Toggle done"' : ''}>${st === 'done' ? (fold ? '▸ ' : '▾ ') : ''}${st === 'done' && !showAllDone && total > 20 ? `done 20/${total}` : `${st.replaceAll('_', ' ')} (${total})`}</h3>${st === 'todo' && !tasks.length ? `<div class="hint-first" data-testid="board-empty-team">${sel.boardTeam && S.tasks.length ? 'No tasks for this team.' : 'Create a goal task, assign it to an agent (usually the PM), then press Run.'}</div>` : ''}${
-    (fold ? [] : st === 'done' ? doneCards(tasks) : tasks.filter((t) => t.status === st).slice().sort(byPriorityThenTitle)).map((t) => { const bl = openBlockers(t); const w = (S.orch.agents[t.assignee] || {});
-      // Worker state must match reality: an agent with a live run is busy — on THIS task (or an
-      // unattributed wake run for it) reads "live", on another task reads "working elsewhere",
-      // and only an assignee with no live process at all earns "No worker".
-      const running = t.assignee && runningIds().includes(t.assignee);
-      const busy = w.status === 'working' || (!w.status && running);
-      const ip = t.status === 'in_progress';
-      const live = ip && busy && (w.taskId == null || w.taskId === t.id);
-      const busyOther = ip && busy && !live;
-      const noWorker = ip && t.assignee && !busy;
-      const ready = !bl.length && ['todo', 'backlog'].includes(t.status);
-      const cbt = sel.boardTeam ? nodeTeamOf(t.createdBy) : null; // cross-team: created by another team
-      const tags = [cbt && cbt !== sel.boardTeam ? teamBadge(cbt) : '',
-        live ? '<span class="tag live" title="live">live</span>' : '',
-        busyOther ? `<span class="tag elsewhere" title="${esc(nodeName(t.assignee))} is working on ${esc(taskTitle(w.taskId))}">working elsewhere</span>` : '',
-        noWorker ? `<span class="tag noworker" title="in_progress but no live agent process for ${esc(nodeName(t.assignee))}">No worker</span>` : '',
-        stallTag(t),
-        (upd.devMode !== false && rstGated(t)) ? `<span class="tag rstwait" title="held back by the restart gate${rst.scheduledAfter ? ` — starts after the core restart (after ${esc(shortTaskId(rst.scheduledAfter))})` : ' — starts after the core restarts'}">waits for restart</span>` : '',
-        bl.length ? `<span class="tag blocked" title="waits for: ${esc(bl.map(taskTitle).join(', '))}">Blocked by ${esc(taskTitle(bl[0]).slice(0, 28))}${bl.length > 1 ? ` +${bl.length - 1}` : ''}</span>` : ready ? '<span class="tag ready" title="Ready">Ready</span>' : '',
-        t.awaitingApproval ? '<span class="tag approval" title="needs approval">needs approval</span>' : ''].join('');
-      const snippet = String(t.description || '').replace(/\s+/g, ' ').trim();
-      return `<div class="card ${sel.task === t.id ? 'sel' : ''}${t.awaitingApproval ? ' approval' : ''}" data-id="${t.id}"><b>${esc(t.title)}</b>${snippet && snippet !== t.title ? `<span class="cdesc" title="${esc(snippet)}">${esc(clipText(snippet, 100))}</span>` : ''}${tags ? `<span class="ctags">${tags}</span>` : ''}<small class="cmeta">${priorityBadge(t)}${t.assignee ? ((w) => `<span class="avatar sm" style="background:${avatarBg(w)}" title="${esc(w.name)}">${avatarBody(t.assignee, w)}</span><span class="cname">${esc(w.name)}</span>`)(who(t.assignee)) : '<span class="muted">unassigned</span>'}<span class="cago" title="last updated">${ago(t.updatedAt) || '—'}</span>${t.comments.length ? `<span class="ccount" title="${t.comments.length} comment${t.comments.length === 1 ? '' : 's'}">💬 ${t.comments.length}</span>` : ''}</small></div>`; }).join('')}${st === 'done' && !fold && total > 20 ? `<button class="ghost" id="toggle-done">${showAllDone ? 'Show recent only' : 'Show all done'}</button>` : ''}</div>`; }).join('');
-  if ($('#done-h')) $('#done-h').onclick = () => { doneOpen = !doneOpen; boardSig = ''; renderBoard(); };
-  if ($('#toggle-done')) $('#toggle-done').onclick = () => { showAllDone = !showAllDone; boardSig = ''; renderBoard(); };
-  document.querySelectorAll('.card').forEach((c) => c.onclick = () => { sel.task = sel.task === c.dataset.id ? null : c.dataset.id; renderBoard(); });
+  patchBoardColumns(tasks);
   const d = $('#taskdetail'); const t = S.tasks.find((x) => x.id === sel.task);
   if (!t) { d.innerHTML = ''; d.classList.add('closed'); renderBoard.last = null; return; }
   d.classList.remove('closed');
@@ -1958,6 +2018,15 @@ function renderBoard() {
   $('#td-close').onclick = () => { sel.task = null; renderBoard(); };
   $('#td-del').onclick = async () => { if (confirm('Delete task?')) { await call('deleteTask', t.id); sel.task = null; refresh(); } };
 }
+// Card / done-head / toggle clicks bind once via delegation: keyed patching keeps card nodes
+// alive, so the old rebind-every-render loops (and their lost handlers on replaced cards) are gone.
+$('#columns').addEventListener('click', (e) => {
+  if (e.target.closest('#toggle-done')) { showAllDone = !showAllDone; boardSig = ''; renderBoard(); return; }
+  if (e.target.closest('#done-h')) { doneOpen = !doneOpen; boardSig = ''; renderBoard(); return; }
+  const card = e.target.closest('.card');
+  if (card && card.closest('#columns')) { sel.task = sel.task === card.dataset.id ? null : card.dataset.id; renderBoard(); }
+});
+
 // Board team scope (t_1158f757): one select at the start of the toolbar; index.html is out of
 // scope for this task so the control is injected here.
 document.querySelector('#tab-board .toolbar').insertAdjacentHTML('afterbegin', '<select id="boardteam" title="Scope the board to one team, or show all teams"></select>');
@@ -2123,6 +2192,11 @@ renderLogLevelChips();
 // (the live tail) shrinks the window again so streaming keeps the DOM bounded.
 const LOG_PAGE = 200;
 let logWin = LOG_PAGE;
+// Bottom re-pin (t_fe51eee9): content-visibility resolves a row's real size only when it paints,
+// so a scrollTop = scrollHeight assignment made during a draw pins to estimate-based heights and
+// drifts off the tail as real sizes land (measured: 321px in the chat room). One frame after
+// paint the visible rows have real sizes — re-pin then, unless the user scrolled away in between.
+const repinBottom = (box) => { const top = box.scrollTop; requestAnimationFrame(() => requestAnimationFrame(() => { if (box.scrollTop >= top - 50) box.scrollTop = box.scrollHeight; })); };
 // Monotonic sequence for streamed lines + cursor of what the log DOM already shows: appendLogTail
 // (below) fast-appends lines with _seq past the cursor instead of rebuilding the window.
 let logSeq = 0, logTailSeq = 0, logTailAt = 0;
@@ -2162,7 +2236,7 @@ function renderLog() {
   const ob = document.getElementById('log-older'); if (ob) ob.onclick = () => { logWin += LOG_PAGE; renderLog(); };
   bindSubToggles(renderLog);
   document.querySelectorAll('#log [data-tasklink]').forEach((d) => d.onclick = () => { sel.task = d.dataset.tasklink; showTab('board'); renderBoard(); });
-  if (atBottom && $('#logauto').checked) box.scrollTop = box.scrollHeight;
+  if (atBottom && $('#logauto').checked) { box.scrollTop = box.scrollHeight; repinBottom(box); }
   else box.scrollTop = Chat.anchorScroll(prevTop, prevH, box.scrollHeight);
 }
 $('#logteam').onchange = () => { sel.logTeam = $('#logteam').value; $('#logfilter').value = ''; renderObs(); renderLog(); };
@@ -2735,8 +2809,14 @@ const avatarHtml = (id, working, ask) => { const w = who(id); return `<div class
 // ≥3 consecutive handoffs from one actor fold into one expandable "assigned N tasks" row.
 const bubbleRuns = (items) => { const out = []; items.forEach((it, k) => { it._sameTask = k > 0 && !!it.taskId && items[k - 1].taskId === it.taskId; }); for (let i = 0; i < items.length;) { let j = i; while (j < items.length && items[j].type === 'handoff') j++;
   if (j - i >= 3) { const run = items.slice(i, j); out.push(`<details class="evrun"><summary class="evrow"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg><span>assigned ${run.length} tasks</span></summary>${run.map(bubble).join('')}</details>`); i = j; } else { j = Math.max(j, i + 1); out.push(...items.slice(i, j).map(bubble)); i = j; } } return out.join(''); };
-const renderGroups = (events, working) => { const ask = needsYou(); return mergeGroups(Chat.group(events)).map((g) => { const w = who(g.who);
-  return `<div class="cgroup${w.human ? ' self' : ''}">${avatarHtml(g.who, working, ask)}<div class="cbody"><div class="cname">${esc(w.name)}${w.role ? `<span class="role">${esc(w.role)}</span>` : ''}${w.human ? '' : vbadge((S.allNodes || []).find((n) => n.id === g.who))}<time>${new Date(g.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time></div>${bubbleRuns(g.items)}</div></div>`; }).join(''); };
+// One group's name/time header (shared by the full render and the append path, which rebuilds a
+// group's body in place without touching its avatar).
+const groupHeadHtml = (g) => { const w = who(g.who);
+  return `<div class="cname">${esc(w.name)}${w.role ? `<span class="role">${esc(w.role)}</span>` : ''}${w.human ? '' : vbadge((S.allNodes || []).find((n) => n.id === g.who))}<time>${new Date(g.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time></div>`; };
+// data-cnt = event count of the group (repeat-collapsed bubbles carry it in .count) — the append
+// path slides the window from the front in whole groups and needs the count to keep the books.
+const renderGroups = (events, working) => { const ask = needsYou(); return mergeGroups(Chat.group(events)).map((g) => { const w = who(g.who); const cnt = g.items.reduce((a, it) => a + (it.count || 1), 0);
+  return `<div class="cgroup${w.human ? ' self' : ''}" data-cnt="${cnt}">${avatarHtml(g.who, working, ask)}<div class="cbody">${groupHeadHtml(g)}${bubbleRuns(g.items)}</div></div>`; }).join(''); };
 // Sticky "Your turn" bar above the composer: every pending ask_human question/approval.
 function renderYourTurn(ev) {
   const seen = new Set((S.inbox || []).map((i) => i.id)); const items = [...(S.inbox || []), ...ev.filter((e) => e.type === 'question' && !seen.has(e.inboxId)).map((e) => ({ id: e.inboxId, nodeId: e.who, question: e.text, choices: e.choices, kind: 'question' }))]; const bar = $('#chat-yourturn'); bar.classList.toggle('hidden', !items.length);
@@ -2793,10 +2873,23 @@ function renderChatBody() {
   // count events newer than the previous tail instead.
   const delta = ev.filter((e) => e.at > (CH.evTailAt ?? -Infinity)).length;
   if (ev.length) CH.evTailAt = ev[ev.length - 1].at;
+  // Everything besides pure tail-append data the room DOM carries: scope/thread/window state, the
+  // working/needs-you rings in group avatars, and node identity (names, roles, badges, faces).
+  const stamp = [sel.chatTeam || '', CH.thread || '', [...workingT].sort().join(), [...needsYou()].sort().join(),
+    S.allNodes.map((n) => n.id + n.name + n.role + (n.runtime || '') + (n.model || '') + (n.avatarSeed || '')).join()].join('|');
+  // Fast tail append (t_fe51eee9): pinned to the bottom, nothing but new trailing events — extend
+  // the last group / append new groups instead of rebuilding every group (the #1 streaming cost
+  // left in the room, ~100 groups of innerHTML + full relayout per burst draw). Any surprise falls
+  // back to the full render below, which is always correct.
+  if (atBottom && CH.evDom && CH.stamp === stamp) {
+    const plan = Chat.tailPlan(CH.evDom, ev, CH.win || Chat.PAGE);
+    if (plan && applyChatAppend(ev, plan, workingT)) return;
+  }  CH.stamp = stamp;
+  CH.evDom = page.items;
   room.innerHTML = page.items.length ? (page.hidden ? `<button id="chat-older" class="olderbar linklike">↑ ${page.hidden} earlier message${page.hidden === 1 ? '' : 's'} — scroll up or click to load</button>` : '') + renderGroups(page.items, workingT)
     : sel.chatTeam ? '<p class="muted logempty" data-testid="chat-empty-team">No messages for this team.</p>'
     : S.team.nodes.length ? `<div class="cempty"><svg class="brandmark big" viewBox="0 0 32 32" aria-hidden="true"><path d="M23 9A10 10 0 1 0 23 23" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/><g fill="currentColor"><circle cx="23" cy="9" r="3.6"/><circle cx="6" cy="16" r="3.6"/><circle cx="23" cy="23" r="3.6"/></g></svg><b>#company is quiet</b>Type a goal below, or @mention an agent (e.g. <code>@${esc(S.team.nodes[0].name)} write hello.txt</code>).</div>` : '<div class="cempty"><svg class="brandmark big" viewBox="0 0 32 32" aria-hidden="true"><path d="M23 9A10 10 0 1 0 23 23" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/><g fill="currentColor"><circle cx="23" cy="9" r="3.6"/><circle cx="6" cy="16" r="3.6"/><circle cx="23" cy="23" r="3.6"/></g></svg><b>No team yet</b>Create your team in the Team tab (or use the first-run guide), then chat with it here.</div>';
-  if (atBottom) { CH.win = Chat.PAGE; room.scrollTop = room.scrollHeight; CH.pendingNew = 0; }
+  if (atBottom) { CH.win = Chat.PAGE; room.scrollTop = room.scrollHeight; repinBottom(room); CH.pendingNew = 0; }
   else { room.scrollTop = Chat.anchorScroll(prevTop, prevH, room.scrollHeight); CH.pendingNew = (CH.pendingNew || 0) + delta; }
   const ob = $('#chat-older'); if (ob) ob.onclick = chatGrow;
   updateNewPill();
@@ -2804,11 +2897,63 @@ function renderChatBody() {
   if (t) { const tev = ev.filter((e) => e.taskId === t.id);
     th.innerHTML = `<div class="chat-head"><b>🧵 ${esc(t.title)}</b><span class="role">${esc(t.status)}</span><span class="spacer"></span><button id="ch-close" title="Close thread">✕</button></div><div id="chat-threadroom">${tev.length ? renderGroups(tev, workingT) : '<p class="muted" style="padding:16px">Nothing in this thread yet.</p>'}</div>`;
     $('#ch-close').onclick = () => { CH.thread = null; chatSched.force(); }; }
-  document.querySelectorAll('#tab-chat [data-thread]').forEach((b) => b.onclick = () => { CH.thread = b.dataset.thread; chatSched.force(); });
-  document.querySelectorAll('#tab-chat .bubble.question').forEach((d) => {
+  bindChatBubbles($('#tab-chat'));
+}
+// Thread links and ask-human answer forms ride the bubbles; both paths (full render and tail
+// append) wire them through here — property assignment, so re-binding over old nodes is a no-op.
+function bindChatBubbles(scope) {
+  scope.querySelectorAll('[data-thread]').forEach((b) => b.onclick = () => { CH.thread = b.dataset.thread; chatSched.force(); });
+  scope.querySelectorAll('.bubble.question').forEach((d) => {
     const answer = (v) => act(async () => { if (!v) return; await call('answerInbox', d.dataset.iid, v); refresh(); })();
     d.querySelectorAll('.ch-choice').forEach((b) => b.onclick = () => answer(b.dataset.v)); d.querySelector('.ch-send').onclick = () => answer(d.querySelector('.ch-ans').value.trim());
   });
+}
+// Extend the room with plan.fresh (t_fe51eee9): slide the window from the front in whole groups,
+// continue the last remaining group when the new events share its author (rebuilding that group's
+// body — repeat badges and handoff runs may re-collapse), append new groups for the rest, and
+// refresh the older-bar count. Whole-group eviction keeps up to one group of extra scrollback at
+// the front (a partial group can't be evicted without splitting bubbles) — the fp-verified window
+// is exact regardless, and the next full render realigns the top edge. Returns false when the DOM
+// shape doesn't match the plan — the caller falls back to the full render, which overwrites
+// whatever was touched here.
+function applyChatAppend(ev, plan, workingT) {
+  const room = $('#chat-room');
+  const win = CH.win || Chat.PAGE;
+  const ob = $('#chat-older');
+  if ((ev.length > win) !== !!ob) return false; // the window boundary moved: draw it in a full render
+  const dom = CH.evDom;
+  const evict = dom.length - plan.keep;
+  let evicted = 0;
+  if (evict > 0) for (let g = room.querySelector('.cgroup'); g && evicted + (+g.dataset.cnt || 1) <= evict; g = room.querySelector('.cgroup')) { evicted += +g.dataset.cnt || 1; g.remove(); }
+  const domNow = dom.slice(evicted); // old events still in the DOM (evicted counts actual events)
+  const items = domNow.concat(plan.fresh);
+  if (items.length > ev.length) return false; // bookkeeping lost the thread of the feed: rebuild
+  // The boundary group: trailing run of same-author non-question events in items — the same
+  // content a full render's Chat.group would produce for this window.
+  let runStart = items.length - 1;
+  if (items[runStart].type === 'question') runStart = items.length; // questions never join a run
+  else { const rw = items[runStart].who;
+    while (runStart > 0 && items[runStart - 1].who === rw && items[runStart - 1].type !== 'question') runStart--; }
+  if (runStart < domNow.length) { // the run continues the DOM's last group: rebuild its body in place
+    const groups = room.querySelectorAll('.cgroup');
+    const lastGroup = groups[groups.length - 1];
+    if (!lastGroup || !lastGroup.querySelector('.cbody')) return false;
+    const run = Chat.collapseRepeats(items.slice(runStart));
+    lastGroup.querySelector('.cbody').innerHTML = groupHeadHtml({ who: run[0].who, at: run[0].at }) + bubbleRuns(run);
+    lastGroup.dataset.cnt = String(items.slice(runStart).reduce((a, it) => a + (it.count || 1), 0));
+  } else if (runStart < items.length) { // the run starts inside the fresh events: they form new groups
+    const t = document.createElement('template');
+    t.innerHTML = renderGroups(items.slice(runStart), workingT);
+    room.appendChild(t.content);
+  }
+  CH.evDom = items;
+  CH.pendingNew = 0;
+  if (ob) { const hidden = ev.length - win; const label = `↑ ${hidden} earlier message${hidden === 1 ? '' : 's'} — scroll up or click to load`; if (ob.textContent !== label) ob.textContent = label; }
+  bindChatBubbles($('#tab-chat'));
+  room.scrollTop = room.scrollHeight;
+  repinBottom(room);
+  updateNewPill();
+  return true;
 }
 function chatPreview() {
   const v = $('#chat-input').value; const p = Chat.parseComposer(v, S.team.nodes); const pv = $('#chat-preview');
@@ -2992,6 +3137,7 @@ function appendLogTail() {
   logTailAt = added[added.length - 1].at;
   logSig = logKey();
   box.scrollTop = box.scrollHeight;
+  repinBottom(box);
   return true;
 }
 // Direct 'log' pushes now carry only the low-volume paths (self-update watcher); orchestrator log
