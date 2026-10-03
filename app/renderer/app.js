@@ -129,14 +129,29 @@ const TAB_VIEW = {
   chat: renderChat,
 };
 function renderAll() {
-  renderSidebar(); renderPreflightBar(); renderHeader(); renderSelfUpdate(); renderAlerts(); renderGuide();
+  renderChrome();
   drawActiveView(true);
 }
+// The sidebar Inbox badge is always-visible chrome: it tracks the inbox count on every render,
+// not only while the inbox tab itself is drawn — the old inline update inside renderInbox left
+// the badge stale whenever items landed while another tab was active.
+// Perf instrumentation (t_f6b343a5): ring of recent durations + slow-call count, inspect via
+// window.__perf.inboxBadge — nothing is logged unless a call exceeds SLOW_MS.
+const PERF = { inboxBadge: { samples: [], slow: 0, SLOW_MS: 2 } };
+function renderInboxBadge() {
+  const t0 = performance.now();
+  $('#inbox-tab-badge').textContent = (S.inbox || []).length ? String(S.inbox.length) : '';
+  const ms = performance.now() - t0;
+  const p = PERF.inboxBadge;
+  p.samples.push(ms); if (p.samples.length > 120) p.samples.shift();
+  if (ms > p.SLOW_MS) { p.slow++; console.debug('inbox badge render slow', ms.toFixed(2), 'ms'); }
+}
+window.__perf = PERF;
 // The always-visible chrome (Perry's contract, t_8d586961): badges, counts and the restart chip
 // track state even while their tab is hidden, so they draw synchronously everywhere. Only the
 // heavy active-tab view may defer, and only on a revisit (see drawActiveView).
 function renderChrome() {
-  renderSidebar(); renderPreflightBar(); renderHeader(); renderSelfUpdate(); renderAlerts(); renderGuide();
+  renderSidebar(); renderInboxBadge(); renderPreflightBar(); renderHeader(); renderSelfUpdate(); renderAlerts(); renderGuide();
 }
 // The active tab's view, tracked per tab so activation can tell "never drawn" (synchronous draw —
 // no blank frame) from "DOM left over from the last visit" (draw after the activation paint: the
@@ -2213,7 +2228,7 @@ const LOG_LEVEL = { error: 'error', stderr: 'error', tool_error: 'error', system
 // fields Dev A sends with the event; fall back to the raw text for lines persisted without them.
 function monitorText(l) {
   const ids = Array.isArray(l.taskIds) && l.taskIds.length ? ` (${l.taskIds.join(', ')})` : '';
-  return esc(([l.action, l.reason].filter(Boolean).join(' — ') || l.text) + ids);
+  return esc((([l.action, l.reason].filter(Boolean).join(' — ') || l.text) || '') + ids);
 }
 // "Read {"file_path":"/a/b.js"}" -> summary "Read b.js"; the raw JSON only shows on expand.
 function humanLog(t) {
@@ -2231,7 +2246,8 @@ function logRow(l) {
   let text = l.kind === 'monitor' ? monitorText(l) : esc(l.text);
   const hum = humanLog(l.text);
   if (hum && l.kind !== 'monitor') text = `<details class="logjson"><summary>${esc(hum.head)}</summary><pre>${esc(hum.json)}</pre></details>`;
-  return `<div class="logrow lv-${lvl}"><span class="logtime">${new Date(l.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span><span class="avatar sm" style="background:${avatarBg(w)}" title="${esc(w.name)}">${avatarBody(l.nodeId, w)}</span><span class="logagent" title="${esc(w.name)}">${esc(w.name)}</span>${task}<span class="loglevel lv-${lvl}">${badge}</span><span class="logtext">${text}</span></div>`;
+  const at = new Date(l.at); const tm = isNaN(at) ? '' : at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  return `<div class="logrow lv-${lvl}"><span class="logtime">${tm}</span><span class="avatar sm" style="background:${avatarBg(w)}" title="${esc(w.name)}">${avatarBody(l.nodeId, w)}</span><span class="logagent" title="${esc(w.name)}">${esc(w.name)}</span>${task}<span class="loglevel lv-${lvl}">${badge}</span><span class="logtext">${text}</span></div>`;
 }
 // ---------- subagents (contract: t_c33656ba) ----------
 // Records live on the owning agent (S.orch.agents[id].subagents) for the current run and persist per
@@ -2303,7 +2319,7 @@ function renderLog() {
   const box = $('#log'); const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 20;
   const prevH = box.scrollHeight, prevTop = box.scrollTop;
   const all = logs.filter((l) => l.projectId === ctx.p && (!teamIds || teamIds.has(l.nodeId)));
-  const base = all.filter((l) => (!f || l.nodeId === f) && (!q || l.text.toLowerCase().includes(q)));
+  const base = all.filter((l) => (!f || l.nodeId === f) && (!q || (l.text || '').toLowerCase().includes(q)));
   base.sort((a, b) => (a.at || 0) - (b.at || 0));
   let rows = base.filter((l) => logLevels.has(severityOf(l)));
   let hiddenInfo = 0;
@@ -2314,12 +2330,16 @@ function renderLog() {
   renderLog.total = rows.length;
   const page = Chat.pageOf(rows, logWin);
   renderLog.winItems = page.items.length;
-  logTailAt = rows.length ? rows[rows.length - 1].at : 0;
-  logTailSeq = logSeq;
+  // The tail cursor is captured but stamped only after the DOM actually built: a throw mid-build
+  // (malformed line, bad subagent record) must not mark lines as rendered — appendLogTail would
+  // then treat them as already shown and hide them for good.
+  const tailAt = rows.length ? rows[rows.length - 1].at : 0;
+  const tailSeq = logSeq;
   const empty = teamIds && !all.length ? 'No messages for this team.' : (all.length ? 'No log lines match your filter.' : 'No activity yet — run the team to see agent logs here.');
   const older = page.hidden ? `<button id="log-older" class="olderbar linklike">↑ ${page.hidden} earlier line${page.hidden === 1 ? '' : 's'} — scroll up or click to load</button>` : '';
   box.innerHTML = rows.length ? (hiddenInfo ? `<p class="muted logempty">${hiddenInfo} info line(s) hidden by the level filter — showing all. <button id="log-showall" class="linklike">Show all</button></p>` : '') + older +
     Subagents.nestRows(page.items, subRecOf, null).map((x) => x.kind === 'sub' ? subBlockHtml(x) : logRow(x.l)).join('') : `<p class="muted logempty">${empty}</p>`;
+  logTailAt = tailAt; logTailSeq = tailSeq;
   const sa = document.getElementById('log-showall'); if (sa) sa.onclick = () => { logLevels.add('info'); logLevels.add('warn'); logLevels.add('error'); renderLogLevelChips(); renderLog(); };
   const ob = document.getElementById('log-older'); if (ob) ob.onclick = () => { logWin += LOG_PAGE; renderLog(); };
   bindSubToggles(renderLog);
@@ -3325,8 +3345,8 @@ composerEl.addEventListener('drop', (e) => { e.preventDefault(); composerEl.clas
 // ---------- human inbox (ask_human questions + approvals) ----------
 const ibOpen = new Map();
 function renderInbox() {
-  const items = [...(S.inbox || [])].sort((a, b) => (b.createdAt || b.at || 0) - (a.createdAt || a.at || 0)); const n = items.length ? String(items.length) : '';
-  $('#inbox-tab-badge').textContent = n;
+  const items = [...(S.inbox || [])].sort((a, b) => (b.createdAt || b.at || 0) - (a.createdAt || a.at || 0));
+  renderInboxBadge();
   const taskTitle = (id) => (S.tasks.find((t) => t.id === id) || {}).title || '';
   $('#inboxlist').innerHTML = items.length ? items.map((i) => `<div class="inboxitem" data-iid="${i.id}">
     <div class="ib-head" role="button" tabindex="0" aria-expanded="false">${S.allNodes.some((x) => x.id === i.nodeId) ? avatarHtml(i.nodeId, new Set(), new Set([i.nodeId])) : '<div class="avatar" style="background:#3a3f4b" title="System">⚙</div>'}<div class="ib-main"><div class="ib-q">${esc(i.question)}</div><small class="ib-meta">${i.kind === 'approval' ? 'Approval' : 'Question'} · ${S.allNodes.some((x) => x.id === i.nodeId) ? esc(nodeName(i.nodeId)) : 'System'}${i.taskId ? ' · ' + esc(taskTitle(i.taskId)) : ''}</small></div><small class="ib-time" title="${esc(new Date(i.at).toLocaleString())}">${esc(agoTxt(i.at) || 'just now')}</small></div>
@@ -3376,7 +3396,10 @@ function scheduleLogRender() {
   setTimeout(flush, 150); // rAF can starve in occluded windows; never let the tail stall
 }
 function flushLogTail() {
-  if ($('#tab-obs').classList.contains('active') && !appendLogTail()) renderLog();
+  // One malformed streamed line must not kill the scheduler: the throw would otherwise recur on
+  // every queued flush, taking renderLive's task-detail refresh down with it.
+  try { if ($('#tab-obs').classList.contains('active') && !appendLogTail()) renderLog(); }
+  catch (e) { console.warn('log pane flush failed', e); }
   renderLive(); // board task-detail pane follows the stream even while Obs is hidden
 }
 // Fast append path: only when the DOM is the plain live tail (no search, all levels on, no subagent
