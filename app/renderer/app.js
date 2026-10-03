@@ -1920,7 +1920,8 @@ function cardHtml(t) {
 function patchBoardColumns(tasks) {
   const colsEl = $('#columns');
   boardCols.forEach((st, ci) => {
-    const total = tasks.filter((t) => t.status === st).length;
+    const colTasks = tasks.filter((t) => t.status === st); // one pass serves the header count and the card list
+    const total = colTasks.length;
     const fold = st === 'done' && !doneOpen;
     let col = colsEl.querySelector(':scope > .col.' + st);
     if (!col) { col = tplEl(`<div class="col ${st}"></div>`); colsEl.appendChild(col); }
@@ -1940,7 +1941,7 @@ function patchBoardColumns(tasks) {
       if (!hint) { hint = tplEl('<div class="hint-first" data-testid="board-empty-team"></div>'); h3.after(hint); }
       if (hint.textContent !== wantHint) hint.textContent = wantHint;
     } else if (hint) { hint.remove(); hint = null; } // detach from `prev` too: cards must not insert after a removed node
-    const want = fold ? [] : st === 'done' ? doneCards(tasks) : tasks.filter((t) => t.status === st).slice().sort(byPriorityThenTitle);
+    const want = fold ? [] : st === 'done' ? doneCards(tasks) : colTasks.slice().sort(byPriorityThenTitle);
     const have = new Map(); // existing cards by task id (external duplicates are dropped, first wins)
     for (const el of [...col.children]) {
       if (!el.classList.contains('card')) continue;
