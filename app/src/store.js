@@ -1128,7 +1128,11 @@ class Store {
   // deletes instead; here we know the bytes). Callers treat the returned records as read-only
   // snapshots, like listTasks.
   _runsCached() {
-    let st; try { st = fs.statSync(this.file('runs')); } catch { return null; }
+    let st; try { st = fs.statSync(this.file('runs')); } catch {
+      // No file yet: a seeded memo (sig null) is this process's memory truth until the first
+      // flush installs the real stat key — addRun must be immediately visible to listRuns.
+      return this._runsMemo && this._runsMemo.sig === null ? this._runsMemo.runs : null;
+    }
     const sig = st.size + ':' + st.mtimeMs;
     if (this._runsMemo && this._runsMemo.sig === sig) return this._runsMemo.runs;
     let d; try { d = JSON.parse(fs.readFileSync(this.file('runs'), 'utf8')); } catch { return null; }
@@ -1149,18 +1153,77 @@ class Store {
     }
     try { const st = fs.statSync(this.file('runs')); this._runsMemo = { sig: st.size + ':' + st.mtimeMs, runs }; } catch { this._runsMemo = null; }
   }
+  // Run records are telemetry: the orchestrator records a run at start and rewrites it with proxy
+  // cost at the end — exactly when agents' MCP processes hold the store lock in write bursts.
+  // Persisting synchronously sleepSync-spun the main thread behind those bursts, and getAll queued
+  // behind the spin as a 1.3-1.6s stall (Argo t_44b45119). Memory updates synchronously (listRuns/
+  // getAll never see a gap); the disk write retries from an unref'd timer instead. A hard crash
+  // may lose the last pending records — runs are telemetry, tasks are not. Under the lock the
+  // flush re-reads the file and re-applies this process's pending records, so a second writer's
+  // records can never be dropped by our write.
+  _persistRunsSoon(delayMs = 5) {
+    if (this._runsFlushTimer || !this._runsPending || !this._runsPending.size) return;
+    const t = setTimeout(() => {
+      this._runsFlushTimer = null;
+      if (!this._runsPending || !this._runsPending.size) return;
+      this._runsFlushDelay = Math.min((this._runsFlushDelay || 5) * 2, 500);
+      if (this.flushRunsNow()) this._runsFlushDelay = 5;
+      else this._persistRunsSoon(this._runsFlushDelay);
+    }, delayMs);
+    if (t.unref) t.unref();
+    this._runsFlushTimer = t;
+  }
+  flushRunsNow() {
+    if (!this._runsPending || !this._runsPending.size) return true;
+    let ok = false;
+    try {
+      this.withLockTry(() => {
+        try {
+          let fileRuns;
+          try {
+            // Skip the cross-instance merge re-read when the file still matches our own write
+            // (the common case) — the full parse is only for records another process may have added.
+            let st; try { st = fs.statSync(this.file('runs')); } catch { st = null; }
+            const sig = st ? st.size + ':' + st.mtimeMs : null;
+            if (this._runsMemo && this._runsMemo.sig !== null && sig === this._runsMemo.sig) fileRuns = this._runsMemo.runs;
+            else fileRuns = JSON.parse(fs.readFileSync(this.file('runs'), 'utf8')).runs || [];
+          } catch { fileRuns = []; }
+          const byId = new Map();
+          fileRuns.forEach((x, i) => { if (x) byId.set(x.id != null ? x.id : '#idx' + i, x); }); // id-less records keep their slot
+          for (const [k, r] of this._runsPending) byId.set(k, r);
+          let fresh = [...byId.values()];
+          if (fresh.length > 5000) fresh = fresh.slice(fresh.length - 5000);
+          this._writeRuns(fresh);
+          this._runsPending.clear();
+          ok = true;
+        } catch { ok = false; } // _writeRuns already dropped the memo; the retry loop takes it from here
+      });
+    } catch { ok = false; } // even the lock is unwritable (read-only dir): stay pending, never throw
+    return ok;
+  }
+  _stageRun(r) {
+    if (!this._runsPending) this._runsPending = new Map();
+    this._runsPending.set(r.id != null ? r.id : 'anon-' + (++this._runsAnon || (this._runsAnon = 1)), r);
+    // Fast path: uncontended locks write through immediately (cross-instance readers stay exact).
+    // Contended — the agent MCP-burst case that sleepSync-stalled getAll — defers to the timer.
+    if (this._runsFlushTimer) return; // a retry is already scheduled; it takes this record too
+    if (!this.flushRunsNow()) this._persistRunsSoon();
+  }
   addRun(r) {
-    this.withLock(() => { const runs = this._runsCached() || []; runs.push(r); if (runs.length > 5000) runs.splice(0, runs.length - 5000); this._writeRuns(runs); });
+    let runs = this._runsCached();
+    if (!runs) { runs = []; if (!this._runsMemo) this._runsMemo = { sig: null, runs }; } // no file yet: memory is truth
+    runs.push(r); if (runs.length > 5000) runs.splice(0, runs.length - 5000);
+    this._stageRun(r);
     return r;
   }
   // Re-persist one run after a late in-place update (proxy cost): replaces by id, appends when the
   // run is not present (trimmed the same way), so resolveProxyCost never duplicates or loses it.
   replaceRun(r) {
-    this.withLock(() => {
-      const runs = this._runsCached() || []; const i = runs.findIndex((x) => x.id === r.id);
-      if (i >= 0) runs[i] = r; else { runs.push(r); if (runs.length > 5000) runs.splice(0, runs.length - 5000); }
-      this._writeRuns(runs);
-    });
+    let runs = this._runsCached();
+    if (!runs) { runs = []; if (!this._runsMemo) this._runsMemo = { sig: null, runs }; }
+    const i = runs.findIndex((x) => x.id === r.id);
+    if (i >= 0) runs[i] = r; else { runs.push(r); if (runs.length > 5000) runs.splice(0, runs.length - 5000); }
+    this._stageRun(r);
     return r;
   }
   listRuns(filter = {}) {
