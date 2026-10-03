@@ -107,6 +107,7 @@ async function refresh() {
   await Promise.all([loadLogs(ctx.p), loadSelfUpdate(), loadCoreState()]); // three independent round-trips, overlapped
   syncRtu(); // banner follows the snapshot across reloads / missed pushes
   chatBump(); // applied changes may cover the sections deltas do not carry (team/nodes) — the chat epoch must follow
+  usCache = null; // this refresh changed state: the alerts/meter must read fresh usageStatus, not the 1s-shared result of a pre-change fetch (a stale hit rendered the limits chip hidden forever — no later render re-checks it; gui-e2e topbar red)
   try { localStorage.setItem('ctx', JSON.stringify(ctx)); } catch {}
   renderAll();
 }
