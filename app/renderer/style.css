@@ -144,7 +144,8 @@ h3 .pill { font-size:10px; font-weight:600; vertical-align:middle; }
 #td-live .tool { color:var(--term-yellow); } #td-live .error, #td-live .tool_error { color:var(--term-red); } #td-live .result { color:var(--term-green); } #td-live .system { color:var(--term-blue); }
 .checks.deps { max-height:120px; overflow:auto; } .checks.deps label { display:flex; margin:2px 0; } .checks.deps label.open { color:var(--warn); }
 td.actions button { padding:2px 7px; font-size:12px; margin-right:4px; } #budgetbar:empty { display:none; }
-#toasts { position:fixed; right:14px; bottom:14px; display:flex; flex-direction:column; gap:8px; z-index:10; }
+/* Toasts must clear the Get started guide card (#guide, z50) — they share the bottom-right corner. */
+#toasts { position:fixed; right:14px; bottom:14px; display:flex; flex-direction:column; gap:8px; z-index:60; }
 .toast { background:var(--card); border:1px solid var(--acc); border-left:4px solid var(--acc); border-radius:6px; padding:8px 12px; max-width:340px; box-shadow:0 4px 14px rgba(0,0,0,.2); cursor:pointer; }
 #helpdlg td { padding:3px 10px; }
 /* Header stays on one row whatever the pill contents: title, tabs and pills never wrap. */
