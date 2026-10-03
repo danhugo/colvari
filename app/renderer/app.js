@@ -1927,7 +1927,7 @@ const priorityOf = (t) => PRIORITIES.includes(t.priority) ? t.priority : 'P2';
 const priorityBadge = (t) => `<span class="tag prio prio-${priorityOf(t)}" title="Priority ${priorityOf(t)}">${priorityOf(t)}</span>`;
 const byPriorityThenTitle = (a, b) => PRIORITIES.indexOf(priorityOf(a)) - PRIORITIES.indexOf(priorityOf(b)) || a.title.localeCompare(b.title);
 // Relative age for card meta ("2h", "3d") — a card's freshness is part of scanning a board.
-const ago = (ts) => { if (!ts) return ''; const sec = (Date.now() - new Date(ts).getTime()) / 1000;
+const ago = (ts) => { if (!ts) return ''; const ms = new Date(ts).getTime(); if (Number.isNaN(ms)) return ''; const sec = (Date.now() - ms) / 1000;
   return sec < 60 ? 'now' : sec < 3600 ? `${Math.floor(sec / 60)}m` : sec < 86400 ? `${Math.floor(sec / 3600)}h` : `${Math.floor(sec / 86400)}d`; };
 // Skip-no-op renders (t_9315f18a): the storm profile showed every run push re-rendering ALL heavy
 // sections (503-card board, 200-row log window, 300-run usage table) even when their inputs were
