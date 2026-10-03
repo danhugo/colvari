@@ -2139,7 +2139,8 @@ const discardWikiEdit = () => !wikiDirty() || confirm('Discard unsaved changes t
 const wikiNew = () => { if (!discardWikiEdit()) return; sel.page = null; wikiEdit = true; $('#wk-title').value = ''; $('#wk-content').value = ''; showWiki(); renderWiki(); };
 $('#wk-new').onclick = wikiNew;
 $('#wk-empty-new').onclick = wikiNew; // was rendered but never wired up — dead button
-$('#wk-search').oninput = renderWiki;
+let wkSearchTimer = 0;
+$('#wk-search').oninput = () => { clearTimeout(wkSearchTimer); wkSearchTimer = setTimeout(renderWiki, 150); }; // each keystroke re-filters and rebuilds the page list — render once per typing pause
 function loadPage() { const p = S.wiki[sel.page]; if (!p) return; $('#wk-title').value = p.title; $('#wk-content').value = p.content; showWiki(); }
 // Cheap backlinks: tasks whose title or description mention this page's title.
 function wikiBacklinks(title) { const q = title.trim().toLowerCase(); if (!q) return []; return S.tasks.filter((t) => (t.title || '').toLowerCase().includes(q) || (t.description || '').toLowerCase().includes(q)); }
