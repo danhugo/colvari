@@ -44,7 +44,7 @@ const AGENTS = SCENARIO === 'idle' ? 0 : Math.max(1, Number(process.env.PERF_AGE
 const RUN = SCENARIO === 'load' || SCENARIO === 'feed'; // only these start the orchestrator
 const STREAM_EPS = Number(process.env.STREAM_EPS || 6);
 const STREAM_SECONDS = Math.ceil((WARM_MS + DURATION_MS) / 1000) + 30;
-const TAB = ['chat', 'board', 'log', 'overview'].includes(process.env.PERF_TAB || '') ? process.env.PERF_TAB : 'chat';
+const TAB = ['chat', 'board', 'log', 'obs', 'overview'].includes(process.env.PERF_TAB || '') ? process.env.PERF_TAB : 'chat';
 const CLI = path.join(APP, 'test/perf/stream-cli.js');
 const WAIT = (ms) => new Promise((r) => setTimeout(r, ms));
 fs.mkdirSync(OUT, { recursive: true });
