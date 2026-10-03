@@ -3445,7 +3445,7 @@ document.addEventListener('keydown', (e) => {
 // renderer patches its local store and re-renders the visible views; a seq gap or resync marker
 // falls back to a full getAll pull (wiki rule 5). The 2s tick below stays as the backstop for the
 // sections deltas do not cover.
-let lastDeltaSeq = null, lastDeltaProject = null, deltaRaf = 0;
+let lastDeltaSeq = null, lastDeltaProject = null;
 // Log-line ingest shared by both paths (t_d22a6cf2): batched deltas for the active project and the
 // cross-project batches below keep the old 'log'-channel semantics — lines from every project
 // accumulate (tagged with projectId), only the active project's redraw the views.
@@ -3457,6 +3457,16 @@ function ingestLogs(lines) {
   if (!lines[0] || !lines[0].projectId || lines[0].projectId === ctx.p) chatBump();
   scheduleLogRender();
 }
+// Main render path (t_d0a816d9): every same-project delta batch used to end in a renderAll one
+// rAF later — while agents stream, batches arrive several per frame and the whole chrome + active
+// view rebuild at up to 60/s. The same event-driven scheduler the chat room uses coalesces the
+// burst to one draw per minMs with a guaranteed trailing edge, so the last patch always lands.
+const renderSched = RenderSched.create({
+  minMs: 200,
+  hidden: () => document.hidden,
+  gate: () => true, // the chrome renderSched draws is on screen on every tab
+  draw: () => renderAll(), // late-binding: e2e/perf harnesses wrap the global by name
+});
 squad.on('delta', (b) => {
   if (!b || !Array.isArray(b.deltas)) return;
   if (b.projectId && b.projectId !== ctx.p) {
@@ -3478,16 +3488,16 @@ squad.on('delta', (b) => {
     if (d.type === 'task' || d.type === 'messages' || d.type === 'inbox' || d.type === 'orch') chatBump();
   }
   if (b.v && lastV) Object.assign(lastV, b.v); // keep the version poll quiet about what we already applied
-  if (!deltaRaf) deltaRaf = requestAnimationFrame(() => { deltaRaf = 0; renderAll(); });
+  renderSched.bump(); // coalesced full draw: the state is patched, the pixels follow on the scheduler's trailing edge
 });
 squad.on('state', (st) => { if (st.projectId && st.projectId !== ctx.p) { clearTimeout(pendingP); pendingP = setTimeout(async () => { P = await call('listProjects'); renderSidebar(); }, 200); return; } clearTimeout(pending); }); // same-project state arrives as deltas now; cancel a pending pull instead of scheduling one
 // Pause-when-hidden (t_e116438b): while the window is hidden the schedulers arm nothing (rAF is
 // stalled anyway, and DOM built in the dark is wasted work) and the backstop poll sleeps; on show,
 // one catch-up pull plus a chat bump redraw whatever moved while dark. Deltas keep patching S and
-// leave a pending rAF, so every view (not just chat) is current again by the frame after show.
+// bump the schedulers, so every view (not just chat) is current again by the frame after show.
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'hidden') { chatSched.hide(); return; }
-  chatBump(); refresh();
+  if (document.visibilityState === 'hidden') { chatSched.hide(); renderSched.hide(); return; }
+  chatBump(); renderSched.bump(); refresh();
 });
 setInterval(() => { if (S.orch.running && !document.hidden) refresh(); }, 2000); // backstop for the sections deltas do not carry (team/nodes/nstat); version-gated inside refresh, paused while hidden
 refresh().then(() => syncRecovery()); // recovery banner needs a settled ctx.p (t_6911ba60)
