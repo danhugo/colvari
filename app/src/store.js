@@ -253,12 +253,59 @@ class Store {
       fs.writeFileSync(tmp, String(process.pid));
       fs.renameSync(tmp, path.join(lock, 'pid'));
     } catch {}
+    // Same depth contract as withLock/withLockAsync (write-through hooks consult it).
+    this._lockDepth = (this._lockDepth || 0) + 1;
     try { fn(); return true; } finally {
+      this._lockDepth--;
       let ours = true;
       try { ours = fs.readFileSync(path.join(lock, 'pid'), 'utf8').trim() === String(process.pid); }
       catch (e) { ours = e.code === 'ENOENT'; }
       if (ours) { try { fs.rmSync(lock, { recursive: true, force: true }); } catch {} }
     }
+  }
+  // Async twin of withLock for the main process's own dispatch/run-end task writes: the WAIT for
+  // a busy lock yields the event loop (setTimeout) instead of sleepSync(10)-spinning, so a burst
+  // of agent MCP writes no longer freezes main while it queues (t_a2566d54 — getAll tail). The
+  // critical section itself stays SYNCHRONOUS: `fn` must not await. Holding this lock across an
+  // await would let the same process's sync writers self-deadlock (single thread: their
+  // Atomics.wait spin would block the very continuation that would release us). Same steal policy
+  // and pid-checked release as the sync lock.
+  withLockAsync(fn) {
+    const lock = path.join(this.dir, '.lock');
+    const start = Date.now();
+    const attempt = () => {
+      try { fs.mkdirSync(lock); } catch (e) {
+        if (e.code !== 'EEXIST') throw e;
+        if (Date.now() - start > LOCK.waitMs && lockHolderDead(lock)) {
+          const stolen = lock + '.stolen.' + process.pid;
+          try { fs.rmSync(stolen, { recursive: true, force: true }); fs.renameSync(lock, stolen); fs.rmSync(stolen, { recursive: true, force: true }); return attempt(); } catch {}
+        }
+        if (Date.now() - start > LOCK.waitMs + 30000) throw new Error('store lock busy (async wait timed out)');
+        return null; // still busy: keep waiting
+      }
+      try {
+        try {
+          const tmp = path.join(lock, 'pid.' + process.pid + '.tmp');
+          fs.writeFileSync(tmp, String(process.pid));
+          fs.renameSync(tmp, path.join(lock, 'pid'));
+        } catch {}
+        // Same depth contract as withLock: write-through hooks fire inside this lock and consult
+        // _lockDepth to skip the re-entrant _ensureBoard/_ensureWiki baselines.
+        this._lockDepth = (this._lockDepth || 0) + 1;
+        try { return fn(); }
+        finally {
+          this._lockDepth--;
+          let ours = true;
+          try { ours = fs.readFileSync(path.join(lock, 'pid'), 'utf8').trim() === String(process.pid); } catch (e) { ours = e.code === 'ENOENT'; }
+          if (ours) { try { fs.rmSync(lock, { recursive: true, force: true }); } catch {} }
+        }
+      } catch (e) {
+        try { fs.rmSync(lock, { recursive: true, force: true }); } catch {}
+        throw e;
+      }
+    };
+    const run = () => { const r = attempt(); if (r !== null) return Promise.resolve(r); return new Promise((res) => setTimeout(res, 10)).then(run); };
+    return run();
   }
   withLock(fn) {
     const lock = path.join(this.dir, '.lock');
@@ -448,10 +495,8 @@ class Store {
   // The before-image reuses the per-file cache's compact form (t_7e53747c): the old code
   // stringified every task twice per write, all inside the lock — every agent MCP call paid it,
   // and main-process writers queued behind those holds.
-  _withTasks(fn) {
-    if (this.cache && !this.cache.closed) this.cache.prewarm();
-    this._ensureBoard();
-    return this.withLock(() => {
+  _taskWritePass(fn) {
+    return () => {
       const tasks = this._taskFiles().map((f) => this._readTaskFile(f)).filter(Boolean);
       const beforeIds = new Set(tasks.map((t) => t.id));
       const beforeStr = new Map();
@@ -466,7 +511,18 @@ class Store {
       for (const t of tasks) beforeIds.delete(t.id);
       for (const tid0 of beforeIds) this._unlinkTask(tid0);
       return r;
-    });
+    };
+  }
+  _withTasks(fn) {
+    if (this.cache && !this.cache.closed) this.cache.prewarm();
+    this._ensureBoard();
+    return this.withLock(this._taskWritePass(fn));
+  }
+  // Async twin of _withTasks (see withLockAsync): same read/diff/write pass under the async lock.
+  async _withTasksAsync(fn) {
+    if (this.cache && !this.cache.closed) this.cache.prewarm();
+    this._ensureBoard();
+    return this.withLockAsync(this._taskWritePass(fn));
   }
   // One-time per process: heal an interrupted migration, then verify out-of-board edits.
   // Lock is taken per step here; callers must NOT already hold it.
@@ -527,7 +583,12 @@ class Store {
     try { this._saveHashes(h); } catch {}
   }
   _verifyTaskIntegrity() {
-    this.withLock(() => {
+    // Try-lock, not spin (t_a2566d54): the verify is advisory — out-of-band edits are adopted with a
+    // store-log line, and every sanctioned write maintains the hash map itself — so skipping the
+    // round while an agent's MCP process holds the lock costs nothing. Spinning here put a
+    // multi-second main-thread freeze on every first board load that raced a write burst (the
+    // getAll tail that survived the dispatch fixes).
+    this.withLockTry(() => {
       try {
         const hashes = this._readHashes();
         if (!hashes) { this._snapshotTaskHashes(); return; } // first open of a per-file store: adopt as baseline
@@ -557,7 +618,8 @@ class Store {
     });
   }
   _verifyWikiIntegrity() {
-    this.withLock(() => {
+    // Try-lock, not spin — same contract as _verifyTaskIntegrity (t_a2566d54).
+    this.withLockTry(() => {
       try {
         const idx = this._readWikiIndex();
         let changed = false;
@@ -776,6 +838,77 @@ class Store {
     // Every approval request also shows up in the human inbox.
     if (patch.awaitingApproval && !this.listInbox({ status: 'open' }).some((i) => i.kind === 'approval' && i.taskId === tid)) this.addInbox({ kind: 'approval', taskId: tid, nodeId: t.assignee, question: `Approve "${t.title}"?`, choices: ['approve'] });
     // Never strand finished work in its worktree branch: auto-merge on done, or park as merge_conflict.
+    if (patch.status === 'done' && t.worktreePath && t.worktreeBranch) t = this._mergeOnDone(t, opts);
+    return t;
+  }
+  // Async twin of _updateTask (dispatch/run-end writes on the main process: see withLockAsync).
+  // Uncontended, the write completes SYNCHRONOUSLY in the caller's span — no await suspension —
+  // so dispatch invariants like "slot reserved ⇒ agent marked, disk status written" stay atomic
+  // exactly as with the sync write (tests and the sweep observe no intermediate states). Only a
+  // contended lock defers to the yielding wait, which is the case that never froze the loop before.
+  _updateTaskAsync(tid, patch) {
+    const body = (tasks) => {
+      const t = tasks.find((x) => x.id === tid); if (!t) throw new Error('no task ' + tid);
+      if (patch.status && !STATUSES.includes(patch.status)) throw new Error('bad status ' + patch.status);
+      if (patch.blockedBy !== undefined) t.blockedBy = C.validateDeps(tid, patch.blockedBy, tasks);
+      if (patch.status && patch.status !== 'review') t.awaitingApproval = false;
+      if (patch.priority !== undefined) t.priority = C.normalizePriority(patch.priority);
+      for (const k of ['title', 'description', 'assignee', 'status', 'sessionId', 'sessions', 'iterations', 'awaitingApproval', 'reopenCount', 'worktreePath', 'worktreeBranch', 'isConflictResolution', 'conflictBranch', 'conflictRetries', 'parkedForHuman', 'stallRecoveries', 'drainCuts', 'redMaster', 'reviewStage', 'reviewWakes', 'reviewWakeAt', 'autoResumeTried', 'noAutoResume', 'stuckAlertFor']) if (patch[k] !== undefined) t[k] = patch[k];
+      t.updatedAt = new Date().toISOString();
+      for (let c = t; c.status === 'done' && c.parentId;) {
+        const parent = tasks.find((x) => x.id === c.parentId);
+        if (!parent || parent.status === 'done' || tasks.some((x) => x.parentId === parent.id && x.status !== 'done')) break;
+        parent.status = 'done'; parent.awaitingApproval = false; parent.updatedAt = t.updatedAt; c = parent;
+      }
+      return t;
+    };
+    const pass = this._taskWritePass(body);
+    if (this.cache && !this.cache.closed) this.cache.prewarm();
+    this._ensureBoard();
+    let out, done = false;
+    try { done = this.withLockTry(() => { out = pass(); }); } catch (e) { throw e; }
+    if (done) return Promise.resolve(out);
+    return this.withLockAsync(pass);
+  }
+  // Fire-and-forget twin used by the dispatch path (t_a2566d54): with the lock free it takes the
+  // EXACT sync updateTask path (hooks, merge gate, test mocks — master behavior bit-for-bit).
+  // Only a busy lock defers: the write lands via the yielding async lock a few ms later instead of
+  // sleepSync-spinning the main thread behind an agent MCP write burst (the getAll tail). Every
+  // consumer of these writes — agent MCP reads, board UI, review chains — reads strictly after.
+  // Returns the task view at call time on the deferred path; errors surface in the store log.
+  updateTaskSoon(tid, patch, opts) {
+    const lock = path.join(this.dir, '.lock');
+    let free = false;
+    try { fs.mkdirSync(lock); free = true; } catch (e) { if (e.code !== 'EEXIST') throw e; }
+    if (free) { try { fs.rmSync(lock, { recursive: true, force: true }); } catch {} }
+    if (free) return this.updateTask(tid, patch, opts);
+    const pass = this._taskWritePass((tasks) => {
+      const t = tasks.find((x) => x.id === tid); if (!t) throw new Error('no task ' + tid);
+      if (patch.status && !STATUSES.includes(patch.status)) throw new Error('bad status ' + patch.status);
+      if (patch.blockedBy !== undefined) t.blockedBy = C.validateDeps(tid, patch.blockedBy, tasks);
+      if (patch.status && patch.status !== 'review') t.awaitingApproval = false;
+      if (patch.priority !== undefined) t.priority = C.normalizePriority(patch.priority);
+      for (const k of ['title', 'description', 'assignee', 'status', 'sessionId', 'sessions', 'iterations', 'awaitingApproval', 'reopenCount', 'worktreePath', 'worktreeBranch', 'isConflictResolution', 'conflictBranch', 'conflictRetries', 'parkedForHuman', 'stallRecoveries', 'drainCuts', 'redMaster', 'reviewStage', 'reviewWakes', 'reviewWakeAt', 'autoResumeTried', 'noAutoResume', 'stuckAlertFor']) if (patch[k] !== undefined) t[k] = patch[k];
+      t.updatedAt = new Date().toISOString();
+      for (let c = t; c.status === 'done' && c.parentId;) {
+        const parent = tasks.find((x) => x.id === c.parentId);
+        if (!parent || parent.status === 'done' || tasks.some((x) => x.parentId === parent.id && x.status !== 'done')) break;
+        parent.status = 'done'; parent.awaitingApproval = false; parent.updatedAt = t.updatedAt; c = parent;
+      }
+      return t;
+    });
+    this.withLockAsync(pass).then((t) => {
+      try {
+        if (patch.awaitingApproval && !this.listInbox({ status: 'open' }).some((i) => i.kind === 'approval' && i.taskId === tid)) this.addInbox({ kind: 'approval', taskId: tid, nodeId: t.assignee, question: `Approve "${t.title}"?`, choices: ['approve'] });
+        if (patch.status === 'done' && t.worktreePath && t.worktreeBranch) this._mergeOnDone(t, opts);
+      } catch (e) { try { this._logStore('updateTaskSoon deferred hook failed: ' + e.message); } catch {} }
+    }).catch((e) => { try { this._logStore('updateTaskSoon deferred write failed: ' + e.message); } catch {} });
+    return this.getTask(tid);
+  }
+  async updateTaskAsync(tid, patch, opts) {
+    let t = await this._updateTaskAsync(tid, patch);
+    if (patch.awaitingApproval && !this.listInbox({ status: 'open' }).some((i) => i.kind === 'approval' && i.taskId === tid)) this.addInbox({ kind: 'approval', taskId: tid, nodeId: t.assignee, question: `Approve "${t.title}"?`, choices: ['approve'] });
+    // The merge gate is sync by contract (t_12a92368) and runs in whichever process flips done.
     if (patch.status === 'done' && t.worktreePath && t.worktreeBranch) t = this._mergeOnDone(t, opts);
     return t;
   }
@@ -1002,8 +1135,19 @@ class Store {
   }
 
   // ---- messages (agent to agent, scope checked in board-tools) ----
+  // Stat-keyed cache for messages.json (t_a2566d54): every getAll parsed the whole file (~0.7MB
+  // and growing). Same size:mtime contract as the task/runs caches — out-of-band edits bust it,
+  // our own writes invalidate up front.
+  _readMsgs() {
+    let st; try { st = fs.statSync(this.file('messages')); } catch { return []; }
+    const sig = st.size + ':' + st.mtimeMs;
+    if (this._msgsMemo && this._msgsMemo.sig === sig) return this._msgsMemo.ms;
+    let ms; try { ms = JSON.parse(fs.readFileSync(this.file('messages'), 'utf8')).messages || []; } catch { return []; }
+    this._msgsMemo = { sig, ms };
+    return ms;
+  }
   listMessages(filter = {}) {
-    let ms = this.read('messages', { messages: [] }).messages;
+    let ms = this._readMsgs().slice();
     if (filter.to) ms = ms.filter((m) => m.to === filter.to);
     if (filter.from) ms = ms.filter((m) => m.from === filter.from);
     return ms;
@@ -1014,11 +1158,13 @@ class Store {
     const atts = sanitizeAttachments(attachments);
     if (atts) m.attachments = atts;
     if (wake) m.wake = true; // the one message kind that may wake an idle agent (see orchestrator.wakeUnread)
+    this._msgsMemo = null;
     this.update('messages', { messages: [] }, (d) => { d.messages.push(m); });
     return m;
   }
   markMessagesRead(ids, read = true) {
     const set = new Set(ids); if (!set.size) return;
+    this._msgsMemo = null;
     this.update('messages', { messages: [] }, (d) => { for (const m of d.messages) if (set.has(m.id)) m.read = !!read; });
   }
 

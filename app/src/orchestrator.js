@@ -25,6 +25,7 @@ const { SubagentTracker, isSubagentTool } = require('./subagents');
 const FQ = require('./failures');
 const PB = require('./litellm');
 const SW = require('./stall-watchdog');
+const WS = require('./wake-sweep');
 
 const MCP_SERVER = path.join(__dirname, 'mcp-server.js');
 
@@ -76,15 +77,9 @@ function autoCompactEnv(pct) {
   return String(Math.min(100, Math.max(10, Math.round(pct))));
 }
 
-// Wake-on-message: how often the orchestrator looks for unread agent->agent messages, how long a burst
-// may coalesce into one dispatch, and the ping-pong guard (max auto-wakes per sender->recipient pair
-// per window). An idle agent with unread agent messages is woken on every sweep — message wakes are
-// never held back by a suppression window (t_9e4b4805: the old 5-min per-agent gap delayed teammate
-// messages while the agent sat idle); DEBOUNCE_MS coalesces a burst and the pair cap is the loop
-// protection. MIN_GAP_MS now only anchors the idle/stale nudge throttle in nudgeIdle — a changed idle
-// set must not re-wake a just-woken core. Task dispatch never waits on the gap.
-// Exported so tests can shorten the timings.
-const WAKE = { SWEEP_MS: 1000, DEBOUNCE_MS: 1500, MIN_GAP_MS: 5 * 60 * 1000, MAX_PER_PAIR: 3, PAIR_WINDOW_MS: 10 * 60 * 1000 };
+// Wake-on-message (src/wake-sweep.js): constants and sweep machinery live there; WAKE is shared by
+// reference so tests shortening the timings in place keep working through either export.
+const WAKE = WS.WAKE;
 
 // Stall watchdog (src/stall-watchdog.js): constants and machinery live there; STALL is shared by
 // reference so tests shortening the timings in place keep working through either export.
@@ -236,6 +231,9 @@ class Orchestrator extends EventEmitter {
     this.wakeTimers = new Map(); // nodeId -> { timer, dueAt } — at most one pending wake per agent
     this.wakePairs = new Map(); // 'from>to' -> {count, since}
     this.wakeLastAt = new Map(); // nodeId -> ts of the agent's last agent->agent wake dispatch (nudge throttle anchor)
+    // Jank instrumentation (src/wake-sweep.js): sweep count/duration and debounce timers armed,
+    // so the 1 Hz sweep's main-loop cost is visible; a slow sweep logs a system line.
+    this._wakeStats = { sweeps: 0, totalMs: 0, maxMs: 0, armed: 0 };
     this._wakeTimer = setInterval(() => this.sweepWakes(), WAKE.SWEEP_MS);
     if (this._wakeTimer.unref) this._wakeTimer.unref();
     // Core watch state (sweepWatch): lastWatchAt/lastDigest advance on every due tick; wokeDigest is
@@ -290,9 +288,11 @@ class Orchestrator extends EventEmitter {
       } catch {}
     }
     // Stall watchdog state: last seen cumulative CPU time of each run's CLI process (nodeId -> {pid, cpuMs}),
-    // and the pending SIGKILL grace timers for stalled runs that ignore SIGTERM.
+    // the pending SIGKILL grace timers for stalled runs that ignore SIGTERM, and the last liveness
+    // probe time per node (nodeId -> ts, the STALL.LIVE_RECHECK_MS debounce in sweepStalls).
     this._stallCpu = new Map();
     this._stallKill = new Map();
+    this._stallProbe = new Map();
     this._stallTimer = setInterval(() => this.sweepStalls(), STALL.SWEEP_MS);
     if (this._stallTimer.unref) this._stallTimer.unref();
     // Review watchdog state (sweepReviews): per review task, which link of the review chain is current
@@ -568,55 +568,11 @@ class Orchestrator extends EventEmitter {
     return { ...m, delivered: live ? 'interrupt' : queued ? 'queued' : 'inbox' };
   }
 
-  // ---- wake on message: an idle agent that receives a send_message is dispatched with its unread
-  // messages as the prompt. The sender's send_message has already returned (it only writes to the
-  // store); delivery happens here, in the background, debounced and loop-capped. ----
-  sweepWakes() {
-    if (this.userStopped || this.dispatchPaused) { for (const t of this.wakeTimers.values()) clearTimeout(t.timer); this.wakeTimers.clear(); return; }
-    try {
-      const team = this.store.getTeam();
-      const now = Date.now();
-      for (const node of team.nodes) {
-        const a = this.agent(node.id);
-        if (this.procs.has(node.id) || a.status === 'working') continue;
-        const unread = this.wakeUnread(node.id, team);
-        if (!unread.length) {
-          if (a.wakePending) { a.wakePending = null; this.changed(); }
-          continue;
-        }
-        // Per-agent wake debounce: while an agent runs (task or wake), messages stay queued unread —
-        // never a parallel run. Once idle, unread teammate and human messages wake the agent on every
-        // sweep, burst-coalesced by the debounce timer below: message wakes are never suppressed
-        // (t_9e4b4805 — the old MIN_GAP_MS window delayed teammate messages while the agent sat idle;
-        // the pair cap in dispatchWake is the ping-pong guard, and human senders are exempt from it).
-        // Task dispatch is NOT debounced either (an assigned/unblocked task reaches the agent right
-        // away and its prompt carries the unread count); system wakes never enter this sweep.
-        const prev = a.wakePending;
-        if (!prev || prev.count !== unread.length) {
-          // nextWakeAt is the armed timer's due time; recomputed only on a transition so an unchanged
-          // pending state does not churn a state push every sweep.
-          a.wakePending = { count: unread.length, suppressed: false, nextWakeAt: (prev && prev.nextWakeAt) || now + WAKE.DEBOUNCE_MS };
-          this.changed();
-        }
-        // Debounce: a burst of messages coalesces into the one dispatch this timer fires. At most one
-        // pending wake per agent: the wakeTimers entry IS the dedupe key.
-        if (!this.wakeTimers.has(node.id)) {
-          const dueAt = now + WAKE.DEBOUNCE_MS;
-          this.wakeTimers.set(node.id, { dueAt, timer: setTimeout(() => {
-            this.wakeTimers.delete(node.id);
-            this.dispatchWake(node.id).catch((e) => this.log(node.id, 'error', 'wake dispatch: ' + e.message));
-          }, WAKE.DEBOUNCE_MS) });
-        }
-      }
-    } catch (e) { this.log(null, 'error', 'wake sweep: ' + e.message); }
-  }
-  // Unread messages for a node from teammates or the human operator (system senders have their own
-  // delivery paths and never wake anyone — except the queued status-check nudge, whose wake flag
-  // opts exactly that one message kind into waking an idle agent, like the human message it replaced).
-  wakeUnread(nodeId, team = this.store.getTeam()) {
-    return this.store.listMessages({ to: nodeId })
-      .filter((m) => !m.read && m.from !== nodeId && (m.from !== 'system' || m.wake) && (m.from === 'human' || m.from === 'system' || team.nodes.some((n) => n.id === m.from)));
-  }
+  // ---- wake on message: sweep machinery lives in src/wake-sweep.js; these prototype methods are
+  // the delegation seam — the sweep reads through `orch.*` so tests stub runAlive-style on
+  // instances (o.wakeUnread = ...), and the 1s timer dispatches through `this.sweepWakes()`. ----
+  sweepWakes() { WS.sweepWakes(this); }
+  wakeUnread(nodeId, team = this.store.getTeam()) { return WS.wakeUnread(this, nodeId, team); }
   async dispatchWake(nodeId) {
     const team = this.store.getTeam();
     const node = team.nodes.find((n) => n.id === nodeId);
@@ -725,7 +681,11 @@ class Orchestrator extends EventEmitter {
       this.changed();
     } catch (e) {
       a.status = 'idle'; a.iteration = 0; a.activity = null;
-      this.log(node.id, 'error', `wake run crashed: ${e.message}`);
+      // The dispatch marked these messages read before the run started; a crash here means they
+      // were never delivered — back to the unread inbox so the next sweep retries (the pair cap
+      // still bounds an agent->agent retry loop).
+      try { this.store.markMessagesRead(msgs.map((m) => m.id), false); } catch {}
+      this.log(node.id, 'error', `wake run crashed: ${e.message}; its messages returned to the unread inbox`);
       this.changed();
     } finally {
       // Released however the bookkeeping above ends: a leaked slot leaves a self-update
@@ -743,7 +703,9 @@ class Orchestrator extends EventEmitter {
   // ---- stall watchdog: detection and recovery live in src/stall-watchdog.js; these prototype
   // methods are the delegation seam — tests stub runAlive/procTable on instances, and the sweep
   // dispatches through `orch.runAlive(...)` so a stub is honored. ----
-  sweepStalls() { SW.sweepStalls(this); }
+  // The sweep runs off a bare interval: an exception here would be an uncaught one (the 5s timer
+  // callback has no guard of its own), so the sweep itself is crash-proof like tick/sweepRestart.
+  sweepStalls() { try { SW.sweepStalls(this); } catch (e) { try { this.log(null, 'error', 'stall sweep: ' + e.message); } catch {} } }
 
   stallLiveKids(child) { return SW.stallLiveKids(this, child); }
 
@@ -1521,6 +1483,8 @@ class Orchestrator extends EventEmitter {
         run.stderr = errbuf.trim();
         try { removePerRunMcpDirs(env); } catch {} // per-run board config was read at child startup (t_8170a988)
         if (a.currentRun === run) a.currentRun = null;
+        this._stallCpu.delete(node.id); // drop the CPU snapshot: a recycled pid must not read as advancing CPU for the next run
+        this._stallProbe.delete(node.id); // and the probe stamp: the next run's first liveness check must be fresh
         try {
           if (buf.trim()) this.onEvent(node, buf.trim(), run, rt.id);
           if (run.subs && run.subs.records.length) {
@@ -1582,9 +1546,9 @@ class Orchestrator extends EventEmitter {
     this.runs++;
     // A run for this task started (dispatch, manual button, or auto resume): new stuck episode — the
     // previous episode's one-try flag and human-stop stamp are void.
-    if (task.autoResumeTried || task.noAutoResume) this.store.updateTask(task.id, { autoResumeTried: null, noAutoResume: null });
+    if (task.autoResumeTried || task.noAutoResume) this.store.updateTaskSoon(task.id, { autoResumeTried: null, noAutoResume: null });
     const reviewPickup = task.status === 'review'; // dispatched to review a hand-off: ending clean approves it
-    this.store.updateTask(task.id, { status: 'in_progress' });
+    this.store.updateTaskSoon(task.id, { status: 'in_progress' });
     const a = this.agent(node.id); a.status = 'working'; a.lastError = null; a.taskId = task.id; a.task = task.title; a.runs++; a.iteration = 1; a.reviewPickup = reviewPickup; a.wakePending = null; // the prompt carries the unread count
     this.procs.set(node.id, { kill() {} }); // reserve the slot synchronously
     let okRuntime = null; // set when the run finishes OK: free-signal auto resume (plan t_76da3303 C)
@@ -1605,7 +1569,7 @@ class Orchestrator extends EventEmitter {
         else {
           const w = WT.ensureWorktree(cwd, task.id);
           if (w.warning) this.log(node.id, 'error', 'warning: ' + w.warning);
-          else { cwd = w.cwd; worktree = true; this.store.updateTask(task.id, { worktreePath: w.worktreePath, worktreeBranch: w.worktreeBranch }); }
+          else { cwd = w.cwd; worktree = true; this.store.updateTaskSoon(task.id, { worktreePath: w.worktreePath, worktreeBranch: w.worktreeBranch }); }
         }
       }
       const presets = settings.rolePresets || [];
@@ -1661,7 +1625,7 @@ class Orchestrator extends EventEmitter {
         if (r.sessionId) {
           resume = r.sessionId;
           const tp = this.store.getTask(task.id);
-          this.store.updateTask(task.id, { sessions: { ...((tp && tp.sessions) || {}), [sessKey]: r.sessionId }, iterations: i });
+          this.store.updateTaskSoon(task.id, { sessions: { ...((tp && tp.sessions) || {}), [sessKey]: r.sessionId }, iterations: i });
         }
         // A resume can fail because the session id went stale (sessions are per cwd; ids stored
         // before the per-owner key may belong to another agent or runtime): retry once from a fresh
@@ -1671,7 +1635,7 @@ class Orchestrator extends EventEmitter {
           const tp = this.store.getTask(task.id);
           const sessions = { ...((tp && tp.sessions) || {}) };
           delete sessions[sessKey];
-          this.store.updateTask(task.id, { sessions });
+          this.store.updateTaskSoon(task.id, { sessions });
           resume = null;
           this.log(node.id, 'system', '↻ resume failed (session not found): retrying once from a fresh session');
           continue;
@@ -1680,7 +1644,7 @@ class Orchestrator extends EventEmitter {
         // (persisted on the task, so it survives app restarts — otherwise a restart would re-arm the
         // recovery budget). A code 0 under an active stall claim is NOT progress — the watchdog killed
         // a run whose CLI trapped TERM and exited 0; resetting there would disarm the max-2 limit.
-        if (code === 0 && !r.stalled) { const tp = this.store.getTask(task.id); if (tp && tp.stallRecoveries) this.store.updateTask(task.id, { stallRecoveries: 0 }); }
+        if (code === 0 && !r.stalled) { const tp = this.store.getTask(task.id); if (tp && tp.stallRecoveries) this.store.updateTaskSoon(task.id, { stallRecoveries: 0 }); }
         // Stalled run confirmed exited (the watchdog killed it after the run.stalled claim) — whatever
         // the exit code: a trapping CLI can exit 0 on its kill signal, and that still needs the same
         // recovery. Resume the same session with a continue prompt, at most STALL.MAX_RECOVERIES times
@@ -1690,7 +1654,7 @@ class Orchestrator extends EventEmitter {
           const ts = this.store.getTask(task.id);
           const attempt = ((ts && ts.stallRecoveries) || 0) + 1;
           if (attempt > STALL.MAX_RECOVERIES) {
-            this.store.updateTask(task.id, { stallRecoveries: attempt, status: 'waiting_for_human' });
+            this.store.updateTaskSoon(task.id, { stallRecoveries: attempt, status: 'waiting_for_human' });
             this.store.commentTask(task.id, 'orchestrator', `Run stalled ${attempt} time(s); the ${STALL.MAX_RECOVERIES} automatic stop+resume recoveries are used up. Parked for a human.`);
             this.emit('run.recovery_failed', { nodeId: node.id, taskId: task.id, attempt: attempt - 1, final: true });
             this.log(node.id, 'error', `stall recovery failed: ${attempt - 1} automatic resume(s) already used; parked for a human`);
@@ -1698,13 +1662,13 @@ class Orchestrator extends EventEmitter {
           }
           if (!resume) {
             // No session id to resume: never silently retry fresh (would lose the session's context).
-            this.store.updateTask(task.id, { stallRecoveries: attempt, status: 'waiting_for_human' });
+            this.store.updateTaskSoon(task.id, { stallRecoveries: attempt, status: 'waiting_for_human' });
             this.store.commentTask(task.id, 'orchestrator', 'Run stalled; automatic recovery failed because the run reported no session id to resume. Parked for a human.');
             this.emit('run.recovery_failed', { nodeId: node.id, taskId: task.id, attempt, final: true, reason: 'no session' });
             this.log(node.id, 'error', 'stall recovery failed: no session id was reported, the same session cannot be resumed');
             reason = 'stalled: no session to resume'; break;
           }
-          this.store.updateTask(task.id, { stallRecoveries: attempt, status: 'in_progress' });
+          this.store.updateTaskSoon(task.id, { stallRecoveries: attempt, status: 'in_progress' });
           a.stall = { attempt, max: STALL.MAX_RECOVERIES };
           this.log(node.id, 'system', `↻ stall recovery ${attempt}/${STALL.MAX_RECOVERIES}: resuming the same session with a continue prompt`);
           this.emit('run.recovering', { nodeId: node.id, taskId: task.id, attempt, max: STALL.MAX_RECOVERIES });
@@ -1719,7 +1683,7 @@ class Orchestrator extends EventEmitter {
           human = [msgs.map((x) => x.text).join('\n\n'), attachedFilesLines(humanAtts)].filter(Boolean).join('\n\n');
           this.runs++; a.runs++;
           this.log(node.id, 'system', `↻ ${node.name} resumes with the human message`);
-          const tt = this.store.getTask(task.id); if (tt && tt.status !== 'in_progress') this.store.updateTask(task.id, { status: 'in_progress' });
+          const tt = this.store.getTask(task.id); if (tt && tt.status !== 'in_progress') this.store.updateTaskSoon(task.id, { status: 'in_progress' });
           continue;
         }
         judge = null;
@@ -1730,19 +1694,19 @@ class Orchestrator extends EventEmitter {
         if (!step.again) break;
         if (this.runs >= settings.maxRuns) { reason = 'maxRuns reached'; break; }
         this.runs++; a.runs++;
-        if (t && t.status !== 'in_progress') this.store.updateTask(task.id, { status: 'in_progress' });
+        if (t && t.status !== 'in_progress') this.store.updateTaskSoon(task.id, { status: 'in_progress' });
       }
       const stoppedWhy = a.stopRequested; a.stopRequested = false;
       // A human stop (stopAgent; budget stops excluded — a.budgetStop is set for those) stamps the
       // task so the free-signal auto resume never brings it back (plan t_76da3303 C). The manual
       // button still works: only the auto path consults the stamp.
-      if (stoppedWhy && !a.budgetStop) this.store.updateTask(task.id, { noAutoResume: true });
+      if (stoppedWhy && !a.budgetStop) this.store.updateTaskSoon(task.id, { noAutoResume: true });
       a.status = 'idle'; a.taskId = null; a.task = null; a.iteration = 0; a.stall = null;
       const t = this.store.getTask(task.id);
       const gate = (st) => C.gateStatus(st, node, this.store.getSettings());
       if (m.mode === 'goal' && t && judge && !judge.met && t.status === 'done') {
         // Parked for a human, not a "please review this" hand-off: never auto-dispatched/auto-advanced.
-        this.store.updateTask(task.id, { status: 'review', parkedForHuman: true });
+        this.store.updateTaskSoon(task.id, { status: 'review', parkedForHuman: true });
         this.store.commentTask(task.id, 'orchestrator', judge.inconclusive ? `Goal check was inconclusive after ${i} iteration(s): ${judge.reason}. Check the result yourself.` : `Goal condition not met after ${i} iteration(s) (${reason}): ${judge.reason}`);
       } else if (t && t.status === 'in_progress' && !this.drainCutNodes.has(node.id)) {
         // Agent ended without updating status: a normal dispatch hands off to review —
@@ -1762,25 +1726,25 @@ class Orchestrator extends EventEmitter {
           const priorCrashes = t.comments.filter((c) => /^crashed: exit code/.test(c.text)).length;
           if (priorCrashes >= 2) {
             const g = gate('review'); g.parkedForHuman = true;
-            this.store.updateTask(task.id, g);
+            this.store.updateTaskSoon(task.id, g);
             const tail = FQ.redactError(stderr) || `exit ${code}, no stderr`;
             this.store.commentTask(task.id, 'orchestrator', `crashed: exit code ${code} after ${i} iteration(s) (${reason}); ${priorCrashes + 1} crashes — parked for a human instead of re-queuing.\nstderr tail: ${tail}`);
             this.alertCrashPark(node, task, priorCrashes + 1, tail);
           } else {
-            this.store.updateTask(task.id, { status: 'todo' });
+            this.store.updateTaskSoon(task.id, { status: 'todo' });
             this.store.commentTask(task.id, 'orchestrator', `crashed: exit code ${code} after ${i} iteration(s) (${reason}); back to todo.`);
           }
         } else {
           const g = gate(ok && a.reviewPickup ? 'done' : 'review');
           if (!ok) g.parkedForHuman = true;
-          this.store.updateTask(task.id, g);
+          this.store.updateTaskSoon(task.id, g);
           this.store.commentTask(task.id, 'orchestrator', stoppedWhy ? `Agent stopped (${stoppedWhy}) after ${i} iteration(s); moved to review.` : `Agent exited (code ${code}) without setting status after ${i} iteration(s) (${reason}); moved to review.`);
         }
       } else if (t && t.status === 'review' && !t.parkedForHuman && code !== 0 && this.running && !stoppedWhy && !this.drainCutNodes.has(node.id)) {
         // The agent itself moved this to 'review' (clearing parkedForHuman) but the process then crashed
         // (nonzero exit). A crashed run must never look like a clean hand-off eligible for silent
         // auto-advance to done: park it for a human to inspect.
-        this.store.updateTask(task.id, { parkedForHuman: true });
+        this.store.updateTaskSoon(task.id, { parkedForHuman: true });
         this.store.commentTask(task.id, 'orchestrator', `Agent exited (code ${code}) after moving this task to review during iteration ${i}; parked for a human because the run crashed.`);
       }
       const t2 = this.store.getTask(task.id);

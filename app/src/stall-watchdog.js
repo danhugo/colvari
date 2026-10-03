@@ -25,8 +25,12 @@ const isBoardHelper = (r) => !!r.command && /mcp-server\.js/.test(r.command) && 
 // HARD_CAP_MULT: silence for MULT x stallTimeoutMin kills the run even when runAlive() sees live
 // descendants — a runtime's own long-lived helpers (helpycode MCP servers) used to pin liveness
 // true forever (t_1f75efd8: a wake run hung 3h11m).
+// LIVE_RECHECK_MS: how long a run stays trusted-alive after one liveness probe — a silent run kept
+// alive by descendants (hung runtime with helpers) used to re-fork the blocking `ps` on every 5s
+// sweep forever. Verdicts are minutes-granular, so one probe per window is plenty; a probe is never
+// debounced past the hard cap, where the verdict decides a kill.
 // Shared with orchestrator.js by reference (tests shorten the timings in place).
-const STALL = { SWEEP_MS: 5000, SIGKILL_GRACE_MS: 8000, MAX_RECOVERIES: 2, HARD_CAP_MULT: 3 };
+const STALL = { SWEEP_MS: 5000, SIGKILL_GRACE_MS: 8000, MAX_RECOVERIES: 2, HARD_CAP_MULT: 3, LIVE_RECHECK_MS: 30000 };
 
 // Short 'continue' prompt for a stalled run resumed in the same session (the session already holds
 // the full task context; this only tells the agent the previous attempt was stopped and why).
@@ -49,10 +53,12 @@ function procTable() {
 // (ps unavailable, slot placeholder without a pid) counts as alive: never stall on a hunch. The
 // board MCP helper subtree is excluded (isBoardHelper): it idles for the whole session and would
 // otherwise keep a hung CLI "alive" forever.
-function runAlive(orch, nodeId, child) {
+// snapshot: optional shared proc table — the sweep passes one so a pass with N silent runs forks
+// ps once, not N times (all reads within a sweep are the same instant anyway).
+function runAlive(orch, nodeId, child, snapshot) {
   if (!child || !child.pid) return true;
   if (child.exitCode != null) return false; // already exited; the close event just hasn't fired
-  const rows = orch.procTable();
+  const rows = snapshot === undefined ? orch.procTable() : snapshot;
   if (!rows) return true;
   const me = rows.find((r) => r.pid === child.pid);
   const prev = orch._stallCpu.get(nodeId);
@@ -75,8 +81,8 @@ function runAlive(orch, nodeId, child) {
 
 // Live (non-zombie) descendants of the run's CLI, for the hard-cap log: they show what kept a
 // silent run "alive" (board MCP helpers excluded, same scan as runAlive).
-function stallLiveKids(orch, child) {
-  const rows = orch.procTable();
+function stallLiveKids(orch, child, snapshot) {
+  const rows = snapshot === undefined ? orch.procTable() : snapshot;
   if (!rows || !child || !child.pid) return [];
   const kids = new Map();
   for (const r of rows) { if (!kids.has(r.ppid)) kids.set(r.ppid, []); kids.get(r.ppid).push(r); }
@@ -117,43 +123,68 @@ function sweepStalls(orch) {
   if (!(timeoutMin > 0)) return;
   const now = Date.now();
   const hardCapMs = timeoutMin * STALL.HARD_CAP_MULT * 60000;
+  // One shared proc table per sweep, forked lazily on the first liveness check (ps is a blocking
+  // execFileSync — the whole point of this cache): a sweep that must judge N silent runs reads a
+  // single snapshot instead of forking ps per run. null (ps unavailable) stays falsy, so a failed
+  // fork is retried on the next run rather than pinned for the pass.
+  let rows;
+  const table = () => rows || (rows = orch.procTable());
   for (const [nodeId, child] of [...orch.procs]) {
     const a = orch.agents[nodeId];
     const run = a && a.currentRun;
-    if (!a || a.status !== 'working' || !run || run.done || run.stalled) continue;
-    // Every run kind: task runs (a.taskId) and every no-task run — the activity trigger no longer
-    // gates the sweep (t_600e630d: no-task runs without a 'message' trigger were skipped).
-    const isWake = !a.taskId;
-    if (runOver && !isWake) continue;
-    if (a.stopRequested || a.pendingHuman.length) continue;
-    const idleMs = now - (a.lastActivityAt || 0);
-    if (idleMs < timeoutMin * 60000) continue;
-    // A live descendant (long silent tool call) protects the run — up to the hard cap, where
-    // silence wins: the cap is what recovers runs whose runtime keeps helpers alive forever.
-    const alive = orch.runAlive(nodeId, child);
-    const capped = alive && idleMs >= hardCapMs;
-    if (alive && !capped) continue;
-    // One-way claim on the run object: whichever sweep flips .stalled owns the recovery, so a tick
-    // racing a manual stop or a queued message can never double-fire (compare-and-set on the run).
-    run.stalled = true;
-    a.stall = { state: 'stalled' };
-    const idleMin = Math.round(idleMs / 60000);
-    const kids = capped ? orch.stallLiveKids(child) : null;
-    orch.log(nodeId, 'error', capped
-      ? `stall: no output for ${idleMin} min (${STALL.HARD_CAP_MULT}x the ${timeoutMin} min timeout) — killing despite live child processes: ${kids.length ? kids.slice(0, 3).map((k) => `pid ${k.pid} ${String(k.command).slice(0, 80)}`).join('; ') + (kids.length > 3 ? `; +${kids.length - 3} more` : '') : 'none found'}`
-      : isWake
-        ? `stall: wake run silent with no live child process for ${idleMin} min; stopping it (messages still pending re-wake the agent)`
-        : `stall: no events and no live child process for ${idleMin} min; stopping the run to recover`);
-    orch.emit('run.stalled', { nodeId, taskId: a.taskId || null, idleMin, kind: isWake ? 'wake' : 'task' });
-    try { child.kill('SIGTERM'); } catch {}
-    orch._stallKill.set(nodeId, setTimeout(() => {
-      orch._stallKill.delete(nodeId);
-      if (orch.procs.get(nodeId) === child && a.currentRun === run && !run.done) {
-        try { child.kill('SIGKILL'); } catch {}
-        orch.log(nodeId, 'error', 'stall: run ignored SIGTERM; sent SIGKILL');
-      }
-    }, STALL.SIGKILL_GRACE_MS));
-    orch.changed();
+    try {
+      if (!a || a.status !== 'working' || !run || run.done || run.stalled) continue;
+      // Every run kind: task runs (a.taskId) and every no-task run — the activity trigger no longer
+      // gates the sweep (t_600e630d: no-task runs without a 'message' trigger were skipped).
+      const isWake = !a.taskId;
+      if (runOver && !isWake) continue;
+      if (a.stopRequested || a.pendingHuman.length) continue;
+      const idleMs = now - (a.lastActivityAt || 0);
+      if (idleMs < timeoutMin * 60000) continue;
+      // A live descendant (long silent tool call) protects the run — up to the hard cap, where
+      // silence wins: the cap is what recovers runs whose runtime keeps helpers alive forever.
+      // Debounce the probe (runAlive forks a blocking `ps` on the main loop): a run verified alive
+      // stays trusted-alive for LIVE_RECHECK_MS — only cap-eligible runs probe on every sweep,
+      // because there the verdict decides the kill and must read fresh data.
+      const cappedIdle = idleMs >= hardCapMs;
+      const probed = orch._stallProbe || (orch._stallProbe = new Map());
+      if (!cappedIdle && now - (probed.get(nodeId) || 0) < STALL.LIVE_RECHECK_MS) continue;
+      const alive = orch.runAlive(nodeId, child, table());
+      probed.set(nodeId, now);
+      const capped = alive && cappedIdle;
+      if (alive && !capped) continue;
+      // One-way claim on the run object: whichever sweep flips .stalled owns the recovery, so a tick
+      // racing a manual stop or a queued message can never double-fire (compare-and-set on the run).
+      run.stalled = true;
+      probed.delete(nodeId);
+      a.stall = { state: 'stalled' };
+      const idleMin = Math.round(idleMs / 60000);
+      // Reporting is guarded: the sweep that made the claim owes the kill — a crashing log/emit must
+      // never strand a claimed run (later sweeps skip it, and without the TERM there is no close, so
+      // no recovery would ever fire).
+      try {
+        const kids = capped ? stallLiveKids(orch, child, table()) : null;
+        orch.log(nodeId, 'error', capped
+          ? `stall: no output for ${idleMin} min (${STALL.HARD_CAP_MULT}x the ${timeoutMin} min timeout) — killing despite live child processes: ${kids.length ? kids.slice(0, 3).map((k) => `pid ${k.pid} ${String(k.command).slice(0, 80)}`).join('; ') + (kids.length > 3 ? `; +${kids.length - 3} more` : '') : 'none found'}`
+          : isWake
+            ? `stall: wake run silent with no live child process for ${idleMin} min; stopping it (messages still pending re-wake the agent)`
+            : `stall: no events and no live child process for ${idleMin} min; stopping the run to recover`);
+        orch.emit('run.stalled', { nodeId, taskId: a.taskId || null, idleMin, kind: isWake ? 'wake' : 'task' });
+      } catch {}
+      try { child.kill('SIGTERM'); } catch {}
+      orch._stallKill.set(nodeId, setTimeout(() => {
+        orch._stallKill.delete(nodeId);
+        if (orch.procs.get(nodeId) === child && a.currentRun === run && !run.done) {
+          try { child.kill('SIGKILL'); } catch {}
+          orch.log(nodeId, 'error', 'stall: run ignored SIGTERM; sent SIGKILL');
+        }
+      }, STALL.SIGKILL_GRACE_MS));
+      try { orch.changed(); } catch {}
+    } catch (e) {
+      // One agent's unreadable state must not blind the sweep for the rest of the board (pre-claim
+      // failures only: post-claim reporting is guarded above so the kill always happens).
+      try { orch.log(nodeId, 'error', 'stall sweep: ' + (e && e.message || e)); } catch {}
+    }
   }
 }
 

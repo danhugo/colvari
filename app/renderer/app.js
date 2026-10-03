@@ -18,8 +18,9 @@ const logsLoaded = new Set(); // projects whose persisted logs.jsonl was merged 
 async function loadLogs(pid) {
   if (logsLoaded.has(pid)) return; logsLoaded.add(pid);
   let saved = []; try { saved = await call('getLogs', 1500); } catch {}
-  const first = Math.min(...logs.filter((l) => l.projectId === pid).map((l) => l.at), Infinity);
-  logs.unshift(...saved.filter((l) => l.at < first).map((l) => ({ ...l, projectId: pid, saved: true })));
+  if (!Array.isArray(saved)) saved = [];
+  const first = Math.min(...logs.filter((l) => l.projectId === pid).map((l) => l.at || 0), Infinity);
+  logs.unshift(...saved.filter((l) => l && (l.at || 0) < first).map((l) => ({ ...l, projectId: pid, saved: true })));
   renderLog();
 }
 const testing = new Set(); // node ids with a preflight test in flight
@@ -139,9 +140,18 @@ function renderAll() {
 // The sidebar Inbox badge is always-visible chrome: it tracks the inbox count on every render,
 // not only while the inbox tab itself is drawn — an inline update inside renderInbox left the
 // badge stale whenever items landed while another tab was active.
+// Perf instrumentation (t_f6b343a5): ring of recent durations + slow-call count, inspect via
+// window.__perf.inboxBadge — nothing is logged unless a call exceeds SLOW_MS.
+const PERF = { inboxBadge: { samples: [], slow: 0, SLOW_MS: 2 } };
 function renderInboxBadge() {
+  const t0 = performance.now();
   $('#inbox-tab-badge').textContent = (S.inbox || []).length ? String(S.inbox.length) : '';
+  const ms = performance.now() - t0;
+  const p = PERF.inboxBadge;
+  p.samples.push(ms); if (p.samples.length > 120) p.samples.shift();
+  if (ms > p.SLOW_MS) { p.slow++; console.debug('inbox badge render slow', ms.toFixed(2), 'ms'); }
 }
+window.__perf = PERF;
 // The always-visible chrome (Perry's contract, t_8d586961): badges, counts and the restart chip
 // track state even while their tab is hidden, so they draw synchronously everywhere. Only the
 // heavy active-tab view may defer, and only on a revisit (see drawActiveView).
@@ -443,7 +453,7 @@ function renderSidebar() {
   $('#teamlist').innerHTML = teams.map((t) => `<div data-tid="${t.id}" class="${t.id === ctx.t ? 'sel' : ''}"><i class="teamdot" style="background:var(--agent-${teamHue(t.id)})"></i>${esc(t.name)}</div>`).join('');
 }
 function switchTo(c) {
-  if (c.p !== ctx.p) { sel = { node: null, edge: null, task: null, page: null, logTeam: '', chatTeam: '', boardTeam: '' }; wikiEdit = false; $('#wk-title').value = ''; $('#wk-content').value = ''; }
+  if (c.p !== ctx.p) { if (!discardWikiEdit()) return; sel = { node: null, edge: null, task: null, page: null, logTeam: '', chatTeam: '', boardTeam: '' }; wikiEdit = false; wkBaseUpdated = null; $('#wk-title').value = ''; $('#wk-content').value = ''; }
   else sel = { ...sel, node: null, edge: null };
   connectFrom = null; connectMode = false; $('#connect').classList.remove('on');
   ctx = c;
@@ -502,11 +512,14 @@ $('#importfile').onchange = act(async (e) => {
 // never size against a hidden (0-width) layout. obs and chat keep their signatures instead: their
 // DOM stays valid across the hide, so a revisit is a no-op when nothing moved, an incremental
 // tail-append when only new log lines arrived (flushLogTail), and a full rebuild only on real
-// content change. team/wiki/settings/inbox have no signature — renderAll rebuilds them whenever shown.
+// content change. team/settings/inbox have no signature — renderAll rebuilds them whenever shown.
+// wiki does keep one (t_9bb0596c): its list is plain DOM that stays valid across a hide, so with a
+// signature the every-poll renderAll tick no longer rebuilds the page list (and re-wires its click
+// handlers) when no page, search or selection moved.
 const TAB_RESIG = {
   board: () => { boardSig = null; },
   obs: () => { obsSig = null; },
-  usage: () => { usageSig = null; },
+  usage: () => { usageSig = null; usageSched.force(); }, // size-measuring view: rebuild now, not on the burst debounce
 };
 document.querySelectorAll('button[data-tab]').forEach((b) => b.onclick = () => {
   const wasActive = b.classList.contains('active');
@@ -1010,6 +1023,16 @@ function drawClusterCard(g, n, onExpand) {
   el('title', {}, g).textContent = n.members.map((m) => `${m.name} — ${nodeLive(m)}`).join('\n');
   g.style.cursor = 'pointer'; g.onclick = (ev) => { ev.stopPropagation(); onExpand(); };
 }
+// Tidy top-down tree over assign edges (the engine behind graphAuto and the Auto-layout button).
+// One parent per node — the first assign edge wins; later ones are ignored. Roots (no assign
+// parent) place left-to-right, core agents first; children place recursively and a parent is
+// centred over its first/last child. More than 5 all-leaf reports wrap under their lead into a
+// 5-wide block instead of one endless row. Agents with no assign edges, plus anything not reached
+// from a root, wrap into a near-landscape grid balanced toward the canvas aspect ratio. Spacing:
+// GX = card width + 36, GY = card height + 64. Pure layout — the stored x/y stay the user's
+// manual layout; the result is applied per render only while graphAuto is on. The same algorithm
+// also lives (shared + instrumented) in app/src/graph-view.js as layoutTree/treeLayout, which
+// test/graph-view.test.js exercises; this renderer copy is the one buildView actually calls.
 function treeLayout(nodes, edges) {
   const ids = new Set(nodes.map((n) => n.id)), kids = {}, hasParent = new Set(); const GX = W + 36, GY = H + 64, pos = {};
   for (const e of edges) if ((e.type || 'assign') === 'assign' && ids.has(e.from) && ids.has(e.to) && e.from !== e.to && !hasParent.has(e.to)) { (kids[e.from] ||= []).push(e.to); hasParent.add(e.to); }
@@ -1116,7 +1139,7 @@ function edgeGeom(a, b, off, obs = [], seed = 0) {
     return null;
   };
   const r = solve() || detour();
-  if (!r) { const p1 = [A.x + NW, A.y + NH / 2 + off * 0.6], p2 = [B.x, B.y + NH / 2 + off * 0.6], rail = (p1[0] + p2[0]) / 2 + off; return { d: orthPath([p1, [rail, p1[1]], [rail, p2[1]], p2].map(P)), mid: P([rail, (p1[1] + p2[1]) / 2]), n: flip ? [1, 0] : [0, 1] }; }
+  if (!r) { const { p1, p2 } = anchors(), rail = (p1[0] + p2[0]) / 2 + off; return { d: orthPath([p1, [rail, p1[1]], [rail, p2[1]], p2].map(P)), mid: P([rail, (p1[1] + p2[1]) / 2]), n: flip ? [1, 0] : [0, 1] }; }
   return { d: orthPath(r.pts.map(P)), mid: P(r.mid), n: flip ? [r.n[1], r.n[0]] : r.n };
 }
 const overlaps = (r, q) => r.x < q.x + q.w && q.x < r.x + r.w && r.y < q.y + q.h && q.y < r.y + r.h;
@@ -1389,7 +1412,10 @@ function canvasMenu(ev) {
   showMenu(ev.clientX, ev.clientY, menuItems(items)); bindMenu(items);
 }
 async function addAgentAt(x, y) { const role = S.team.nodes.length === 0 ? 'PM' : 'Dev'; const n = await call('addNode', { role, x: Math.round(x), y: Math.round(y) }); sel.node = n.id; refresh(); }
-// Layered (Sugiyama-lite) layout: longest-path layers over assign/review edges, barycentre ordering, centred rows.
+// Auto-layout button (also the canvas context menu's "Auto-layout"): flips graphAuto back on so
+// every render recomputes positions via treeLayout above, collapses clusters to their heads,
+// persists the fresh positions when the view is unclustered, then fits the result to the viewport.
+// There is no separate layout pass here — treeLayout is the whole engine.
 async function autoLayout() {
   if (!S.team.nodes.length) return; graphAuto = true; expandedClusters.clear(); renderGraph();
   if (!GV.clustered) await call('setPositions', Object.fromEntries(S.team.nodes.map((n) => [n.id, { x: n.x, y: n.y }])));
@@ -1901,7 +1927,7 @@ const priorityOf = (t) => PRIORITIES.includes(t.priority) ? t.priority : 'P2';
 const priorityBadge = (t) => `<span class="tag prio prio-${priorityOf(t)}" title="Priority ${priorityOf(t)}">${priorityOf(t)}</span>`;
 const byPriorityThenTitle = (a, b) => PRIORITIES.indexOf(priorityOf(a)) - PRIORITIES.indexOf(priorityOf(b)) || a.title.localeCompare(b.title);
 // Relative age for card meta ("2h", "3d") — a card's freshness is part of scanning a board.
-const ago = (ts) => { if (!ts) return ''; const sec = (Date.now() - new Date(ts).getTime()) / 1000;
+const ago = (ts) => { if (!ts) return ''; const ms = new Date(ts).getTime(); if (Number.isNaN(ms)) return ''; const sec = (Date.now() - ms) / 1000;
   return sec < 60 ? 'now' : sec < 3600 ? `${Math.floor(sec / 60)}m` : sec < 86400 ? `${Math.floor(sec / 3600)}h` : `${Math.floor(sec / 86400)}d`; };
 // Skip-no-op renders (t_9315f18a): the storm profile showed every run push re-rendering ALL heavy
 // sections (503-card board, 200-row log window, 300-run usage table) even when their inputs were
@@ -1917,7 +1943,22 @@ const doneCards = (list) => { const all = list.filter((t) => t.status === 'done'
 // #columns innerHTML on every change — which repainted all 300 cards, dropped hover/focus and
 // reset column scroll — each column diffs its card list by task id. A card whose HTML string is
 // unchanged is not touched at all; only inserts, removals, content changes and reorders move DOM.
+// The six board columns (t_c5db7bf0), in workflow order. Every task status the store knows
+// (STATUSES in src/store.js) maps to exactly one column — this list is the board's contract with
+// the store, so the two must stay in lockstep:
+//   todo              — dispatchable work; a card with no open blockers earns the "Ready" tag
+//   in_progress       — claimed by a worker; the live / working elsewhere / No worker tags
+//                       disambiguate whether an agent is actually on this task
+//   waiting_for_human — paused for user input; awaitingApproval adds the "needs approval" tag
+//   review            — work landed; the auto-merge gate (store.js _mergeOnDone) runs from here
+//   merge_conflict    — the gate refused (conflict or dirty main checkout); fix in the worktree,
+//                       then flip done to retry the merge
+//   done              — merged; folded by default to the 20 most recently updated (see doneCards)
 const boardCols = ['todo', 'in_progress', 'waiting_for_human', 'review', 'merge_conflict', 'done'];
+// A task whose status is not one of the six (the store gained a status without a matching column,
+// or a task file lost its status) must neither crash the render nor silently vanish: colStOf
+// buckets it into an "other" column rendered after done.
+const colStOf = (t) => (boardCols.includes(t.status) ? t.status : 'other');
 const cardSigs = new WeakMap(); // card element -> html it was built from
 const tplEl = (html) => { const t = document.createElement('template'); t.innerHTML = html.trim(); return t.content.firstElementChild; };
 const colHead = (st, total) => st === 'done'
@@ -1951,10 +1992,26 @@ function cardHtml(t) {
   const cmtWord = nCmts === 1 ? 'comment' : 'comments';
   return `<div class="card ${sel.task === t.id ? 'sel' : ''}${t.awaitingApproval ? ' approval' : ''}" data-id="${t.id}"><b>${esc(t.title)}</b>${snippet && snippet !== t.title ? `<span class="cdesc" title="${esc(snippet)}">${esc(clipText(snippet, 100))}</span>` : ''}${tags ? `<span class="ctags">${tags}</span>` : ''}<small class="cmeta">${priorityBadge(t)}${t.assignee ? ((w) => `<span class="avatar sm" style="background:${avatarBg(w)}" title="${esc(w.name)}">${avatarBody(t.assignee, w)}</span><span class="cname">${esc(w.name)}</span>`)(who(t.assignee)) : '<span class="muted">unassigned</span>'}<span class="cago" title="last updated">${ago(t.updatedAt) || '—'}</span>${nCmts ? `<span class="ccount" title="${nCmts} ${cmtWord}">💬 ${nCmts}</span>` : ''}</small></div>`;
 }
+// Card-html memo (t_d6c2be24): every store write (any comment, any run push) bumps the board
+// version, and the old path met that by re-running cardHtml for ALL cards — ~500 html strings on
+// the grown board, rebuilt just to be diffed — even though only one card's inputs had moved. The
+// memo keys each card's html on exactly what cardHtml reads: the task's own updatedAt (the store
+// bumps it on every task mutation, comments included), the global env (agent states, running set,
+// restart gate, dev mode, team scope, the board's status mix and size, agent names), the rendered
+// age label (the only clock-driven part) and whether this card is the selected one.
+const cardHtmlCache = new Map(); // task id -> { key, html }
+const cardHtmlCached = (t, envKey) => {
+  const key = `${envKey}|${t.updatedAt || ''}|${ago(t.updatedAt)}|${sel.task === t.id ? 1 : 0}`;
+  let c = cardHtmlCache.get(t.id);
+  if (!c || c.key !== key) cardHtmlCache.set(t.id, c = { key, html: cardHtml(t) });
+  return c.html;
+};
 function patchBoardColumns(tasks) {
   const colsEl = $('#columns');
-  boardCols.forEach((st, ci) => {
-    const colTasks = tasks.filter((t) => t.status === st); // one pass serves the header count and the card list
+  const envKey = [agentStamp(), JSON.stringify(S.orch.running || null), rst.scheduledAfter || '', rst.gating.join(), upd.devMode !== false, sel.boardTeam || '', S.tasks.length, S.tasks.map((x) => colStOf(x)[0]).join(''), S.allNodes.map((n) => n.name).join()].join('|');
+  const strays = tasks.filter((t) => !boardCols.includes(t.status)); // collected once; the "other" column reuses them
+  (strays.length ? boardCols.concat('other') : boardCols).forEach((st, ci) => {
+    const colTasks = st === 'other' ? strays : tasks.filter((t) => t.status === st); // one pass serves the header count and the card list
     const total = colTasks.length;
     const fold = st === 'done' && !doneOpen;
     let col = colsEl.querySelector(':scope > .col.' + st);
@@ -1985,7 +2042,7 @@ function patchBoardColumns(tasks) {
     for (const [id, el] of have) if (!wantIds.has(id)) { el.remove(); have.delete(id); }
     let prev = hint || h3;
     for (let i = 0; i < want.length; i++) {
-      const t = want[i]; const html = cardHtml(t);
+      const t = want[i]; const html = cardHtmlCached(t, envKey);
       let el = have.get(t.id);
       if (el && cardSigs.get(el) !== html) { const nu = tplEl(html); el.replaceWith(nu); have.set(t.id, el = nu); }
       if (!el) { el = tplEl(html); have.set(t.id, el); }
@@ -2000,6 +2057,7 @@ function patchBoardColumns(tasks) {
       if (tb.textContent !== label) tb.textContent = label;
     } else if (tb) tb.remove();
   });
+  if (cardHtmlCache.size > tasks.length) { const live = new Set(tasks.map((t) => t.id)); for (const id of cardHtmlCache.keys()) if (!live.has(id)) cardHtmlCache.delete(id); }
 }
 function renderBoard() {
   if (!$('#tab-board').classList.contains('active')) return;
@@ -2097,14 +2155,22 @@ function md(src) {
     .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
     .replace(/\n{2,}/g, '<br><br>'))).join('');
 }
+let wkSig = null;
 function renderWiki() {
+  // Signature like obsSig (see TAB_RESIG note): every state poll ran through here and rebuilt the
+  // page list + re-wired its handlers even with nothing changed. updatedAt changes on any write, so
+  // keying on titles+updatedAt+author+search+selection can't miss a real edit (including another
+  // agent rewriting the page mid-session).
   const q = ($('#wk-search').value || '').trim().toLowerCase();
+  const pages = Object.keys(S.wiki).sort().map((t) => `${t}|${S.wiki[t].updatedAt || ''}|${S.wiki[t].author || ''}`).join(';');
+  const key = [ctx.p, pages, q, sel.page || '', wikiEdit].join('|');
+  if (key === wkSig) return; wkSig = key;
   const titles = Object.keys(S.wiki).sort().filter((t) => !q || t.toLowerCase().includes(q) || (S.wiki[t].content || '').toLowerCase().includes(q));
   const all = Object.keys(S.wiki).length;
   $('#wikipages').innerHTML = titles.length
     ? titles.map((t) => `<div class="${t === sel.page ? 'sel' : ''}" data-t="${esc(t)}"><b>${esc(t)}</b><small class="wk-meta">${esc(S.wiki[t].author)}${agoTxt(S.wiki[t].updatedAt) ? ' · ' + agoTxt(S.wiki[t].updatedAt) : ''}</small></div>`).join('')
     : all ? '<p class="muted wk-empty-body">No pages match your search.</p>' : '<p class="muted wk-empty-body">No pages yet. Click + New page to write your first one — e.g. a runbook, a glossary, or notes for the team.</p>';
-  document.querySelectorAll('#wikipages div[data-t]').forEach((d) => d.onclick = () => { if (d.dataset.t !== sel.page && !discardWikiEdit()) return; sel.page = d.dataset.t; wikiEdit = false; loadPage(); renderWiki(); });
+  document.querySelectorAll('#wikipages div[data-t]').forEach((d) => d.onclick = () => { if (!discardWikiEdit()) return; sel.page = d.dataset.t; wikiEdit = false; loadPage(); renderWiki(); });
   if (sel.page && S.wiki[sel.page] && !wikiEdit) loadPage();
   const empty = !sel.page && !wikiEdit;
   $('#wk-empty').classList.toggle('hidden', !empty); $('#wk-editor').classList.toggle('hidden', empty);
@@ -2119,11 +2185,16 @@ function wikiDirty() {
   return title !== (p ? p.title : sel.page) || content !== (p ? p.content || '' : '');
 }
 const discardWikiEdit = () => !wikiDirty() || confirm('Discard unsaved changes to this page?');
-const wikiNew = () => { if (!discardWikiEdit()) return; sel.page = null; wikiEdit = true; $('#wk-title').value = ''; $('#wk-content').value = ''; showWiki(); renderWiki(); };
+// Concurrent-write guard (seed 471): agents write wiki pages through the board tools while a human
+// edits. wkBaseUpdated remembers the page's updatedAt when this editing session began, so Save can
+// detect "the page changed elsewhere since you started typing" instead of silently clobbering it.
+let wkBaseUpdated = null;
+const wikiNew = () => { if (!discardWikiEdit()) return; sel.page = null; wikiEdit = true; wkBaseUpdated = null; $('#wk-title').value = ''; $('#wk-content').value = ''; showWiki(); renderWiki(); };
 $('#wk-new').onclick = wikiNew;
 $('#wk-empty-new').onclick = wikiNew; // was rendered but never wired up — dead button
-$('#wk-search').oninput = renderWiki;
-function loadPage() { const p = S.wiki[sel.page]; if (!p) return; $('#wk-title').value = p.title; $('#wk-content').value = p.content; showWiki(); }
+let wkSearchTimer = 0;
+$('#wk-search').oninput = () => { clearTimeout(wkSearchTimer); wkSearchTimer = setTimeout(renderWiki, 150); }; // each keystroke re-filters and rebuilds the page list — render once per typing pause
+function loadPage() { const p = S.wiki[sel.page]; if (!p) return; $('#wk-title').value = p.title; $('#wk-content').value = p.content; wkBaseUpdated = p.updatedAt || null; showWiki(); }
 // Cheap backlinks: tasks whose title or description mention this page's title.
 function wikiBacklinks(title) { const q = title.trim().toLowerCase(); if (!q) return []; return S.tasks.filter((t) => (t.title || '').toLowerCase().includes(q) || (t.description || '').toLowerCase().includes(q)); }
 function showWiki() {
@@ -2132,22 +2203,23 @@ function showWiki() {
   $('#wk-view').innerHTML = md($('#wk-content').value) + (bl.length ? `<div class="wk-backlinks"><b>Linked from tasks</b><ul>${bl.map((t) => `<li data-task="${esc(t.id)}">${esc(t.title)}</li>`).join('')}</ul></div>` : '');
   $('#wk-view').querySelectorAll('.wk-backlinks li').forEach((d) => d.onclick = () => { sel.task = d.dataset.task; showTab('board'); renderBoard(); });
 }
-$('#wk-edit').onclick = () => { wikiEdit = !wikiEdit; showWiki(); };
+$('#wk-edit').onclick = () => { const on = !wikiEdit; if (on) wkBaseUpdated = (sel.page && S.wiki[sel.page]) ? (S.wiki[sel.page].updatedAt || null) : null; wikiEdit = on; showWiki(); };
 $('#wk-save').onclick = async () => {
   const t = $('#wk-title').value.trim();
   if (!t) { alert('Give the page a title before saving.'); $('#wk-title').focus(); return; }
   if (t !== sel.page && S.wiki[t] && !confirm(`A page titled "${t}" already exists. Overwrite it?`)) return;
   const prev = sel.page && sel.page !== t && S.wiki[sel.page] ? sel.page : null; // title change would otherwise leave the old page behind as a stray duplicate
   if (prev && !confirm(`Rename page "${prev}" to "${t}"? The old page will be removed.`)) return;
+  if (t === sel.page && S.wiki[t] && (S.wiki[t].updatedAt || null) !== wkBaseUpdated && !confirm('This page changed elsewhere since you started editing. Save over it?')) return;
   $('#wk-save').disabled = true;
   try {
     await call('writeWiki', t, $('#wk-content').value);
     if (prev) await call('deleteWiki', prev);
-    sel.page = t; wikiEdit = false; refresh();
+    sel.page = t; wikiEdit = false; wkBaseUpdated = null; refresh();
   } catch (e) { alert(String(e.message || e).replace(/^Error invoking remote method 'api': (Error: )?/, '')); }
   finally { $('#wk-save').disabled = false; }
 };
-$('#wk-del').onclick = async () => { $('#wk-more').open = false; if (sel.page && confirm(`Delete page "${sel.page}"? This can't be undone.`)) { try { await call('deleteWiki', sel.page); sel.page = null; $('#wk-title').value = ''; $('#wk-content').value = ''; refresh(); } catch (e) { alert(String(e.message || e).replace(/^Error invoking remote method 'api': (Error: )?/, '')); } } };
+$('#wk-del').onclick = async () => { $('#wk-more').open = false; if (sel.page && confirm(`Delete page "${sel.page}"? This can't be undone.`)) { try { await call('deleteWiki', sel.page); sel.page = null; wikiEdit = false; wkBaseUpdated = null; $('#wk-title').value = ''; $('#wk-content').value = ''; refresh(); } catch (e) { alert(String(e.message || e).replace(/^Error invoking remote method 'api': (Error: )?/, '')); } } };
 
 // ---------- observability ----------
 const logTeamNodes = () => S.allNodes.filter((n) => teamScoped(sel.logTeam, n.id));
@@ -2195,7 +2267,7 @@ const LOG_LEVEL = { error: 'error', stderr: 'error', tool_error: 'error', system
 // fields Dev A sends with the event; fall back to the raw text for lines persisted without them.
 function monitorText(l) {
   const ids = Array.isArray(l.taskIds) && l.taskIds.length ? ` (${l.taskIds.join(', ')})` : '';
-  return esc(([l.action, l.reason].filter(Boolean).join(' — ') || l.text) + ids);
+  return esc((([l.action, l.reason].filter(Boolean).join(' — ') || l.text) || '') + ids);
 }
 // "Read {"file_path":"/a/b.js"}" -> summary "Read b.js"; the raw JSON only shows on expand.
 function humanLog(t) {
@@ -2207,13 +2279,15 @@ function humanLog(t) {
   return { head: head.length > 140 ? head.slice(0, 139) + '…' : head, json: JSON.stringify(o, null, 2) };
 }
 function logRow(l) {
+  l = l || {}; // a null/primitive line renders as a system row instead of killing the whole build
   const w = who(l.nodeId); const lvl = LOG_LEVEL[l.kind] || 'text';
   const task = l.taskId ? `<span class="logtask" data-tasklink="${esc(l.taskId)}" title="${esc(l.task || l.taskId)} — open in task thread">${esc(shortTaskId(l.taskId))}</span>` : '';
   const badge = l.kind === 'monitor' ? 'Monitor' : l.kind === 'watch' ? 'Watch' : esc(l.kind);
   let text = l.kind === 'monitor' ? monitorText(l) : esc(l.text);
   const hum = humanLog(l.text);
   if (hum && l.kind !== 'monitor') text = `<details class="logjson"><summary>${esc(hum.head)}</summary><pre>${esc(hum.json)}</pre></details>`;
-  return `<div class="logrow lv-${lvl}"><span class="logtime">${new Date(l.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span><span class="avatar sm" style="background:${avatarBg(w)}" title="${esc(w.name)}">${avatarBody(l.nodeId, w)}</span><span class="logagent" title="${esc(w.name)}">${esc(w.name)}</span>${task}<span class="loglevel lv-${lvl}">${badge}</span><span class="logtext">${text}</span></div>`;
+  const at = new Date(l.at); const tm = isNaN(at) ? '' : at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  return `<div class="logrow lv-${lvl}"><span class="logtime">${tm}</span><span class="avatar sm" style="background:${avatarBg(w)}" title="${esc(w.name)}">${avatarBody(l.nodeId, w)}</span><span class="logagent" title="${esc(w.name)}">${esc(w.name)}</span>${task}<span class="loglevel lv-${lvl}">${badge}</span><span class="logtext">${text}</span></div>`;
 }
 // ---------- subagents (contract: t_c33656ba) ----------
 // Records live on the owning agent (S.orch.agents[id].subagents) for the current run and persist per
@@ -2250,7 +2324,7 @@ function bindSubToggles(rerender) { document.querySelectorAll('[data-subtoggle]'
 // All severities shown by default; chips let you narrow the feed down to warn/error only.
 const logLevels = new Set(['info', 'warn', 'error']);
 const LOG_SEVERITY = { error: 'error', tool_error: 'error', stderr: 'warn' };
-const severityOf = (l) => l.level || LOG_SEVERITY[l.kind] || 'info';
+const severityOf = (l) => (l && (l.level || LOG_SEVERITY[l.kind])) || 'info'; // malformed/null line degrades to info, never throws the filter
 function renderLogLevelChips() {
   $('#loglevels').innerHTML = ['info', 'warn', 'error'].map((lv) => `<button class="lvchip lv-${lv}${logLevels.has(lv) ? ' on' : ''}" data-lv="${lv}" aria-pressed="${logLevels.has(lv)}" title="${logLevels.has(lv) ? 'Hide' : 'Show'} ${lv} lines"><span class="dot" aria-hidden="true"></span>${lv}</button>`).join('');
   document.querySelectorAll('#loglevels [data-lv]').forEach((b) => b.onclick = () => { const lv = b.dataset.lv; logLevels.has(lv) ? logLevels.delete(lv) : logLevels.add(lv); renderLogLevelChips(); renderLog(); });
@@ -2279,13 +2353,13 @@ function renderLog() {
   CH.subIndex = null; // per-draw subagent record index (see subRecOf)
   if (!$('#tab-obs').classList.contains('active')) return;
   const lkey = logKey();
-  if (lkey === logSig) return; logSig = lkey;
+  if (lkey === logSig) return;
   const f = $('#logfilter').value; const q = ($('#logsearch').value || '').trim().toLowerCase();
   const teamIds = sel.logTeam ? new Set(logTeamNodes().map((n) => n.id)) : null;
   const box = $('#log'); const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 20;
   const prevH = box.scrollHeight, prevTop = box.scrollTop;
   const all = logs.filter((l) => l.projectId === ctx.p && (!teamIds || teamIds.has(l.nodeId)));
-  const base = all.filter((l) => (!f || l.nodeId === f) && (!q || l.text.toLowerCase().includes(q)));
+  const base = all.filter((l) => (!f || l.nodeId === f) && (!q || (l.text || '').toLowerCase().includes(q)));
   base.sort((a, b) => (a.at || 0) - (b.at || 0));
   let rows = base.filter((l) => logLevels.has(severityOf(l)));
   let hiddenInfo = 0;
@@ -2296,12 +2370,16 @@ function renderLog() {
   renderLog.total = rows.length;
   const page = Chat.pageOf(rows, logWin);
   renderLog.winItems = page.items.length;
-  logTailAt = rows.length ? rows[rows.length - 1].at : 0;
-  logTailSeq = logSeq;
+  // The tail cursor is captured but stamped only after the DOM actually built: a throw mid-build
+  // (malformed line, bad subagent record) must not mark lines as rendered — appendLogTail would
+  // then treat them as already shown and hide them for good.
+  const tailAt = rows.length ? rows[rows.length - 1].at : 0;
+  const tailSeq = logSeq;
   const empty = teamIds && !all.length ? 'No messages for this team.' : (all.length ? 'No log lines match your filter.' : 'No activity yet — run the team to see agent logs here.');
   const older = page.hidden ? `<button id="log-older" class="olderbar linklike">↑ ${page.hidden} earlier line${page.hidden === 1 ? '' : 's'} — scroll up or click to load</button>` : '';
   box.innerHTML = rows.length ? (hiddenInfo ? `<p class="muted logempty">${hiddenInfo} info line(s) hidden by the level filter — showing all. <button id="log-showall" class="linklike">Show all</button></p>` : '') + older +
     Subagents.nestRows(page.items, subRecOf, null).map((x) => x.kind === 'sub' ? subBlockHtml(x) : logRow(x.l)).join('') : `<p class="muted logempty">${empty}</p>`;
+  logTailAt = tailAt; logTailSeq = tailSeq; logSig = lkey; // stamped only after the DOM actually built: a throw mid-build (malformed line, bad subagent record) must not mark the pane as rendered — renderLog would then early-return forever and freeze it
   const sa = document.getElementById('log-showall'); if (sa) sa.onclick = () => { logLevels.add('info'); logLevels.add('warn'); logLevels.add('error'); renderLogLevelChips(); renderLog(); };
   const ob = document.getElementById('log-older'); if (ob) ob.onclick = () => { logWin += LOG_PAGE; renderLog(); };
   bindSubToggles(renderLog);
@@ -2311,7 +2389,8 @@ function renderLog() {
 }
 $('#logteam').onchange = () => { sel.logTeam = $('#logteam').value; $('#logfilter').value = ''; renderObs(); renderLog(); };
 $('#logfilter').onchange = renderLog;
-$('#logsearch').oninput = renderLog;
+let logSearchTimer = 0;
+$('#logsearch').oninput = () => { clearTimeout(logSearchTimer); logSearchTimer = setTimeout(renderLog, 150); }; // each keystroke re-filters and rebuilds the whole window (~56ms at profile sizes) — render once per typing pause
 $('#clearlog').onclick = act(async () => { if (!confirm('Clear the log of this project (also the saved log file)?')) return; for (let i = logs.length - 1; i >= 0; i--) if (logs[i].projectId === ctx.p) logs.splice(i, 1); await call('clearLogs'); renderLog(); });
 
 // ---------- usage & billing ----------
@@ -2494,10 +2573,25 @@ function billingTable(rs) {
   const g = {}; for (const r of rs) { const k = r.billingSource || 'unknown'; (g[k] ||= { runs: 0, cost: 0 }); g[k].runs++; g[k].cost += r.reportedCostUsd || 0; }
   return `<div><h4>By billing source</h4><table><tr><th></th><th>Runs</th><th>Cost</th><th></th></tr>${Object.entries(g).sort((a, b) => b[1].cost - a[1].cost).map(([k, v]) => `<tr><td>${billTag(k)}</td><td class="num">${v.runs}</td><td class="num">$${v.cost.toFixed(4)}</td><td>${k === 'subscription' ? '<span class="costnote">covered by subscription — not billed per token</span>' : k === 'unknown' ? '<span class="costnote">billing source undetected</span>' : ''}</td></tr>`).join('')}</table></div>`;
 }
+// Debounced ledger draw (seed 491): with the Usage tab open during an agent burst every render
+// pass whose runs version moved rebuilt the whole ledger view (aggregation + every table) at
+// render rate. RenderSched coalesces those rebuilds to one per 400ms while the burst lasts — the
+// same contract as the chat room; the sig fast-path still makes unchanged renders free, and
+// user-driven draws (tab activation, filter change) force past the rate limit.
+const usageSched = RenderSched.create({
+  minMs: 400,
+  hidden: () => document.hidden,
+  gate: () => !!$('#tab-usage.active'),
+  draw: () => renderUsageBody(), // late-binding: e2e/perf harnesses wrap the global by name
+});
+const usageUkey = () => [S.v && S.v.runs, S.v && S.v.board, RUNS.length, $('#us-agent').value, $('#us-billing').value, S.allNodes.length].join('|');
 function renderUsage() {
   if (!$('#tab-usage').classList.contains('active')) return;
-  const ukey = [S.v && S.v.runs, S.v && S.v.board, RUNS.length, $('#us-agent').value, $('#us-billing').value, S.allNodes.length].join('|');
-  if (ukey === usageSig) return; usageSig = ukey;
+  if (usageUkey() === usageSig) return;
+  usageSched.bump(); // event burst: the trailing draw lands the final ledger state
+}
+function renderUsageBody() {
+  usageSig = usageUkey();
   const fa = $('#us-agent'); const cur = fa.value;
   fa.innerHTML = '<option value="">All</option>' + S.allNodes.map((n) => `<option value="${n.id}">${esc(n.name)}</option>`).join(''); fa.value = cur;
   const fb = $('#us-billing').value;
@@ -2617,7 +2711,7 @@ function usageSub(name) {
 }
 $('#us-anchors').onclick = (ev) => { const b = ev.target.closest('button[data-sub]'); if (b) usageSub(b.dataset.sub); };
 usageSub('summary');
-$('#us-agent').onchange = renderUsage; $('#us-billing').onchange = renderUsage;
+$('#us-agent').onchange = () => usageSched.force(); $('#us-billing').onchange = () => usageSched.force(); // user action: immediate redraw, no burst debounce
 const download = (name, text, type) => { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], { type })); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000); };
 $('#us-export').onclick = act(async () => download(`usage-${(S.project.name || 'project').replace(/[^\w-]+/g, '_')}.csv`, await call('usageCSV', false), 'text/csv'));
 $('#us-exportall').onclick = act(async () => download('usage-all-projects.csv', await call('usageCSV', true), 'text/csv'));
@@ -2635,9 +2729,9 @@ function renderSettings() {
     <div class="set-row"><div class="set-lab"><label for="st-perm">Default permission mode</label><p class="set-hint">Agents can override this per node.</p></div><div class="set-ctl"><select id="st-perm">${['bypassPermissions', 'acceptEdits', 'default', 'plan'].map((m) => `<option ${m === s.permissionMode ? 'selected' : ''}>${m}</option>`).join('')}</select></div></div>
     </div></section>
     <section class="set-sec"><h3>Limits &amp; budgets</h3><div class="set-rows">
-    <div class="set-row"><div class="set-lab"><label for="st-conc">Max concurrent agents</label><p class="set-hint">How many agents may run at the same time.</p></div><div class="set-num"><input id="st-conc" type="number" min="1" max="8" value="${s.maxConcurrency}"><span class="set-unit">agents</span></div></div>
+    <div class="set-row"><div class="set-lab"><label for="st-conc">Max concurrent agents</label><p class="set-hint">How many agents may run at the same time.</p></div><div class="set-num"><input id="st-conc" type="number" min="1" max="8" value="${s.maxConcurrency ?? 2}"><span class="set-unit">agents</span></div></div>
     <div class="set-row"><div class="set-lab"><label for="st-maxagents">Max agents per team</label><p class="set-hint">Core agent recruit limit.</p></div><div class="set-num"><input id="st-maxagents" type="number" min="1" value="${s.maxAgents ?? 6}"><span class="set-unit">agents</span></div></div>
-    <div class="set-row"><div class="set-lab"><label for="st-runs">Max agent runs per Run</label><p class="set-hint">Safety cap for the scheduler.</p></div><div class="set-num"><input id="st-runs" type="number" min="1" value="${s.maxRuns}"><span class="set-unit">runs</span></div></div>
+    <div class="set-row"><div class="set-lab"><label for="st-runs">Max agent runs per Run</label><p class="set-hint">Safety cap for the scheduler.</p></div><div class="set-num"><input id="st-runs" type="number" min="1" value="${s.maxRuns ?? 30}"><span class="set-unit">runs</span></div></div>
     <div class="set-row"><div class="set-lab"><label for="st-budgetusd">Project budget per Run</label><p class="set-hint">Stops all agents when reached. 0 = no limit.</p></div><div class="set-num"><span class="set-unit">$</span><input id="st-budgetusd" type="number" min="0" step="0.01" value="${s.budgetUsd || 0}"></div></div>
     <div class="set-row"><div class="set-lab"><label for="st-budgettok">Project token budget per Run</label><p class="set-hint">Input + output. 0 = no limit.</p></div><div class="set-num"><input id="st-budgettok" type="number" min="0" step="1000" value="${s.budgetTokens || 0}"><span class="set-unit">tokens</span></div></div>
     <div class="set-row"><div class="set-lab"><label for="st-autocompactpct">Auto-compact at</label><p class="set-hint">Context usage that triggers /compact. 0 = off.</p></div><div class="set-num"><input id="st-autocompactpct" type="number" min="0" max="95" value="${s.autoCompactPct ?? 40}"><span class="set-unit">%</span></div></div>
@@ -2657,7 +2751,7 @@ function renderSettings() {
     <p class="muted">When new commits land on this app's base branch: pause the scheduler, wait for running agents to finish, test the new code, then relaunch and resume the run. Failed tests cancel the restart.</p>
     <div id="upd-history"></div></section>`}
     <h3>Role presets (this project)</h3><p class="muted">Presets appear as role suggestions. A new agent whose role matches a preset gets its prompt, tools and permission mode.</p>
-    <table id="presettable"><tr><th>Name</th><th>Permission</th><th>Allowed</th><th>Disallowed</th><th></th></tr>${(s.rolePresets || []).map((p) => `<tr><td>${esc(p.name)}</td><td>${esc(p.permissionMode || 'default')}</td><td>${esc(p.allowedTools.join(', '))}</td><td>${esc(p.disallowedTools.join(', '))}</td><td><button data-editp="${esc(p.name)}">Edit</button><button data-delp="${esc(p.name)}">Delete</button></td></tr>`).join('')}</table>
+    <table id="presettable"><tr><th>Name</th><th>Permission</th><th>Allowed</th><th>Disallowed</th><th></th></tr>${(s.rolePresets || []).filter((p) => p && p.name).map((p) => `<tr><td>${esc(p.name)}</td><td>${esc(p.permissionMode || 'default')}</td><td>${esc((p.allowedTools || []).join(', '))}</td><td>${esc((p.disallowedTools || []).join(', '))}</td><td><button data-editp="${esc(p.name)}">Edit</button><button data-delp="${esc(p.name)}">Delete</button></td></tr>`).join('')}</table>
     <div id="presetform"><label>Name</label><input id="pr-name"><label>Default system prompt</label><textarea id="pr-prompt" rows="3"></textarea>
     <label>Default allowed tools</label><input id="pr-allowed" placeholder="Read, Grep"><label>Default disallowed tools</label><input id="pr-disallowed">
     <label>Permission mode</label><select id="pr-perm"><option value="">project default</option>${(S.config.permissionModes || []).map((m) => `<option>${m}</option>`).join('')}</select>
@@ -2670,13 +2764,16 @@ function renderSettings() {
   };
   wireRuntimesSection(); wireDraftForm();
   document.querySelectorAll('[data-delp]').forEach((b) => b.onclick = act(async () => { await call('deletePreset', b.dataset.delp); refresh(); }));
-  document.querySelectorAll('[data-editp]').forEach((b) => b.onclick = () => { const p = s.rolePresets.find((x) => x.name === b.dataset.editp); $('#pr-name').value = p.name; $('#pr-prompt').value = p.systemPrompt; $('#pr-allowed').value = p.allowedTools.join(', '); $('#pr-disallowed').value = p.disallowedTools.join(', '); $('#pr-perm').value = p.permissionMode; });
-  $('#pr-save').onclick = act(async () => { await call('savePreset', { name: $('#pr-name').value, systemPrompt: $('#pr-prompt').value, allowedTools: $('#pr-allowed').value, disallowedTools: $('#pr-disallowed').value, permissionMode: $('#pr-perm').value }); refresh(); });
-  $('#st-save').onclick = async () => { await call('saveSettings', { claudePath: $('#st-claude').value.trim() || 'claude', maxConcurrency: +$('#st-conc').value || 2, maxRuns: +$('#st-runs').value || 30, permissionMode: $('#st-perm').value,
-    budgetUsd: +$('#st-budgetusd').value || 0, budgetTokens: +$('#st-budgettok').value || 0, requireApproval: $('#st-approval').checked, notifications: $('#st-notify').checked, stuckMinutes: +$('#st-stuck').value || 5,
+  document.querySelectorAll('[data-editp]').forEach((b) => b.onclick = () => { const p = (s.rolePresets || []).find((x) => x.name === b.dataset.editp); if (!p) return; $('#pr-name').value = p.name; $('#pr-prompt').value = p.systemPrompt || ''; $('#pr-allowed').value = (p.allowedTools || []).join(', '); $('#pr-disallowed').value = (p.disallowedTools || []).join(', '); $('#pr-perm').value = p.permissionMode || ''; });
+  $('#pr-save').onclick = act(async () => { const name = $('#pr-name').value.trim(); if (!name) return; await call('savePreset', { name, systemPrompt: $('#pr-prompt').value, allowedTools: $('#pr-allowed').value, disallowedTools: $('#pr-disallowed').value, permissionMode: $('#pr-perm').value }); refresh(); });
+  // Clamp every number to its declared min/max: the HTML attrs only constrain spinner clicks, and
+  // `+x || fallback` lets a hand-typed negative through (e.g. -5 concurrency, a negative budget
+  // that disables the limit it was meant to enforce).
+  $('#st-save').onclick = act(async () => { await call('saveSettings', { claudePath: $('#st-claude').value.trim() || 'claude', maxConcurrency: Math.max(1, Math.min(8, +$('#st-conc').value || 2)), maxRuns: Math.max(1, +$('#st-runs').value || 30), permissionMode: $('#st-perm').value,
+    budgetUsd: Math.max(0, +$('#st-budgetusd').value || 0), budgetTokens: Math.max(0, +$('#st-budgettok').value || 0), requireApproval: $('#st-approval').checked, notifications: $('#st-notify').checked, stuckMinutes: Math.max(1, +$('#st-stuck').value || 5),
     stallTimeoutMin: Math.max(1, +$('#st-stall').value || 10),
     maxAgents: Math.max(1, parseInt($('#st-maxagents').value, 10) || 6), teamChangeApproval: $('#st-tcappr').value === 'auto' ? 'auto' : 'ask',
-    autoCompactPct: Math.max(0, Math.min(95, +$('#st-autocompactpct').value || 0)) }); refresh(); };
+    autoCompactPct: Math.max(0, Math.min(95, +$('#st-autocompactpct').value || 0)) }); refresh(); });
   renderUpdSettings();
   const stAr = $('#st-autorestart');
   if (stAr) stAr.onchange = act(async (ev) => {
@@ -3376,7 +3473,10 @@ function scheduleLogRender() {
   setTimeout(flush, 150); // rAF can starve in occluded windows; never let the tail stall
 }
 function flushLogTail() {
-  if ($('#tab-obs').classList.contains('active') && !appendLogTail()) renderLog();
+  // One malformed streamed line must not kill the scheduler: the throw would otherwise recur on
+  // every queued flush, taking renderLive's task-detail refresh down with it.
+  try { if ($('#tab-obs').classList.contains('active') && !appendLogTail()) renderLog(); }
+  catch (e) { console.warn('log pane flush failed', e); }
   renderLive(); // board task-detail pane follows the stream even while Obs is hidden
 }
 // Fast append path: only when the DOM is the plain live tail (no search, all levels on, no subagent
@@ -3392,12 +3492,14 @@ function appendLogTail() {
   const f = $('#logfilter').value;
   const teamIds = sel.logTeam ? new Set(logTeamNodes().map((n) => n.id)) : null;
   const fresh = logs.filter((l) => l.projectId === ctx.p && (!teamIds || teamIds.has(l.nodeId)) && (!f || l.nodeId === f) && (l._seq === undefined || l._seq > logTailSeq));
-  logTailSeq = logSeq;
+  // logTailSeq is NOT advanced here: a throw inside the row build below would otherwise stamp the
+  // cursor past lines the DOM never received, hiding them for good. It moves only after the append
+  // succeeded (or when nothing new needed drawing); a bail just falls back to a full render.
   // Lines injected out-of-band (no _seq — tests, restored sessions) were never counted by the
   // cursor; claiming them here would stamp a signature the DOM never rendered and hide them for
   // good. Same for subagent lines: they nest into blocks only a full render can build.
   if (fresh.some((l) => l._seq === undefined || l.subagentId)) return false;
-  if (!fresh.length) { logSig = logKey(); return true; } // only already-rendered or filtered-out lines arrived
+  if (!fresh.length) { logTailSeq = logSeq; logSig = logKey(); return true; } // only already-rendered or filtered-out lines arrived
   const added = fresh;
   added.sort((a, b) => (a.at || 0) - (b.at || 0));
   if (added[0].at < logTailAt) return false; // straggler older than the tail: let renderLog re-sort
@@ -3414,6 +3516,7 @@ function appendLogTail() {
     olderBar.textContent = `↑ ${hidden} earlier line${hidden === 1 ? '' : 's'} — scroll up or click to load`;
   } else renderLog.winItems += added.length;
   renderLog.total += added.length;
+  logTailSeq = logSeq;
   logTailAt = added[added.length - 1].at;
   logSig = logKey();
   box.scrollTop = box.scrollHeight;
@@ -3422,7 +3525,7 @@ function appendLogTail() {
 }
 // Direct 'log' pushes now carry only the low-volume paths (self-update watcher); orchestrator log
 // lines arrive batched on the 'delta' channel above (t_d22a6cf2).
-squad.on('log', (l) => { l._seq = ++logSeq; logs.push(l); if (logs.length > 8000) logs.splice(0, 1000); if (l.projectId === ctx.p) chatBump(); scheduleLogRender(); });
+squad.on('log', (l) => { if (!l || typeof l !== 'object') return; l._seq = ++logSeq; logs.push(l); if (logs.length > 8000) logs.splice(0, 1000); if (l.projectId === ctx.p) chatBump(); scheduleLogRender(); });
 // In-app toast for orchestrator notifications (desktop notifications are shown by the main process).
 squad.on('notify', (n) => {
   if (n.projectId && n.projectId !== ctx.p) return;
@@ -3506,8 +3609,8 @@ squad.on('state', (st) => { if (st.projectId && st.projectId !== ctx.p) { clearT
 // one catch-up pull plus a chat bump redraw whatever moved while dark. Deltas keep patching S and
 // bump the schedulers, so every view (not just chat) is current again by the frame after show.
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'hidden') { chatSched.hide(); renderSched.hide(); return; }
-  chatBump(); renderSched.bump(); refresh();
+  if (document.visibilityState === 'hidden') { chatSched.hide(); renderSched.hide(); usageSched.hide(); return; }
+  chatBump(); renderSched.bump(); usageSched.bump(); refresh();
 });
 setInterval(() => { if (S.orch.running && !document.hidden) refresh(); }, 2000); // backstop for the sections deltas do not carry (team/nodes/nstat); version-gated inside refresh, paused while hidden
 refresh().then(() => syncRecovery()); // recovery banner needs a settled ctx.p (t_6911ba60)

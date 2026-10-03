@@ -256,3 +256,40 @@ test('wake: the human sender is never pair-capped; the cap still binds agent->ag
   assert.equal(runsB(), base + WAKE.MAX_PER_PAIR);
   assert.ok(s.listMessages({ to: b.id }).some((m) => !m.read && m.text === 'ping capped'));
 });
+
+// ---- sweep instrumentation (t_4dba572d): counters always advance; a sweep past the slow
+// threshold logs a system line naming the scanned idle-agent count (the sweep re-reads every
+// idle agent's inbox at 1 Hz on the main loop, so a long sweep is a jank signal).
+
+test('wake sweep instrumentation: counters advance per sweep and per armed debounce', () => {
+  const d = tmp('squad-wake-');
+  const s = new Store(path.join(d, 'p'));
+  const a = s.addNode({ name: 'A', role: 'Dev' }); const b = s.addNode({ name: 'B', role: 'Dev' });
+  s.addEdge(a.id, b.id);
+  s.sendMessage({ from: a.id, to: b.id, text: 'wake me' });
+  const o = makeOrch(s);
+  o.dispatchWake = async () => {}; // counter test only: never let the debounce timer spawn a run
+  o.sweepWakes();
+  o.sweepWakes(); // second sweep: timer already armed, pending unchanged — nothing new to count
+  const st = o._wakeStats;
+  assert.equal(st.sweeps, 2);
+  assert.equal(st.armed, 1);
+  assert.ok(st.maxMs >= 0 && st.totalMs >= st.maxMs);
+});
+
+test('wake sweep instrumentation: a slow sweep logs a system line with the scanned count', () => {
+  const d = tmp('squad-wake-');
+  const s = new Store(path.join(d, 'p'));
+  const a = s.addNode({ name: 'A', role: 'Dev' }); const b = s.addNode({ name: 'B', role: 'Dev' });
+  s.addEdge(a.id, b.id);
+  s.sendMessage({ from: a.id, to: b.id, text: 'wake me' });
+  const o = makeOrch(s);
+  o.dispatchWake = async () => {};
+  const lines = [];
+  const orig = o.log.bind(o);
+  o.log = (id, lvl, text) => { lines.push(text); orig(id, lvl, text); };
+  const prev = WAKE.SLOW_SWEEP_MS;
+  WAKE.SLOW_SWEEP_MS = -1; // force the slow branch: elapsed is always >= 0
+  try { o.sweepWakes(); } finally { WAKE.SLOW_SWEEP_MS = prev; }
+  assert.ok(lines.some((t) => /wake sweep: checked 2 idle agent\(s\), 1 with unread/.test(t)), JSON.stringify(lines));
+});

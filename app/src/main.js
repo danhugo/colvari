@@ -2826,14 +2826,22 @@ const api = {
   // Delta getAll (t_9d92c3d3): with `since` (the client's last version map) only sections whose
   // signature changed are returned, so the 2s poll moves kilobytes instead of ~1.8MB of JSON.
   // Without `since` (first load, project switch, old callers) every section is returned as before.
+  // Slow-path watchdog (t_a2566d54): getAll is the one IPC every poll hits — a main-thread stall
+  // here delays every channel, so the tail must stay visible. Steady state is ~2 ms; >150 ms means
+  // a sync write/spin snuck back in front of the loop, and the phase split says which one.
   getAll: (c, since) => {
-    const s = ST(c); const t = TS(c); probeUnprobedAgents(c.p);
-    const v = stateVersion(c);
+    const t0 = Date.now(); const ph = [];
+    const mark = (k) => ph.push(k + '=' + (Date.now() - t0));
+    const s = ST(c); mark('store'); const t = TS(c); mark('team'); probeUnprobedAgents(c.p); mark('probe');
+    const v = stateVersion(c); mark('ver');
     const all = { project: s.meta(), team: { ...t.getTeam(), nodes: withPF(t.getTeam().nodes, s.getSettings()) }, allNodes: withPF(s.getTeam().nodes, s.getSettings()), tasks: s.listTasks(), wiki: s.listWiki(), settings: s.getSettings(), messages: s.listMessages().slice(-200), orch: orchFor(c.p).snapshotSlim(),
       config: { runtimes: runtimes(s.getSettings()), billingModes: U.BILLING_MODES, permissionModes: AC.PERMISSION_MODES, edgeTypes: AC.EDGE_TYPES, boardTools: AC.BOARD_TOOLS, roles: AC.roleSuggestions(s.getSettings().rolePresets, s.getTeam().nodes) } };
+    mark('body');
     const sectionOf = { project: 'project', team: 'team', teams: 'allNodes', board: 'tasks', wiki: 'wiki', settings: 'settings', messages: 'messages', orch: 'orch' };
     const out = { v, teamId: t.teamId, dir: s.dir };
     for (const k of pickChanged(v, since)) { if (sectionOf[k]) out[sectionOf[k]] = all[sectionOf[k]]; if (k === 'settings') out.config = all.config; }
+    mark('pick');
+    if (Date.now() - t0 > 150) console.error('[perf] getAll slow', (Date.now() - t0) + 'ms', ph.join(' '));
     return out;
   },
   getStateVersion: (c) => stateVersion(c),
