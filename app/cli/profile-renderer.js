@@ -12,14 +12,15 @@
  * and samples app.getAppMetrics() for PERF_DURATION_MS (default 60s). Merged report:
  * <PROF_OUT>/renderer-cpu.md + renderer-cpu.json.
  */
-const { spawn } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const HE = require('../test/harness/harness-electron');
 
 const APP = path.resolve(__dirname, '..');
 const ENTRY = path.join(APP, 'test/perf/cpu-baseline.js');
-const ELECTRON = path.join(APP, 'node_modules/.bin/electron');
+const ELECTRON = process.env.PROF_ELECTRON || undefined; // default: the real Electron binary via electronBin()
+
 const OUT = process.env.PROF_OUT || path.join(os.tmpdir(), `agents-squad-cpu-${Date.now()}`);
 const DURATION_MS = Number(process.env.PERF_DURATION_MS || 60000);
 const WARM_MS = Number(process.env.PERF_WARM_MS || 5000);
@@ -52,17 +53,18 @@ async function runCell(cell) {
   if (process.env.PROF_RESUME === '1' && fs.existsSync(jsonPath)) { console.log(`[driver] ${cell.name}: cached (${jsonPath})`); return JSON.parse(fs.readFileSync(jsonPath, 'utf8')); }
   fs.mkdirSync(dir, { recursive: true });
   const loadBefore = os.loadavg()[0];
-  const child = spawn(ELECTRON, [ENTRY], {
+  const child = HE.spawnHarness(ELECTRON || HE.electronBin(), [ENTRY], {
     cwd: APP,
-    // Own process group: a hung cell is killed tree-wide (electron cli.js spawns a child the
-    // SIGTERM would not reach) without ever matching process names.
-    detached: true,
+    label: `profile-${cell.name}`,
+    // Own process group + harness marker: the cell dies with this run — group kill on driver
+    // exit/signal/error here, parent-death watchdog inside the app itself, pidfile-recorded
+    // orphan reap as the last resort. Never matched by name.
     env: { ...process.env, ...cell.env, PERF_OUT: dir, PERF_DURATION_MS: String(DURATION_MS), PERF_WARM_MS: String(WARM_MS) },
     stdio: ['ignore', 'inherit', 'inherit'],
   });
   const budgetMs = (WARM_MS + DURATION_MS) + 240000;
   const code = await new Promise((resolve) => {
-    const guard = setTimeout(() => { console.error(`[driver] ${cell.name}: TIMEOUT after ${Math.round(budgetMs / 1000)}s — killing process group of pid ${child.pid}`); try { process.kill(-child.pid, 'SIGTERM'); } catch {} setTimeout(() => { try { process.kill(-child.pid, 'SIGKILL'); } catch {} }, 3000); resolve(-1); }, budgetMs);
+    const guard = setTimeout(() => { console.error(`[driver] ${cell.name}: TIMEOUT after ${Math.round(budgetMs / 1000)}s — killing process group of pid ${child.pid}`); void HE.killGroup(child.pid, { log: (m) => console.error(`[driver] ${cell.name}: ${m}`) }); resolve(-1); }, budgetMs);
     child.on('exit', (c) => { clearTimeout(guard); resolve(c == null ? -1 : c); });
     child.on('error', (e) => { clearTimeout(guard); console.error(`[driver] ${cell.name}: spawn failed:`, e.message); resolve(-2); });
   });

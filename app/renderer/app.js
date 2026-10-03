@@ -110,7 +110,11 @@ async function refresh() {
   chatBump(); // applied changes may cover the sections deltas do not carry (team/nodes) — the chat epoch must follow
   usCache = null; // this refresh changed state: the alerts/meter must read fresh usageStatus, not the 1s-shared result of a pre-change fetch (a stale hit rendered the limits chip hidden forever — no later render re-checks it; gui-e2e topbar red)
   try { localStorage.setItem('ctx', JSON.stringify(ctx)); } catch {}
-  renderAll();
+  // Debounced draw (t_ae99a65e): refresh's full render joins the same coalesced queue the delta
+  // path draws from, so the 2s backstop poll and the visibility catch-up no longer stack a second
+  // full renderAll on a delta draw in the same frame while agents stream. Idle single-shot refreshes
+  // (user actions) still draw on the scheduler's next tick — last + minMs is in the past, timeout 0.
+  renderSched.bump();
 }
 const nodeName = (id) => (S.allNodes.find((n) => n.id === id) || {}).name || (id ? id : 'unassigned');
 // Tab-scoped rendering (t_8d586961): renderAll draws the always-visible chrome plus ONLY the
@@ -2222,12 +2226,12 @@ const logTeamNodes = () => S.allNodes.filter((n) => teamScoped(sel.logTeam, n.id
 const obsIdleOpen = new Set();
 function renderObs() {
   if (!$('#tab-obs').classList.contains('active')) return;
-  const okey = [S.v && S.v.project, S.v && S.v.teams, S.v && S.v.settings, ctx.p, logs.length, (logs[logs.length - 1] || {}).at, S.tasks.length, sel.logTeam, S.orch.runCost, S.orch.runTokens, agentStamp()].join('|');
+  let cur = $('#logfilter').value; // clicking a row changes only this, so it must gate the rebuild (t_h0a1c2fa bug 1)
+  const okey = [S.v && S.v.project, S.v && S.v.teams, S.v && S.v.settings, ctx.p, logs.length, (logs[logs.length - 1] || {}).at, S.tasks.length, sel.logTeam, S.orch.runCost, S.orch.runTokens, agentStamp(), cur].join('|');
   if (okey === obsSig) return; obsSig = okey;
   const teams = (S.project && S.project.teams) || [];
   const tf = $('#logteam'); tf.innerHTML = '<option value="">All teams</option>' + teams.map((t) => `<option value="${t.id}">${esc(t.name)}</option>`).join(''); tf.value = sel.logTeam;
   const nodes = logTeamNodes();
-  let cur = $('#logfilter').value;
   if (cur && !nodes.some((n) => n.id === cur)) cur = '';
   const counts = {}; let total = 0;
   const ids = new Set(nodes.map((n) => n.id));
@@ -3309,17 +3313,34 @@ function syncThreadPanel(ev, workingT) {
   restoreChips(th); // the panel rebuilds as its thread streams: keep the user's expanded chips open
   $('#ch-close').onclick = () => { CH.thread = null; CH.thKey = null; chatSched.force(); };
 }
+// IME state of the composer (Vietnamese Telex and friends compose straight into the textarea):
+// while a composition is live, Enter/Tab/arrows belong to the IME, and acting on them sends
+// unfinalized text and clears the field out from under the IME — the IME's restored fragment then
+// goes out as a stray second message (t_h0a1c2fa: "đang làm gì v" followed by a lone "v" 52ms
+// later, straight from the real store). The wiring sits with the other input listeners below.
+let chatComposing = false;
 function chatPreview() {
-  const v = $('#chat-input').value; const p = Chat.parseComposer(v, S.team.nodes); const pv = $('#chat-preview');
-  pv.textContent = Chat.preview(p); pv.className = p ? p.kind : 'muted';
-  const ms = Chat.mentionMatches(v, S.team.nodes); const box = $('#chat-mentions'); box.classList.toggle('hidden', !ms || !ms.length);
-  CH.mi = Math.min(CH.mi, Math.max(0, (ms || []).length - 1));
-  box.innerHTML = (ms || []).map((n, i) => `<div data-name="${esc(n.name)}" class="${i === CH.mi ? 'sel' : ''}"><span class="avatar${isLeadRole(n.role) ? ' is-lead' : ''}" style="background:${roleBg(n.role)}">${avatarBody(n.id, who(n.id))}</span>${esc(n.name)} <span class="role">${esc(n.role)}</span></div>`).join('');
-  box.querySelectorAll('div').forEach((d) => d.onmousedown = (e) => { e.preventDefault(); pickMention(d.dataset.name); });
+  const i = $('#chat-input'); const v = i.value; const p = Chat.parseComposer(v, S.team.nodes); const pv = $('#chat-preview');
+  // Guarded writes: chatPreview runs on every keystroke AND mid-composition — same-value
+  // textContent/className assignments still dirty the composer's layout each keystroke, and a
+  // mentions-box rebuild the user can't see is churn on top (same finding as the header pills).
+  const ptxt = Chat.preview(p); if (pv.textContent !== ptxt) pv.textContent = ptxt;
+  const pcls = p ? p.kind : 'muted'; if (pv.className !== pcls) pv.className = pcls;
+  const ms = Chat.mentionMatches(v, S.team.nodes); const box = $('#chat-mentions'); const open = !!(ms && ms.length);
+  box.classList.toggle('hidden', !open);
+  if (open) {
+    CH.mi = Math.min(CH.mi, Math.max(0, ms.length - 1));
+    const html = ms.map((n, i) => `<div data-name="${esc(n.name)}" class="${i === CH.mi ? 'sel' : ''}"><span class="avatar${isLeadRole(n.role) ? ' is-lead' : ''}" style="background:${roleBg(n.role)}">${avatarBody(n.id, who(n.id))}</span>${esc(n.name)} <span class="role">${esc(n.role)}</span></div>`).join('');
+    if (box.innerHTML !== html) {
+      box.innerHTML = html;
+      box.querySelectorAll('div').forEach((d) => d.onmousedown = (e) => { e.preventDefault(); pickMention(d.dataset.name); });
+    }
+  }
 }
 function pickMention(name) { const i = $('#chat-input'); i.value = i.value.replace(/@(\w*)$/, '@' + name + ' '); i.focus(); CH.mi = 0; chatPreview(); }
 async function chatSend() {
-  const i = $('#chat-input'); const p = Chat.parseComposer(i.value, S.team.nodes); if (!p) return;
+  const i = $('#chat-input'); if (chatComposing) return; // the Send button can click mid-composition too — same stray-message risk as Enter
+  const p = Chat.parseComposer(i.value, S.team.nodes); if (!p) return;
   if (p.kind === 'error') return chatPreview();
   if (chatAtts.some((a) => !a.path)) return; // blocked until every chip saved (a failed chip must be removed first)
   const atts = chatAtts.length ? chatAtts.map(({ path, name, mime, size }) => ({ path, name, mime, size })) : null;
@@ -3334,7 +3355,10 @@ async function chatSend() {
   refresh();
 }
 $('#chat-input').addEventListener('input', chatPreview);
+$('#chat-input').addEventListener('compositionstart', () => { chatComposing = true; });
+$('#chat-input').addEventListener('compositionend', () => { chatComposing = false; chatPreview(); });
 $('#chat-input').addEventListener('keydown', (e) => {
+  if (e.isComposing || e.keyCode === 229) return; // IME composition: Enter commits the text, it must not also send it (t_h0a1c2fa)
   const box = $('#chat-mentions'); const open = !box.classList.contains('hidden'); const items = box.querySelectorAll('div');
   if (open && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) { e.preventDefault(); CH.mi = (CH.mi + (e.key === 'ArrowDown' ? 1 : items.length - 1)) % items.length; chatPreview(); }
   else if (open && (e.key === 'Tab' || e.key === 'Enter')) { e.preventDefault(); pickMention(items[CH.mi].dataset.name); }
@@ -3535,12 +3559,6 @@ document.addEventListener('keydown', (e) => {
 // falls back to a full getAll pull (wiki rule 5). The 2s tick below stays as the backstop for the
 // sections deltas do not cover.
 let lastDeltaSeq = null, lastDeltaProject = null;
-// Debounced render path (t_148d9889): delta batches used to schedule a full renderAll per rAF —
-// during an agent burst that rebuilt chrome + the active view at pump rate. RenderSched coalesces
-// them to one render per 150ms window (trailing edge always lands the final state), the same
-// contract as the chat room (400ms) and the log tail; the visibility-show handler re-arms the
-// draw so views hidden under a burst catch up right after the window returns.
-const deltaSched = RenderSched.create({ minMs: 150, hidden: () => document.hidden, draw: () => renderAll() });
 // Log-line ingest shared by both paths (t_d22a6cf2): batched deltas for the active project and the
 // cross-project batches below keep the old 'log'-channel semantics — lines from every project
 // accumulate (tagged with projectId), only the active project's redraw the views.
@@ -3552,6 +3570,16 @@ function ingestLogs(lines) {
   if (!lines[0] || !lines[0].projectId || lines[0].projectId === ctx.p) chatBump();
   scheduleLogRender();
 }
+// Main render path (t_d0a816d9): every same-project delta batch used to end in a renderAll one
+// rAF later — while agents stream, batches arrive several per frame and the whole chrome + active
+// view rebuild at up to 60/s. The same event-driven scheduler the chat room uses coalesces the
+// burst to one draw per minMs with a guaranteed trailing edge, so the last patch always lands.
+const renderSched = RenderSched.create({
+  minMs: 200,
+  hidden: () => document.hidden,
+  gate: () => true, // the chrome renderSched draws is on screen on every tab
+  draw: () => renderAll(), // late-binding: e2e/perf harnesses wrap the global by name
+});
 squad.on('delta', (b) => {
   if (!b || !Array.isArray(b.deltas)) return;
   if (b.projectId && b.projectId !== ctx.p) {
@@ -3573,16 +3601,16 @@ squad.on('delta', (b) => {
     if (d.type === 'task' || d.type === 'messages' || d.type === 'inbox' || d.type === 'orch') chatBump();
   }
   if (b.v && lastV) Object.assign(lastV, b.v); // keep the version poll quiet about what we already applied
-  deltaSched.bump();
+  renderSched.bump(); // coalesced full draw: the state is patched, the pixels follow on the scheduler's trailing edge
 });
 squad.on('state', (st) => { if (st.projectId && st.projectId !== ctx.p) { clearTimeout(pendingP); pendingP = setTimeout(async () => { P = await call('listProjects'); renderSidebar(); }, 200); return; } clearTimeout(pending); }); // same-project state arrives as deltas now; cancel a pending pull instead of scheduling one
 // Pause-when-hidden (t_e116438b): while the window is hidden the schedulers arm nothing (rAF is
 // stalled anyway, and DOM built in the dark is wasted work) and the backstop poll sleeps; on show,
 // one catch-up pull plus a chat bump redraw whatever moved while dark. Deltas keep patching S and
-// bump deltaSched, so every view (not just chat) is current again within one render window of show.
+// bump the schedulers, so every view (not just chat) is current again by the frame after show.
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'hidden') { chatSched.hide(); usageSched.hide(); return; }
-  chatBump(); deltaSched.bump(); usageSched.bump(); refresh();
+  if (document.visibilityState === 'hidden') { chatSched.hide(); renderSched.hide(); usageSched.hide(); return; }
+  chatBump(); renderSched.bump(); usageSched.bump(); refresh();
 });
 setInterval(() => { if (S.orch.running && !document.hidden) refresh(); }, 2000); // backstop for the sections deltas do not carry (team/nodes/nstat); version-gated inside refresh, paused while hidden
 refresh().then(() => syncRecovery()); // recovery banner needs a settled ctx.p (t_6911ba60)
