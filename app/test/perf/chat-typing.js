@@ -94,9 +94,11 @@ const INSTRUMENT = `
   }).observe(room, { childList: true });
   const sample = () => {
     const now = performance.now();
-    const focused = document.activeElement;
-    const s = { at: +now.toFixed(1), focused: focused && focused.id || null, value: input.value.length, caret: input.selectionStart };
-    if ((focused && focused.id) !== (P.samples.length ? P.samples[P.samples.length - 1].focused : null)) P.focusChanges.push({ at: +now.toFixed(1), to: s.focused });
+    // activeElement===null (window without OS focus) has no id — normalize once, or undefined!==null
+    // logs a phantom focus change on every sample (Uma, t_h0a1c2fa).
+    const fid = (document.activeElement && document.activeElement.id) || null;
+    const s = { at: +now.toFixed(1), focused: fid, value: input.value.length, caret: input.selectionStart };
+    if (fid !== (P.samples.length ? P.samples[P.samples.length - 1].focused : null)) P.focusChanges.push({ at: +now.toFixed(1), to: fid });
     P.samples.push(s);
     if (now - P.startedAt < ${STREAM_MS + 12000}) setTimeout(sample, 30);
   };
@@ -147,6 +149,10 @@ async function main() {
   const seed = await ex(`const p = await call('createProject', 'Chat typing probe'); switchTo({ p: p.id }); await w(300); await refresh(); await call('saveSettings', { helpycodePath: ${jsq(HCPATH)}, useWorktrees: false, maxConcurrency: ${AGENTS}, maxRuns: ${AGENTS + 2}, requireApproval: false, stallTimeoutMin: 5 }); const nodes = []; for (let i = 0; i < ${AGENTS}; i++) nodes.push(await call('addNode', { name: 'Typer-' + (i + 1), role: 'Dev', x: 100 + i * 220, y: 120, runtime: 'helpycode', model: ${jsq(MODEL)} })); await refresh(); return { dir: S.dir, nodes: nodes.map((n) => n.id) };`);
   seedStore(seed.dir, seed.nodes);
   await ex(`logsLoaded.delete(ctx.p); await refresh(); sel.chatTeam = ''; chatSched.force(); showTab('chat'); await w(500); return { groups: document.querySelectorAll('#chat-room .cgroup').length };`).then((r) => console.log('[chat-typing] seeded feed:', JSON.stringify(r)));
+  // The window must hold OS focus before sampling: an unfocused Chromium reports
+  // activeElement===null, which turned the focus metric into an artifact (Uma, t_h0a1c2fa).
+  if (process.platform === 'darwin') app.focus({ steal: true });
+  wc.focus();
   const armed = await exT(INSTRUMENT, 10000);
   if (!armed || armed.error) throw new Error('instrumentation failed: ' + JSON.stringify(armed));
   const toolTask = (n) => `await call('createTask', { title: 'Composer stress probe ' + ${n}, description: 'Help stress-test the chat composer. Do at least 12 separate tool calls, one at a time: list files, git status, read package.json, read different source files, node -e version checks. After EVERY tool result, write one short sentence (as a plain text reply line) describing what you saw. Never modify or create files.', assignee: ${jsq(seed.nodes[n - 1])} });`;
