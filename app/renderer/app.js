@@ -2070,6 +2070,7 @@ function patchBoardColumns(tasks) {
       if (tb.textContent !== label) tb.textContent = label;
     } else if (tb) tb.remove();
   });
+  boardPatchSig = sig; // only after the full patch: a throw above must strand no fresh sig
   if (cardHtmlCache.size > tasks.length) { const live = new Set(tasks.map((t) => t.id)); for (const id of cardHtmlCache.keys()) if (!live.has(id)) cardHtmlCache.delete(id); }
 }
 function renderBoard() {

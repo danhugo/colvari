@@ -22,6 +22,8 @@ const MARKER_ARG_PREFIX = '--squad-harness-run=';
 const ENV_MARKER_PREFIX = 'AGENTS_SQUAD_HARNESS_RUN=';
 const TERM_GRACE_MS = 2000; // SIGTERM, wait, then SIGKILL (critic amendment 2 on t_b8a2f6c4)
 const PS_TIMEOUT_MS = 4000;
+const PS_TRIES = 3; // a loaded machine can EAGAIN/starve a spawn; empty ≠ a real answer (see psField)
+const PS_RETRY_MS = 50;
 
 // The real system tmpdir, not a run's private one (same reasoning as procguard): pidfiles are how
 // a run that died hard gets reaped by a LATER boot, so they must survive private-dir teardown.
@@ -30,10 +32,24 @@ const pidFileOf = (runId) => path.join(pidsDir(), `${String(runId).replace(/[^A-
 const harnessRunId = (label = 'harness') => `${label}-${process.pid}-${Date.now().toString(36)}`;
 const markerArgFor = (runId) => MARKER_ARG_PREFIX + runId;
 
+// Blocking nap for the retry gap (sweep is synchronous); Atomics.wait throws on some
+// embedders — fall back to a spin.
+const psNap = (ms) => { try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); } catch { const end = Date.now() + ms; while (Date.now() < end); } };
+
+// An empty read of a live pid is always a FAILED observation, never an answer: a live process
+// always has an lstart, a pgid and a command. Under load the `ps` spawn itself can EAGAIN, time
+// out or be starved into emptiness — reporting that as a mismatch would skip (never signal) an
+// orphan that must be reaped, so retry briefly before giving up and reporting emptiness.
 function psField(pid, args) {
-  try {
-    return spawnSync('ps', ['-p', String(pid), ...args], { encoding: 'utf8', timeout: PS_TIMEOUT_MS, stdio: ['ignore', 'pipe', 'pipe'] }).stdout.trim();
-  } catch { return ''; }
+  for (let i = 0; i < PS_TRIES; i++) {
+    let out = '';
+    try {
+      out = spawnSync('ps', ['-p', String(pid), ...args], { encoding: 'utf8', timeout: PS_TIMEOUT_MS, stdio: ['ignore', 'pipe', 'pipe'] }).stdout.trim();
+    } catch { /* transient spawn failure under load: retry */ }
+    if (out) return out;
+    if (i < PS_TRIES - 1) psNap(PS_RETRY_MS);
+  }
+  return '';
 }
 const pidLstart = (pid) => psField(pid, ['-o', 'lstart=']);
 const pidPgid = (pid) => { const v = Number(psField(pid, ['-o', 'pgid='])); return Number.isInteger(v) && v > 0 ? v : null; };
