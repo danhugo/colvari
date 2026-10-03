@@ -1582,9 +1582,9 @@ class Orchestrator extends EventEmitter {
     this.runs++;
     // A run for this task started (dispatch, manual button, or auto resume): new stuck episode — the
     // previous episode's one-try flag and human-stop stamp are void.
-    if (task.autoResumeTried || task.noAutoResume) this.store.updateTask(task.id, { autoResumeTried: null, noAutoResume: null });
+    if (task.autoResumeTried || task.noAutoResume) this.store.updateTaskSoon(task.id, { autoResumeTried: null, noAutoResume: null });
     const reviewPickup = task.status === 'review'; // dispatched to review a hand-off: ending clean approves it
-    this.store.updateTask(task.id, { status: 'in_progress' });
+    this.store.updateTaskSoon(task.id, { status: 'in_progress' });
     const a = this.agent(node.id); a.status = 'working'; a.lastError = null; a.taskId = task.id; a.task = task.title; a.runs++; a.iteration = 1; a.reviewPickup = reviewPickup; a.wakePending = null; // the prompt carries the unread count
     this.procs.set(node.id, { kill() {} }); // reserve the slot synchronously
     let okRuntime = null; // set when the run finishes OK: free-signal auto resume (plan t_76da3303 C)
@@ -1605,7 +1605,7 @@ class Orchestrator extends EventEmitter {
         else {
           const w = WT.ensureWorktree(cwd, task.id);
           if (w.warning) this.log(node.id, 'error', 'warning: ' + w.warning);
-          else { cwd = w.cwd; worktree = true; this.store.updateTask(task.id, { worktreePath: w.worktreePath, worktreeBranch: w.worktreeBranch }); }
+          else { cwd = w.cwd; worktree = true; this.store.updateTaskSoon(task.id, { worktreePath: w.worktreePath, worktreeBranch: w.worktreeBranch }); }
         }
       }
       const presets = settings.rolePresets || [];
@@ -1661,7 +1661,7 @@ class Orchestrator extends EventEmitter {
         if (r.sessionId) {
           resume = r.sessionId;
           const tp = this.store.getTask(task.id);
-          this.store.updateTask(task.id, { sessions: { ...((tp && tp.sessions) || {}), [sessKey]: r.sessionId }, iterations: i });
+          this.store.updateTaskSoon(task.id, { sessions: { ...((tp && tp.sessions) || {}), [sessKey]: r.sessionId }, iterations: i });
         }
         // A resume can fail because the session id went stale (sessions are per cwd; ids stored
         // before the per-owner key may belong to another agent or runtime): retry once from a fresh
@@ -1671,7 +1671,7 @@ class Orchestrator extends EventEmitter {
           const tp = this.store.getTask(task.id);
           const sessions = { ...((tp && tp.sessions) || {}) };
           delete sessions[sessKey];
-          this.store.updateTask(task.id, { sessions });
+          this.store.updateTaskSoon(task.id, { sessions });
           resume = null;
           this.log(node.id, 'system', '↻ resume failed (session not found): retrying once from a fresh session');
           continue;
@@ -1680,7 +1680,7 @@ class Orchestrator extends EventEmitter {
         // (persisted on the task, so it survives app restarts — otherwise a restart would re-arm the
         // recovery budget). A code 0 under an active stall claim is NOT progress — the watchdog killed
         // a run whose CLI trapped TERM and exited 0; resetting there would disarm the max-2 limit.
-        if (code === 0 && !r.stalled) { const tp = this.store.getTask(task.id); if (tp && tp.stallRecoveries) this.store.updateTask(task.id, { stallRecoveries: 0 }); }
+        if (code === 0 && !r.stalled) { const tp = this.store.getTask(task.id); if (tp && tp.stallRecoveries) this.store.updateTaskSoon(task.id, { stallRecoveries: 0 }); }
         // Stalled run confirmed exited (the watchdog killed it after the run.stalled claim) — whatever
         // the exit code: a trapping CLI can exit 0 on its kill signal, and that still needs the same
         // recovery. Resume the same session with a continue prompt, at most STALL.MAX_RECOVERIES times
@@ -1690,7 +1690,7 @@ class Orchestrator extends EventEmitter {
           const ts = this.store.getTask(task.id);
           const attempt = ((ts && ts.stallRecoveries) || 0) + 1;
           if (attempt > STALL.MAX_RECOVERIES) {
-            this.store.updateTask(task.id, { stallRecoveries: attempt, status: 'waiting_for_human' });
+            this.store.updateTaskSoon(task.id, { stallRecoveries: attempt, status: 'waiting_for_human' });
             this.store.commentTask(task.id, 'orchestrator', `Run stalled ${attempt} time(s); the ${STALL.MAX_RECOVERIES} automatic stop+resume recoveries are used up. Parked for a human.`);
             this.emit('run.recovery_failed', { nodeId: node.id, taskId: task.id, attempt: attempt - 1, final: true });
             this.log(node.id, 'error', `stall recovery failed: ${attempt - 1} automatic resume(s) already used; parked for a human`);
@@ -1698,13 +1698,13 @@ class Orchestrator extends EventEmitter {
           }
           if (!resume) {
             // No session id to resume: never silently retry fresh (would lose the session's context).
-            this.store.updateTask(task.id, { stallRecoveries: attempt, status: 'waiting_for_human' });
+            this.store.updateTaskSoon(task.id, { stallRecoveries: attempt, status: 'waiting_for_human' });
             this.store.commentTask(task.id, 'orchestrator', 'Run stalled; automatic recovery failed because the run reported no session id to resume. Parked for a human.');
             this.emit('run.recovery_failed', { nodeId: node.id, taskId: task.id, attempt, final: true, reason: 'no session' });
             this.log(node.id, 'error', 'stall recovery failed: no session id was reported, the same session cannot be resumed');
             reason = 'stalled: no session to resume'; break;
           }
-          this.store.updateTask(task.id, { stallRecoveries: attempt, status: 'in_progress' });
+          this.store.updateTaskSoon(task.id, { stallRecoveries: attempt, status: 'in_progress' });
           a.stall = { attempt, max: STALL.MAX_RECOVERIES };
           this.log(node.id, 'system', `↻ stall recovery ${attempt}/${STALL.MAX_RECOVERIES}: resuming the same session with a continue prompt`);
           this.emit('run.recovering', { nodeId: node.id, taskId: task.id, attempt, max: STALL.MAX_RECOVERIES });
@@ -1719,7 +1719,7 @@ class Orchestrator extends EventEmitter {
           human = [msgs.map((x) => x.text).join('\n\n'), attachedFilesLines(humanAtts)].filter(Boolean).join('\n\n');
           this.runs++; a.runs++;
           this.log(node.id, 'system', `↻ ${node.name} resumes with the human message`);
-          const tt = this.store.getTask(task.id); if (tt && tt.status !== 'in_progress') this.store.updateTask(task.id, { status: 'in_progress' });
+          const tt = this.store.getTask(task.id); if (tt && tt.status !== 'in_progress') this.store.updateTaskSoon(task.id, { status: 'in_progress' });
           continue;
         }
         judge = null;
@@ -1730,19 +1730,19 @@ class Orchestrator extends EventEmitter {
         if (!step.again) break;
         if (this.runs >= settings.maxRuns) { reason = 'maxRuns reached'; break; }
         this.runs++; a.runs++;
-        if (t && t.status !== 'in_progress') this.store.updateTask(task.id, { status: 'in_progress' });
+        if (t && t.status !== 'in_progress') this.store.updateTaskSoon(task.id, { status: 'in_progress' });
       }
       const stoppedWhy = a.stopRequested; a.stopRequested = false;
       // A human stop (stopAgent; budget stops excluded — a.budgetStop is set for those) stamps the
       // task so the free-signal auto resume never brings it back (plan t_76da3303 C). The manual
       // button still works: only the auto path consults the stamp.
-      if (stoppedWhy && !a.budgetStop) this.store.updateTask(task.id, { noAutoResume: true });
+      if (stoppedWhy && !a.budgetStop) this.store.updateTaskSoon(task.id, { noAutoResume: true });
       a.status = 'idle'; a.taskId = null; a.task = null; a.iteration = 0; a.stall = null;
       const t = this.store.getTask(task.id);
       const gate = (st) => C.gateStatus(st, node, this.store.getSettings());
       if (m.mode === 'goal' && t && judge && !judge.met && t.status === 'done') {
         // Parked for a human, not a "please review this" hand-off: never auto-dispatched/auto-advanced.
-        this.store.updateTask(task.id, { status: 'review', parkedForHuman: true });
+        this.store.updateTaskSoon(task.id, { status: 'review', parkedForHuman: true });
         this.store.commentTask(task.id, 'orchestrator', judge.inconclusive ? `Goal check was inconclusive after ${i} iteration(s): ${judge.reason}. Check the result yourself.` : `Goal condition not met after ${i} iteration(s) (${reason}): ${judge.reason}`);
       } else if (t && t.status === 'in_progress' && !this.drainCutNodes.has(node.id)) {
         // Agent ended without updating status: a normal dispatch hands off to review —
@@ -1762,25 +1762,25 @@ class Orchestrator extends EventEmitter {
           const priorCrashes = t.comments.filter((c) => /^crashed: exit code/.test(c.text)).length;
           if (priorCrashes >= 2) {
             const g = gate('review'); g.parkedForHuman = true;
-            this.store.updateTask(task.id, g);
+            this.store.updateTaskSoon(task.id, g);
             const tail = FQ.redactError(stderr) || `exit ${code}, no stderr`;
             this.store.commentTask(task.id, 'orchestrator', `crashed: exit code ${code} after ${i} iteration(s) (${reason}); ${priorCrashes + 1} crashes — parked for a human instead of re-queuing.\nstderr tail: ${tail}`);
             this.alertCrashPark(node, task, priorCrashes + 1, tail);
           } else {
-            this.store.updateTask(task.id, { status: 'todo' });
+            this.store.updateTaskSoon(task.id, { status: 'todo' });
             this.store.commentTask(task.id, 'orchestrator', `crashed: exit code ${code} after ${i} iteration(s) (${reason}); back to todo.`);
           }
         } else {
           const g = gate(ok && a.reviewPickup ? 'done' : 'review');
           if (!ok) g.parkedForHuman = true;
-          this.store.updateTask(task.id, g);
+          this.store.updateTaskSoon(task.id, g);
           this.store.commentTask(task.id, 'orchestrator', stoppedWhy ? `Agent stopped (${stoppedWhy}) after ${i} iteration(s); moved to review.` : `Agent exited (code ${code}) without setting status after ${i} iteration(s) (${reason}); moved to review.`);
         }
       } else if (t && t.status === 'review' && !t.parkedForHuman && code !== 0 && this.running && !stoppedWhy && !this.drainCutNodes.has(node.id)) {
         // The agent itself moved this to 'review' (clearing parkedForHuman) but the process then crashed
         // (nonzero exit). A crashed run must never look like a clean hand-off eligible for silent
         // auto-advance to done: park it for a human to inspect.
-        this.store.updateTask(task.id, { parkedForHuman: true });
+        this.store.updateTaskSoon(task.id, { parkedForHuman: true });
         this.store.commentTask(task.id, 'orchestrator', `Agent exited (code ${code}) after moving this task to review during iteration ${i}; parked for a human because the run crashed.`);
       }
       const t2 = this.store.getTask(task.id);
