@@ -1907,6 +1907,17 @@ const doneCards = (list) => { const all = list.filter((t) => t.status === 'done'
 // #columns innerHTML on every change — which repainted all 300 cards, dropped hover/focus and
 // reset column scroll — each column diffs its card list by task id. A card whose HTML string is
 // unchanged is not touched at all; only inserts, removals, content changes and reorders move DOM.
+// The six board columns (t_c5db7bf0), in workflow order. Every task status the store knows
+// (STATUSES in src/store.js) maps to exactly one column — this list is the board's contract with
+// the store, so the two must stay in lockstep:
+//   todo              — dispatchable work; a card with no open blockers earns the "Ready" tag
+//   in_progress       — claimed by a worker; the live / working elsewhere / No worker tags
+//                       disambiguate whether an agent is actually on this task
+//   waiting_for_human — paused for user input; awaitingApproval adds the "needs approval" tag
+//   review            — work landed; the auto-merge gate (store.js _mergeOnDone) runs from here
+//   merge_conflict    — the gate refused (conflict or dirty main checkout); fix in the worktree,
+//                       then flip done to retry the merge
+//   done              — merged; folded by default to the 20 most recently updated (see doneCards)
 const boardCols = ['todo', 'in_progress', 'waiting_for_human', 'review', 'merge_conflict', 'done'];
 const cardSigs = new WeakMap(); // card element -> html it was built from
 const tplEl = (html) => { const t = document.createElement('template'); t.innerHTML = html.trim(); return t.content.firstElementChild; };
