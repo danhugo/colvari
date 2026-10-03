@@ -33,7 +33,9 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const APP = path.resolve(process.env.PERF_APP_DIR || path.join(__dirname, '../..'));
+// The harness lives at <repo>/test/perf; the Electron app is the sibling app/ directory.
+// (PERF_APP_DIR overrides — e.g. pointing at a worktree's app/.)
+const APP = path.resolve(process.env.PERF_APP_DIR || path.join(__dirname, '../..', 'app'));
 const MAIN = path.join(APP, 'src/main.js');
 const HCPATH = process.env.PERF_HCPATH || '/Users/d/.local/bin/helpycode';
 const MODEL = process.env.PERF_HC_MODEL || 'elice/z-ai/glm-5.3-flash';
@@ -565,6 +567,7 @@ async function main() {
   await phase('warm');
 
   const working = await waitForAgents(seeded);
+  const WARM_PERF = performance.now(); // steady-window boundary: excludes boot/seed cold reads
   console.log(`[realperf] ${working}/${AGENTS} real helpycode agents working`);
   await WAIT(WARM_MS);
 
@@ -585,6 +588,23 @@ async function main() {
   const WINDOW_T0 = Date.now();
   await phase('chatopen');
   const stopTrace = await startTrace(TRACE_MS);
+  // Main-process event-loop delay is armed HERE — after the profiler starts, so the histogram
+  // covers exactly the agent-driven phases (chat-open campaign, scroll, streaming) and excludes
+  // the harness-owned Profiler.stop, which serializes the whole profile on this thread and would
+  // otherwise dominate max (a 200 s profile stopped inside the window reads as a multi-second
+  // "block" that is not app work). Percentile floor caveat: monitorEventLoopDelay on an idle loop
+  // quantizes at ~10 ms on macOS (calibrated against a plain node process), well under the 50 ms
+  // bar — the histogram's job is the tail, not the floor.
+  EL.enable();
+  const EL_T0 = Date.now();
+  let elOver50 = 0, elWatchMax = 0, elWatchNext = Date.now();
+  const elWatcher = setInterval(() => { // 20 ms drift watch: fires late by ~the longest block
+    const now = Date.now();
+    const late = now - elWatchNext;
+    if (late > elWatchMax) elWatchMax = late;
+    if (late > 50) elOver50++;
+    elWatchNext = now + 20;
+  }, 20);
   const probeRecs = await chatOpenCampaign(REPS);
   console.log(`[realperf] chat-open campaign done: ${probeRecs.length} samples`);
 
@@ -616,9 +636,10 @@ async function main() {
   const streamWindowSecs = streamSubs.reduce((s, w) => s + w.wallMs, 0) / 1000;
   const ioWin = { calls: IO.winCalls, totalMs: +IO.winTotalMs.toFixed(1) };
   IO.winCalls = 0; IO.winTotalMs = 0;
-  EL.enable();
-  await WAIT(2000);
   EL.disable();
+  clearInterval(elWatcher);
+  const elWindowSecs = +(Math.max(1, Date.now() - EL_T0) / 1000).toFixed(1);
+  const elMs = (ns) => +((ns || 0) / 1000).toFixed(2);
 
   sampling = false;
   await sampler;
@@ -657,6 +678,14 @@ async function main() {
     perSec: +(PERF_IPC.length / winSecs).toFixed(2),
     byName: Object.fromEntries(Object.entries(byName).map(([k, v]) => [k, { n: v.n, perSec: +(v.n / winSecs).toFixed(2), msP50: q(v.ms, 0.5), msP95: q(v.ms, 0.95), msMax: v.ms.length ? Math.max(...v.ms) : 0 }]).sort((a, b) => b[1].n - a[1].n).slice(0, 14)),
   };
+  // Steady window (from the moment the agents are confirmed working): the cold first getAll after
+  // seeding pays every list*() on a just-written store and lands in the 1.5 s class once per
+  // process — real, but a boot cost, not the dispatch-tail bar (t_a2566d54), which this isolates.
+  const steady = PERF_IPC.filter((c) => c.at >= WARM_PERF);
+  const sby = {};
+  for (const c of steady) { (sby[c.name] = sby[c.name] || { n: 0, ms: [] }); sby[c.name].n++; sby[c.name].ms.push(+c.ms.toFixed(2)); }
+  const sga = sby.getAll || { n: 0, ms: [] };
+  summary.ipc.steady = { n: steady.length, getAll: { n: sga.n, msP50: q(sga.ms, 0.5), msP95: q(sga.ms, 0.95), msMax: sga.ms.length ? Math.max(...sga.ms) : 0 } };
   summary.streamSubs = streamSubs;
   summary.screenshots = fs.readdirSync(OUT).filter((f) => f.endsWith('.png'));
   // Real helpycode runs update the feed via state-push deltas + refresh pulls, not per-line
@@ -683,7 +712,7 @@ async function main() {
     ioBlockedMsPerSec: +(liveSubs.reduce((s, w) => s + w.ioMs, 0) / liveSecs).toFixed(1),
     roomDrawsPerSec: +(liveFrames.draws / liveSecs).toFixed(2), roomDrawMsPerSec: +(liveFrames.drawMs / liveSecs).toFixed(1),
   };
-  summary.io = { streamWindow: ioWin, eventLoopMs: (() => { const us = (ns) => +((ns || 0) / 1000).toFixed(2); return { p50: us(EL.percentile(50)), p95: us(EL.percentile(95)), max: us(EL.max) }; })(), slowestCallsMs: [...IO.slowest], maxMsPerCall: +IO.maxMs.toFixed(2) };
+  summary.io = { streamWindow: ioWin, eventLoopMs: { p50: elMs(EL.percentile(50)), p95: elMs(EL.percentile(95)), p99: elMs(EL.percentile(99)), max: elMs(EL.max), watchMaxMs: +elWatchMax.toFixed(1), over50: elOver50, windowSecs: elWindowSecs }, slowestCallsMs: [...IO.slowest], maxMsPerCall: +IO.maxMs.toFixed(2) };
   summary.env = {
     agents: AGENTS, tasksPerAgent: TASKS_PER_AGENT, reps: REPS, scrollReps: SCROLL_REPS, traceMs: trace.windowMs || TRACE_MS,
     staggerMs: STAGGER_MS, stallMin: STALL_MIN,
@@ -693,6 +722,7 @@ async function main() {
     electron: process.versions.electron,
     commit: (() => { try { return require('child_process').execFileSync('git', ['rev-parse', 'HEAD'], { cwd: APP, encoding: 'utf8' }).trim(); } catch { return 'unknown'; } })(),
   };
+  fs.writeFileSync(path.join(OUT, 'ipc-raw.json'), JSON.stringify(PERF_IPC));
   fs.writeFileSync(path.join(OUT, 'real-agents-jank.json'), JSON.stringify(summary, null, 2));
   fs.writeFileSync(path.join(OUT, 'real-agents-jank.md'), markdown(summary));
   console.log('\n' + markdown(summary));
@@ -740,7 +770,7 @@ Stream (untouched, ${s.streamPushes.liveSubs}/${s.streamPushes.subs} live 10s su
 |---|---:|---:|---:|---:|---:|
 ${['warm', 'chatopen', 'scroll', 'stream'].map(cpuRow).join('\n')}
 
-Main-thread appendLog (stream window): ${s.io.streamWindow.calls} calls Σ ${s.io.streamWindow.totalMs} ms · max single ${s.io.maxMsPerCall} ms · event-loop p95 ${s.io.eventLoopMs.p95} ms / max ${s.io.eventLoopMs.max} ms
+Main-thread appendLog (stream window): ${s.io.streamWindow.calls} calls Σ ${s.io.streamWindow.totalMs} ms · max single ${s.io.maxMsPerCall} ms · main event loop over the ${s.io.eventLoopMs.windowSecs} s measured window (post-profiler-start): p95 ${s.io.eventLoopMs.p95} / p99 ${s.io.eventLoopMs.p99} / max ${s.io.eventLoopMs.max} ms (histogram, ~10 ms idle floor on macOS) · 20 ms drift-watch: max ${s.io.eventLoopMs.watchMaxMs} ms late, firings >50 ms late: ${s.io.eventLoopMs.over50}
 
 ## Trace — self time by function (${s.env.traceMs} ms window)
 
@@ -752,6 +782,8 @@ Long tasks → functions (renderer, worst first):
 ${(tr.longTaskAttribution || []).map((a) => `- ${a.durMs} ms: ${a.during.join(' | ')}`).join('\n') || '—'}
 
 ## IPC round-trips (${s.ipc.perSec}/s)
+
+Steady window (post agent-start, n=${s.ipc.steady.n}): **getAll p50 ${s.ipc.steady.getAll.msP50} / p95 ${s.ipc.steady.getAll.msP95} / max ${s.ipc.steady.getAll.msMax} ms** (n=${s.ipc.steady.getAll.n})
 
 | call | n | /s | p50 ms | p95 ms | max ms |
 |---|---:|---:|---:|---:|---:|
