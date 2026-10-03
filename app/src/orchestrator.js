@@ -392,7 +392,18 @@ class Orchestrator extends EventEmitter {
   }
   // Per-key usage ledger over the persisted runs (see usage.js usageLedger): one row per
   // {runtime, provider, model}, plus byAgent/byTask groupings. Memoized on the runs file signature.
-  ledger() { return this._memoBy('ledger', this.sig('runs'), () => U.usageLedger(this.runsMemo())); }
+  // Instrumented: slow rebuilds log a timing line (last one kept on this._ledgerLastMs) so a
+  // large run history's aggregation cost stays visible on the perf board.
+  ledger() {
+    return this._memoBy('ledger', this.sig('runs'), () => {
+      const t0 = Date.now();
+      const led = U.usageLedger(this.runsMemo());
+      const ms = Date.now() - t0;
+      this._ledgerLastMs = ms;
+      if (ms >= 50) this.log(null, 'system', `usage ledger rebuilt in ${ms} ms over ${(led.rows || []).length} key(s)`);
+      return led;
+    });
+  }
   // When per-key usage tracking started (older runs are dropped on migration — store.migrateUsageLedger);
   // null when the project predates the field or has no meta yet.
   usageSince() { try { const m = this.store.meta(); return (m && m.usageTrackingSince) || null; } catch { return null; } }
