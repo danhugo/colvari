@@ -24,6 +24,7 @@ const CAP = require('./capabilities');
 const { SubagentTracker, isSubagentTool } = require('./subagents');
 const FQ = require('./failures');
 const PB = require('./litellm');
+const SW = require('./stall-watchdog');
 
 const MCP_SERVER = path.join(__dirname, 'mcp-server.js');
 
@@ -62,16 +63,6 @@ function interruptedFromReap(store, killed) {
   return out;
 }
 
-// 'ps -o time=' CPU time, e.g. '12:05.44' (MM:SS.cc) or '1:02:03' (H:MM:SS) -> ms.
-function stimeToMs(s) {
-  const seg = String(s || '').trim().split(':');
-  if (!seg[seg.length - 1]) return null;
-  const last = seg.pop().split('.');
-  const secs = Number(last[0]) + Number('0.' + (last[1] || '0'));
-  const mins = Number(seg.pop() || 0), hrs = Number(seg.pop() || 0);
-  return Math.round(((hrs * 60 + mins) * 60 + secs) * 1000);
-}
-
 // CLAUDE_AUTOCOMPACT_PCT_OVERRIDE value for a configured percent. claude 2.1.284 parses the env as a
 // percent (0-100], not a fraction: threshold = min(floor(window * pct/100), window - 13000). The CLI
 // applies no floor of its own, and a threshold at/below a session's ~25-30k baseline compacts at once
@@ -95,18 +86,9 @@ function autoCompactEnv(pct) {
 // Exported so tests can shorten the timings.
 const WAKE = { SWEEP_MS: 1000, DEBOUNCE_MS: 1500, MIN_GAP_MS: 5 * 60 * 1000, MAX_PER_PAIR: 3, PAIR_WINDOW_MS: 10 * 60 * 1000 };
 
-// The run's board MCP server is a long-lived stdio helper the CLI spawns for the whole session
-// (mcpConfig: <exec> src/mcp-server.js --project <dir> --node <id>). It idles between calls, so its
-// being alive says nothing about run progress — leave its whole subtree out of the stall liveness
-// scan, or a hung CLI that owns one is never recovered.
-const isBoardHelper = (r) => !!r.command && /mcp-server\.js/.test(r.command) && r.command.includes('--project') && r.command.includes('--node');
-
-// Stall watchdog: how often a working agent is checked for silence, how long a SIGTERM'd stalled run
-// gets to exit before SIGKILL, and the max automatic stop+resume recoveries per task (persisted there).
-// HARD_CAP_MULT: silence for MULT x stallTimeoutMin kills the run even when runAlive() sees live
-// descendants — a runtime's own long-lived helpers (helpycode MCP servers) used to pin liveness
-// true forever (t_1f75efd8: a wake run hung 3h11m).
-const STALL = { SWEEP_MS: 5000, SIGKILL_GRACE_MS: 8000, MAX_RECOVERIES: 2, HARD_CAP_MULT: 3 };
+// Stall watchdog (src/stall-watchdog.js): constants and machinery live there; STALL is shared by
+// reference so tests shortening the timings in place keep working through either export.
+const STALL = SW.STALL;
 
 // Dispatch sweep: task changes written outside this process (an agent's own board MCP calls create,
 // unblock or move tasks) carry no in-process event to tick on — without this cadence a ready todo
@@ -185,11 +167,9 @@ function humanPrompt(text, base = null, attachments = null) {
   return [base, `Message from the human operator (answer or act on it, then continue your current task, if you have one):\n${text}`, 'Reply via chat (your final answer is the reply). If the human asks to redo something ("do again"), act on it: re-create the tasks. create_task only for real work.', attachedFilesLines(attachments)].filter(Boolean).join('\n\n');
 }
 
-// Short 'continue' prompt for a stalled run resumed in the same session (the session already holds
-// the full task context; this only tells the agent the previous attempt was stopped and why).
-function stallPrompt(task) {
-  return `Your previous run for this task (id=${task.id}) stalled (no activity for the configured stall timeout) and was stopped automatically. Continue the task from where you left off and finish it as originally instructed.`;
-}
+// Short 'continue' prompt for a stalled run resumed in the same session — lives with the rest of
+// the stall watchdog in src/stall-watchdog.js.
+const stallPrompt = SW.stallPrompt;
 
 // Prompt for a wake run: an idle agent dispatched purely to handle unread teammate messages.
 function wakePrompt(team, node, msgs) {
@@ -760,128 +740,16 @@ class Orchestrator extends EventEmitter {
     if (this.running) setImmediate(() => this.tick());
   }
 
-  // ---- stall watchdog: a run that has emitted nothing AND has no live child/descendant process for
-  // stallTimeoutMin (setting, default 10) is stalled. Task runs are stopped and resumed in the same
-  // session (runTask's r.stalled branch) with a short continue prompt, max 2 recoveries per task.
-  // EVERY run kind is watched (t_600e630d): task runs and every no-task run (wake, loop, watchdog)
-  // of every runtime — a hung run must never hold the agent's single-run slot. No-task runs are only
-  // stopped: the sweep re-delivers what still matters. Hard cap: silence for HARD_CAP_MULT x the
-  // timeout kills any run even with live descendants (runtimes whose own helpers pin runAlive()
-  // forever). Manual interrupts (stopAgent, a queued human message) always take precedence. ----
-  sweepStalls() {
-    if (this.userStopped) return;
-    // Task-run recovery is the Run's business (it re-dispatches through runTask), but a no-task run
-    // can be live with the Run over (dispatchWake does not require it) — those still get watched.
-    let runOver = false;
-    if (!this.running) {
-      runOver = true;
-      let hasNoTaskRun = false;
-      for (const [nodeId] of this.procs) {
-        const a = this.agents[nodeId];
-        if (a && a.status === 'working' && !a.taskId) hasNoTaskRun = true;
-      }
-      if (!hasNoTaskRun) return;
-    }
-    const timeoutMin = Number(this.store.getSettings().stallTimeoutMin ?? 10);
-    if (!(timeoutMin > 0)) return;
-    const now = Date.now();
-    const hardCapMs = timeoutMin * STALL.HARD_CAP_MULT * 60000;
-    for (const [nodeId, child] of [...this.procs]) {
-      const a = this.agents[nodeId];
-      const run = a && a.currentRun;
-      if (!a || a.status !== 'working' || !run || run.done || run.stalled) continue;
-      // Every run kind: task runs (a.taskId) and every no-task run — the activity trigger no longer
-      // gates the sweep (t_600e630d: no-task runs without a 'message' trigger were skipped).
-      const isWake = !a.taskId;
-      if (runOver && !isWake) continue;
-      if (a.stopRequested || a.pendingHuman.length) continue;
-      const idleMs = now - (a.lastActivityAt || 0);
-      if (idleMs < timeoutMin * 60000) continue;
-      // A live descendant (long silent tool call) protects the run — up to the hard cap, where
-      // silence wins: the cap is what recovers runs whose runtime keeps helpers alive forever.
-      const alive = this.runAlive(nodeId, child);
-      const capped = alive && idleMs >= hardCapMs;
-      if (alive && !capped) continue;
-      // One-way claim on the run object: whichever sweep flips .stalled owns the recovery, so a tick
-      // racing a manual stop or a queued message can never double-fire (compare-and-set on the run).
-      run.stalled = true;
-      a.stall = { state: 'stalled' };
-      const idleMin = Math.round(idleMs / 60000);
-      const kids = capped ? this.stallLiveKids(child) : null;
-      this.log(nodeId, 'error', capped
-        ? `stall: no output for ${idleMin} min (${STALL.HARD_CAP_MULT}x the ${timeoutMin} min timeout) — killing despite live child processes: ${kids.length ? kids.slice(0, 3).map((k) => `pid ${k.pid} ${String(k.command).slice(0, 80)}`).join('; ') + (kids.length > 3 ? `; +${kids.length - 3} more` : '') : 'none found'}`
-        : isWake
-          ? `stall: wake run silent with no live child process for ${idleMin} min; stopping it (messages still pending re-wake the agent)`
-          : `stall: no events and no live child process for ${idleMin} min; stopping the run to recover`);
-      this.emit('run.stalled', { nodeId, taskId: a.taskId || null, idleMin, kind: isWake ? 'wake' : 'task' });
-      try { child.kill('SIGTERM'); } catch {}
-      this._stallKill.set(nodeId, setTimeout(() => {
-        this._stallKill.delete(nodeId);
-        if (this.procs.get(nodeId) === child && a.currentRun === run && !run.done) {
-          try { child.kill('SIGKILL'); } catch {}
-          this.log(nodeId, 'error', 'stall: run ignored SIGTERM; sent SIGKILL');
-        }
-      }, STALL.SIGKILL_GRACE_MS));
-      this.changed();
-    }
-  }
+  // ---- stall watchdog: detection and recovery live in src/stall-watchdog.js; these prototype
+  // methods are the delegation seam — tests stub runAlive/procTable on instances, and the sweep
+  // dispatches through `orch.runAlive(...)` so a stub is honored. ----
+  sweepStalls() { SW.sweepStalls(this); }
 
-  // Live (non-zombie) descendants of the run's CLI, for the hard-cap log: they show what kept a
-  // silent run "alive" (board MCP helpers excluded, same scan as runAlive).
-  stallLiveKids(child) {
-    const rows = this.procTable();
-    if (!rows || !child || !child.pid) return [];
-    const kids = new Map();
-    for (const r of rows) { if (!kids.has(r.ppid)) kids.set(r.ppid, []); kids.get(r.ppid).push(r); }
-    const out = []; const queue = [child.pid]; const seen = new Set(queue);
-    while (queue.length) {
-      for (const r of kids.get(queue.pop()) || []) {
-        if (seen.has(r.pid) || isBoardHelper(r)) continue;
-        seen.add(r.pid); queue.push(r.pid);
-        if (r.state[0] !== 'Z') out.push({ pid: r.pid, command: r.command });
-      }
-    }
-    return out;
-  }
+  stallLiveKids(child) { return SW.stallLiveKids(this, child); }
 
-  // Liveness beyond emitted events: a live (non-zombie) descendant of the run's CLI process counts as
-  // alive — a long silent tool call (build, sleep, network) keeps a grandchild process running even
-  // though no events stream. So does the CLI's own CPU time advancing between sweeps. Unknowable
-  // (ps unavailable, slot placeholder without a pid) counts as alive: never stall on a hunch. The
-  // board MCP helper subtree is excluded (isBoardHelper): it idles for the whole session and would
-  // otherwise keep a hung CLI "alive" forever.
-  runAlive(nodeId, child) {
-    if (!child || !child.pid) return true;
-    if (child.exitCode != null) return false; // already exited; the close event just hasn't fired
-    const rows = this.procTable();
-    if (!rows) return true;
-    const me = rows.find((r) => r.pid === child.pid);
-    const prev = this._stallCpu.get(nodeId);
-    this._stallCpu.set(nodeId, { pid: child.pid, cpuMs: me ? me.cpuMs : null });
-    if (me && prev && prev.pid === child.pid && prev.cpuMs != null && me.cpuMs > prev.cpuMs) return true;
-    const kids = new Map();
-    for (const r of rows) { if (!kids.has(r.ppid)) kids.set(r.ppid, []); kids.get(r.ppid).push(r); }
-    const queue = [child.pid]; const seen = new Set(queue);
-    while (queue.length) {
-      for (const r of kids.get(queue.pop()) || []) {
-        if (seen.has(r.pid) || isBoardHelper(r)) continue; // skipped node's subtree stays unreachable
-        seen.add(r.pid); queue.push(r.pid);
-        // Primary ps state is the first char; flags follow ('ZN' = defunct+nice). A stopped CLI cannot
-        // reap its exited children, so defunct descendants pile up — they are not liveness.
-        if (r.state[0] !== 'Z') return true;
-      }
-    }
-    return false;
-  }
+  runAlive(nodeId, child) { return SW.runAlive(this, nodeId, child); }
 
-  // [{pid, ppid, state, cpuMs, command}] for every process, or null when ps is unavailable.
-  procTable() {
-    try {
-      const out = require('child_process').execFileSync('ps', ['-axo', 'pid=,ppid=,state=,time=,command='], { timeout: 4000 }).toString();
-      return out.split('\n').map((l) => l.trim().split(/\s+/)).filter((p) => p.length >= 3)
-        .map((p) => ({ pid: Number(p[0]), ppid: Number(p[1]), state: p[2], cpuMs: stimeToMs(p[3]), command: p.slice(4).join(' ') }));
-    } catch { return null; }
-  }
+  procTable() { return SW.procTable(); }
   changed() { this.emit('state', this.snapshotSlim()); }
 
   start() {

@@ -29,6 +29,7 @@ test('runs: addRun/listRuns/replaceRun/clearRuns round-trip through the cache', 
 test('runs: compact on disk (no pretty-print whitespace)', () => {
   const s = new Store(mktemp('squad-'));
   s.addRun({ id: 'r1', nodeId: 'n1' });
+  s.flushRunsNow(); // persistence is async + retried (t_44b45119) — force it before reading bytes
   const raw = fs.readFileSync(require('node:path').join(s.dir, 'runs.json'), 'utf8');
   assert.ok(!raw.includes('\n  '), 'runs.json must be one compact line of JSON');
   assert.deepEqual(JSON.parse(raw), { runs: [{ id: 'r1', nodeId: 'n1' }] });
@@ -37,6 +38,7 @@ test('runs: compact on disk (no pretty-print whitespace)', () => {
 test('runs: out-of-band file edits bust the cache (stat key)', () => {
   const s = new Store(mktemp('squad-'));
   s.addRun({ id: 'r1', nodeId: 'n1' });
+  assert.equal(s.flushRunsNow(), true, 'flush before the out-of-band write so no timer can clobber it');
   assert.equal(s.listRuns().length, 1); // warm the cache
   const file = require('node:path').join(s.dir, 'runs.json');
   fs.writeFileSync(file, JSON.stringify({ runs: [{ id: 'zz', nodeId: 'x' }, { id: 'yy', nodeId: 'y' }] }));
@@ -102,16 +104,39 @@ test('withLockTry: a lock stolen mid-hold is not deleted (release checks the pid
   fs.rmSync(lock, { recursive: true, force: true });
 });
 
-test('runs: a failed write drops the memo so the phantom record never serves', () => {
+// t_44b45119: run-record persistence must never sleepSync-spin the main thread behind an agent
+// MCP write burst — memory truth is immediate, the disk write defers and retries.
+test('runs: a failed write keeps the record pending and lands it when the disk recovers', () => {
   const dir = mktemp('squad-');
   const s = new Store(dir);
   s.addRun({ id: 'ok1', n: 1 });
+  assert.equal(s.flushRunsNow(), true);
   fs.chmodSync(dir, 0o500); // writes into the store dir now fail
-  let threw = false;
-  try { s.addRun({ id: 'phantom', n: 2 }); } catch { threw = true; }
-  assert.ok(threw, 'the write error propagates');
+  s.addRun({ id: 'phantom', n: 2 });
+  assert.equal(s.listRuns().some((r) => r.id === 'phantom'), true, 'memory truth is immediate');
+  assert.equal(s.flushRunsNow(), false, 'failed flush reports not-ok and stays pending (no crash, no spin)');
   fs.chmodSync(dir, 0o700);
-  const rs = s.listRuns();
-  assert.equal(rs.length, 1, 'memo dropped: re-read from disk, no phantom');
-  assert.equal(rs[0].id, 'ok1');
+  assert.equal(s.flushRunsNow(), true, 'recovers on the next flush');
+  const onDisk = JSON.parse(fs.readFileSync(require('node:path').join(dir, 'runs.json'), 'utf8')).runs;
+  assert.deepEqual(onDisk.map((r) => r.id).sort(), ['ok1', 'phantom']);
+  assert.equal(s.listRuns().length, 2);
+});
+
+test('runs: flush defers under contention (no spin) and merges records another instance wrote meanwhile', () => {
+  const dir = mktemp('squad-');
+  const a = new Store(dir);
+  const b = new Store(dir);
+  a.addRun({ id: 'ra', n: 1 });
+  b.addRun({ id: 'rb', n: 2 });
+  b.flushRunsNow(); // b's write lands while a still holds a pending record
+  fs.mkdirSync(dir + '/.lock'); // an agent MCP burst holds the lock
+  const t0 = Date.now();
+  a.addRun({ id: 'rc', n: 3 }); // contended: the fast path defers, no spin
+  assert.ok(Date.now() - t0 < 100, `staged in ${Date.now() - t0}ms`);
+  assert.equal(a.flushRunsNow(), false, 'still contended: kept pending');
+  fs.rmSync(dir + '/.lock', { recursive: true, force: true });
+  assert.equal(a.flushRunsNow(), true);
+  const onDisk = JSON.parse(fs.readFileSync(require('node:path').join(dir, 'runs.json'), 'utf8')).runs;
+  assert.deepEqual(onDisk.map((r) => r.id).sort(), ['ra', 'rb', 'rc'], 'no lost update across instances');
+  assert.deepEqual(a.listRuns().map((r) => r.id).sort(), ['ra', 'rb', 'rc']);
 });
