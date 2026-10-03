@@ -236,10 +236,12 @@ async function autorun(file) {
   const p = pm.list().find((x) => x.name === project); if (!p) return console.error('[autorun] no project', project);
   const w = (ms) => new Promise((r) => setTimeout(r, ms));
   await w(800);
+  // The project list renders after the first refresh: wait for the row instead of a fixed sleep.
+  for (let i = 0; i < 60; i++) { if (await win.webContents.executeJavaScript(`!!document.querySelector('#projectlist div[data-pid="${p.id}"]')`)) break; await w(500); }
   await win.webContents.executeJavaScript(`document.querySelector('#projectlist div[data-pid="${p.id}"]').click()`); await w(1200);
-  await win.webContents.executeJavaScript(`document.querySelector('#tabs button[data-tab=team]').click(); document.querySelector('#testteam').click()`);
-  for (let i = 0; i < 90; i++) { await w(2000); const t = await win.webContents.executeJavaScript(`document.querySelector('#pf-summary').textContent`); if (!/testing|untested/.test(t)) { console.log('[autorun] preflight:', t); break; } }
-  await win.webContents.executeJavaScript(`(() => { const g = document.querySelector('#goal'); g.value = ${JSON.stringify(goal)}; document.querySelector('#run').click(); })()`);
+  await win.webContents.executeJavaScript(`document.querySelector('#tabs button[data-tab=team]').click(); const t = document.querySelector('#testteam'); if (t) t.click();`); // the Test team button is gone from some layouts
+  for (let i = 0; i < 90; i++) { await w(2000); const t = await win.webContents.executeJavaScript(`(document.querySelector('#pf-summary') || {}).textContent || ''`); if (!/testing|untested/.test(t)) { console.log('[autorun] preflight:', t); break; } }
+  await win.webContents.executeJavaScript(`(() => { const g = document.querySelector('#goal'); g.value = ${JSON.stringify(goal)}; window.confirm = () => true; document.querySelector('#run').click(); })()`);
   console.log('[autorun] started', p.name);
   orchFor(p.id).once('done', () => console.log('[autorun] done', p.name));
 }
