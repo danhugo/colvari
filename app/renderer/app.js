@@ -3398,7 +3398,6 @@ composerEl.addEventListener('drop', (e) => { e.preventDefault(); composerEl.clas
 const ibOpen = new Map();
 function renderInbox() {
   const items = [...(S.inbox || [])].sort((a, b) => (b.createdAt || b.at || 0) - (a.createdAt || a.at || 0));
-  renderInboxBadge();
   const taskTitle = (id) => (S.tasks.find((t) => t.id === id) || {}).title || '';
   $('#inboxlist').innerHTML = items.length ? items.map((i) => `<div class="inboxitem" data-iid="${i.id}">
     <div class="ib-head" role="button" tabindex="0" aria-expanded="false">${S.allNodes.some((x) => x.id === i.nodeId) ? avatarHtml(i.nodeId, new Set(), new Set([i.nodeId])) : '<div class="avatar" style="background:#3a3f4b" title="System">⚙</div>'}<div class="ib-main"><div class="ib-q">${esc(i.question)}</div><small class="ib-meta">${i.kind === 'approval' ? 'Approval' : 'Question'} · ${S.allNodes.some((x) => x.id === i.nodeId) ? esc(nodeName(i.nodeId)) : 'System'}${i.taskId ? ' · ' + esc(taskTitle(i.taskId)) : ''}</small></div><small class="ib-time" title="${esc(new Date(i.at).toLocaleString())}">${esc(agoTxt(i.at) || 'just now')}</small></div>
