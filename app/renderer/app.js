@@ -448,7 +448,7 @@ function renderSidebar() {
   $('#teamlist').innerHTML = teams.map((t) => `<div data-tid="${t.id}" class="${t.id === ctx.t ? 'sel' : ''}"><i class="teamdot" style="background:var(--agent-${teamHue(t.id)})"></i>${esc(t.name)}</div>`).join('');
 }
 function switchTo(c) {
-  if (c.p !== ctx.p) { sel = { node: null, edge: null, task: null, page: null, logTeam: '', chatTeam: '', boardTeam: '' }; wikiEdit = false; $('#wk-title').value = ''; $('#wk-content').value = ''; }
+  if (c.p !== ctx.p) { if (!discardWikiEdit()) return; sel = { node: null, edge: null, task: null, page: null, logTeam: '', chatTeam: '', boardTeam: '' }; wikiEdit = false; wkBaseUpdated = null; $('#wk-title').value = ''; $('#wk-content').value = ''; }
   else sel = { ...sel, node: null, edge: null };
   connectFrom = null; connectMode = false; $('#connect').classList.remove('on');
   ctx = c;
@@ -2169,12 +2169,16 @@ function wikiDirty() {
   return title !== (p ? p.title : sel.page) || content !== (p ? p.content || '' : '');
 }
 const discardWikiEdit = () => !wikiDirty() || confirm('Discard unsaved changes to this page?');
-const wikiNew = () => { if (!discardWikiEdit()) return; sel.page = null; wikiEdit = true; $('#wk-title').value = ''; $('#wk-content').value = ''; showWiki(); renderWiki(); };
+// Concurrent-write guard (seed 471): agents write wiki pages through the board tools while a human
+// edits. wkBaseUpdated remembers the page's updatedAt when this editing session began, so Save can
+// detect "the page changed elsewhere since you started typing" instead of silently clobbering it.
+let wkBaseUpdated = null;
+const wikiNew = () => { if (!discardWikiEdit()) return; sel.page = null; wikiEdit = true; wkBaseUpdated = null; $('#wk-title').value = ''; $('#wk-content').value = ''; showWiki(); renderWiki(); };
 $('#wk-new').onclick = wikiNew;
 $('#wk-empty-new').onclick = wikiNew; // was rendered but never wired up — dead button
 let wkSearchTimer = 0;
 $('#wk-search').oninput = () => { clearTimeout(wkSearchTimer); wkSearchTimer = setTimeout(renderWiki, 150); }; // each keystroke re-filters and rebuilds the page list — render once per typing pause
-function loadPage() { const p = S.wiki[sel.page]; if (!p) return; $('#wk-title').value = p.title; $('#wk-content').value = p.content; showWiki(); }
+function loadPage() { const p = S.wiki[sel.page]; if (!p) return; $('#wk-title').value = p.title; $('#wk-content').value = p.content; wkBaseUpdated = p.updatedAt || null; showWiki(); }
 // Cheap backlinks: tasks whose title or description mention this page's title.
 function wikiBacklinks(title) { const q = title.trim().toLowerCase(); if (!q) return []; return S.tasks.filter((t) => (t.title || '').toLowerCase().includes(q) || (t.description || '').toLowerCase().includes(q)); }
 function showWiki() {
@@ -2183,22 +2187,23 @@ function showWiki() {
   $('#wk-view').innerHTML = md($('#wk-content').value) + (bl.length ? `<div class="wk-backlinks"><b>Linked from tasks</b><ul>${bl.map((t) => `<li data-task="${esc(t.id)}">${esc(t.title)}</li>`).join('')}</ul></div>` : '');
   $('#wk-view').querySelectorAll('.wk-backlinks li').forEach((d) => d.onclick = () => { sel.task = d.dataset.task; showTab('board'); renderBoard(); });
 }
-$('#wk-edit').onclick = () => { wikiEdit = !wikiEdit; showWiki(); };
+$('#wk-edit').onclick = () => { const on = !wikiEdit; if (on) wkBaseUpdated = (sel.page && S.wiki[sel.page]) ? (S.wiki[sel.page].updatedAt || null) : null; wikiEdit = on; showWiki(); };
 $('#wk-save').onclick = async () => {
   const t = $('#wk-title').value.trim();
   if (!t) { alert('Give the page a title before saving.'); $('#wk-title').focus(); return; }
   if (t !== sel.page && S.wiki[t] && !confirm(`A page titled "${t}" already exists. Overwrite it?`)) return;
   const prev = sel.page && sel.page !== t && S.wiki[sel.page] ? sel.page : null; // title change would otherwise leave the old page behind as a stray duplicate
   if (prev && !confirm(`Rename page "${prev}" to "${t}"? The old page will be removed.`)) return;
+  if (t === sel.page && S.wiki[t] && (S.wiki[t].updatedAt || null) !== wkBaseUpdated && !confirm('This page changed elsewhere since you started editing. Save over it?')) return;
   $('#wk-save').disabled = true;
   try {
     await call('writeWiki', t, $('#wk-content').value);
     if (prev) await call('deleteWiki', prev);
-    sel.page = t; wikiEdit = false; refresh();
+    sel.page = t; wikiEdit = false; wkBaseUpdated = null; refresh();
   } catch (e) { alert(String(e.message || e).replace(/^Error invoking remote method 'api': (Error: )?/, '')); }
   finally { $('#wk-save').disabled = false; }
 };
-$('#wk-del').onclick = async () => { $('#wk-more').open = false; if (sel.page && confirm(`Delete page "${sel.page}"? This can't be undone.`)) { try { await call('deleteWiki', sel.page); sel.page = null; wikiEdit = false; $('#wk-title').value = ''; $('#wk-content').value = ''; refresh(); } catch (e) { alert(String(e.message || e).replace(/^Error invoking remote method 'api': (Error: )?/, '')); } } };
+$('#wk-del').onclick = async () => { $('#wk-more').open = false; if (sel.page && confirm(`Delete page "${sel.page}"? This can't be undone.`)) { try { await call('deleteWiki', sel.page); sel.page = null; wikiEdit = false; wkBaseUpdated = null; $('#wk-title').value = ''; $('#wk-content').value = ''; refresh(); } catch (e) { alert(String(e.message || e).replace(/^Error invoking remote method 'api': (Error: )?/, '')); } } };
 
 // ---------- observability ----------
 const logTeamNodes = () => S.allNodes.filter((n) => teamScoped(sel.logTeam, n.id));
