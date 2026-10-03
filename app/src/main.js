@@ -111,7 +111,11 @@ function orchFor(pid) {
   let o = orchs.get(pid);
   if (!o) {
     o = new Orchestrator(pm.store(pid), { repoDir: APP_ROOT, devMode: DEV_MODE });
-    o.on('log', (l) => send('log', { ...l, projectId: pid }));
+    // Log lines ride the delta pump as one batched 'logs' delta per tick (t_d22a6cf2) — one IPC
+    // message per line used to serialize main<->renderer under streaming load. The self-update
+    // watcher keeps the direct 'log' channel (main.js below): low volume, and it must arrive even
+    // when the pump for a not-yet-opened project is idle.
+    o.on('log', (l) => pumpFor(pid).pushLog({ ...l, projectId: pid }));
     o.on('state', (s) => send('state', { ...s, projectId: pid })); // slim: the renderer refreshes from the store on receipt
     o.on('notify', (n) => { send('notify', { ...n, projectId: pid }); notify(n, pid); });
     o.on('woken_by_message', (w) => send('woken_by_message', { ...w, projectId: pid }));

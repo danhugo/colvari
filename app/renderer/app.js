@@ -2951,6 +2951,8 @@ function appendLogTail() {
   box.scrollTop = box.scrollHeight;
   return true;
 }
+// Direct 'log' pushes now carry only the low-volume paths (self-update watcher); orchestrator log
+// lines arrive batched on the 'delta' channel above (t_d22a6cf2).
 squad.on('log', (l) => { l._seq = ++logSeq; logs.push(l); if (logs.length > 8000) logs.splice(0, 1000); if (l.projectId === ctx.p) chatBump(); scheduleLogRender(); });
 // In-app toast for orchestrator notifications (desktop notifications are shown by the main process).
 squad.on('notify', (n) => {
@@ -2980,17 +2982,36 @@ document.addEventListener('keydown', (e) => {
 });
 // IPC deltas (t_39bf39ac, track 2): the main process pushes {type,id,patch} batches — one send per
 // tick, seq-chained — covering tasks/wiki (board-cache change events), the orch snapshot (state
-// events) and messages/inbox/runs (sig-checked per flush). The renderer patches its local store and
-// re-renders the visible views; a seq gap or resync marker falls back to a full getAll pull (wiki
-// rule 5). The 2s tick below stays as the backstop for the sections deltas do not cover.
+// events), batched log lines (t_d22a6cf2) and messages/inbox/runs (sig-checked per flush). The
+// renderer patches its local store and re-renders the visible views; a seq gap or resync marker
+// falls back to a full getAll pull (wiki rule 5). The 2s tick below stays as the backstop for the
+// sections deltas do not cover.
 let lastDeltaSeq = null, lastDeltaProject = null, deltaRaf = 0;
+// Log-line ingest shared by both paths (t_d22a6cf2): batched deltas for the active project and the
+// cross-project batches below keep the old 'log'-channel semantics — lines from every project
+// accumulate (tagged with projectId), only the active project's redraw the views.
+function ingestLogs(lines) {
+  for (const l of lines) { l._seq = ++logSeq; logs.push(l); }
+  if (logs.length > 8000) logs.splice(0, 1000);
+  // A batch comes from one pump/project: bump chat only for the active project's lines (the old
+  // 'log' handler skipped them too); the log tail renders itself only when Obs is open anyway.
+  if (!lines[0] || !lines[0].projectId || lines[0].projectId === ctx.p) chatBump();
+  scheduleLogRender();
+}
 squad.on('delta', (b) => {
-  if (!b || !Array.isArray(b.deltas) || (b.projectId && b.projectId !== ctx.p)) return;
+  if (!b || !Array.isArray(b.deltas)) return;
+  if (b.projectId && b.projectId !== ctx.p) {
+    // Inactive project's batch: not applied to S (its seq chain is tracked on switch), but its log
+    // lines still accumulate so a later switch has the same history the direct pushes delivered.
+    for (const d of b.deltas) if (d.type === 'logs') ingestLogs(d.set);
+    return;
+  }
   if (lastDeltaProject !== ctx.p) { lastDeltaProject = ctx.p; lastDeltaSeq = null; } // fresh chain after a project switch
   if (DeltaClient.plan(lastDeltaSeq, b).op === 'resync') { lastDeltaSeq = null; lastV = null; refresh(); return; }
   lastDeltaSeq = b.seq;
   for (const d of b.deltas) {
     if (d.type === 'runs') { RUNS = d.set; chatBump(); continue; } // module binding, not an S section
+    if (d.type === 'logs') { ingestLogs(d.set); continue; } // batched log lines: one IPC per tick instead of one per line
     if (d.type === 'resync') { lastDeltaSeq = null; lastV = null; refresh(); return; }
     DeltaClient.patch(S, d);
     // Chat reads task/messages/inbox/orch/runs: bump its epoch so the event-driven redraw

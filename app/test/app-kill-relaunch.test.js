@@ -120,8 +120,9 @@ test('relaunch on the same store: planted orphan reaped, task marked interrupted
   const t2 = s.getTask(task2.id);
   const c = (t2.comments || []).find((x) => x.author === 'system' && /died while this task's agent run was live/.test(x.text));
   assert.ok(c, 'interrupted task has no system comment');
-  const logs = fs.readFileSync(path.join(seed.dir, 'logs.jsonl'), 'utf8');
-  assert.match(logs, new RegExp(`previous app instance \\(pid ${app1.pid}\\) died without a clean exit[^]*reaped 1 orphan`), 'boot summary log line missing or wrong');
+  // Boot logs are buffered now (t_d22a6cf2): poll for the flushed line instead of reading once.
+  const bootLine = new RegExp(`previous app instance \\(pid ${app1.pid}\\) died without a clean exit[^]*reaped 1 orphan`);
+  assert.ok(await until(() => { try { return bootLine.test(fs.readFileSync(path.join(seed.dir, 'logs.jsonl'), 'utf8')); } catch { return false; } }, 10000), 'boot summary log line missing or wrong');
 
   // The verify instance quits cleanly (entry app.quit -> will-quit stamps cleanExitAt):
   // the next boot must find no banner evidence at all.
