@@ -185,6 +185,31 @@ test('another run finishing OK on the same runtime triggers one auto try', async
   assert.equal(s.getTask(tb.id).status, 'review', 'the auto try resumed it to a clean hand-off');
 });
 
+test("a deferred fate write must not leave the finished task reading in_progress to its own finish signal (t_5ab37844)", async () => {
+  const { s, argsLog } = setup(SRESULT('own-1'));
+  const n = s.addNode({ name: 'D', role: 'Dev' });
+  const t = s.createTask({ title: 'own work', assignee: n.id });
+  const o = new Orchestrator(s); o.running = true;
+  o.preflight = async () => ({ ok: true });
+  // Contended-lock simulation (the updateTaskSoon / updateTaskAsync deferred path): every task
+  // write lands one macrotask late, so a scan between write and landing sees the pre-write state.
+  const real = s.updateTask.bind(s);
+  const queue = [];
+  const defer = (tid, patch, opts) => {
+    queue.push([tid, patch, opts]);
+    setImmediate(() => { for (const [a, b, c] of queue.splice(0)) { try { real(a, b, c); } catch {} } });
+    return s.getTask(tid);
+  };
+  s.updateTaskSoon = (tid, patch, opts) => defer(tid, patch, opts);
+  s.updateTaskAsync = async (tid, patch, opts) => { defer(tid, patch, opts); await new Promise((r) => setImmediate(r)); return s.getTask(tid); }; // like the real one: the await resolves only after the write lands
+  await o.runTask(s.getTeam().nodes.find((x) => x.id === n.id), s.getTask(t.id), s.getTeam(), s.getSettings());
+  await settle(o);
+  await new Promise((r) => setImmediate(r));
+  assert.equal(readCalls(argsLog).length, 1, 'the run is not auto-resumed by its own finish signal');
+  assert.equal(s.getTask(t.id).status, 'review', 'the deferred hand-off write still lands');
+  assert.ok(!s.getTask(t.id).autoResumeTried, 'no one-try flag: no auto try happened');
+});
+
 test('autoResumeStuck claims at most ONE task per trigger', async () => {
   const { s, argsLog } = setup(`exec sleep 30`); // hang: hold the claimed run in flight (exec: no orphan)
   const b = s.addNode({ name: 'B', role: 'Dev' });

@@ -1719,13 +1719,13 @@ class Orchestrator extends EventEmitter {
       // A human stop (stopAgent; budget stops excluded — a.budgetStop is set for those) stamps the
       // task so the free-signal auto resume never brings it back (plan t_76da3303 C). The manual
       // button still works: only the auto path consults the stamp.
-      if (stoppedWhy && !a.budgetStop) this.store.updateTaskSoon(task.id, { noAutoResume: true });
+      if (stoppedWhy && !a.budgetStop) await this.store.updateTaskAsync(task.id, { noAutoResume: true });
       a.status = 'idle'; a.taskId = null; a.task = null; a.iteration = 0; a.stall = null;
       const t = this.store.getTask(task.id);
       const gate = (st) => C.gateStatus(st, node, this.store.getSettings());
       if (m.mode === 'goal' && t && judge && !judge.met && t.status === 'done') {
         // Parked for a human, not a "please review this" hand-off: never auto-dispatched/auto-advanced.
-        this.store.updateTaskSoon(task.id, { status: 'review', parkedForHuman: true });
+        await this.store.updateTaskAsync(task.id, { status: 'review', parkedForHuman: true });
         this.store.commentTask(task.id, 'orchestrator', judge.inconclusive ? `Goal check was inconclusive after ${i} iteration(s): ${judge.reason}. Check the result yourself.` : `Goal condition not met after ${i} iteration(s) (${reason}): ${judge.reason}`);
       } else if (t && t.status === 'in_progress' && !this.drainCutNodes.has(node.id)) {
         // Agent ended without updating status: a normal dispatch hands off to review —
@@ -1745,25 +1745,25 @@ class Orchestrator extends EventEmitter {
           const priorCrashes = t.comments.filter((c) => /^crashed: exit code/.test(c.text)).length;
           if (priorCrashes >= 2) {
             const g = gate('review'); g.parkedForHuman = true;
-            this.store.updateTaskSoon(task.id, g);
+            await this.store.updateTaskAsync(task.id, g);
             const tail = FQ.redactError(stderr) || `exit ${code}, no stderr`;
             this.store.commentTask(task.id, 'orchestrator', `crashed: exit code ${code} after ${i} iteration(s) (${reason}); ${priorCrashes + 1} crashes — parked for a human instead of re-queuing.\nstderr tail: ${tail}`);
             this.alertCrashPark(node, task, priorCrashes + 1, tail);
           } else {
-            this.store.updateTaskSoon(task.id, { status: 'todo' });
+            await this.store.updateTaskAsync(task.id, { status: 'todo' });
             this.store.commentTask(task.id, 'orchestrator', `crashed: exit code ${code} after ${i} iteration(s) (${reason}); back to todo.`);
           }
         } else {
           const g = gate(ok && a.reviewPickup ? 'done' : 'review');
           if (!ok) g.parkedForHuman = true;
-          this.store.updateTaskSoon(task.id, g);
+          await this.store.updateTaskAsync(task.id, g);
           this.store.commentTask(task.id, 'orchestrator', stoppedWhy ? `Agent stopped (${stoppedWhy}) after ${i} iteration(s); moved to review.` : `Agent exited (code ${code}) without setting status after ${i} iteration(s) (${reason}); moved to review.`);
         }
       } else if (t && t.status === 'review' && !t.parkedForHuman && code !== 0 && this.running && !stoppedWhy && !this.drainCutNodes.has(node.id)) {
         // The agent itself moved this to 'review' (clearing parkedForHuman) but the process then crashed
         // (nonzero exit). A crashed run must never look like a clean hand-off eligible for silent
         // auto-advance to done: park it for a human to inspect.
-        this.store.updateTaskSoon(task.id, { parkedForHuman: true });
+        await this.store.updateTaskAsync(task.id, { parkedForHuman: true });
         this.store.commentTask(task.id, 'orchestrator', `Agent exited (code ${code}) after moving this task to review during iteration ${i}; parked for a human because the run crashed.`);
       }
       const t2 = this.store.getTask(task.id);
@@ -1783,7 +1783,10 @@ class Orchestrator extends EventEmitter {
     // Free signal (plan t_76da3303 C): a run on this runtime just finished OK — its CLI proved
     // healthy, so ONE stuck task on the same runtime gets its single auto retest+resume try. Fired
     // after the finally so the released slot counts in the maxConcurrency guard, and before the
-    // ticks below so the dispatched task holds its own slot before any reconcile runs.
+    // ticks below so the dispatched task holds its own slot before any reconcile runs. The fate
+    // writes above go through the awaited updateTaskAsync (never the deferrable updateTaskSoon):
+    // a hand-off queued behind a busy lock read as in_progress here and got spuriously retested by
+    // its own finish signal — double cost/tokens at best, a retest loop at worst (t_5ab37844).
     if (okRuntime && this.running && !this.userStopped) { try { this.autoResumeStuck(okRuntime, 'run finished ok'); } catch {} }
     setImmediate(() => this.tick());
     setImmediate(() => this.tick());
