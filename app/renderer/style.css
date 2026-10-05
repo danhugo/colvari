@@ -794,6 +794,7 @@ header #stop:hover { background:var(--danger-soft); color:var(--danger); }
 .sb-inbox:hover { background:var(--bg-hover); color:var(--fg-primary); }
 .sb-inbox.active { background:var(--accent-soft); color:var(--accent-text); }
 .sb-inbox:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
+.sb-inbox .badge { margin-left:auto; }
 /* Section action icons reveal on hover or keyboard focus only; --fg-secondary keeps them ≥3:1
    on the sidebar surface in both themes (the old --fg-muted glyphs read as background noise). */
 #sidebar .sb-actions { opacity:0; transition:opacity var(--dur-fast) var(--ease-out); }
@@ -935,6 +936,7 @@ button, .pchip, .tag, .badge, .pill, .avatar, .cchip summary, .lvchip, .asswitch
 .ib-empty { display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; gap:8px; min-height:60%; padding:40px 20px; color:var(--fg-secondary); }
 .ib-empty svg { width:44px; height:44px; stroke:var(--fg-secondary); fill:none; stroke-width:1.4; stroke-linecap:round; stroke-linejoin:round; }
 .ib-empty h3 { margin:0; color:var(--fg-primary); font-size:16px; } .ib-empty p { margin:0; max-width:340px; }
+.sb-inbox .badge { min-width:18px; font-weight:var(--fw-semibold); }
 
 /* Sidebar inbox count (t_b31a7a05): solid pill, always legible against the sidebar. */
 .sb-inbox .badge { display:inline-flex; align-items:center; justify-content:center; height:18px; min-width:18px; padding:0 6px; border-radius:9px; background:var(--danger); color:var(--fg-on-accent); font-size:11px; font-weight:var(--fw-semibold); line-height:1; margin-left:auto; } .sb-inbox .badge:empty { display:none; }
