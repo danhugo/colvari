@@ -54,6 +54,10 @@ const TEST_MODE = !!(process.env.AGENTS_SQUAD_GUI_E2E || process.env.AGENTS_SQUA
 const HARNESS_RUN = process.env.AGENTS_SQUAD_HARNESS_RUN || (TEST_MODE ? HS.harnessRunId('harness') : null);
 if (TEST_MODE) {
   const testRoot = isolateTestRoot();
+  // Durable sandbox root (t_8f7605c4): every repo-mutating path (task worktree create/merge/
+  // discard, agent dispatch cwd) refuses anything resolving outside it. Set here — past the
+  // require-time reads harnesses key on — and never unset, so it also rides into spawned env.
+  process.env.AGENTS_SQUAD_TEST_ROOT = testRoot;
   // Own userData too (t_490eeee8 harness-isolation audit): the default path is shared with the
   // live app, so a test renderer would read the live localStorage ctx AND write its own over it.
   app.setPath('userData', path.join(testRoot, 'userData'));

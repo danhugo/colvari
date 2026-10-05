@@ -77,6 +77,22 @@ process.on('exit', () => { try { fs.rmSync(process.env.AGENTS_SQUAD_PROJECT, { r
 // Isolation self-check (t_490eeee8 audit): a regression above would boot the perf instance on
 // the live app's data root — refuse instead of clobbering it.
 if (!process.env.AGENTS_SQUAD_PROJECT.startsWith(os.tmpdir())) throw new Error('[perf] AGENTS_SQUAD_PROJECT must be an isolated temp root — refusing to run against shared data');
+
+// Sandbox (t_8f7605c4): agents get private git clones inside the data root and the run
+// hard-fails at startup unless every node workdir + git root stays inside it.
+const SB = require(path.join(APP, 'test', 'harness', 'sandbox'));
+const AGENT_WS = Array.from({ length: AGENTS }, (_, i) => SB.agentWorkspace(process.env.AGENTS_SQUAD_PROJECT, i));
+function assertAgentSandbox(seeded) {
+  const { Store } = require(path.join(APP, 'src/store.js'));
+  const store = new Store(seeded.dir);
+  const nodes = store.read(store.teamFile(), { nodes: [] }).nodes || [];
+  if (nodes.length < AGENTS) throw new Error(`[sandbox] only ${nodes.length}/${AGENTS} nodes found after seed`);
+  for (const n of nodes) {
+    const wd = path.resolve(n.workdir || seeded.dir);
+    SB.assertSandboxed(process.env.AGENTS_SQUAD_PROJECT, [{ label: `node ${n.name} workdir`, path: wd }]);
+    if (n.workdir) SB.assertGitInside(process.env.AGENTS_SQUAD_PROJECT, wd, `node ${n.name}`);
+  }
+}
 process.env.AGENTS_SQUAD_TEST_TIMEOUT_MS = String(Math.max(180000,
   STREAM_SECONDS * 1000 + 90000 + TRACE_MS + CLICK_BUDGET_MS));
 process.env.AGENTS_SQUAD_DEV = '0'; // no UpdateWatcher in a perf instance
@@ -277,7 +293,7 @@ async function seed() {
     switchTo({ p: p.id }); await w(600); await refresh();
     await call('saveSettings', { claudePath: ${jsq(CLI)}, useWorktrees: false, maxConcurrency: ${AGENTS}, maxRuns: ${TASKS + 2} });
     const nodes = [];
-    for (let i = 0; i < ${AGENTS}; i++) nodes.push(await call('addNode', { name: 'Perf-' + (i + 1), role: 'Dev', x: 90 + (i % 3) * 240, y: 110 + Math.floor(i / 3) * 190, runtime: 'claude', model: 'perf-1' }));
+    for (let i = 0; i < ${AGENTS}; i++) nodes.push(await call('addNode', { name: 'Perf-' + (i + 1), role: 'Dev', x: 90 + (i % 3) * 240, y: 110 + Math.floor(i / 3) * 190, runtime: 'claude', model: 'perf-1', workdir: ${jsq(AGENT_WS[i])} }));
     for (const n of nodes.slice(1)) await call('addEdge', nodes[0].id, n.id, 'assign');
     const tasks = [];
     for (let i = 0; i < ${TASKS}; i++) tasks.push((await call('createTask', { title: 'Streaming perf task ' + (i + 1), description: 'Keep the team busy with synthetic streaming work for the perf baseline.', assignee: nodes[i % nodes.length].id })).id);
@@ -433,6 +449,7 @@ async function startTrace(minMs) {
 async function main() {
   await WAIT(1200);
   const seeded = await seed();
+  assertAgentSandbox(seeded); // hard gate (t_8f7605c4)
   const bulk = bulkSeed(seeded.dir, seeded.nodes);
   console.log('[perf] seeded', JSON.stringify({ ...seeded, ...bulk }));
   await ex(`await refresh(); showTab('chat'); await w(300);`);
