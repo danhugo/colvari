@@ -2577,7 +2577,25 @@ function billingTable(rs) {
   const g = {}; for (const r of rs) { const k = r.billingSource || 'unknown'; (g[k] ||= { runs: 0, cost: 0 }); g[k].runs++; g[k].cost += r.reportedCostUsd || 0; }
   return `<div><h4>By billing source</h4><table><tr><th></th><th>Runs</th><th>Cost</th><th></th></tr>${Object.entries(g).sort((a, b) => b[1].cost - a[1].cost).map(([k, v]) => `<tr><td>${billTag(k)}</td><td class="num">${v.runs}</td><td class="num">$${v.cost.toFixed(4)}</td><td>${k === 'subscription' ? '<span class="costnote">covered by subscription — not billed per token</span>' : k === 'unknown' ? '<span class="costnote">billing source undetected</span>' : ''}</td></tr>`).join('')}</table></div>`;
 }
+// t_6cbe12ed: a run landing bumps S.v.runs, so under stream churn every delta-pump frame rebuilt
+// the ledger (~4.2 ms at 471 runs, t_0bd4680f — ~25% main thread at frame rate). Leading+trailing
+// debounce: activation and filter changes still draw at once when the view is quiet, a streaming
+// burst coalesces into at most one rebuild per window, and the trailing call guarantees the last
+// state lands.
+const USAGE_DEBOUNCE_MS = 300;
+let usageLastDraw = 0, usageTimer = 0;
 function renderUsage() {
+  if (!$('#tab-usage').classList.contains('active')) return;
+  const now = Date.now();
+  if (now - usageLastDraw >= USAGE_DEBOUNCE_MS) {
+    if (usageTimer) { clearTimeout(usageTimer); usageTimer = 0; }
+    usageLastDraw = now;
+    renderUsageNow();
+  } else if (!usageTimer) {
+    usageTimer = setTimeout(() => { usageTimer = 0; if (!$('#tab-usage').classList.contains('active')) return; usageLastDraw = Date.now(); renderUsageNow(); }, USAGE_DEBOUNCE_MS - (now - usageLastDraw));
+  }
+}
+function renderUsageNow() {
   if (!$('#tab-usage').classList.contains('active')) return;
   const ukey = [S.v && S.v.runs, S.v && S.v.board, RUNS.length, $('#us-agent').value, $('#us-billing').value, S.allNodes.length].join('|');
   if (ukey === usageSig) return; usageSig = ukey;
