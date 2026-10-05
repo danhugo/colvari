@@ -26,7 +26,7 @@ const scopeBlock = src.slice(s0, s1);
 const teamHue = (tid) => ({ t1: 1, t2: 2 }[tid] || 0);
 
 function build(state) {
-  return new Function('S', 'teamHue', `${indexBlock}\nreturn { nodeById, taskById, nodeTeamOf, teamScoped, taskTeamOf, agentColor, agentStep };`)(state, teamHue);
+  return new Function('S', 'teamHue', `${indexBlock}\nreturn { nodeById, taskById, nodeTeamOf, teamScoped, taskTeamOf, agentColor, agentVar };`)(state, teamHue);
 }
 function buildTitle(state) {
   return new Function('S', 'taskById', `${titleBlock}\nreturn { taskTitle };`)(state.S || state, build(state).taskById);
@@ -99,14 +99,16 @@ test('steady-state lookups perform ZERO array scans (the 139ms fix)', () => {
   assert.equal(scans.nodes, warm.nodes, 'no node scans after warm-up');
 });
 
-test('agentStep stays correct with the memo and mixes colours within a team', () => {
+test('agentVar wears exactly the team colour — no per-member mix steps (t_b590b876)', () => {
   const S = fixture();
   const ix = build(S);
-  assert.deepEqual([ix.agentStep('n1'), ix.agentStep('n2'), ix.agentStep('n3')], [0, 1, 2]);
-  assert.equal(ix.agentStep('n4'), 0);
-  assert.equal(ix.agentStep('human'), 0);
-  S.allNodes = S.allNodes.slice(); // identity swap: memo re-inits, steps unchanged
-  assert.equal(ix.agentStep('n3'), 2);
+  assert.deepEqual([ix.agentColor('n1'), ix.agentColor('n2'), ix.agentColor('n3')], [1, 1, 1]);
+  assert.deepEqual([ix.agentVar('n1'), ix.agentVar('n2'), ix.agentVar('n3')].filter((v, i, a) => a.indexOf(v) === i), ['var(--agent-1)']);
+  assert.equal(ix.agentVar('n4'), 'var(--agent-2)'); // the other team differs
+  let h = 0; for (const c of 'human') h = (h * 31 + c.charCodeAt(0)) >>> 0;
+  assert.equal(ix.agentVar('human'), `var(--agent-${(h % 8) + 1})`); // hash fallback for teamless ids
+  S.allNodes = S.allNodes.slice(); // identity swap: memo re-inits, colour unchanged
+  assert.equal(ix.agentVar('n3'), 'var(--agent-1)');
 });
 
 test('chatInScope/crossTeamOf route events by task team through the indexes', () => {

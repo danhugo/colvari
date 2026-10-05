@@ -904,11 +904,12 @@ $('#runbtn').onclick = () => $('#run').click(); // header Run shares the popover
 const W = 184, H = 80, SVGNS = 'http://www.w3.org/2000/svg';
 function el(tag, attrs, parent) { const e = document.createElementNS(SVGNS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); parent && parent.appendChild(e); return e; }
 let VP = { x: 20, y: 20, zoom: 1 }, vpTeam = null, vpSave = null, lastEdgeType = 'assign', linkDrag = null;
-// Team-tied colour system (t_300e8fd2): the hue belongs to the TEAM (hash of teamId), so a
-// screenshot reads team clustering, not noise; members within a team step toward --agent-mix
-// (80% / 62%) so teammates are distinguishable while staying in the team's hue family.
-// Team-tied hue: a team's index among the project's teams (sorted by id — stable across
-// machines) so up to 8 teams get DISTINCT hues; hash fallback covers unknown/teamless ids.
+// Team-tied colour system (t_b590b876 regression): the colour belongs to the TEAM (its index
+// among the project's teams, sorted by id — stable across machines, up to 8 distinct hues; hash
+// fallback covers unknown/teamless ids) and EVERY agent surface wears exactly that one token —
+// graph avatar disc + stripe, minimap, chat, board, logs, mentions, live card, editor face.
+// The role-tinted roleBg() and per-member mix steps (t_300e8fd2) both broke the
+// "avatar colour = team colour, same as the frame" rule (wiki UI Design Direction — Graph Editor).
 const _teamHue = new Map(); let _teamHueSrc = null;
 const teamHue = (teamId) => {
   if (!teamId) return 0;
@@ -937,16 +938,9 @@ const agentColor = (id) => {
   if (hue) return hue;
   let h = 0; for (const c of String(id)) h = (h * 31 + c.charCodeAt(0)) >>> 0; return (h % 8) + 1;
 };
-// Step within the team (0-2 colour mix) — the per-call filter here allocated a fresh array for
-// every avatar on every draw; memoize per allNodes identity like the id indexes above.
-const agentStep = (id) => {
-  const n = nodeById(id);
-  if (!n || !n.teamId) return 0;
-  if (_idx.steps !== S.allNodes) { _idx.steps = S.allNodes; _idx.stepMap = new Map(); }
-  let s = _idx.stepMap.get(id);
-  if (s === undefined) { const i = S.allNodes.filter((x) => x.teamId === n.teamId).findIndex((x) => x.id === id); s = i < 0 ? 0 : i % 3; _idx.stepMap.set(id, s); }
-  return s;
-};
+// Step within the team (0-2 colour mix) — removed (t_b590b876): teammates must share one colour;
+// identity comes from the DiceBear face (incl. the avatarSeed override, which changes the face only).
+const agentVar = (id) => `var(--agent-${agentColor(id)})`;
 // Team scoping (t_1158f757): one predicate shared by the Logs/Chat/Board team filters.
 // team = '' (All teams) passes everything; an id that is not a team node never passes a
 // real team — chat events get their own "no team anywhere stays visible" rule on top.
@@ -962,18 +956,8 @@ const teamBadge = (tid) => { const tm = teamNameOf(tid); const name = tm ? tm.na
 const fillTeamSelect = (el, val, teams) => { if (!el) return; const sig = teams.map((t) => t.id).join() + '|' + (val || '');
   if (el.dataset.tsig === sig) return; el.dataset.tsig = sig;
   el.innerHTML = '<option value="">All teams</option>' + teams.map((t) => `<option value="${t.id}">${esc(t.name)}</option>`).join(''); el.value = val || ''; };
-const agentVar = (id) => { const s = agentStep(id); return s ? `color-mix(in srgb, var(--agent-${agentColor(id)}) ${s === 1 ? 80 : 62}%, var(--agent-mix))` : `var(--agent-${agentColor(id)})`; };
 // Leads/PMs read as circles vs the member squircle (avatarHtml adds the class).
 const isLeadRole = (role) => /\b(pm|lead|manager|chief|director|head)\b/i.test(String(role || ''));
-// Agent avatar background: role → existing brand token (wiki decision-dicebear-avatars; the -text family
-// passes contrast in both themes, plain --agent-N fails light mode). Lead checked first so "Dev Lead" reads lead.
-const roleBg = (role) => { const r = String(role || '');
-  if (isLeadRole(r)) return 'var(--accent-text)';
-  if (/critic/i.test(r)) return 'var(--agent-3-text)';
-  if (/review/i.test(r)) return 'var(--agent-2-text)';
-  if (/design/i.test(r)) return 'var(--agent-4-text)';
-  if (/\b(dev|engineer)\b/i.test(r)) return 'var(--agent-5-text)';
-  return 'var(--fg-muted)'; };
 const edgeSeed = (e) => { let h = 0; for (const c of String(e.id || '')) h = (h * 31 + c.charCodeAt(0)) >>> 0; return h; };
 // S.orch.agents is patched by every delta; S.nstat only by refresh() (which the delta path keeps quiet) — so 'working' comes from the live agents, nstat only adds needs-human.
 const nodeLive = (n) => (S.orch.agents[n.id] || {}).status === 'working' ? 'working' : ((S.nstat || {})[n.id] || {}).status === 'needs-human' ? 'needs-human' : 'idle';
@@ -1248,7 +1232,7 @@ function renderGraph() {
     const g = el('g', { class: 'node' + (sel.node === n.id || connectFrom === n.id ? ' sel' : '') + ' st-' + live + (live === 'working' ? ' working' : '') + (rtuFor(n.id) ? ' rtpaused' : ''), transform: `translate(${n.x},${n.y})`, 'data-id': n.id }, nL);
     el('rect', { class: 'card', width: W, height: H, rx: 12 }, g);
     el('rect', { class: 'stripe', width: 4, height: H - 20, x: 0, y: 10, rx: 2, style: `fill:${agentVar(n.id)}` }, g);
-    el('circle', { class: 'avatar', cx: 30, cy: 26, r: 14, style: `fill:${roleBg(n.role)};--av:${roleBg(n.role)}` }, g);
+    el('circle', { class: 'avatar', cx: 30, cy: 26, r: 14, style: `fill:${agentVar(n.id)};--av:${agentVar(n.id)}` }, g);
     if (isLeadRole(n.role)) el('text', { x: 40, y: 37, class: 'leadstar', 'text-anchor': 'middle' }, g).textContent = '★';
     el('image', { class: 'avface', href: faceUri(n.id), x: 16, y: 12, width: 28, height: 28, 'clip-path': 'url(#avclip-team)' }, g);
     el('text', { x: 52, y: 23, class: 'nname' }, g).textContent = clipText(n.name, Math.max(6, Math.round(16 / Math.max(1, 11 / (13 * VP.zoom)))));
@@ -1477,7 +1461,7 @@ function nodeLiveCard(n) {
   const lastEv = [...logs].reverse().find((l) => l.projectId === ctx.p && l.nodeId === n.id);
   const liveTxt = live === 'working' ? '● Working' : live === 'needs-human' ? '● Needs you' : '○ Idle';
   return `<div class="livecard">
-    <div class="lc-head"><img class="lc-face" src="${faceUri(n.id)}" alt="" style="background:${roleBg(n.role)}"><div class="lc-id"><b>${esc(n.name)}</b><span class="lc-role">${esc(n.role)}${isLeadRole(n.role) ? ' ★' : ''}</span></div><span class="pill lc-live lc-${live}" title="${isStuck ? 'stalled — no output for a while · ' : ''}${esc(live)}">${isStuck ? '⚠ stuck · ' : ''}${liveTxt}</span></div>
+    <div class="lc-head"><img class="lc-face" src="${faceUri(n.id)}" alt="" style="background:${agentVar(n.id)}"><div class="lc-id"><b>${esc(n.name)}</b><span class="lc-role">${esc(n.role)}${isLeadRole(n.role) ? ' ★' : ''}</span></div><span class="pill lc-live lc-${live}" title="${isStuck ? 'stalled — no output for a while · ' : ''}${esc(live)}">${isStuck ? '⚠ stuck · ' : ''}${liveTxt}</span></div>
     <div class="lc-task">${t ? `▸ <b>${esc(clipText(t.title, 60))}</b><span class="lc-tstatus">${esc(t.status)}</span>` : '<span class="muted">No current task</span>'}</div>
     <div class="lc-last">${lastEv ? `<small class="muted">${new Date(lastEv.at).toLocaleTimeString()}</small> ${esc(clipText(lastEv.text, 120))}` : '<span class="muted">No activity yet</span>'}</div>
     <div class="lc-actions"><button id="lc-chat" class="primary">Open in Chat</button></div>
@@ -1510,7 +1494,7 @@ function renderNodeForm() {
     <div class="toolbar"><button id="nf-test" ${testing.has(n.id) ? 'disabled' : ''}>Test agent</button><span class="muted">saves first, then runs a cheap check</span></div>
     <div id="nf-pf">${pfDetail(n)}</div>
     <label>Name</label><input id="nf-name" value="${esc(n.name)}">
-    <label>Face</label><div><img id="nf-face" width="40" height="40" alt="" style="background:${roleBg(n.role)};border-radius:50%;vertical-align:middle" src="${faceUri(n.id)}"> <button id="nf-newface" type="button">New face</button> <button id="nf-resetface" type="button">Reset</button></div>
+    <label>Face</label><div><img id="nf-face" width="40" height="40" alt="" style="background:${agentVar(n.id)};border-radius:50%;vertical-align:middle" src="${faceUri(n.id)}"> <button id="nf-newface" type="button">New face</button> <button id="nf-resetface" type="button">Reset</button></div>
     <label>Role <span class="muted">(free text; presets: ${presets.length})</span></label><input id="nf-role" list="rolelist" value="${esc(n.role)}"><datalist id="rolelist">${C.roles.map((r) => `<option value="${esc(r)}">`).join('')}</datalist>
     <div class="toolbar"><button id="nf-applypreset" ${presets.some((p) => p.name.toLowerCase() === String(n.role).toLowerCase()) ? '' : 'disabled'}>Apply preset</button><button id="nf-savepreset">Save as role preset</button></div>
     <label class="inline"><input type="checkbox" id="nf-core" ${n.core ? 'checked' : ''}> Core agent <span class="muted">(protected; recruits and retires teammates; one per team)</span></label>
@@ -2916,7 +2900,7 @@ const crossTeamOf = (e) => { const st = sel.chatTeam; if (!st) return null;
   const a = nodeTeamOf(e.who); if (a && a !== st) return a;
   const b = nodeTeamOf(e.to); if (b && b !== st) return b;
   const tt = e.taskId ? taskTeamOf(e.taskId) : null; return tt && tt !== st ? tt : null; };
-const who = (id) => { const n = nodeById(id); return n ? { name: n.name, role: n.role, color: agentVar(n.id), bg: roleBg(n.role), ini: Chat.initials(n.name), lead: isLeadRole(n.role) } : id === 'human' ? { name: 'You', role: '', color: 'transparent', ini: '', human: true } : { name: id || 'system', role: '', color: 'var(--bg-hover)', ini: '⚙', sys: true }; };
+const who = (id) => { const n = nodeById(id); return n ? { name: n.name, role: n.role, color: agentVar(n.id), bg: agentVar(n.id), ini: Chat.initials(n.name), lead: isLeadRole(n.role) } : id === 'human' ? { name: 'You', role: '', color: 'transparent', ini: '', human: true } : { name: id || 'system', role: '', color: 'var(--bg-hover)', ini: '⚙', sys: true }; };
 function bubble(e) {
   const link = e.taskId && !CH.thread ? ` data-thread="${e.taskId}"` : ''; const tt = link ? taskTitle(e.taskId) : ''; const tl = link && !e._sameTask ? `<span class="tlink" title="${esc(tt)}">↳ ${esc(tt)}</span>` : '';
   const rep = e.count > 1 ? `<span class="repeat" title="repeated ${e.count} times">×${e.count}</span>` : '';
@@ -3322,7 +3306,7 @@ function chatPreview() {
   box.classList.toggle('hidden', !open);
   if (open) {
     CH.mi = Math.min(CH.mi, Math.max(0, ms.length - 1));
-    const html = ms.map((n, i) => `<div data-name="${esc(n.name)}" class="${i === CH.mi ? 'sel' : ''}"><span class="avatar${isLeadRole(n.role) ? ' is-lead' : ''}" style="background:${roleBg(n.role)}">${avatarBody(n.id, who(n.id))}</span>${esc(n.name)} <span class="role">${esc(n.role)}</span></div>`).join('');
+    const html = ms.map((n, i) => `<div data-name="${esc(n.name)}" class="${i === CH.mi ? 'sel' : ''}"><span class="avatar${isLeadRole(n.role) ? ' is-lead' : ''}" style="background:${agentVar(n.id)}">${avatarBody(n.id, who(n.id))}</span>${esc(n.name)} <span class="role">${esc(n.role)}</span></div>`).join('');
     if (box.innerHTML !== html) {
       box.innerHTML = html;
       box.querySelectorAll('div').forEach((d) => d.onmousedown = (e) => { e.preventDefault(); pickMention(d.dataset.name); });
