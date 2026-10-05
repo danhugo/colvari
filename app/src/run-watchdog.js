@@ -9,7 +9,7 @@
 // It self-exits once the run group is gone (normal end of run) or after a day, so a lost explicit
 // kill can never leak one. Killing is only ever by the recorded group pid — never by name.
 
-const { spawnSync } = require('child_process');
+const CP = require('./cp');
 
 const arg = (name, dflt) => {
   const i = process.argv.indexOf('--' + name);
@@ -24,7 +24,10 @@ const MAX_LIFETIME_MS = 24 * 60 * 60 * 1000;
 
 const pidAlive = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } };
 const groupAlive = (pid) => { try { process.kill(-pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } };
-const pidLstart = (pid) => { try { return spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8' }).stdout.trim(); } catch { return ''; } };
+// Async ps read (t_5a78aa95, consistency with the app-side probes): this script is its own
+// process, so the old spawnSync only ever blocked itself — the async read is equivalent and
+// keeps every probe on one code path.
+const pidLstart = async (pid) => { const r = await CP.run('ps', ['-o', 'lstart=', '-p', String(pid)], { timeoutMs: 5000 }); return String(r.stdout || '').trim(); };
 
 let reaped = false;
 function reapGroup() {
@@ -39,12 +42,17 @@ function reapGroup() {
 }
 
 const t0 = Date.now();
-const tick = () => {
-  if (GROUP_PID > 1 && !groupAlive(GROUP_PID)) process.exit(0); // run ended; nothing left to guard
-  if (process.ppid === 1) return reapGroup(); // reparented: the app (our spawner) is gone
-  if (APP_PID > 1 && !pidAlive(APP_PID)) return reapGroup();
-  if (APP_PID > 1 && APP_LSTART && pidAlive(APP_PID) && pidLstart(APP_PID) !== APP_LSTART) return reapGroup(); // pid recycled
-  if (Date.now() - t0 > MAX_LIFETIME_MS) process.exit(0);
+let ticking = false; // a starved ps must not overlap the next interval's tick
+const tick = async () => {
+  if (ticking) return;
+  ticking = true;
+  try {
+    if (GROUP_PID > 1 && !groupAlive(GROUP_PID)) process.exit(0); // run ended; nothing left to guard
+    if (process.ppid === 1) return reapGroup(); // reparented: the app (our spawner) is gone
+    if (APP_PID > 1 && !pidAlive(APP_PID)) return reapGroup();
+    if (APP_PID > 1 && APP_LSTART && pidAlive(APP_PID) && (await pidLstart(APP_PID)) !== APP_LSTART) return reapGroup(); // pid recycled
+    if (Date.now() - t0 > MAX_LIFETIME_MS) process.exit(0);
+  } finally { ticking = false; }
 };
 setInterval(tick, INTERVAL_MS);
 tick();

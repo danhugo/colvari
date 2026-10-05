@@ -100,12 +100,12 @@ test('usageStatus: API auth tracks tokens/cost, not request windows', () => {
   assert.equal(s.authTypes.includes('api'), true);
 });
 
-test('capabilities: parses --help text into slash commands / bare commands, never throws', () => {
+test('capabilities: parses --help text into slash commands / bare commands, never throws', async () => {
   const help = 'Usage: claude [options]\n\nAvailable commands:\n  chat        start a chat\n  init        create CLAUDE.md\n\nSlash commands: /compact /review\n';
-  const r = CAP.probeHelp('claude', ['--help'], () => help);
+  const r = await CAP.probeHelp('claude', ['--help'], () => help);
   assert.ok(r.ok); assert.deepEqual(r.slashCommands.sort(), ['/compact', '/review']);
   assert.ok(r.commands.includes('chat') && r.commands.includes('init'));
-  const missing = CAP.probeHelp('nope', ['--help'], () => { const e = new Error('ENOENT'); e.code = 'ENOENT'; throw e; });
+  const missing = await CAP.probeHelp('nope', ['--help'], () => { const e = new Error('ENOENT'); e.code = 'ENOENT'; throw e; });
   assert.equal(missing.ok, false); assert.equal(missing.error, 'not installed');
 });
 
@@ -119,27 +119,27 @@ test('capabilities: needsReprobe triggers on missing/expired cache and signature
   assert.equal(CAP.needsReprobe(stale, 'claude|1.0|opus|auto', { now }), true); // TTL lapsed
 });
 
-test('capabilities: init event data replaces the --help probe as-is, no union with hard-coded/local lists', () => {
+test('capabilities: init event data replaces the --help probe as-is, no union with hard-coded/local lists', async () => {
   const fs = require('fs'); const os = require('os'); const path = require('path');
   const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'cap-home-'));
   const rt = { id: 'claude', bin: () => 'claude' };
-  const c = CAP.discoverCapabilities(rt, {}, { exec: () => '/compact', initEvent: { slash_commands: ['review'], skills: ['pdf'], permission_modes: ['default', 'plan'] }, cwd: fakeHome, home: fakeHome });
+  const c = await CAP.discoverCapabilities(rt, {}, { exec: () => '/compact', initEvent: { slash_commands: ['review'], skills: ['pdf'], permission_modes: ['default', 'plan'] }, cwd: fakeHome, home: fakeHome });
   assert.deepEqual(c.slashCommands, ['/review']);
   assert.deepEqual(c.skills, ['pdf']); assert.deepEqual(c.modes, ['default', 'plan']);
   assert.equal(c.runtime, 'claude');
 });
 
-test('capabilities: Refresh (--help-only probe) unions in the runtime\'s previously observed real slash commands so modes already known (goal/loop) survive a weaker --help probe', () => {
+test('capabilities: Refresh (--help-only probe) unions in the runtime\'s previously observed real slash commands so modes already known (goal/loop) survive a weaker --help probe', async () => {
   const fs = require('fs'); const os = require('os'); const path = require('path');
   const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'cap-home-'));
   const rt = { id: 'claude', bin: () => 'claude' };
   // This --help probe alone (no /goal or /loop mentioned, nothing scanned locally) would report zero modes.
-  const c = CAP.discoverCapabilities(rt, {}, { exec: () => 'usage: claude', cwd: fakeHome, home: fakeHome, prevSlashCommands: ['/goal', '/loop'] });
+  const c = await CAP.discoverCapabilities(rt, {}, { exec: () => 'usage: claude', cwd: fakeHome, home: fakeHome, prevSlashCommands: ['/goal', '/loop'] });
   const modeNames = c.categorized.filter((x) => x.category === 'mode').map((x) => x.name).sort();
   assert.deepEqual(modeNames, ['goal', 'loop']);
   assert.ok(c.slashCommands.includes('/goal') && c.slashCommands.includes('/loop'));
   // An initEvent, when present, is still the CLI's own authoritative report and is not unioned with anything.
-  const withInit = CAP.discoverCapabilities(rt, {}, { exec: () => 'usage: claude', cwd: fakeHome, home: fakeHome, prevSlashCommands: ['/goal', '/loop'], initEvent: { slash_commands: ['review'] } });
+  const withInit = await CAP.discoverCapabilities(rt, {}, { exec: () => 'usage: claude', cwd: fakeHome, home: fakeHome, prevSlashCommands: ['/goal', '/loop'], initEvent: { slash_commands: ['review'] } });
   assert.deepEqual(withInit.slashCommands, ['/review']);
 });
 
@@ -226,11 +226,11 @@ test('usage: providerUsageStatus reports real usage or an explicit reason', () =
   assert.equal(neverReported.available, false); assert.match(neverReported.reason, /no usage reported yet/);
 });
 
-test('capabilities: modes are only the goal/loop slash commands the CLI actually reports (+ permission_modes), plus configured mcp servers', () => {
+test('capabilities: modes are only the goal/loop slash commands the CLI actually reports (+ permission_modes), plus configured mcp servers', async () => {
   const fs = require('fs'); const os = require('os'); const path = require('path');
   const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'cap-home-'));
   const rt = { id: 'claude', bin: () => 'claude' };
-  const c = CAP.discoverCapabilities(rt, { mcpServers: { board: {} } }, { exec: () => 'usage: claude', cwd: fakeHome, home: fakeHome });
+  const c = await CAP.discoverCapabilities(rt, { mcpServers: { board: {} } }, { exec: () => 'usage: claude', cwd: fakeHome, home: fakeHome });
   const modeNames = c.categorized.filter((x) => x.category === 'mode').map((x) => x.name).sort();
   assert.deepEqual(modeNames, []); // "usage: claude" --help mentions no /goal or /loop slash commands
   const mcpNames = c.categorized.filter((x) => x.category === 'mcp').map((x) => x.name);

@@ -15,21 +15,24 @@ const path = require('path');
 
 const SRC = path.join(__dirname, '..', 'src');
 
-// Floors = occurrences when this guard landed (2026-10-05, 39 total). CLI-only file:
-// sandbox.js (perf harness, never in the Electron main path). Prune floors back down as
-// t_5a78aa95 converts files; the test stays green when counts only drop.
+// Floors = current occurrences after t_5a78aa95 converted every main-path call to async
+// (pruned from the landing snapshot of 39 on 2026-10-05). What remains, per file:
+//   sandbox.js    — CLI-only (perf harness, never loaded inside Electron).
+//   merge-gate.js — string content of the WATCHDOG child script (its own process) + comments.
+//   main.js       — the gui-e2e conflictShots fixture helper (test-driver path) + comments.
+//   the rest      — comments only; every real call is async now.
+// Ratchet: only shrinking keeps this green; a new sync call must come with a conversion.
 const FLOOR = {
-  'capabilities.js': 2,
-  'harness-sweep.js': 3,
+  'capabilities.js': 1,
   'introspector.js': 2,
   'main.js': 4,
-  'merge-gate.js': 10,
-  'run-watchdog.js': 2,
-  'runtimes.js': 2,
+  'merge-gate.js': 4,
+  'run-watchdog.js': 1,
+  'runtimes.js': 1,
   'sandbox.js': 5,
-  'self-update.js': 4,
-  'stall-watchdog.js': 2,
-  'worktree.js': 3,
+  'self-update.js': 2,
+  'stall-watchdog.js': 1,
+  'worktree.js': 2,
 };
 
 const SYNC_API = /\b(?:spawnSync|execFileSync|execSync)\b/g;

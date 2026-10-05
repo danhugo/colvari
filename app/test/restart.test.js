@@ -41,7 +41,7 @@ const setup = (d) => {
 // Stand-in for the project's UpdateWatcher: records restartScheduled/cancel calls.
 const fakeUpdater = () => ({ phase: 'idle', calls: [], restartScheduled(r) { this.calls.push(r); return true; }, cancel() { this.calls.push('cancel'); this.phase = 'idle'; } });
 
-test('store: landed merges bump the pending counter; refusals and empty merges do not', () => {
+test('store: landed merges bump the pending counter; refusals and empty merges do not', async () => {
   const d = tmp('squad-restart-');
   const s = new Store(path.join(d, 'p'));
   const pm = s.addNode({ name: 'PM', role: 'PM' });
@@ -56,11 +56,14 @@ test('store: landed merges bump the pending counter; refusals and empty merges d
   try {
     MG.gateMerge = () => ({ merged: true, base: 'master', root, gate: { state: 'green', tests: 1, flaky: [] } });
     s.updateTask(s.createTask({ title: 'x', assignee: pm.id, createdBy: 'human' }).id, { worktreePath: '/w', worktreeBranch: 'squad/x', status: 'done' });
+    await s._mergeQueue; // the gate runs in the background now: wait for it before reading the tally
     assert.equal(s.restartPending().count, 3, 'a landed merge counts');
     MG.gateMerge = () => ({ merged: false, refused: true, dirty: ['f'], root });
     s.updateTask(s.createTask({ title: 'y', assignee: pm.id, createdBy: 'human' }).id, { worktreePath: '/w2', worktreeBranch: 'squad/y', status: 'done' });
+    await s._mergeQueue;
     MG.gateMerge = () => ({ merged: false, base: 'master', root, gate: { state: 'skipped' } });
     s.updateTask(s.createTask({ title: 'z', assignee: pm.id, createdBy: 'human' }).id, { worktreePath: '/w3', worktreeBranch: 'squad/z', status: 'done' });
+    await s._mergeQueue;
     assert.equal(s.restartPending().count, 3, 'refused and empty merges do not count (Cato #6)');
     assert.equal(s.restartPending().since, since);
   } finally { MG.gateMerge = orig; }
@@ -81,7 +84,7 @@ test('store: merges collapse to ONE pending restart at the latest sha, counted a
   assert.equal(s.restartPending().count, 7);
 });
 
-test('store: a landed merge points the pending restart at the new tip, N commits behind (t_7e590e54)', () => {
+test('store: a landed merge points the pending restart at the new tip, N commits behind (t_7e590e54)', async () => {
   const d = tmp('squad-restart-');
   const s = new Store(path.join(d, 'p'));
   const pm = s.addNode({ name: 'PM', role: 'PM' });
@@ -93,12 +96,14 @@ test('store: a landed merge points the pending restart at the new tip, N commits
     MG.gateMerge = () => ({ merged: true, base: 'master', root, sha: 'tip-9', gate: { state: 'green', tests: 1, flaky: [] } });
     WT.commitsBehind = () => 4;
     s.updateTask(s.createTask({ title: 'x', assignee: pm.id, createdBy: 'human' }).id, { worktreePath: '/w', worktreeBranch: 'squad/x', status: 'done' });
+    await s._mergeQueue; // gate is backgrounded now: settle it while the stubs are still in place
   } finally { MG.gateMerge = orig; WT.commitsBehind = origCB; }
   const rp = s.restartPending();
   assert.equal(rp.sha, 'tip-9', 'one restart to the merged tip');
   assert.equal(rp.count, 4, 'commits build-1..tip-9, not "1 merge"');
   MG.gateMerge = () => ({ merged: true, base: 'master', root, gate: { state: 'green', tests: 1, flaky: [] } });
   s.updateTask(s.createTask({ title: 'y', assignee: pm.id, createdBy: 'human' }).id, { worktreePath: '/w2', worktreeBranch: 'squad/y', status: 'done' });
+  await s._mergeQueue; // settle before the stub is restored, or the queued merge hits the real gate
   MG.gateMerge = orig;
   assert.equal(s.restartPending().count, 5, 'a gate result without a sha falls back to the tally');
   assert.equal(s.restartPending().sha, 'tip-9', 'and keeps the last known tip');
@@ -285,7 +290,7 @@ test('orchestrator: the not-armed reason names the target sha and the commits be
   assert.deepEqual(st.waitingReasons, [st.blockedReason]);
 });
 
-test('orchestrator: boot records the running build sha so merges can count commits behind (t_7e590e54)', () => {
+test('orchestrator: boot records the running build sha so merges can count commits behind (t_7e590e54)', async () => {
   const d = tmp('squad-restart-');
   const repo = tmp('squad-restart-repo-');
   execSync(`git -C "${repo}" init -q`);
@@ -295,20 +300,23 @@ test('orchestrator: boot records the running build sha so merges can count commi
   const clear = (o) => { clearInterval(o._wakeTimer); clearInterval(o._stallTimer); clearInterval(o._tickTimer); clearInterval(o._restartTimer); };
   const o = new Orchestrator(s, { repoDir: repo });
   clear(o);
+  await waitFor(() => (s.meta() || {}).buildSha === sha, 4000); // headSha lands async off the constructor
   assert.equal((s.meta() || {}).buildSha, sha, 'meta.buildSha = HEAD at boot');
   execSync(`git -C "${repo}" -c user.email=t@t -c user.name=t commit --allow-empty -qm two`);
   const o2 = new Orchestrator(s, { repoDir: repo });
   clear(o2);
-  assert.equal((s.meta() || {}).buildSha, execSync(`git -C "${repo}" rev-parse HEAD`).toString().trim(), 'a moved HEAD is re-recorded');
+  const sha2 = execSync(`git -C "${repo}" rev-parse HEAD`).toString().trim();
+  await waitFor(() => (s.meta() || {}).buildSha === sha2, 4000);
+  assert.equal((s.meta() || {}).buildSha, sha2, 'a moved HEAD is re-recorded');
 });
 
-test('orchestrator: human pill — restartNow fires when idle; cancel disarms and aborts the flow', () => {
+test('orchestrator: human pill — restartNow fires when idle; cancel disarms and aborts the flow', async () => {
   const d = tmp('squad-restart-');
   const { s, o } = setup(d);
   const up = fakeUpdater();
   o.updater = up;
   o.running = false;
-  o.restartNow();
+  await o.restartNow();
   assert.ok(s.restartPending().firedAt, 'idle board: armed and fired immediately');
   assert.ok(up.calls.includes('manual restart'));
   s.bumpRestartPending();
@@ -323,7 +331,7 @@ test('orchestrator: human pill — restartNow fires when idle; cancel disarms an
 // returning state. A target the running build already contains (0 commits behind, from git) is a
 // noop: the stale pending state is cleared and pushed, and no schedule arms — its dispatch gate
 // would freeze the team for a restart that can never happen.
-test('orchestrator: restartNow at the running build sha returns {status:"noop"} and clears the stale pending state', () => {
+test('orchestrator: restartNow at the running build sha returns {status:"noop"} and clears the stale pending state', async () => {
   const d = tmp('squad-restart-');
   const repo = tmp('squad-restart-repo-');
   execSync(`git -C "${repo}" init -q`);
@@ -331,13 +339,14 @@ test('orchestrator: restartNow at the running build sha returns {status:"noop"} 
   const sha = execSync(`git -C "${repo}" rev-parse HEAD`).toString().trim();
   const s = new Store(path.join(d, 'p'));
   s.addNode({ name: 'PM', role: 'PM' });
-  const o = new Orchestrator(s, { repoDir: repo }); // records meta.buildSha = sha
+  const o = new Orchestrator(s, { repoDir: repo }); // records meta.buildSha = sha (async since t_5a78aa95)
   clearInterval(o._wakeTimer); clearInterval(o._stallTimer); clearInterval(o._tickTimer); clearInterval(o._restartTimer);
   o.wakeRun = async () => {};
+  for (let i = 0; i < 200 && !(s.meta() || {}).buildSha; i++) await new Promise((r2) => setTimeout(r2, 10)); // buildSha lands in the background
   s.setRestartPending({ scheduledNow: true, count: 21, sha });
   let pushed = null;
   o.on('restart-state', (r) => { pushed = r; });
-  const r = o.restartNow();
+  const r = await o.restartNow();
   assert.equal(r.status, 'noop');
   assert.match(r.message, /already running/);
   assert.equal(s.restartPending(), null, 'the stale tally and the armed schedule are gone');
@@ -345,7 +354,7 @@ test('orchestrator: restartNow at the running build sha returns {status:"noop"} 
   assert.ok(!o._restartGate, 'the dispatch gate never armed');
 });
 
-test('orchestrator: restartNow with a genuinely pending target returns {status:"scheduled"} and arms', () => {
+test('orchestrator: restartNow with a genuinely pending target returns {status:"scheduled"} and arms', async () => {
   const d = tmp('squad-restart-');
   const repo = tmp('squad-restart-repo-');
   execSync(`git -C "${repo}" init -q`);
@@ -361,19 +370,19 @@ test('orchestrator: restartNow with a genuinely pending target returns {status:"
   const up = fakeUpdater();
   o.updater = up;
   o.running = false;
-  const r = o.restartNow();
+  const r = await o.restartNow();
   assert.equal(r.status, 'scheduled');
   assert.ok(s.restartPending().scheduledNow, 'the restart is armed');
   assert.ok(up.calls.includes('manual restart'), 'an idle board fires immediately');
   assert.ok(o.restartState().pendingCount === 2, 'the real pending count stays');
 });
 
-test('orchestrator: restartNow in a packaged build returns {status:"error"}', () => {
+test('orchestrator: restartNow in a packaged build returns {status:"error"}', async () => {
   const s = new Store(path.join(tmp('squad-restart-'), 'p'));
   s.addNode({ name: 'PM', role: 'PM' });
   const o = new Orchestrator(s, { devMode: false });
   clearInterval(o._wakeTimer); clearInterval(o._stallTimer); clearInterval(o._tickTimer); clearInterval(o._restartTimer);
-  const r = o.restartNow();
+  const r = await o.restartNow();
   assert.equal(r.status, 'error');
   assert.ok(r.message);
   assert.equal(s.restartPending(), null, 'nothing armed');
@@ -452,7 +461,7 @@ test('packaged build: N merges >= cap still dispatch todo tasks (no count, no ar
   assert.equal(o.restartState().pendingCount, 0);
 });
 
-test('packaged build: boot wipes a stored restart schedule instead of honoring it', () => {
+test('packaged build: boot wipes a stored restart schedule instead of honoring it', async () => {
   const d = tmp('squad-restart-');
   const s = new Store(path.join(d, 'p'));
   s.addNode({ name: 'PM', role: 'PM' });
@@ -463,7 +472,7 @@ test('packaged build: boot wipes a stored restart schedule instead of honoring i
   assert.equal(s.restartPending(), null, 'boot cleared the impossible schedule');
   o.sweepRestart();
   assert.equal(o._restartGate, false, 'and the gate never arms from stale state');
-  o.restartNow();
+  await o.restartNow();
   assert.equal(s.restartPending(), null, 'restartNow is a no-op too');
 });
 

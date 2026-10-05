@@ -13,10 +13,10 @@
 //     when its recorded owner is dead AND the live process still matches the recorded start time
 //     and marker — recycled pids, marker mismatches and anything unverifiable are skipped and
 //     their pidfile removed, never killed. Processes are never matched by name.
-const { spawnSync } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const CP = require('./cp');
 
 const MARKER_ARG_PREFIX = '--squad-harness-run=';
 const ENV_MARKER_PREFIX = 'AGENTS_SQUAD_HARNESS_RUN=';
@@ -32,52 +32,52 @@ const pidFileOf = (runId) => path.join(pidsDir(), `${String(runId).replace(/[^A-
 const harnessRunId = (label = 'harness') => `${label}-${process.pid}-${Date.now().toString(36)}`;
 const markerArgFor = (runId) => MARKER_ARG_PREFIX + runId;
 
-// Blocking nap for the retry gap (sweep is synchronous); Atomics.wait throws on some
-// embedders — fall back to a spin.
-const psNap = (ms) => { try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); } catch { const end = Date.now() + ms; while (Date.now() < end); } };
+// Non-blocking nap for the retry gap (sweep is async since t_5a78aa95 — the old Atomics.wait
+// blocked the booting main process for the whole identity-verified sweep).
+const psNap = (ms) => CP.sleep(ms);
 
 // An empty read of a live pid is always a FAILED observation, never an answer: a live process
 // always has an lstart, a pgid and a command. Under load the `ps` spawn itself can EAGAIN, time
 // out or be starved into emptiness — reporting that as a mismatch would skip (never signal) an
 // orphan that must be reaped, so retry briefly before giving up and reporting emptiness.
-function psField(pid, args) {
+async function psField(pid, args) {
   for (let i = 0; i < PS_TRIES; i++) {
     let out = '';
     try {
-      out = spawnSync('ps', ['-p', String(pid), ...args], { encoding: 'utf8', timeout: PS_TIMEOUT_MS, stdio: ['ignore', 'pipe', 'pipe'] }).stdout.trim();
+      const r = await CP.run('ps', ['-p', String(pid), ...args], { timeoutMs: PS_TIMEOUT_MS });
+      out = String(r.stdout || '').trim();
     } catch { /* transient spawn failure under load: retry */ }
     if (out) return out;
-    if (i < PS_TRIES - 1) psNap(PS_RETRY_MS * (i + 1)); // growing backoff: a slammed machine needs more than one slack window
+    if (i < PS_TRIES - 1) await psNap(PS_RETRY_MS * (i + 1)); // growing backoff: a slammed machine needs more than one slack window
   }
   return '';
 }
-const pidLstart = (pid) => psField(pid, ['-o', 'lstart=']);
-const pidPgid = (pid) => { const v = Number(psField(pid, ['-o', 'pgid='])); return Number.isInteger(v) && v > 0 ? v : null; };
-const pidCommand = (pid) => psField(pid, ['-o', 'command=']);
+const pidLstart = async (pid) => psField(pid, ['-o', 'lstart=']);
+const pidPgid = async (pid) => { const v = Number(await psField(pid, ['-o', 'pgid='])); return Number.isInteger(v) && v > 0 ? v : null; };
+const pidCommand = async (pid) => psField(pid, ['-o', 'command=']);
 // `ps eww` (darwin) appends the process environment to the command line — how a run that
 // self-marked via env alone (no argv nonce) is still identified from outside. The mode flag
 // must precede -p; empty output (unsupported platform) fails the check open to the lstart gate.
-const pidEnvBlob = (pid) => {
-  try {
-    return spawnSync('ps', ['eww', '-p', String(pid), '-o', 'command='], { encoding: 'utf8', timeout: PS_TIMEOUT_MS, stdio: ['ignore', 'pipe', 'pipe'] }).stdout.trim();
-  } catch { return ''; }
+const pidEnvBlob = async (pid) => {
+  const r = await CP.run('ps', ['eww', '-p', String(pid), '-o', 'command='], { timeoutMs: PS_TIMEOUT_MS });
+  return String(r.stdout || '').trim();
 };
 
-function isZombie(pid) { return psField(pid, ['-o', 'state=']).includes('Z'); }
+const isZombie = async (pid) => (await psField(pid, ['-o', 'state='])).includes('Z');
 // A zombie answers signal 0 but is dead for our purposes; EPERM means alive but unkillable.
-function pidAlive(pid) {
+async function pidAlive(pid) {
   if (!pid || pid === process.pid) return false;
   try { process.kill(pid, 0); } catch (e) { return e.code === 'EPERM'; }
-  return !isZombie(pid);
+  return !(await isZombie(pid));
 }
 
 // Pids of this process and its ancestors (bounded walk): the sweep never signals these even if a
 // stale pidfile claims them (critic amendment 5).
-function ownAncestors(selfPid = process.pid) {
+async function ownAncestors(selfPid = process.pid) {
   const seen = new Set([selfPid]);
   let pid = selfPid;
   for (let i = 0; i < 30; i++) {
-    const ppid = Number(psField(pid, ['-o', 'ppid=']));
+    const ppid = Number(await psField(pid, ['-o', 'ppid=']));
     if (!Number.isInteger(ppid) || ppid <= 1 || seen.has(ppid)) break;
     seen.add(ppid); pid = ppid;
   }
@@ -94,17 +94,18 @@ const removeFile = (file) => { try { fs.unlinkSync(file); } catch { /* raced or 
 
 // The harness app records itself (called from src/main.js when the marker is present). The marker
 // argv nonce comes from the driver when it spawned us; TEST_MODE self-marks have env only.
-function recordRun({ runId, ownerPid = process.ppid, markerArg = null, log = () => {} } = {}) {
+// Async since t_5a78aa95 (the pid/pgid/lstart reads fork ps).
+async function recordRun({ runId, ownerPid = process.ppid, markerArg = null, log = () => {} } = {}) {
   if (!runId) return null;
   const rec = {
     runId: String(runId),
     pid: process.pid,
-    pgid: pidPgid(process.pid) || process.pid,
-    lstart: pidLstart(process.pid),
+    pgid: (await pidPgid(process.pid)) || process.pid,
+    lstart: await pidLstart(process.pid),
     markerArg: markerArg || process.argv.find((a) => String(a).startsWith(MARKER_ARG_PREFIX)) || null,
     envMarker: ENV_MARKER_PREFIX + String(runId),
     ownerPid: ownerPid || null,
-    ownerLstart: ownerPid ? pidLstart(ownerPid) : '',
+    ownerLstart: ownerPid ? await pidLstart(ownerPid) : '',
     recordedAt: Date.now(),
   };
   atomicWriteJson(pidFileOf(rec.runId), rec);
@@ -145,8 +146,8 @@ function signalRun(pid, sig, livePgid) {
   } catch { return false; }
 }
 
-function killRecorded(rec, log) {
-  const livePgid = pidPgid(rec.pid);
+async function killRecorded(rec, log) {
+  const livePgid = await pidPgid(rec.pid);
   signalRun(rec.pid, 'SIGTERM', livePgid);
   setTimeout(() => {
     if (!pidAlive(rec.pid)) return;
@@ -157,25 +158,25 @@ function killRecorded(rec, log) {
 
 // Why a pidfile entry may not be touched. 'live-run' keeps the pidfile (its owner is alive);
 // every other non-orphan verdict deletes the pidfile but NEVER signals.
-function judgeRun(rec, { selfPid, ancestors }) {
+async function judgeRun(rec, { selfPid, ancestors }) {
   if (!rec || !Number.isInteger(rec.pid) || rec.pid <= 1) return 'malformed';
   if (rec.pid === selfPid || ancestors.has(rec.pid)) return 'live-run'; // our own tree
   if (rec.ownerPid && rec.ownerPid !== selfPid && !ancestors.has(rec.ownerPid)) {
-    const ownerAlive = pidAlive(rec.ownerPid) && (!rec.ownerLstart || pidLstart(rec.ownerPid) === rec.ownerLstart);
+    const ownerAlive = (await pidAlive(rec.ownerPid)) && (!rec.ownerLstart || (await pidLstart(rec.ownerPid)) === rec.ownerLstart);
     if (ownerAlive) return 'live-run';
   }
-  if (!pidAlive(rec.pid)) return 'dead-record'; // recorded pid gone: stale record, nothing to reap
+  if (!(await pidAlive(rec.pid))) return 'dead-record'; // recorded pid gone: stale record, nothing to reap
   // Identity: a DIFFERENT, non-empty lstart proves pid reuse (critic amendment 1); a DIFFERENT
   // command proves the same. An EMPTY read (ps starved under load, t_8f7605c4 gate flake) proves
   // nothing — it must fall through to the next check instead of skipping an orphan that has to
   // be reaped, and if every read starves the record is kept for the next sweep, never deleted.
   let verified = false;
-  if (rec.lstart) { const ls = pidLstart(rec.pid); if (ls) { if (ls !== rec.lstart) return 'recycled-pid'; verified = true; } }
+  if (rec.lstart) { const ls = await pidLstart(rec.pid); if (ls) { if (ls !== rec.lstart) return 'recycled-pid'; verified = true; } }
   if (rec.markerArg) {
-    const cmd = pidCommand(rec.pid);
+    const cmd = await pidCommand(rec.pid);
     if (cmd) { if (!cmd.includes(rec.markerArg)) return 'marker-mismatch'; verified = true; }
   } else if (rec.envMarker) {
-    const blob = pidEnvBlob(rec.pid);
+    const blob = await pidEnvBlob(rec.pid);
     if (blob) { if (!blob.includes(rec.envMarker)) return 'marker-mismatch'; verified = true; }
   }
   if (!verified) return 'unverifiable'; // every identity read starved: keep the record, try again after the next boot
@@ -183,17 +184,19 @@ function judgeRun(rec, { selfPid, ancestors }) {
 }
 
 // Boot sweep (plan item 2): read ONLY the dedicated pidfile dir, never userData, never names.
-function sweep({ selfPid = process.pid, log = (m) => console.log(m) } = {}) {
+// Async since t_5a78aa95: identity reads fork ps (per record, with retries) — awaited on the
+// event loop so the booting main process never stalls.
+async function sweep({ selfPid = process.pid, log = (m) => console.log(m) } = {}) {
   const out = { reaped: [], skipped: [], stale: 0 };
   let files = [];
   try { files = fs.readdirSync(pidsDir()); } catch { return out; }
-  const ancestors = ownAncestors(selfPid);
+  const ancestors = await ownAncestors(selfPid);
   for (const f of files) {
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]*\.json$/.test(f)) continue;
     const full = path.join(pidsDir(), f);
     let rec = null;
     try { rec = JSON.parse(fs.readFileSync(full, 'utf8')); } catch { removeFile(full); continue; }
-    const verdict = judgeRun(rec, { selfPid, ancestors });
+    const verdict = await judgeRun(rec, { selfPid, ancestors });
     if (verdict === 'live-run') continue;
     if (verdict === 'orphan') {
       log(`[harness-sweep] reaping orphaned harness run ${rec.runId} (pid ${rec.pid}, owner ${rec.ownerPid} is gone)`);

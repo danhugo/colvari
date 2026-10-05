@@ -17,13 +17,13 @@ const { ensureWorktree } = require('../src/worktree');
 
 const g = (cwd, ...a) => execFileSync('git', ['-c', 'user.email=a@b', '-c', 'user.name=a', ...a], { cwd, stdio: ['ignore', 'pipe', 'pipe'] }).toString().trim();
 
-function repoWithTask(id) {
+async function repoWithTask(id) {
   const d = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'gasync-')));
   fs.writeFileSync(path.join(d, '.gitignore'), '.squad/\n');
   g(d, 'init', '-q', '-b', 'main');
   fs.writeFileSync(path.join(d, 'a.txt'), 'base\n');
   g(d, 'add', '.'); g(d, 'commit', '-q', '-m', 'init');
-  const w = ensureWorktree(d, id);
+  const w = await ensureWorktree(d, id);
   fs.writeFileSync(path.join(w.worktreePath, 'b.txt'), 'work\n');
   g(w.worktreePath, 'add', '.'); g(w.worktreePath, 'commit', '-q', '-m', 'work');
   return { d, t: { id, worktreePath: w.worktreePath, worktreeBranch: w.worktreeBranch } };
@@ -37,14 +37,14 @@ test('gateMerge returns a promise and the event loop stays responsive while it r
   // real-but-stubbed gate on this throwaway fixture — harmless, and it is what proves a
   // sync-signature gateMerge does not secretly return a promise).
   if (MG.gateMerge.constructor.name !== 'AsyncFunction') {
-    const { t: task } = repoWithTask('t_gma0');
+    const { t: task } = await repoWithTask('t_gma0');
     const r = MG.gateMerge(task, { runTests: () => ({ ok: true, output: '' }) });
     if (!r || typeof r.then !== 'function') {
       return t.skip('gateMerge is still sync (t_5a78aa95 in progress): these assertions enforce the async contract the moment it lands');
     }
   }
 
-  const { d, t: task } = repoWithTask('t_gma1');
+  const { d, t: task } = await repoWithTask('t_gma1');
   let ran = 0;
   let inGate = null; // wall-clock window during which the (async) suite callback was inside the gate
   const ticks = [];

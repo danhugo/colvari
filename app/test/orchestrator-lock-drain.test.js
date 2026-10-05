@@ -171,7 +171,7 @@ test('drain: haltProcs cuts a never-cut task, persists drainCuts, and never cuts
   const tb = s.createTask({ title: 'already-cut task', assignee: b.id });
   const o = new Orchestrator(s);
   o.start();
-  await waitFor(() => o.procs.size === 2, 'both tasks running');
+  await waitFor(() => o.procs.size === 2 && o.procs.get(a.id) && o.procs.get(b.id) && o.procs.get(a.id).pid && o.procs.get(b.id).pid, 'both tasks running (real children, not placeholders)');
   s.updateTask(tb.id, { drainCuts: 1 }); // persisted marker from a previous restart's cut
   const bProc = o.procs.get(b.id);
   await o.haltProcs(200);

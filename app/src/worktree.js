@@ -1,14 +1,19 @@
 // Optional per-task git worktree: branch squad/<taskId>, dir <repo>/.squad/worktrees/<taskId>.
-const { execFileSync, execFile } = require('child_process');
+// Everything here is async (t_5a78aa95): the old execFileSync git() blocked the Electron main
+// process for every worktree op — worktree listing, merges, sweeps.
+const CP = require('./cp');
 const path = require('path');
 const fs = require('fs');
 const SB = require('./sandbox');
 
-function git(cwd, args) { return execFileSync('git', args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] }).toString().trim(); }
+// Generous ceiling (local git ops are quick) with a hard SIGKILL: a hung git must never pin the
+// main process the way the old execFileSync could (no timeout at all).
+const GIT_TIMEOUT_MS = 60_000;
+async function git(cwd, args) { return CP.runThrow('git', args, { cwd, timeoutMs: GIT_TIMEOUT_MS }); }
 
 // True when a local branch exists in repoDir — the same check ensureWorktree uses, but side-effect
 // free (ensureWorktree would CREATE a missing branch).
-function branchExists(repoDir, branch) { try { git(repoDir, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`]); return true; } catch { return false; } }
+async function branchExists(repoDir, branch) { try { await git(repoDir, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`]); return true; } catch { return false; } }
 
 // node_modules is shared with the main checkout, not copied: a relative symlink (created lazily;
 // an existing dir or symlink is never touched, so a deliberate local copy survives). Keeps new
@@ -42,9 +47,9 @@ function linkNodeModules(repoDir, root, dir) {
 }
 
 // Returns { cwd, worktreePath, worktreeBranch } or { cwd, warning } on fallback to the shared repo.
-function ensureWorktree(repoDir, taskId) {
+async function ensureWorktree(repoDir, taskId) {
   let root;
-  try { root = git(repoDir, ['rev-parse', '--show-toplevel']); } catch { return { cwd: repoDir, warning: `not a git repo: ${repoDir}, using shared dir` }; }
+  try { root = await git(repoDir, ['rev-parse', '--show-toplevel']); } catch { return { cwd: repoDir, warning: `not a git repo: ${repoDir}, using shared dir` }; }
   const refuse = SB.refusal(root, 'create a task worktree in');
   if (refuse) return { cwd: repoDir, warning: refuse }; // sandbox: never place task worktrees outside the test data root (t_8f7605c4)
   const branch = `squad/${taskId}`;
@@ -52,8 +57,8 @@ function ensureWorktree(repoDir, taskId) {
   try {
     if (fs.existsSync(path.join(dir, '.git'))) { linkNodeModules(repoDir, root, dir); return { cwd: dir, worktreePath: dir, worktreeBranch: branch }; }
     fs.mkdirSync(path.dirname(dir), { recursive: true });
-    const exists = branchExists(root, branch);
-    git(root, exists ? ['worktree', 'add', dir, branch] : ['worktree', 'add', '-b', branch, dir]);
+    const exists = await branchExists(root, branch);
+    await git(root, exists ? ['worktree', 'add', dir, branch] : ['worktree', 'add', '-b', branch, dir]);
     linkNodeModules(repoDir, root, dir);
     return { cwd: dir, worktreePath: dir, worktreeBranch: branch };
   } catch (e) { return { cwd: repoDir, warning: `worktree creation failed (${String(e.stderr || e.message).trim()}), using shared dir` }; }
@@ -61,22 +66,22 @@ function ensureWorktree(repoDir, taskId) {
 
 // Repo root owning a worktree at <root>/.squad/worktrees/<taskId>; base = the root's current branch.
 const rootOf = (t) => path.resolve(t.worktreePath, '..', '..', '..');
-const baseOf = (root) => git(root, ['symbolic-ref', '--short', 'HEAD']);
+const baseOf = async (root) => git(root, ['symbolic-ref', '--short', 'HEAD']);
 const errOf = (e) => String(e.stderr || e.message).trim();
 
-function worktreeDiff(t) {
-  const root = rootOf(t); const base = baseOf(root); const range = `${base}...${t.worktreeBranch}`;
-  const files = git(root, ['diff', '--name-status', range]).split('\n').filter(Boolean).map((l) => { const [status, ...f] = l.split('\t'); return { status, file: f.join(' -> ') }; });
-  return { base, branch: t.worktreeBranch, files, diff: git(root, ['diff', range]) };
+async function worktreeDiff(t) {
+  const root = rootOf(t); const base = await baseOf(root); const range = `${base}...${t.worktreeBranch}`;
+  const files = (await git(root, ['diff', '--name-status', range])).split('\n').filter(Boolean).map((l) => { const [status, ...f] = l.split('\t'); return { status, file: f.join(' -> ') }; });
+  return { base, branch: t.worktreeBranch, files, diff: await git(root, ['diff', range]) };
 }
 
 // Uncommitted changes in the main checkout (the root repo), ignoring .squad/ — the
 // worktree/board files this app manages live there; that is not user work. The raw
 // (untrimmed) status is sliced per line: porcelain paths start at column 3, and the
 // shared git() helper's blob trim() would eat a first line's leading status space.
-function dirtyMainFiles(root) {
-  const out = execFileSync('git', ['status', '--porcelain'], { cwd: root, stdio: ['ignore', 'pipe', 'pipe'] }).toString();
-  return out.split('\n').filter(Boolean)
+async function dirtyMainFiles(root) {
+  const r = await CP.run('git', ['status', '--porcelain'], { cwd: root, timeoutMs: GIT_TIMEOUT_MS });
+  return String(r.stdout || '').split('\n').filter(Boolean)
     .map((l) => l.slice(3))
     .filter((p) => p !== '.squad' && !p.startsWith('.squad/'));
 }
@@ -93,51 +98,53 @@ function dirtyMergeMessage(dirty) {
 // reported as merged:false instead of running a merge that would be a no-op. A dirty main
 // checkout refuses the merge (merged:false, refused:true, dirty file list) instead of letting
 // git fail around uncommitted work.
-function worktreeMerge(t) {
-  const root = rootOf(t); const base = baseOf(root);
+async function worktreeMerge(t) {
+  const root = rootOf(t); const base = await baseOf(root);
   SB.guardRepo(root, 'auto-merge into'); // sandbox: a harness instance never merges into a real repo (t_8f7605c4)
   let ahead;
-  try { ahead = Number(git(root, ['rev-list', '--count', `${base}..${t.worktreeBranch}`])); } catch { ahead = 1; }
+  try { ahead = Number(await git(root, ['rev-list', '--count', `${base}..${t.worktreeBranch}`])); } catch { ahead = 1; }
   if (ahead === 0) return { base, branch: t.worktreeBranch, merged: false };
-  const dirty = dirtyMainFiles(root);
+  const dirty = await dirtyMainFiles(root);
   if (dirty.length) return { base, branch: t.worktreeBranch, merged: false, refused: true, dirty };
-  try { git(root, ['merge', '--no-ff', '--no-edit', t.worktreeBranch]); }
-  catch (e) { try { git(root, ['merge', '--abort']); } catch {} throw new Error(`merge of ${t.worktreeBranch} into ${base} failed, aborted: ${errOf(e)}`); }
+  try { await git(root, ['merge', '--no-ff', '--no-edit', t.worktreeBranch]); }
+  catch (e) { try { await git(root, ['merge', '--abort']); } catch {} throw new Error(`merge of ${t.worktreeBranch} into ${base} failed, aborted: ${errOf(e)}`); }
   return { base, branch: t.worktreeBranch, merged: true };
 }
 
-function worktreeDiscard(t) {
+async function worktreeDiscard(t) {
   const root = rootOf(t);
   SB.guardRepo(root, 'discard a task worktree in');
-  try { git(root, ['worktree', 'remove', '--force', t.worktreePath]); } catch (e) { if (fs.existsSync(t.worktreePath)) throw new Error(errOf(e)); }
-  try { git(root, ['branch', '-D', t.worktreeBranch]); } catch {}
+  try { await git(root, ['worktree', 'remove', '--force', t.worktreePath]); } catch (e) { if (fs.existsSync(t.worktreePath)) throw new Error(errOf(e)); }
+  try { await git(root, ['branch', '-D', t.worktreeBranch]); } catch {}
   return { ok: true };
 }
 
 // Merge state of `branch` against the repo's base: { base, merged } — merged=true when the branch
 // is an ancestor of the base (fully merged), false when it carries unmerged commits. null when the
 // repo or its base branch cannot be determined (the caller decides whether that is fatal).
-function branchMergeState(root, branch) {
+async function branchMergeState(root, branch) {
   let base;
-  try { base = baseOf(root); } catch { return null; }
-  try { git(root, ['merge-base', '--is-ancestor', branch, base]); return { base, merged: true }; } catch { return { base, merged: false }; }
+  try { base = await baseOf(root); } catch { return null; }
+  try { await git(root, ['merge-base', '--is-ancestor', branch, base]); return { base, merged: true }; } catch { return { base, merged: false }; }
 }
 
 // squad/<taskId> branches in `root` not yet merged (as an ancestor) into the repo's base branch.
-function unmergedSquadBranches(root) {
-  const base = baseOf(root);
+async function unmergedSquadBranches(root) {
+  let base;
+  try { base = await baseOf(root); } catch { return []; }
   let branches;
-  try { branches = git(root, ['branch', '--list', 'squad/*', '--format=%(refname:short)']).split('\n').filter(Boolean); } catch { return []; }
-  return branches
-    .filter((b) => { try { git(root, ['merge-base', '--is-ancestor', b, base]); return false; } catch { return true; } })
-    .map((branch) => ({ root, base, branch }));
+  try { branches = (await git(root, ['branch', '--list', 'squad/*', '--format=%(refname:short)'])).split('\n').filter(Boolean); } catch { return []; }
+  const merged = (b) => git(root, ['merge-base', '--is-ancestor', b, base]).then(() => false, () => true);
+  const out = [];
+  for (const branch of branches) if (await merged(branch)) out.push({ root, base, branch });
+  return out;
 }
 
 // HEAD sha of `dir`'s repo, or null when git fails (not a repo, no git).
-function headSha(dir) { try { return git(dir, ['rev-parse', 'HEAD']); } catch { return null; } }
+async function headSha(dir) { try { return await git(dir, ['rev-parse', 'HEAD']); } catch { return null; } }
 
 // Commits on `to` that `from` lacks, or null when the range does not resolve.
-function commitsBehind(root, from, to) { try { return Number(git(root, ['rev-list', '--count', `${from}..${to}`])); } catch { return null; } }
+async function commitsBehind(root, from, to) { try { return Number(await git(root, ['rev-list', '--count', `${from}..${to}`])); } catch { return null; } }
 
 // ---- lifecycle (t_9b662983): remove on done/merge, orphan sweep, disk usage ----
 
@@ -161,9 +168,9 @@ function ourLinks(status, wtPath) {
 // landed it shows as untracked (`?? app/node_modules`), so treating our own machinery as user
 // work kept done worktrees alive forever (t_1ff80eba). An unreadable tree counts as dirty:
 // removal is a courtesy, never a gamble.
-function worktreeDirty(wtPath) {
+async function worktreeDirty(wtPath) {
   let out;
-  try { out = git(wtPath, ['status', '--porcelain']); } catch { return true; }
+  try { out = await git(wtPath, ['status', '--porcelain']); } catch { return true; }
   const ours = ourLinks(out, wtPath);
   return out.split('\n').filter(Boolean).some((l) => !l.startsWith('?? ') || !ours.has(l.slice(3).replace(/\/$/, '')));
 }
@@ -172,29 +179,29 @@ function worktreeDirty(wtPath) {
 // ensureWorktree). Safety per Cato's plan review: never --force; refuses a dirty tree and a
 // branch that still carries unmerged commits, so a throw means "retain and flag".
 // Returns { removed: true } or { removed: false, absent: true } when there is nothing to remove.
-function removeWorktree(t) {
+async function removeWorktree(t) {
   const wp = t && t.worktreePath;
   if (!wp || !fs.existsSync(path.join(wp, '.git'))) return { removed: false, absent: true };
   SB.guardRepo(rootOf(t), 'remove a task worktree in'); // sandbox: retained, never touched (t_8f7605c4)
-  if (worktreeDirty(wp)) throw new Error('worktree has uncommitted changes');
+  if (await worktreeDirty(wp)) throw new Error('worktree has uncommitted changes');
   // Drop our own share-links first: `git worktree remove` runs its own safety pass, which still
   // counts the untracked link and refuses without --force (t_1ff80eba). Only ever the link —
   // a real dir stays and keeps the refusal.
-  let st; try { st = git(wp, ['status', '--porcelain']); } catch { st = ''; }
+  let st; try { st = await git(wp, ['status', '--porcelain']); } catch { st = ''; }
   for (const p of ourLinks(st, wp)) { try { fs.unlinkSync(path.join(wp, p)); } catch {} }
   const root = rootOf(t);
-  if (t.worktreeBranch && branchExists(root, t.worktreeBranch)) {
-    const st = branchMergeState(root, t.worktreeBranch);
+  if (t.worktreeBranch && await branchExists(root, t.worktreeBranch)) {
+    const st = await branchMergeState(root, t.worktreeBranch);
     if (st && !st.merged) throw new Error(`branch ${t.worktreeBranch} still has unmerged commits`);
   }
-  try { git(root, ['worktree', 'remove', wp]); } catch (e) { throw new Error(`git worktree remove refused: ${errOf(e)}`); }
+  try { await git(root, ['worktree', 'remove', wp]); } catch (e) { throw new Error(`git worktree remove refused: ${errOf(e)}`); }
   return { removed: true };
 }
 
 // Registered worktrees of `root`: [{ path, branch, detached, locked }] (the main tree included).
-function listWorktrees(root) {
+async function listWorktrees(root) {
   const wts = [];
-  for (const block of git(root, ['worktree', 'list', '--porcelain']).split('\n\n')) {
+  for (const block of (await git(root, ['worktree', 'list', '--porcelain'])).split('\n\n')) {
     const m = {};
     for (const l of block.split('\n')) {
       const i = l.indexOf(' ');
@@ -218,19 +225,19 @@ function listWorktrees(root) {
 // owns the race of having its cwd deleted mid-run (t_a91c68ce: the 04:35 ENOENT abort).
 const STRAY_WT = /\/(squad-[^/]+|tmp\.[^/]+\/wt)$/;
 
-function reapStrayWorktrees(root, report) {
+async function reapStrayWorktrees(root, report) {
   const managed = path.join(root, '.squad', 'worktrees') + path.sep;
-  for (const w of listWorktrees(root)) {
+  for (const w of await listWorktrees(root)) {
     const p = w.path;
     if (w.locked || p === root || p.startsWith(managed) || !STRAY_WT.test(p)) continue;
     if (!fs.existsSync(path.join(p, '.git'))) { report.strays.push(p); continue; } // vanished: prune drops the entry
-    if (worktreeDirty(p)) { report.retained.push({ dir: p, reason: 'stray worktree retained: dirty' }); continue; }
-    try { git(root, ['worktree', 'remove', p]); report.strays.push(p); }
+    if (await worktreeDirty(p)) { report.retained.push({ dir: p, reason: 'stray worktree retained: dirty' }); continue; }
+    try { await git(root, ['worktree', 'remove', p]); report.strays.push(p); }
     catch (e) { report.retained.push({ dir: p, reason: `stray worktree retained: ${errOf(e) || 'remove failed'}` }); }
   }
 }
 
-function pruneWorktrees(root) { try { git(root, ['worktree', 'prune']); return true; } catch { return false; } }
+async function pruneWorktrees(root) { try { await git(root, ['worktree', 'prune']); return true; } catch { return false; } }
 
 const wtDirNames = (root) => {
   const wtRoot = path.join(root, '.squad', 'worktrees');
@@ -248,12 +255,12 @@ const wtDirNames = (root) => {
 // prune`; never uses --force.
 // Returns { removed: [ids], retained: [{dir, reason}], strays: [paths], pruned } for callers to
 // log/assert.
-function sweepWorktrees(opts = {}) {
+async function sweepWorktrees(opts = {}) {
   const { repoDir, store, busyTaskIds = [], log = () => {} } = opts;
   const report = { removed: [], retained: [], strays: [], pruned: false };
   let root;
-  try { root = git(repoDir, ['rev-parse', '--show-toplevel']); } catch { report.skipped = `not a git repo: ${repoDir}`; return report; }
-  reapStrayWorktrees(root, report);
+  try { root = await git(repoDir, ['rev-parse', '--show-toplevel']); } catch { report.skipped = `not a git repo: ${repoDir}`; return report; }
+  await reapStrayWorktrees(root, report);
   let tasks;
   try { tasks = store.listTasks(); } catch { report.skipped = 'board unreadable — not proof of orphans'; return report; }
   const busy = new Set(busyTaskIds);
@@ -280,7 +287,7 @@ function sweepWorktrees(opts = {}) {
     }
     if (!reason) {
       try {
-        removeWorktree({ worktreePath: dir, worktreeBranch: `squad/${name}` });
+        await removeWorktree({ worktreePath: dir, worktreeBranch: `squad/${name}` });
         report.removed.push(name);
         for (const t of owners) { try { store.updateTask(t.id, { worktreePath: null, worktreeBranch: null }); } catch {} }
       } catch (e) { reason = String(e.message).slice(0, 200); }
@@ -291,7 +298,7 @@ function sweepWorktrees(opts = {}) {
       for (const t of owners) if (t.status === 'done') { try { store.commentTask(t.id, 'system', `worktree retained: ${reason}`); } catch {} }
     }
   }
-  report.pruned = pruneWorktrees(root);
+  report.pruned = await pruneWorktrees(root);
   if (report.removed.length || report.retained.length || report.strays.length) log(report);
   return report;
 }
@@ -311,16 +318,14 @@ async function diskUsage(repoDir, opts = {}) {
   let entry = duRoots.get(repoDir);
   if (entry && entry.bad && Date.now() - entry.at > (opts.rootRetryMs ?? DU_ROOT_RETRY_MS)) entry = undefined;
   if (entry === undefined) {
-    try { entry = git(repoDir, ['rev-parse', '--show-toplevel']); duRoots.set(repoDir, entry); } catch { duRoots.set(repoDir, { bad: true, at: Date.now() }); }
+    try { entry = await git(repoDir, ['rev-parse', '--show-toplevel']); duRoots.set(repoDir, entry); } catch { duRoots.set(repoDir, { bad: true, at: Date.now() }); }
   }
   const root = entry && !entry.bad ? entry : null;
   if (!root) return { count: 0, bytes: 0 };
   const cached = duCache.get(root);
   if (!opts.force && cached && Date.now() - cached.at < ttl) return cached.val;
   const names = wtDirNames(root);
-  const bytes = names.length ? await new Promise((resolve) => {
-    execFile('du', ['-sk', path.join(root, '.squad', 'worktrees')], (e, out) => resolve(e ? 0 : (Number(String(out).split('\t')[0]) * 1024 || 0)));
-  }) : 0;
+  const bytes = names.length ? Number(String((await CP.run('du', ['-sk', path.join(root, '.squad', 'worktrees')], { timeoutMs: GIT_TIMEOUT_MS })).stdout || '').split('\t')[0]) * 1024 || 0 : 0;
   const val = { count: names.length, bytes };
   duCache.set(root, { at: Date.now(), val });
   return val;
