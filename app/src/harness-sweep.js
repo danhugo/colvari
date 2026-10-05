@@ -22,7 +22,7 @@ const MARKER_ARG_PREFIX = '--squad-harness-run=';
 const ENV_MARKER_PREFIX = 'AGENTS_SQUAD_HARNESS_RUN=';
 const TERM_GRACE_MS = 2000; // SIGTERM, wait, then SIGKILL (critic amendment 2 on t_b8a2f6c4)
 const PS_TIMEOUT_MS = 4000;
-const PS_TRIES = 3; // a loaded machine can EAGAIN/starve a spawn; empty ≠ a real answer (see psField)
+const PS_TRIES = 5; // a loaded machine can EAGAIN/starve a spawn; empty ≠ a real answer (see psField)
 const PS_RETRY_MS = 50;
 
 // The real system tmpdir, not a run's private one (same reasoning as procguard): pidfiles are how
@@ -47,7 +47,7 @@ function psField(pid, args) {
       out = spawnSync('ps', ['-p', String(pid), ...args], { encoding: 'utf8', timeout: PS_TIMEOUT_MS, stdio: ['ignore', 'pipe', 'pipe'] }).stdout.trim();
     } catch { /* transient spawn failure under load: retry */ }
     if (out) return out;
-    if (i < PS_TRIES - 1) psNap(PS_RETRY_MS);
+    if (i < PS_TRIES - 1) psNap(PS_RETRY_MS * (i + 1)); // growing backoff: a slammed machine needs more than one slack window
   }
   return '';
 }
@@ -165,13 +165,20 @@ function judgeRun(rec, { selfPid, ancestors }) {
     if (ownerAlive) return 'live-run';
   }
   if (!pidAlive(rec.pid)) return 'dead-record'; // recorded pid gone: stale record, nothing to reap
-  if (rec.lstart && pidLstart(rec.pid) !== rec.lstart) return 'recycled-pid'; // critic amendment 1
+  // Identity: a DIFFERENT, non-empty lstart proves pid reuse (critic amendment 1); a DIFFERENT
+  // command proves the same. An EMPTY read (ps starved under load, t_8f7605c4 gate flake) proves
+  // nothing — it must fall through to the next check instead of skipping an orphan that has to
+  // be reaped, and if every read starves the record is kept for the next sweep, never deleted.
+  let verified = false;
+  if (rec.lstart) { const ls = pidLstart(rec.pid); if (ls) { if (ls !== rec.lstart) return 'recycled-pid'; verified = true; } }
   if (rec.markerArg) {
-    if (!pidCommand(rec.pid).includes(rec.markerArg)) return 'marker-mismatch';
+    const cmd = pidCommand(rec.pid);
+    if (cmd) { if (!cmd.includes(rec.markerArg)) return 'marker-mismatch'; verified = true; }
   } else if (rec.envMarker) {
     const blob = pidEnvBlob(rec.pid);
-    if (blob && !blob.includes(rec.envMarker)) return 'marker-mismatch';
+    if (blob) { if (!blob.includes(rec.envMarker)) return 'marker-mismatch'; verified = true; }
   }
+  if (!verified) return 'unverifiable'; // every identity read starved: keep the record, try again after the next boot
   return 'orphan'; // owner dead, live pid is provably the recorded harness run
 }
 
@@ -196,6 +203,11 @@ function sweep({ selfPid = process.pid, log = (m) => console.log(m) } = {}) {
       continue;
     }
     if (verdict === 'dead-record') { removeFile(full); out.stale++; continue; }
+    if (verdict === 'unverifiable') { // keep the record: the next sweep re-reads identity once ps can answer
+      out.skipped.push({ runId: rec.runId, pid: rec.pid, verdict });
+      log(`[harness-sweep] ${f}: not reaped (${verdict}) — record kept for the next sweep, nothing signalled`);
+      continue;
+    }
     log(`[harness-sweep] ${f}: not reaped (${verdict}) — pidfile removed, nothing signalled`);
     removeFile(full);
     out.skipped.push({ runId: rec && rec.runId, pid: rec && rec.pid, verdict });
