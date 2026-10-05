@@ -140,36 +140,16 @@ function renderAll() {
 // The sidebar Inbox badge is always-visible chrome: it tracks the inbox count on every render,
 // not only while the inbox tab itself is drawn — an inline update inside renderInbox left the
 // badge stale whenever items landed while another tab was active.
-// Debounced (t_94f9b9f0): a render burst (state pushes while agents stream) used to pay the DOM
-// write once per render. The first change in a burst still writes this frame — the badge never
-// lags its render, so the every-render chrome contract holds — and further changes inside the
-// 100ms window collapse into one trailing write that re-reads S.inbox at fire time, so the last
-// value always lands even if the count flipped and flipped back mid-burst.
 // Perf instrumentation (t_f6b343a5): ring of recent durations + slow-call count, inspect via
-// window.__perf.inboxBadge — nothing is logged unless a write exceeds SLOW_MS.
+// window.__perf.inboxBadge — nothing is logged unless a call exceeds SLOW_MS.
 const PERF = { inboxBadge: { samples: [], slow: 0, SLOW_MS: 2 } };
-const IB_DEBOUNCE_MS = 100;
-let ibTimer = null; // pending trailing write, or the leading write's coalescing-window expiry
-let ibShown = null; // value currently in the DOM
-function ibBadgeWrite() {
+function renderInboxBadge() {
   const t0 = performance.now();
-  ibShown = (S.inbox || []).length ? String(S.inbox.length) : '';
-  $('#inbox-tab-badge').textContent = ibShown;
+  $('#inbox-tab-badge').textContent = (S.inbox || []).length ? String(S.inbox.length) : '';
   const ms = performance.now() - t0;
   const p = PERF.inboxBadge;
   p.samples.push(ms); if (p.samples.length > 120) p.samples.shift();
   if (ms > p.SLOW_MS) { p.slow++; console.debug('inbox badge render slow', ms.toFixed(2), 'ms'); }
-}
-function renderInboxBadge() {
-  const want = (S.inbox || []).length ? String(S.inbox.length) : '';
-  if (want === ibShown) return; // unchanged since the last write: no DOM work, no timer churn
-  if (ibTimer !== null) { // inside a burst window: collapse to one trailing write
-    clearTimeout(ibTimer);
-    ibTimer = setTimeout(() => { ibTimer = null; ibBadgeWrite(); }, IB_DEBOUNCE_MS);
-    return;
-  }
-  ibBadgeWrite(); // leading edge: the first change of a burst lands this frame
-  ibTimer = setTimeout(() => { ibTimer = null; }, IB_DEBOUNCE_MS);
 }
 window.__perf = PERF;
 // The always-visible chrome (Perry's contract, t_8d586961): badges, counts and the restart chip
@@ -539,7 +519,7 @@ $('#importfile').onchange = act(async (e) => {
 const TAB_RESIG = {
   board: () => { boardSig = null; },
   obs: () => { obsSig = null; },
-  usage: () => { usageSig = null; usageSched.force(); }, // size-measuring view: rebuild now, not on the burst debounce
+  usage: () => { usageSig = null; },
 };
 document.querySelectorAll('button[data-tab]').forEach((b) => b.onclick = () => {
   const wasActive = b.classList.contains('active');
@@ -2026,22 +2006,9 @@ const cardHtmlCached = (t, envKey) => {
   if (!c || c.key !== key) cardHtmlCache.set(t.id, c = { key, html: cardHtml(t) });
   return c.html;
 };
-// Whole-patch fast path (t_005acd70): with the board tab open, renderBoard runs on every
-// state push (~15/s in a streaming burst) because the board version bumps each time — the
-// keyed card patch absorbed the DOM cost but still paid O(cards) per push for memo keys,
-// the done-column sort and the per-column filters. The patch reads exactly: the env, each
-// task's id+updatedAt (the store bumps updatedAt on every mutation, comments included),
-// the selection, the done fold state and the clock (age labels change at minute
-// granularity). A matching signature therefore guarantees the current DOM is already
-// correct: return without touching it. Stamped only after a full successful patch, so a
-// throw mid-patch can't strand a stale signature (the renderLog t_9f57b293 lesson).
-let boardPatchSig = null;
-const BOARD_SIG_CLOCK_MS = 30000; // ≤ half the 60s step ago() renders at, so labels stay fresh
 function patchBoardColumns(tasks) {
   const colsEl = $('#columns');
   const envKey = [agentStamp(), JSON.stringify(S.orch.running || null), rst.scheduledAfter || '', rst.gating.join(), upd.devMode !== false, sel.boardTeam || '', S.tasks.length, S.tasks.map((x) => colStOf(x)[0]).join(''), S.allNodes.map((n) => n.name).join()].join('|');
-  const sig = [envKey, sel.task || '', doneOpen, showAllDone, Math.floor(Date.now() / BOARD_SIG_CLOCK_MS), tasks.map((t) => `${t.id}=${t.updatedAt || ''}`).join()].join('|');
-  if (sig === boardPatchSig) return;
   const strays = tasks.filter((t) => !boardCols.includes(t.status)); // collected once; the "other" column reuses them
   (strays.length ? boardCols.concat('other') : boardCols).forEach((st, ci) => {
     const colTasks = st === 'other' ? strays : tasks.filter((t) => t.status === st); // one pass serves the header count and the card list
@@ -2090,7 +2057,6 @@ function patchBoardColumns(tasks) {
       if (tb.textContent !== label) tb.textContent = label;
     } else if (tb) tb.remove();
   });
-  boardPatchSig = sig; // only after the full patch: a throw above must strand no fresh sig
   if (cardHtmlCache.size > tasks.length) { const live = new Set(tasks.map((t) => t.id)); for (const id of cardHtmlCache.keys()) if (!live.has(id)) cardHtmlCache.delete(id); }
 }
 function renderBoard() {
@@ -2611,25 +2577,10 @@ function billingTable(rs) {
   const g = {}; for (const r of rs) { const k = r.billingSource || 'unknown'; (g[k] ||= { runs: 0, cost: 0 }); g[k].runs++; g[k].cost += r.reportedCostUsd || 0; }
   return `<div><h4>By billing source</h4><table><tr><th></th><th>Runs</th><th>Cost</th><th></th></tr>${Object.entries(g).sort((a, b) => b[1].cost - a[1].cost).map(([k, v]) => `<tr><td>${billTag(k)}</td><td class="num">${v.runs}</td><td class="num">$${v.cost.toFixed(4)}</td><td>${k === 'subscription' ? '<span class="costnote">covered by subscription — not billed per token</span>' : k === 'unknown' ? '<span class="costnote">billing source undetected</span>' : ''}</td></tr>`).join('')}</table></div>`;
 }
-// Debounced ledger draw (seed 491): with the Usage tab open during an agent burst every render
-// pass whose runs version moved rebuilt the whole ledger view (aggregation + every table) at
-// render rate. RenderSched coalesces those rebuilds to one per 400ms while the burst lasts — the
-// same contract as the chat room; the sig fast-path still makes unchanged renders free, and
-// user-driven draws (tab activation, filter change) force past the rate limit.
-const usageSched = RenderSched.create({
-  minMs: 400,
-  hidden: () => document.hidden,
-  gate: () => !!$('#tab-usage.active'),
-  draw: () => renderUsageBody(), // late-binding: e2e/perf harnesses wrap the global by name
-});
-const usageUkey = () => [S.v && S.v.runs, S.v && S.v.board, RUNS.length, $('#us-agent').value, $('#us-billing').value, S.allNodes.length].join('|');
 function renderUsage() {
   if (!$('#tab-usage').classList.contains('active')) return;
-  if (usageUkey() === usageSig) return;
-  usageSched.bump(); // event burst: the trailing draw lands the final ledger state
-}
-function renderUsageBody() {
-  usageSig = usageUkey();
+  const ukey = [S.v && S.v.runs, S.v && S.v.board, RUNS.length, $('#us-agent').value, $('#us-billing').value, S.allNodes.length].join('|');
+  if (ukey === usageSig) return; usageSig = ukey;
   const fa = $('#us-agent'); const cur = fa.value;
   fa.innerHTML = '<option value="">All</option>' + S.allNodes.map((n) => `<option value="${n.id}">${esc(n.name)}</option>`).join(''); fa.value = cur;
   const fb = $('#us-billing').value;
@@ -2749,7 +2700,7 @@ function usageSub(name) {
 }
 $('#us-anchors').onclick = (ev) => { const b = ev.target.closest('button[data-sub]'); if (b) usageSub(b.dataset.sub); };
 usageSub('summary');
-$('#us-agent').onchange = () => usageSched.force(); $('#us-billing').onchange = () => usageSched.force(); // user action: immediate redraw, no burst debounce
+$('#us-agent').onchange = renderUsage; $('#us-billing').onchange = renderUsage;
 const download = (name, text, type) => { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], { type })); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000); };
 $('#us-export').onclick = act(async () => download(`usage-${(S.project.name || 'project').replace(/[^\w-]+/g, '_')}.csv`, await call('usageCSV', false), 'text/csv'));
 $('#us-exportall').onclick = act(async () => download('usage-all-projects.csv', await call('usageCSV', true), 'text/csv'));
@@ -3660,8 +3611,8 @@ squad.on('state', (st) => { if (st.projectId && st.projectId !== ctx.p) { clearT
 // one catch-up pull plus a chat bump redraw whatever moved while dark. Deltas keep patching S and
 // bump the schedulers, so every view (not just chat) is current again by the frame after show.
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'hidden') { chatSched.hide(); renderSched.hide(); usageSched.hide(); return; }
-  chatBump(); renderSched.bump(); usageSched.bump(); refresh();
+  if (document.visibilityState === 'hidden') { chatSched.hide(); renderSched.hide(); return; }
+  chatBump(); renderSched.bump(); refresh();
 });
 setInterval(() => { if (S.orch.running && !document.hidden) refresh(); }, 2000); // backstop for the sections deltas do not carry (team/nodes/nstat); version-gated inside refresh, paused while hidden
 refresh().then(() => syncRecovery()); // recovery banner needs a settled ctx.p (t_6911ba60)
