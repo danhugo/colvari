@@ -2006,22 +2006,9 @@ const cardHtmlCached = (t, envKey) => {
   if (!c || c.key !== key) cardHtmlCache.set(t.id, c = { key, html: cardHtml(t) });
   return c.html;
 };
-// Whole-patch fast path (t_005acd70): with the board tab open, renderBoard runs on every
-// state push (~15/s in a streaming burst) because the board version bumps each time — the
-// keyed card patch absorbed the DOM cost but still paid O(cards) per push for memo keys,
-// the done-column sort and the per-column filters. The patch reads exactly: the env, each
-// task's id+updatedAt (the store bumps updatedAt on every mutation, comments included),
-// the selection, the done fold state and the clock (age labels change at minute
-// granularity). A matching signature therefore guarantees the current DOM is already
-// correct: return without touching it. Stamped only after a full successful patch, so a
-// throw mid-patch can't strand a stale signature (the renderLog t_9f57b293 lesson).
-let boardPatchSig = null;
-const BOARD_SIG_CLOCK_MS = 30000; // ≤ half the 60s step ago() renders at, so labels stay fresh
 function patchBoardColumns(tasks) {
   const colsEl = $('#columns');
   const envKey = [agentStamp(), JSON.stringify(S.orch.running || null), rst.scheduledAfter || '', rst.gating.join(), upd.devMode !== false, sel.boardTeam || '', S.tasks.length, S.tasks.map((x) => colStOf(x)[0]).join(''), S.allNodes.map((n) => n.name).join()].join('|');
-  const sig = [envKey, sel.task || '', doneOpen, showAllDone, Math.floor(Date.now() / BOARD_SIG_CLOCK_MS), tasks.map((t) => `${t.id}=${t.updatedAt || ''}`).join()].join('|');
-  if (sig === boardPatchSig) return;
   const strays = tasks.filter((t) => !boardCols.includes(t.status)); // collected once; the "other" column reuses them
   (strays.length ? boardCols.concat('other') : boardCols).forEach((st, ci) => {
     const colTasks = st === 'other' ? strays : tasks.filter((t) => t.status === st); // one pass serves the header count and the card list
@@ -2070,7 +2057,6 @@ function patchBoardColumns(tasks) {
       if (tb.textContent !== label) tb.textContent = label;
     } else if (tb) tb.remove();
   });
-  boardPatchSig = sig; // only after the full patch: a throw above must strand no fresh sig
   if (cardHtmlCache.size > tasks.length) { const live = new Set(tasks.map((t) => t.id)); for (const id of cardHtmlCache.keys()) if (!live.has(id)) cardHtmlCache.delete(id); }
 }
 function renderBoard() {
