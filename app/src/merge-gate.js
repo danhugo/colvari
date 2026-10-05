@@ -37,7 +37,19 @@ const repoRootOf = (t) => path.resolve(t.worktreePath, '..', '..', '..');
 const gatePidFile = (root) => path.join(root, '.squad', GATE.PIDFILE);
 const pidAlive = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } };
 const groupAlive = (pid) => { try { process.kill(-pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } };
-const pidLstart = (pid) => { try { return spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).stdout.trim(); } catch { return ''; } };
+// A starved `ps` (EAGAIN/timeout under a fork-storming suite or machine) returns empty — that is
+// a FAILED observation, not a recycled pid: treating '' as a mismatch makes reapGatePidFile skip
+// a live orphan forever (its "1 orphan agent run stopped" reap silently becomes a skip). Retry
+// briefly before giving up, mirroring harness-sweep's psField (t_8f7605c4).
+const pidLstart = (pid) => {
+  for (let i = 0; i < 3; i++) {
+    let out = '';
+    try { out = spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).stdout.trim(); } catch { /* transient spawn failure: retry */ }
+    if (out) return out;
+    if (i < 2) sleepSync(50 * (i + 1));
+  }
+  return '';
+};
 function killGroup(pgid) { try { process.kill(-pgid, 'SIGTERM'); } catch {} sleepSync(GATE.TERM_GRACE_MS); try { process.kill(-pgid, 'SIGKILL'); } catch {} }
 function reapGatePidFile(file) {
   const out = { killed: [], skipped: [] };
