@@ -35,7 +35,8 @@ test('run-watchdog: kill -9 the app -> the whole run group is gone within 10s', 
   const leader = spawn(sh, [], { detached: true, stdio: 'ignore' });
   assert.ok(await until(() => Number(fs.readFileSync(path.join(d, 'gc'), 'utf8') || 0) > 0), 'fixture never started');
   const gcPid = Number(fs.readFileSync(path.join(d, 'gc'), 'utf8').trim());
-  const wd = spawn(process.execPath, [WD, '--app-pid', String(app.pid), '--app-lstart', MG.pidLstart(app.pid), '--group-pid', String(leader.pid), '--interval-ms', '250'],
+  const appLstart = await MG.pidLstart(app.pid);
+  const wd = spawn(process.execPath, [WD, '--app-pid', String(app.pid), '--app-lstart', appLstart, '--group-pid', String(leader.pid), '--interval-ms', '250'],
     { detached: true, stdio: 'ignore' });
   let wdGone = false; wd.on('exit', () => { wdGone = true; });
   await new Promise((r) => setTimeout(r, 700)); // alive app: the group must be left alone
@@ -70,7 +71,8 @@ test('run-watchdog: a recycled app pid (lstart mismatch) counts as gone; a finis
 test('run-watchdog: exits on its own when the run group ends while the app lives', async () => {
   const app = spawn('/bin/sleep', ['60']);
   const short = spawn('/bin/sleep', ['1'], { detached: true, stdio: 'ignore' });
-  const wd = spawn(process.execPath, [WD, '--app-pid', String(app.pid), '--app-lstart', MG.pidLstart(app.pid), '--group-pid', String(short.pid), '--interval-ms', '250'],
+  const appLstart = await MG.pidLstart(app.pid);
+  const wd = spawn(process.execPath, [WD, '--app-pid', String(app.pid), '--app-lstart', appLstart, '--group-pid', String(short.pid), '--interval-ms', '250'],
     { detached: true, stdio: 'ignore' });
   let wdExit = null; wd.on('exit', (c) => { wdExit = c; });
   assert.ok(await until(() => wdExit === 0, 8000), 'watchdog outlived its finished run group');
@@ -79,20 +81,20 @@ test('run-watchdog: exits on its own when the run group ends while the app lives
 
 // ---- heartbeat breadcrumb ----
 
-test('bootstate: unclean exit detected at boot; clean exit and first boot are not', () => {
+test('bootstate: unclean exit detected at boot; clean exit and first boot are not', async () => {
   const d = tmp('hb');
   assert.equal(BS.detectUnclean(d), null, 'no breadcrumb must read as clean');
-  BS.writeAlive(d, { pid: 424242, at: 1790000000000 }); // previous instance's heartbeat
+  await BS.writeAlive(d, { pid: 424242, at: 1790000000000 }); // previous instance's heartbeat
   const u = BS.detectUnclean(d);
   assert.ok(u && u.pid === 424242 && u.at === 1790000000000, 'heartbeat without clean stamp must read unclean');
   assert.equal(BS.detectUnclean(d, 424242), null, 'a process must never read its own heartbeat as evidence');
-  BS.writeAlive(d, { cleanExitAt: 1790000001000 });
+  await BS.writeAlive(d, { cleanExitAt: 1790000001000 });
   assert.equal(BS.detectUnclean(d), null, 'a clean-exit stamp must read as clean');
 });
 
-test('bootstate: the heartbeat file lands in the store dir and rewrites atomically', () => {
+test('bootstate: the heartbeat file lands in the store dir and rewrites atomically', async () => {
   const d = tmp('hbfile');
-  const rec = BS.writeAlive(d);
+  const rec = await BS.writeAlive(d);
   assert.ok(fs.existsSync(BS.alivePath(d)));
   const onDisk = JSON.parse(fs.readFileSync(BS.alivePath(d), 'utf8'));
   assert.equal(onDisk.pid, rec.pid);
@@ -111,8 +113,9 @@ test('boot reap: orphaned run pidfiles are reaped and their tasks marked interru
   fs.chmodSync(sh, 0o755);
   const leader = spawn(sh, [], { detached: true, stdio: 'ignore' });
   fs.mkdirSync(runPidsDir(s.dir), { recursive: true });
-  fs.writeFileSync(path.join(runPidsDir(s.dir), String(leader.pid)), `${leader.pid}\t${MG.pidLstart(leader.pid)}\tagent-run Flux task:${t.id}\n`);
-  const out = reapRunPids(s.dir);
+  const leaderLstart = await MG.pidLstart(leader.pid);
+  fs.writeFileSync(path.join(runPidsDir(s.dir), String(leader.pid)), `${leader.pid}\t${leaderLstart}\tagent-run Flux task:${t.id}\n`);
+  const out = await reapRunPids(s.dir);
   assert.equal(out.killed.length, 1, 'orphan group not reaped');
   assert.match(out.killed[0].cmd, /task:/, 'pidfile must carry the task id');
   assert.ok(await until(() => !MG.groupAlive(leader.pid)), 'reaped group still alive');

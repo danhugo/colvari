@@ -14,8 +14,10 @@ const MG = require('./merge-gate');
 
 const alivePath = (storeDir) => path.join(storeDir, '.squad', 'app-alive.json');
 
-function writeAlive(storeDir, extra = {}) {
-  const rec = { pid: process.pid, lstart: MG.pidLstart(process.pid), at: Date.now(), ...extra };
+// Heartbeat write. Async since t_5a78aa95: the old sync `ps -o lstart` fork blocked the main
+// process every few seconds. Callers fire-and-forget — a heartbeat is never worth awaiting.
+async function writeAlive(storeDir, extra = {}) {
+  const rec = { pid: process.pid, lstart: await MG.pidLstart(process.pid), at: Date.now(), ...extra };
   try {
     fs.mkdirSync(path.dirname(alivePath(storeDir)), { recursive: true });
     const tmp = alivePath(storeDir) + '.tmp';

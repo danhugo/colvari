@@ -27,8 +27,8 @@ test('unknown non-standard CLI: sub-command rows are parsed despite the binary-n
   assert.deepStrictEqual(cmds.map((c) => c.name), ['ask', 'ls-models']);
 });
 
-test('unknown non-standard CLI: a usable profile is derived with zero new code', () => {
-  const { profile } = introspectRuntime(FIXTURE, exec, { id: 'oddctl', label: 'Oddctl' });
+test('unknown non-standard CLI: a usable profile is derived with zero new code', async () => {
+  const { profile } = await introspectRuntime(FIXTURE, exec, { id: 'oddctl', label: 'Oddctl' });
   assert.strictEqual(profile.binary, FIXTURE);
   assert.deepStrictEqual(profile.argsTemplate, ['ask', '--json', 'json', '--model', '{model}', '{prompt}']);
   assert.deepStrictEqual(profile.modelsCommand, []); // no `models` subcommand -> degrades to unsupported
@@ -46,7 +46,7 @@ test('unknown non-standard CLI: a usable profile is derived with zero new code',
 });
 
 test('unknown non-standard CLI: the derived profile drives a real end-to-end run', async () => {
-  const { profile } = introspectRuntime(FIXTURE, exec, { id: 'oddctl', label: 'Oddctl' });
+  const { profile } = await introspectRuntime(FIXTURE, exec, { id: 'oddctl', label: 'Oddctl' });
   const run = await runProfile(profile, { model: 'odd/mini', prompt: 'say pong' });
   assert.strictEqual(run.exitCode, 0);
   assert.ok(run.result.includes('odd reply to "say pong" (model=odd/mini)'), run.result);

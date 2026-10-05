@@ -27,9 +27,9 @@ function bareRepo() {
 }
 
 // bareRepo + a Store whose task carries a worktree on squad/<id> — the auto-merge.test.js shape.
-function setup(taskId) {
+async function setup(taskId) {
   const repo = bareRepo();
-  const w = WT.ensureWorktree(repo, taskId);
+  const w = await WT.ensureWorktree(repo, taskId);
   const s = new Store(fs.mkdtempSync(path.join(os.tmpdir(), 'wlc-store-')));
   let task = s.createTask({ title: 'lifecycle', assignee: 'n_dev' });
   task = s._updateTask(task.id, { worktreePath: w.worktreePath, worktreeBranch: w.worktreeBranch });
@@ -53,27 +53,29 @@ function settle(s, id, from) {
 function done(s, id) {
   const from = (s.getTask(id).comments || []).length;
   s.updateTask(id, { status: 'done' });
-  return settle(s, id, from);
+  // The gate is async now: wait for the merge (including worktree cleanup) before settling.
+  const q = s._mergeQueue ? s._mergeQueue.catch(() => {}) : Promise.resolve();
+  return q.then(() => settle(s, id, from));
 }
 
 // ---- node_modules sharing ----
 
-test('new worktrees link node_modules (symlink, gitignored), never a copy', () => {
-  const { repo, wt } = setup('t_lc1');
+test('new worktrees link node_modules (symlink, gitignored), never a copy', async () => {
+  const { repo, wt } = await setup('t_lc1');
   const link = path.join(wt, 'node_modules');
   const st = fs.lstatSync(link);
   assert.ok(st.isSymbolicLink(), 'lstat says symlink');
   assert.strictEqual(fs.realpathSync(link), fs.realpathSync(path.join(repo, 'node_modules')), 'resolves to the shared dir');
   assert.strictEqual(g(wt, 'status', '--porcelain'), '', 'symlink is gitignored: porcelain clean');
-  assert.deepStrictEqual(WT.ensureWorktree(repo, 't_lc1'), { cwd: wt, worktreePath: wt, worktreeBranch: 'squad/t_lc1' }, 'reuse path keeps the link');
+  assert.deepStrictEqual(await WT.ensureWorktree(repo, 't_lc1'), { cwd: wt, worktreePath: wt, worktreeBranch: 'squad/t_lc1' }, 'reuse path keeps the link');
 });
 
-test('an existing real node_modules copy in a worktree is never replaced', () => {
-  const { repo, wt } = setup('t_lc11');
+test('an existing real node_modules copy in a worktree is never replaced', async () => {
+  const { repo, wt } = await setup('t_lc11');
   fs.rmSync(path.join(wt, 'node_modules'), { force: true, recursive: true }); // drop the auto-created symlink (lstat: link only, target untouched)
   fs.mkdirSync(path.join(wt, 'node_modules'));
   fs.writeFileSync(path.join(wt, 'node_modules', 'local.txt'), 'real\n');
-  WT.ensureWorktree(repo, 't_lc11'); // reuse path must not touch it
+  await WT.ensureWorktree(repo, 't_lc11'); // reuse path must not touch it
   const st = fs.lstatSync(path.join(wt, 'node_modules'));
   assert.ok(st.isDirectory() && !st.isSymbolicLink());
   assert.strictEqual(fs.readFileSync(path.join(wt, 'node_modules', 'local.txt'), 'utf8'), 'real\n');
@@ -82,7 +84,7 @@ test('an existing real node_modules copy in a worktree is never replaced', () =>
 // ---- remove on done/merge ----
 
 test('merge on done removes the worktree, keeps the branch and the fields naming it', async () => {
-  const { repo, s, task, wt } = setup('t_lc2');
+  const { repo, s, task, wt } = await setup('t_lc2');
   fs.writeFileSync(path.join(wt, 'b.txt'), 'new\n'); g(wt, 'add', '.'); g(wt, 'commit', '-q', '-m', 'work');
   const updated = await done(s, task.id);
   assert.strictEqual(updated.status, 'done');
@@ -94,17 +96,17 @@ test('merge on done removes the worktree, keeps the branch and the fields naming
 });
 
 test('reopen after cleanup recreates the worktree from the kept branch', async () => {
-  const { repo, s, task, wt, taskId } = setup('t_lc2');
+  const { repo, s, task, wt, taskId } = await setup('t_lc2');
   fs.writeFileSync(path.join(wt, 'b.txt'), 'new\n'); g(wt, 'add', '.'); g(wt, 'commit', '-q', '-m', 'work');
   await done(s, task.id);
-  const w2 = WT.ensureWorktree(repo, taskId);
+  const w2 = await WT.ensureWorktree(repo, taskId);
   assert.strictEqual(w2.worktreePath, wt, 'same dir comes back');
   assert.match(g(w2.cwd, 'log', '--oneline', 'squad/' + taskId), /work/, 'prior commits present on the kept branch');
   assert.ok(fs.lstatSync(path.join(wt, 'node_modules')).isSymbolicLink(), 'link re-created too');
 });
 
 test('nothing-merged done flip: dir removed, fields kept so re-flips still comment', async () => {
-  const { s, task, wt } = setup('t_lc12'); // no commits on the branch
+  const { s, task, wt } = await setup('t_lc12'); // no commits on the branch
   const first = await done(s, task.id);
   assert.strictEqual(first.status, 'done');
   assert.strictEqual(fs.existsSync(wt), false, 'dir removed (branch was already an ancestor)');
@@ -115,14 +117,14 @@ test('nothing-merged done flip: dir removed, fields kept so re-flips still comme
 });
 
 test('repeated done-flip and human mergeTask after cleanup are clean no-ops', async () => {
-  const { s, task, wt } = setup('t_lc10');
+  const { s, task, wt } = await setup('t_lc10');
   fs.writeFileSync(path.join(wt, 'b.txt'), 'new\n'); g(wt, 'add', '.'); g(wt, 'commit', '-q', '-m', 'work');
   const first = await done(s, task.id);
   assert.strictEqual(fs.existsSync(wt), false);
   const second = await done(s, task.id); // fields kept + dir gone: gate skips at ahead-0 and comments
   assert.strictEqual(second.status, 'done');
   assert.ok(second.comments.some((c) => /nothing merged: no commits/.test(c.text)));
-  const m = s.mergeTask(task.id); // direct human path takes the same ahead-0 skip
+  const m = await s.mergeTask(task.id); // direct human path takes the same ahead-0 skip
   assert.ok(m.comments.some((c) => /nothing merged: no commits/.test(c.text)));
   assert.strictEqual(m.status, 'done');
 });
@@ -130,11 +132,11 @@ test('repeated done-flip and human mergeTask after cleanup are clean no-ops', as
 // ---- sweep: retained vs removed ----
 
 test('dirty worktree is retained and flagged (sweep and done-flip)', async () => {
-  const { s, task, wt } = setup('t_lc3');
+  const { s, task, wt } = await setup('t_lc3');
   fs.writeFileSync(path.join(wt, 'b.txt'), 'new\n'); g(wt, 'add', '.'); g(wt, 'commit', '-q', '-m', 'work');
   s._updateTask(task.id, { status: 'done' }); // raw done: clean tree, unmerged branch
   fs.writeFileSync(path.join(wt, 'c.txt'), 'uncommitted\n');
-  const r = WT.sweepWorktrees({ repoDir: repoOf(wt), store: s });
+  const r = await WT.sweepWorktrees({ repoDir: repoOf(wt), store: s });
   assert.deepStrictEqual(r.removed, []);
   assert.ok(r.retained.some((x) => x.dir === 't_lc3' && /uncommitted changes/.test(x.reason)), JSON.stringify(r.retained));
   assert.strictEqual(fs.existsSync(wt), true);
@@ -147,23 +149,23 @@ test('dirty worktree is retained and flagged (sweep and done-flip)', async () =>
   assert.ok(t2.comments.some((c) => /worktree retained: worktree has uncommitted changes/.test(c.text)));
 });
 
-test('unmerged branch is retained', () => {
-  const { s, task, wt } = setup('t_lc4');
+test('unmerged branch is retained', async () => {
+  const { s, task, wt } = await setup('t_lc4');
   fs.writeFileSync(path.join(wt, 'b.txt'), 'new\n'); g(wt, 'add', '.'); g(wt, 'commit', '-q', '-m', 'work');
   s._updateTask(task.id, { status: 'done' });
-  const r = WT.sweepWorktrees({ repoDir: repoOf(wt), store: s });
+  const r = await WT.sweepWorktrees({ repoDir: repoOf(wt), store: s });
   assert.deepStrictEqual(r.removed, []);
   assert.ok(r.retained.some((x) => x.dir === 't_lc4' && /unmerged/.test(x.reason)), JSON.stringify(r.retained));
   assert.strictEqual(fs.existsSync(wt), true);
 });
 
-test('in-flight tasks are never touched (status, busy list, shared conflict dir)', () => {
-  const { s, task, wt, repo } = setup('t_lc5');
+test('in-flight tasks are never touched (status, busy list, shared conflict dir)', async () => {
+  const { s, task, wt, repo } = await setup('t_lc5');
   s._updateTask(task.id, { status: 'in_progress' });
-  let r = WT.sweepWorktrees({ repoDir: repo, store: s });
+  let r = await WT.sweepWorktrees({ repoDir: repo, store: s });
   assert.deepStrictEqual(r.removed, []);
   s._updateTask(task.id, { status: 'todo' });
-  r = WT.sweepWorktrees({ repoDir: repo, store: s, busyTaskIds: [task.id] });
+  r = await WT.sweepWorktrees({ repoDir: repo, store: s, busyTaskIds: [task.id] });
   assert.deepStrictEqual(r.removed, [], 'busy list holds it even at todo');
   assert.strictEqual(fs.existsSync(wt), true);
 
@@ -173,14 +175,14 @@ test('in-flight tasks are never touched (status, busy list, shared conflict dir)
   const res = s.createTask({ title: 'Resolve merge conflict: x', assignee: 'n_dev' });
   s._updateTask(res.id, { status: 'in_progress', worktreePath: wt, worktreeBranch: 'squad/t_lc5' });
   s._updateTask(task.id, { status: 'done' });
-  r = WT.sweepWorktrees({ repoDir: repo, store: s });
+  r = await WT.sweepWorktrees({ repoDir: repo, store: s });
   assert.deepStrictEqual(r.removed, [], 'resolve task keeps the shared dir');
   assert.ok(r.retained.some((x) => x.dir === 't_lc5' && /in_progress/.test(x.reason)), JSON.stringify(r.retained));
   assert.strictEqual(fs.existsSync(wt), true);
 });
 
-test('dirs unknown to the store are never swept — a 0-commit branch is merged by definition (t_f4453909); the sweep still prunes', () => {
-  const { s, task, wt, repo } = setup('t_lc7'); // task t_lc7 is todo: its dir must survive
+test('dirs unknown to the store are never swept — a 0-commit branch is merged by definition (t_f4453909); the sweep still prunes', async () => {
+  const { s, task, wt, repo } = await setup('t_lc7'); // task t_lc7 is todo: its dir must survive
   const mk = (name, withCommit) => {
     const dir = path.join(repo, '.squad', 'worktrees', name);
     g(repo, 'worktree', 'add', '-b', `squad/${name}`, dir);
@@ -189,7 +191,7 @@ test('dirs unknown to the store are never swept — a 0-commit branch is merged 
   };
   mk('t_orphan1', true); // unmerged: retained
   const orphan2 = mk('t_orphan2', false); // clean + no commits: still retained — identical to a task that just started
-  let r = WT.sweepWorktrees({ repoDir: repo, store: s });
+  let r = await WT.sweepWorktrees({ repoDir: repo, store: s });
   assert.deepStrictEqual(r.removed, [], JSON.stringify(r));
   assert.ok(r.retained.some((x) => x.dir === 't_orphan1' && /unknown to this store/.test(x.reason)), JSON.stringify(r.retained));
   assert.ok(r.retained.some((x) => x.dir === 't_orphan2' && /unknown to this store/.test(x.reason)), JSON.stringify(r.retained));
@@ -199,15 +201,15 @@ test('dirs unknown to the store are never swept — a 0-commit branch is merged 
   // A stale admin entry (dir deleted by hand) is pruned even though the sweep never saw the dir.
   g(repo, 'worktree', 'add', '-b', 'squad/t_orphan3', path.join(repo, '.squad', 'worktrees', 't_orphan3'));
   fs.rmSync(path.join(repo, '.squad', 'worktrees', 't_orphan3'), { recursive: true, force: true });
-  const r3 = WT.sweepWorktrees({ repoDir: repo, store: s });
+  const r3 = await WT.sweepWorktrees({ repoDir: repo, store: s });
   assert.ok(r3.pruned);
   assert.strictEqual(g(repo, 'worktree', 'list').includes('t_orphan3'), false, 'stale entry pruned');
 });
 
-test('a board read error is not proof of orphans: the sweep no-ops', () => {
-  const { s, task, wt } = setup('t_lc8');
+test('a board read error is not proof of orphans: the sweep no-ops', async () => {
+  const { s, task, wt } = await setup('t_lc8');
   const broken = { listTasks() { throw new Error('disk on fire'); } };
-  const r = WT.sweepWorktrees({ repoDir: repoOf(wt), store: broken });
+  const r = await WT.sweepWorktrees({ repoDir: repoOf(wt), store: broken });
   assert.strictEqual(r.removed.length, 0);
   assert.match(r.skipped, /board unreadable/);
   assert.strictEqual(fs.existsSync(wt), true);
@@ -216,7 +218,7 @@ test('a board read error is not proof of orphans: the sweep no-ops', () => {
 // ---- disk usage ----
 
 test('diskUsage: worktree count + bytes, symlinked node_modules not counted as a copy', async () => {
-  const { repo } = setup('t_lc9');
+  const { repo } = await setup('t_lc9');
   const u = await WT.diskUsage(repo, { force: true });
   assert.strictEqual(u.count, 1);
   assert.ok(u.bytes > 0);
@@ -227,10 +229,10 @@ test('diskUsage: worktree count + bytes, symlinked node_modules not counted as a
 // t_1fb02462: the whole computation (git spawn + worktree listing + du) sits behind the TTL now —
 // a header poll used to run a synchronous `git rev-parse` on the main process every call.
 test('diskUsage: within the TTL the worktree listing is not recomputed', async () => {
-  const { repo } = setup('t_lc10');
+  const { repo } = await setup('t_lc10');
   const u1 = await WT.diskUsage(repo, { force: true });
   assert.strictEqual(u1.count, 1);
-  WT.ensureWorktree(repo, 't_lc10b'); // a second worktree lands after the cached sample
+  await WT.ensureWorktree(repo, 't_lc10b'); // a second worktree lands after the cached sample
   const u2 = await WT.diskUsage(repo); // TTL hit: count must NOT see the new worktree
   assert.strictEqual(u2.count, 1);
   const u3 = await WT.diskUsage(repo, { force: true }); // only an explicit refresh does
@@ -259,45 +261,45 @@ function oldBranchRepo(withAppDir) {
   return repo;
 }
 
-test('symlink-only worktree on a pre-ignore branch is clean and removed; a real copy still refuses', () => {
+test('symlink-only worktree on a pre-ignore branch is clean and removed; a real copy still refuses', async () => {
   const repo = oldBranchRepo(false);
-  const w = WT.ensureWorktree(repo, 't_lc14');
+  const w = await WT.ensureWorktree(repo, 't_lc14');
   assert.ok(fs.lstatSync(path.join(w.worktreePath, 'node_modules')).isSymbolicLink());
   assert.strictEqual(g(w.worktreePath, 'status', '--porcelain'), '?? node_modules', 'the evidence from t_1ff80eba');
-  assert.strictEqual(WT.worktreeDirty(w.worktreePath), false, 'our own link is not user work');
-  assert.deepStrictEqual(WT.removeWorktree({ worktreePath: w.worktreePath, worktreeBranch: 'squad/t_lc14' }), { removed: true });
+  assert.strictEqual(await WT.worktreeDirty(w.worktreePath), false, 'our own link is not user work');
+  assert.deepStrictEqual(await WT.removeWorktree({ worktreePath: w.worktreePath, worktreeBranch: 'squad/t_lc14' }), { removed: true });
   assert.strictEqual(fs.existsSync(w.worktreePath), false);
   g(repo, 'rev-parse', '--verify', 'squad/t_lc14'); // throws (test failure) if the branch was dropped
 
   // A real node_modules dir (a deliberate local copy) is still uncommitted work: refuse.
-  const w2 = WT.ensureWorktree(repo, 't_lc15');
+  const w2 = await WT.ensureWorktree(repo, 't_lc15');
   fs.rmSync(path.join(w2.worktreePath, 'node_modules'), { force: true, recursive: true }); // unlink the link, never the shared target
   fs.mkdirSync(path.join(w2.worktreePath, 'node_modules'));
   fs.writeFileSync(path.join(w2.worktreePath, 'node_modules', 'local.txt'), 'real\n');
-  assert.strictEqual(WT.worktreeDirty(w2.worktreePath), true);
-  assert.throws(() => WT.removeWorktree({ worktreePath: w2.worktreePath, worktreeBranch: 'squad/t_lc15' }), /uncommitted changes/);
+  assert.strictEqual(await WT.worktreeDirty(w2.worktreePath), true);
+  await assert.rejects(() => WT.removeWorktree({ worktreePath: w2.worktreePath, worktreeBranch: 'squad/t_lc15' }), /uncommitted changes/);
 });
 
-test('same for the app/ layout: wt/app/node_modules link does not block removal', () => {
+test('same for the app/ layout: wt/app/node_modules link does not block removal', async () => {
   const repo = oldBranchRepo(true);
-  const w = WT.ensureWorktree(path.join(repo, 'app'), 't_lc16');
+  const w = await WT.ensureWorktree(path.join(repo, 'app'), 't_lc16');
   assert.ok(fs.lstatSync(path.join(w.worktreePath, 'app', 'node_modules')).isSymbolicLink());
   assert.strictEqual(g(w.worktreePath, 'status', '--porcelain'), '?? app/node_modules', 'exactly the evidence comment');
-  assert.strictEqual(WT.worktreeDirty(w.worktreePath), false);
-  const r = WT.sweepWorktrees({ repoDir: repo, store: { listTasks: () => [], getTask: () => ({ id: 't_lc16', status: 'done' }) } }); // store knows the task as done: removable
+  assert.strictEqual(await WT.worktreeDirty(w.worktreePath), false);
+  const r = await WT.sweepWorktrees({ repoDir: repo, store: { listTasks: () => [], getTask: () => ({ id: 't_lc16', status: 'done' }) } }); // store knows the task as done: removable
   assert.deepStrictEqual(r.removed, ['t_lc16'], JSON.stringify(r));
   assert.strictEqual(fs.existsSync(w.worktreePath), false);
   g(repo, 'rev-parse', '--verify', 'squad/t_lc16'); // branch kept
 });
 
-test('a store that cannot see a worktree id retains it when work is at stake (t_e23df71f)', () => {
+test('a store that cannot see a worktree id retains it when work is at stake (t_e23df71f)', async () => {
   const repo = oldBranchRepo(true);
-  const w = WT.ensureWorktree(repo, 't_lc18');
+  const w = await WT.ensureWorktree(repo, 't_lc18');
   // Perf/e2e harness store: knows no tasks at all — the old orphan path deleted every real
   // worktree on such boots (Quinn's t_4382031b scratchpad, 2026-09-30). Uncommitted scratch in
   // an unknown-id dir must survive; only clean+merged dirs are safe to recycle.
   fs.writeFileSync(path.join(w.worktreePath, 'scratch.txt'), 'gate outputs\n');
-  const r = WT.sweepWorktrees({ repoDir: repo, store: { listTasks: () => [], getTask: () => null } });
+  const r = await WT.sweepWorktrees({ repoDir: repo, store: { listTasks: () => [], getTask: () => null } });
   assert.deepStrictEqual(r.removed, [], JSON.stringify(r));
   assert.ok(r.retained.some((e) => e.dir === 't_lc18' && /unknown to this store/.test(e.reason)), JSON.stringify(r.retained));
   assert.strictEqual(fs.existsSync(w.worktreePath), true);
@@ -308,16 +310,16 @@ test('a store that cannot see a worktree id retains it when work is at stake (t_
 // tasks as unknown ids, and deleted their worktrees mid-run — a task that just started has a
 // 0-commit branch (= fully merged) and a clean tree, indistinguishable from a merged orphan
 // by git alone. Only a store that knows the id may remove the dir.
-test('a foreign store never removes a live in_progress task worktree at 0 commits on a clean tree (t_f4453909)', () => {
-  const { s, task, wt, repo } = setup('t_lc21'); // the exact incident shape: 0 commits, clean tree
+test('a foreign store never removes a live in_progress task worktree at 0 commits on a clean tree (t_f4453909)', async () => {
+  const { s, task, wt, repo } = await setup('t_lc21'); // the exact incident shape: 0 commits, clean tree
   s._updateTask(task.id, { status: 'in_progress' });
   const foreign = { listTasks: () => [], getTask: () => null }; // sibling project's / harness store
-  const r = WT.sweepWorktrees({ repoDir: repo, store: foreign });
+  const r = await WT.sweepWorktrees({ repoDir: repo, store: foreign });
   assert.deepStrictEqual(r.removed, [], JSON.stringify(r));
   assert.ok(r.retained.some((e) => e.dir === 't_lc21' && /unknown to this store/.test(e.reason)), JSON.stringify(r.retained));
   assert.strictEqual(fs.existsSync(wt), true, 'the live worktree survives a foreign sweep');
   // The owning store, by contrast, retains it for the plain reason: the task is in flight.
-  const r2 = WT.sweepWorktrees({ repoDir: repo, store: s });
+  const r2 = await WT.sweepWorktrees({ repoDir: repo, store: s });
   assert.deepStrictEqual(r2.removed, [], JSON.stringify(r2));
   assert.ok(r2.retained.some((e) => e.dir === 't_lc21' && /in_progress/.test(e.reason)), JSON.stringify(r2.retained));
   assert.strictEqual(fs.existsSync(wt), true);
@@ -325,8 +327,8 @@ test('a foreign store never removes a live in_progress task worktree at 0 commit
 
 // ---- t_1ff80eba: stray gate/tmp registrations outside .squad/worktrees ----
 
-test('stray squad-*/gate registrations are reaped; locked, dirty and non-matching ones survive', () => {
-  const { repo, s } = setup('t_lc17');
+test('stray squad-*/gate registrations are reaped; locked, dirty and non-matching ones survive', async () => {
+  const { repo, s } = await setup('t_lc17');
   const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'wlc-stray-')));
   const gate = path.join(tmp, 'squad-gate-base-abc123');
   g(repo, 'worktree', 'add', '--detach', gate, 'HEAD');
@@ -341,7 +343,7 @@ test('stray squad-*/gate registrations are reaped; locked, dirty and non-matchin
   g(repo, 'worktree', 'add', '--detach', locked, 'HEAD');
   g(repo, 'worktree', 'lock', locked);
 
-  const r = WT.sweepWorktrees({ repoDir: repo, store: s });
+  const r = await WT.sweepWorktrees({ repoDir: repo, store: s });
   assert.deepStrictEqual(r.strays.sort(), [gate, scratch, twt].sort(), JSON.stringify(r));
   for (const p of [gate, scratch, twt]) assert.strictEqual(fs.existsSync(p), false, `${p} reaped`);
   assert.strictEqual(fs.existsSync(user), true, 'a non-squad worktree is not ours to reap');
@@ -353,7 +355,7 @@ test('stray squad-*/gate registrations are reaped; locked, dirty and non-matchin
   const dirty = path.join(tmp, 'squad-dirty');
   g(repo, 'worktree', 'add', '--detach', dirty, 'HEAD');
   fs.writeFileSync(path.join(dirty, 'wip.txt'), 'mine\n');
-  const r2 = WT.sweepWorktrees({ repoDir: repo, store: s });
+  const r2 = await WT.sweepWorktrees({ repoDir: repo, store: s });
   assert.deepStrictEqual(r2.strays, [], JSON.stringify(r2));
   assert.ok(r2.retained.some((x) => x.dir === dirty && /dirty/.test(x.reason)), JSON.stringify(r2.retained));
   assert.strictEqual(fs.existsSync(dirty), true);
@@ -365,8 +367,8 @@ test('stray squad-*/gate registrations are reaped; locked, dirty and non-matchin
 // with the binary present). A clean, unlocked throwaway of that shape is reaped like any other
 // stray — which is exactly why the self-update flow (and the gate's base checkout) must hold a
 // git worktree lock while their suite runs: locked entries are never touched, by any sweeper.
-test('self-update-shaped stray: unlocked is reaped, locked is never touched', () => {
-  const { repo, s } = setup('t_lc19');
+test('self-update-shaped stray: unlocked is reaped, locked is never touched', async () => {
+  const { repo, s } = await setup('t_lc19');
   const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'wlc-selfupdate-')));
   const unlocked = path.join(tmp, 'squad-selfupdate-incident'); // crashed flow leftover: reaped
   g(repo, 'worktree', 'add', '--detach', unlocked, 'HEAD');
@@ -374,7 +376,7 @@ test('self-update-shaped stray: unlocked is reaped, locked is never touched', ()
   g(repo, 'worktree', 'add', '--detach', locked, 'HEAD');
   g(repo, 'worktree', 'lock', locked);
 
-  const r = WT.sweepWorktrees({ repoDir: repo, store: s });
+  const r = await WT.sweepWorktrees({ repoDir: repo, store: s });
   assert.deepStrictEqual(r.strays, [unlocked], JSON.stringify(r));
   assert.strictEqual(fs.existsSync(unlocked), false, 'an unlocked leftover of this shape is reaped');
   assert.strictEqual(fs.existsSync(locked), true, 'the locked test-step worktree survives every sweeper');
@@ -387,23 +389,23 @@ function repoOf(wtPath) { return path.resolve(wtPath, '..', '..', '..'); }
 
 // ---- QA (t_3344282a): pin the removeWorktree contract store._mergeOnDone leans on ----
 
-test('removeWorktree: absent is a quiet no-op, dirty refuses, unmerged refuses, clean+merged removes and keeps the branch', () => {
-  const { repo, wt } = setup('t_lc13');
-  assert.deepStrictEqual(WT.removeWorktree(null), { removed: false, absent: true });
-  assert.deepStrictEqual(WT.removeWorktree({}), { removed: false, absent: true });
-  assert.deepStrictEqual(WT.removeWorktree({ worktreePath: path.join(repo, '.squad', 'worktrees', 't_missing') }), { removed: false, absent: true });
-  assert.strictEqual(WT.worktreeDirty(path.join(repo, '.squad', 'worktrees', 't_missing')), true, 'unreadable tree counts as dirty: removal never gambles');
+test('removeWorktree: absent is a quiet no-op, dirty refuses, unmerged refuses, clean+merged removes and keeps the branch', async () => {
+  const { repo, wt } = await setup('t_lc13');
+  assert.deepStrictEqual(await WT.removeWorktree(null), { removed: false, absent: true });
+  assert.deepStrictEqual(await WT.removeWorktree({}), { removed: false, absent: true });
+  assert.deepStrictEqual(await WT.removeWorktree({ worktreePath: path.join(repo, '.squad', 'worktrees', 't_missing') }), { removed: false, absent: true });
+  assert.strictEqual(await WT.worktreeDirty(path.join(repo, '.squad', 'worktrees', 't_missing')), true, 'unreadable tree counts as dirty: removal never gambles');
 
   fs.writeFileSync(path.join(wt, 'd.txt'), 'uncommitted\n');
-  assert.throws(() => WT.removeWorktree({ worktreePath: wt, worktreeBranch: 'squad/t_lc13' }), /uncommitted changes/);
+  await assert.rejects(() => WT.removeWorktree({ worktreePath: wt, worktreeBranch: 'squad/t_lc13' }), /uncommitted changes/);
   assert.strictEqual(fs.existsSync(wt), true);
 
   g(wt, 'add', '.'); g(wt, 'commit', '-q', '-m', 'work'); // clean now, but the branch is unmerged
-  assert.throws(() => WT.removeWorktree({ worktreePath: wt, worktreeBranch: 'squad/t_lc13' }), /unmerged/);
+  await assert.rejects(() => WT.removeWorktree({ worktreePath: wt, worktreeBranch: 'squad/t_lc13' }), /unmerged/);
   assert.strictEqual(fs.existsSync(wt), true);
 
   g(repo, 'merge', '--no-ff', '-q', '-m', 'm', 'squad/t_lc13'); // the human merge path
-  assert.deepStrictEqual(WT.removeWorktree({ worktreePath: wt, worktreeBranch: 'squad/t_lc13' }), { removed: true });
+  assert.deepStrictEqual(await WT.removeWorktree({ worktreePath: wt, worktreeBranch: 'squad/t_lc13' }), { removed: true });
   assert.strictEqual(fs.existsSync(wt), false);
   g(repo, 'rev-parse', '--verify', 'squad/t_lc13'); // throws (test failure) if the branch was dropped
 });
@@ -411,7 +413,7 @@ test('removeWorktree: absent is a quiet no-op, dirty refuses, unmerged refuses, 
 // main.js sweeps at boot + every 10 min and orchestrator.start() sweeps before agents spawn
 // (orchestrator.js); this pins the start() wiring — without it a refactor could silently
 // disconnect startup cleanup while every sweepWorktrees unit test stays green.
-test('startup sweep wiring: Orchestrator.start() sweeps removable worktrees before agents spawn', () => {
+test('startup sweep wiring: Orchestrator.start() sweeps removable worktrees before agents spawn', async () => {
   const repo = bareRepo();
   const dir = path.join(repo, '.squad', 'worktrees', 't_orpwire');
   g(repo, 'worktree', 'add', '-b', 'squad/t_orpwire', dir);
@@ -424,6 +426,8 @@ test('startup sweep wiring: Orchestrator.start() sweeps removable worktrees befo
   o.spawnFn = () => ({ unref() {} }); // stub the detached red-master health child
   o.start();
   try {
+    // The sweep is fire-and-forget off start() now — poll for the removal instead of racing it.
+    for (let i = 0; i < 100 && fs.existsSync(dir); i++) await new Promise((r) => setTimeout(r, 40));
     assert.strictEqual(fs.existsSync(dir), false, 'removable worktree swept during start(), before any agent could spawn');
   } finally { o.stop(); }
 });
@@ -437,7 +441,7 @@ test('diskUsage: a failed root resolution retries instead of caching null foreve
   g(dir, 'init', '-q', '-b', 'main');
   fs.writeFileSync(path.join(dir, 'a.txt'), 'base\n');
   g(dir, 'add', '.'); g(dir, 'commit', '-q', '-m', 'init');
-  WT.ensureWorktree(dir, 't_lc11');
+  await WT.ensureWorktree(dir, 't_lc11');
   const cached = await WT.diskUsage(dir, { force: true });
   assert.strictEqual(cached.count, 0, 'the bad root entry is still honored inside the retry window');
   const retried = await WT.diskUsage(dir, { force: true, rootRetryMs: 1 });

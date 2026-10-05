@@ -26,8 +26,8 @@ test('reapGatePids: a recorded live group is killed and the pidfile cleared', as
   const root = tmpRoot('live');
   const c = spawn('/bin/sleep', ['30'], { detached: true, stdio: 'ignore' });
   const f = MG.gatePidFile(root);
-  fs.writeFileSync(f, `${c.pid}\t${MG.pidLstart(c.pid)}\t/bin/sleep 30\n`);
-  const r = MG.reapGatePids(root);
+  fs.writeFileSync(f, `${c.pid}\t${await MG.pidLstart(c.pid)}\t/bin/sleep 30\n`);
+  const r = await MG.reapGatePids(root);
   assert.deepEqual(r.killed.map((x) => x.pid), [c.pid], 'the recorded group was reaped');
   assert.ok(await until(() => !alive(c.pid)), 'group leader is dead');
   assert.equal(fs.existsSync(f), false, 'pidfile cleared after the reap');
@@ -38,7 +38,7 @@ test('reapGatePids: a recycled pid (lstart mismatch) is skipped untouched — no
   const c = spawn('/bin/sleep', ['30'], { detached: true, stdio: 'ignore' });
   const f = MG.gatePidFile(root);
   fs.writeFileSync(f, `${c.pid}\tMon Jan  1 00:00:00 2001\t/bin/sleep 30\n`);
-  const r = MG.reapGatePids(root);
+  const r = await MG.reapGatePids(root);
   assert.deepEqual(r.killed, [], 'nothing killed on identity mismatch');
   assert.deepEqual(r.skipped.map((x) => x.pid), [c.pid]);
   assert.ok(alive(c.pid), 'the live unrelated process survived the reap');
@@ -47,11 +47,11 @@ test('reapGatePids: a recycled pid (lstart mismatch) is skipped untouched — no
   assert.ok(await until(() => !alive(c.pid)), 'teardown killed the sleeper');
 });
 
-test('reapGatePids: dead, garbage and unparseable entries are dropped without touching anything', () => {
+test('reapGatePids: dead, garbage and unparseable entries are dropped without touching anything', async () => {
   const root = tmpRoot('dead');
   const f = MG.gatePidFile(root);
   fs.writeFileSync(f, '999999999\tMon Jan  1 00:00:00 2001\tlong gone\nnot-a-pid\tx\ty\n\n');
-  const r = MG.reapGatePids(root);
+  const r = await MG.reapGatePids(root);
   assert.deepEqual(r.killed, []);
   assert.deepEqual(r.skipped, []);
   assert.equal(fs.existsSync(f), false);
@@ -61,11 +61,11 @@ test('reapGatePids: leader already exited but the group lingers (orphaned electr
   const root = tmpRoot('orphan');
   const f = MG.gatePidFile(root);
   const sh = spawn('/bin/sh', ['-c', 'sleep 0.3; sleep 30 </dev/null >/dev/null 2>&1 &'], { detached: true, stdio: 'ignore' });
-  const lstart = MG.pidLstart(sh.pid); // captured while the leader is still alive
+  const lstart = await MG.pidLstart(sh.pid); // captured while the leader is still alive
   assert.ok(lstart, 'leader lstart captured before it exits');
   assert.ok(await until(() => !alive(sh.pid), 5000), 'leader exited, orphaning the sleeper inside its group');
   fs.writeFileSync(f, `${sh.pid}\t${lstart}\torphan-tree\n`);
-  const r = MG.reapGatePids(root);
+  const r = await MG.reapGatePids(root);
   assert.equal(r.killed.length, 1, 'the orphaned group was reaped by its recorded leader pid');
   assert.ok(await until(() => groupGone(sh.pid)), 'no member of the group survived');
   assert.equal(fs.existsSync(f), false);
@@ -75,7 +75,7 @@ test('runTracked: on clean exit the whole process group is swept — no orphaned
   const root = tmpRoot('sweep');
   const gcFile = path.join(root, 'gc-pid');
   const f = MG.gatePidFile(root);
-  const r = MG.runTracked('/bin/sh', ['-c', `sleep 30 </dev/null >/dev/null 2>&1 & echo $! > ${shq(gcFile)}`], { cwd: root, env: {}, timeoutMs: 15000, pidFile: f });
+  const r = await MG.runTracked('/bin/sh', ['-c', `sleep 30 </dev/null >/dev/null 2>&1 & echo $! > ${shq(gcFile)}`], { cwd: root, env: {}, timeoutMs: 15000, pidFile: f });
   assert.equal(r.status, 0, 'the command itself succeeded');
   assert.equal(r.error, null);
   const gc = Number(fs.readFileSync(gcFile, 'utf8').trim());
@@ -89,7 +89,7 @@ test('runTracked: the hard timeout kills the direct child AND the whole group', 
   const gcFile = path.join(root, 'gc-pid');
   const f = MG.gatePidFile(root);
   const t0 = Date.now();
-  const r = MG.runTracked('/bin/sh', ['-c', `sleep 30 </dev/null >/dev/null 2>&1 & echo $! > ${shq(gcFile)}; exec sleep 60`], { cwd: root, env: {}, timeoutMs: 700, pidFile: f });
+  const r = await MG.runTracked('/bin/sh', ['-c', `sleep 30 </dev/null >/dev/null 2>&1 & echo $! > ${shq(gcFile)}; exec sleep 60`], { cwd: root, env: {}, timeoutMs: 700, pidFile: f });
   assert.ok(Date.now() - t0 < 10000, 'the timeout was hard, not a hang');
   assert.equal(r.status, null, 'the child did not exit on its own');
   assert.equal(r.signal, 'SIGTERM', 'the direct child was TERMed at the deadline');
@@ -104,7 +104,7 @@ test('runTracked: a TERM-immune suite still dies at the hard timeout (group SIGK
   const pidFile2 = path.join(root, 'suite-pid');
   const f = MG.gatePidFile(root);
   const t0 = Date.now();
-  const r = MG.runTracked('/bin/sh', ['-c', `echo $$ > ${shq(pidFile2)}; trap "" TERM; sleep 30`], { cwd: root, env: {}, timeoutMs: 600, pidFile: f });
+  const r = await MG.runTracked('/bin/sh', ['-c', `echo $$ > ${shq(pidFile2)}; trap "" TERM; sleep 30`], { cwd: root, env: {}, timeoutMs: 600, pidFile: f });
   assert.ok(Date.now() - t0 < 10000, `hard timeout enforced (${Date.now() - t0}ms)`);
   assert.equal(r.status, null);
   assert.equal(r.signal, 'SIGKILL', 'TERM-immune child escalated to a group SIGKILL');

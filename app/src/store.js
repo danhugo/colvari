@@ -838,7 +838,11 @@ class Store {
     // Every approval request also shows up in the human inbox.
     if (patch.awaitingApproval && !this.listInbox({ status: 'open' }).some((i) => i.kind === 'approval' && i.taskId === tid)) this.addInbox({ kind: 'approval', taskId: tid, nodeId: t.assignee, question: `Approve "${t.title}"?`, choices: ['approve'] });
     // Never strand finished work in its worktree branch: auto-merge on done, or park as merge_conflict.
-    if (patch.status === 'done' && t.worktreePath && t.worktreeBranch) t = this._mergeOnDone(t, opts);
+    // Async fire-and-forget (t_5a78aa95): the old sync gate ran the whole unit suite on the caller's
+    // thread (minutes on the app's main process). The merge queue serializes merges; the post-gate
+    // state lands via the queue's own writes. Returns the post-FLIP view — await updateTaskAsync /
+    // mergeTask (or store.mergeQueue) for the post-gate state.
+    if (patch.status === 'done' && t.worktreePath && t.worktreeBranch) this._mergeOnDone(t, opts).catch((e) => { try { this._logStore('merge gate error: ' + (e && e.message || e)); } catch {} });
     return t;
   }
   // Async twin of _updateTask (dispatch/run-end writes on the main process: see withLockAsync).
@@ -900,7 +904,7 @@ class Store {
     this.withLockAsync(pass).then((t) => {
       try {
         if (patch.awaitingApproval && !this.listInbox({ status: 'open' }).some((i) => i.kind === 'approval' && i.taskId === tid)) this.addInbox({ kind: 'approval', taskId: tid, nodeId: t.assignee, question: `Approve "${t.title}"?`, choices: ['approve'] });
-        if (patch.status === 'done' && t.worktreePath && t.worktreeBranch) this._mergeOnDone(t, opts);
+        if (patch.status === 'done' && t.worktreePath && t.worktreeBranch) this._mergeOnDone(t, opts).catch((e) => { try { this._logStore('updateTaskSoon merge failed: ' + (e && e.message || e)); } catch {} });
       } catch (e) { try { this._logStore('updateTaskSoon deferred hook failed: ' + e.message); } catch {} }
     }).catch((e) => { try { this._logStore('updateTaskSoon deferred write failed: ' + e.message); } catch {} });
     return this.getTask(tid);
@@ -908,13 +912,15 @@ class Store {
   async updateTaskAsync(tid, patch, opts) {
     let t = await this._updateTaskAsync(tid, patch);
     if (patch.awaitingApproval && !this.listInbox({ status: 'open' }).some((i) => i.kind === 'approval' && i.taskId === tid)) this.addInbox({ kind: 'approval', taskId: tid, nodeId: t.assignee, question: `Approve "${t.title}"?`, choices: ['approve'] });
-    // The merge gate is sync by contract (t_12a92368) and runs in whichever process flips done.
-    if (patch.status === 'done' && t.worktreePath && t.worktreeBranch) t = this._mergeOnDone(t, opts);
+    // The merge gate awaits here (agents' board MCP flips done through this and reads the
+    // post-gate state); sync updateTask fires it in the background instead.
+    if (patch.status === 'done' && t.worktreePath && t.worktreeBranch) t = await this._mergeOnDone(t, opts);
     return t;
   }
   // Merge a done task's squad/<id> branch into base — through the pre-merge test gate
-  // (src/merge-gate.js, SYNC per the t_12a92368 contract): base is merged into the branch in its
-  // worktree, the unit suite runs on exactly that tree, and only a green run lands the base.
+  // (src/merge-gate.js, async since t_5a78aa95; the old synchronous gate froze the main process
+  // for the whole suite): base is merged into the branch in its worktree, the unit suite runs on
+  // exactly that tree, and only a green run lands the base.
   // opts flows into the gate ({runTests} / {testCmd} for tests and the human merge button;
   // production omits it and runs the real suite). On red/infra the task is reopened to its
   // assignee with the capped failing output. On conflict, abort, mark the task 'merge_conflict'
@@ -922,12 +928,29 @@ class Store {
   // branch), so resolving it re-merges the original work instead of stranding it.
   // Human "merge now" (main.js taskMerge IPC): the same gated merge as a done flip, callable
   // in any task state; returns the task in its post-gate state.
-  mergeTask(tid, opts) { return this._mergeOnDone(this.getTask(tid), opts || {}); }
+  mergeTask(tid, opts) { return this._mergeOnDone(this.getTask(tid), { ...(opts || {}), mergeNow: true }); }
+  // Double-merge guard (Cato t_f7c42eef #2): merges in this process run ONE at a time through
+  // this._mergeQueue, so a done→review→done re-flip or a double done-flip queues behind a live
+  // gate instead of racing it (the gate's cross-process merge.lock covers sibling processes, and
+  // its ahead/base re-checks make an already-merged queue slot a cheap no-op).
   _mergeOnDone(t, opts = {}) {
+    const run = () => this._mergeGateRun(t, opts);
+    const prev = Promise.resolve(this._mergeQueue).catch(() => {});
+    this._mergeQueue = prev.then(run, run);
+    return this._mergeQueue;
+  }
+  async _mergeGateRun(t, opts = {}) {
     const tid = t.id;
+    // Re-check after the queue wait: the flip that queued this merge may have been undone
+    // meanwhile (review park, reopen) — only an explicit merge (human button) proceeds from a
+    // non-done state.
+    const cur = this.getTask(tid);
+    if (!cur) return t;
+    if (!opts.mergeNow && cur.status !== 'done') return cur;
+    t = cur;
     this.commentTask(tid, 'system', `merge gate: running the unit suite on ${t.worktreeBranch} before merging into base${process.env.AGENTS_SQUAD_GATE_DISABLED ? ' (gate disabled — merging untested)' : ''}`);
     let r;
-    try { r = MG.gateMerge(t, opts); }
+    try { r = await MG.gateMerge(t, opts); }
     catch (e) { return this._onMergeConflict(t, e); }
     if (r.refused) {
       // Dirty main checkout: park in review (not merge_conflict) so cleaning main and
@@ -953,7 +976,7 @@ class Store {
         try {
           const build = (this.meta() || {}).buildSha;
           if (bump.sha && build && build !== bump.sha) {
-            const n = WT.commitsBehind(r.root, build, bump.sha);
+            const n = await WT.commitsBehind(r.root, build, bump.sha);
             if (n > 0) bump.behind = n;
           }
         } catch {}
@@ -966,14 +989,14 @@ class Store {
         MG.markMasterGreen(this, { root: r.root, tree: r.gate && r.gate.tree, base: r.base, source: 'merge gate', lastMergedTask: t.id, lastMergedBranch: t.worktreeBranch });
       }
       // Landed: the worktree dir is disposable now — the branch (kept) recreates it on reopen.
-      this._cleanupWorktree(t);
+      await this._cleanupWorktree(t);
       return this.getTask(tid);
     }
     if (!r.gate || r.gate.state === 'skipped') {
       this.commentTask(tid, 'system', `nothing merged: no commits on ${t.worktreeBranch} ahead of ${r.base}`);
       // Branch is already an ancestor of base (nothing to lose) — drop the dir too. Fields stay:
       // a repeated done-flip then walks the (cheap) worktree-gone guard and still comments.
-      this._cleanupWorktree(t);
+      await this._cleanupWorktree(t);
       return this.getTask(tid);
     }
     // Blocked by the gate: reopen to the assignee with the capped failing output.
@@ -1027,9 +1050,9 @@ class Store {
   // worktree here means real uncommitted work — flag it, never force. The task's worktreePath/
   // branch fields stay: they name the kept branch (ensureWorktree recreates the dir from it if
   // the task reopens), and a repeated done-flip hits the worktree-gone guard instead of failing.
-  _cleanupWorktree(t) {
+  async _cleanupWorktree(t) {
     try {
-      const r = WT.removeWorktree(t);
+      const r = await WT.removeWorktree(t);
       if (!r.removed) return;
       this.commentTask(t.id, 'system', `worktree removed after merge (branch ${t.worktreeBranch} kept for reopen)`);
     } catch (e) {
@@ -1037,9 +1060,11 @@ class Store {
     }
   }
   // Unmerged squad/<id> branches across every git repo referenced by a task's worktreePath.
-  listUnmergedBranches() {
+  async listUnmergedBranches() {
     const roots = new Set(this.listTasks().filter((t) => t.worktreePath).map((t) => path.resolve(t.worktreePath, '..', '..', '..')));
-    return [...roots].flatMap((root) => WT.unmergedSquadBranches(root));
+    const out = [];
+    for (const root of roots) out.push(...(await WT.unmergedSquadBranches(root)));
+    return out;
   }
   _updateTask(tid, patch) {
     return this._withTasks((tasks) => {

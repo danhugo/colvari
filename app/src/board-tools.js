@@ -217,7 +217,7 @@ function makeTools(store, nodeId) {
       store.commentTask(taskId, n.name, `Reassigned from ${from} to ${target.name}.`);
       return r;
     },
-    update_task_status({ taskId, status, priority }) {
+    async update_task_status({ taskId, status, priority }) {
       const t = me(); let tk = store.getTask(taskId);
       if (!tk) throw new Error('no task ' + taskId);
       if (!canSetStatus(t, nodeId, tk, status)) throw new Error('scope violation: cannot modify this task');
@@ -233,9 +233,9 @@ function makeTools(store, nodeId) {
       if (status === 'done' && !tk.worktreePath) {
         const branch = tk.worktreeBranch || `squad/${tk.id}`;
         const root = squadRepoRoot();
-        const st = root && WT.branchExists(root, branch) ? WT.branchMergeState(root, branch) : null;
+        const st = root && (await WT.branchExists(root, branch)) ? await WT.branchMergeState(root, branch) : null;
         if (st && !st.merged && !tk.worktreeBranch) {
-          const w = WT.ensureWorktree(root, tk.id);
+          const w = await WT.ensureWorktree(root, tk.id);
           if (!w.warning) {
             store.updateTask(taskId, { worktreePath: w.worktreePath, worktreeBranch: w.worktreeBranch });
             tk = store.getTask(taskId);
@@ -247,7 +247,10 @@ function makeTools(store, nodeId) {
       // Explicit agent-initiated review (vs. the orchestrator parking an incomplete/failed run for a human):
       // eligible for reviewer dispatch (no reviewer -> it stays in review, surfaced).
       if (g.status === 'review') g.parkedForHuman = false;
-      const r = store.updateTask(taskId, priority !== undefined ? { ...g, priority } : g);
+      const patch = priority !== undefined ? { ...g, priority } : g;
+      // A done flip awaits the merge gate (async since t_5a78aa95) so the agent reads the
+      // post-gate state (merged / reopened / merge_conflict) right in this tool result.
+      const r = (status === 'done' && tk.worktreePath && tk.worktreeBranch) ? await store.updateTaskAsync(taskId, patch) : store.updateTask(taskId, patch);
       return g.awaitingApproval ? { ...r, note: 'Moved to review: a human must approve this task before it is done.' } : r;
     },
     comment_task({ taskId, text, attachments }) {

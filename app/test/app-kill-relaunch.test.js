@@ -100,7 +100,7 @@ test('relaunch on the same store: planted orphan reaped, task marked interrupted
   orphan.unref();
   const orphanPf = path.join(runPidsDir(seed.dir), String(orphan.pid));
   fs.mkdirSync(path.dirname(orphanPf), { recursive: true });
-  fs.writeFileSync(orphanPf, `${orphan.pid}\t${MG.pidLstart(orphan.pid)}\tagent-run Qa-1 task:${task2.id}\n`);
+  fs.writeFileSync(orphanPf, `${orphan.pid}\t${await MG.pidLstart(orphan.pid)}\tagent-run Qa-1 task:${task2.id}\n`);
   assert.ok(MG.groupAlive(orphan.pid), 'planted orphan not alive');
 
   // Relaunch: bootRecovery must detect the unclean death, reap by recorded pid and mark the

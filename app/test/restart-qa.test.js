@@ -27,7 +27,7 @@ const setup = (d) => {
   const pm = s.addNode({ name: 'PM', role: 'PM' });
   const a = s.addNode({ name: 'A', role: 'Dev' });
   s.addEdge(pm.id, a.id);
-  const o = new Orchestrator(s);
+  const o = new Orchestrator(s); // no repoDir: no buildSha capture to wait for
   clearInterval(o._wakeTimer); clearInterval(o._stallTimer); clearInterval(o._tickTimer); clearInterval(o._restartTimer);
   return { s, o, pm, a };
 };
@@ -40,7 +40,7 @@ const wireUpdater = (o) => ({
 });
 
 // ---- case 1: merge doesn't restart (the pending count goes up instead) ----
-test('qa: a landed merge never restarts — only the pending count moves', () => {
+test('qa: a landed merge never restarts — only the pending count moves', async () => {
   const d = tmp('squad-restart-qa-');
   const { s, o, a } = setup(d);
   const up = wireUpdater(o);
@@ -53,6 +53,7 @@ test('qa: a landed merge never restarts — only the pending count moves', () =>
     MG.gateMerge = () => ({ merged: true, base: 'master', root, gate: { state: 'green', tests: 1, flaky: [] } });
     const t = s.createTask({ title: 'm', assignee: a.id, createdBy: 'human' });
     s.updateTask(t.id, { worktreePath: '/w', worktreeBranch: 'squad/m', status: 'done' });
+    await s._mergeQueue; // the gate is async now — the tally lands with the merge
   } finally { MG.gateMerge = orig; }
   const rp = s.restartPending();
   assert.equal(rp.count, 1, 'the landed merge counts toward the next restart');
@@ -66,7 +67,7 @@ test('qa: a landed merge never restarts — only the pending count moves', () =>
 });
 
 // ---- case 2: schedule_restart is rejected for non-core agents ----
-test('qa: schedule_restart is refused for non-core agents and leaves the state untouched', () => {
+test('qa: schedule_restart is refused for non-core agents and leaves the state untouched', async () => {
   const d = tmp('squad-restart-qa-');
   const { s, pm, a } = setup(d);
   s.bumpRestartPending();
@@ -80,7 +81,7 @@ test('qa: schedule_restart is refused for non-core agents and leaves the state u
 });
 
 // ---- case 3: dispatch pauses while scheduled; the pause is bounded and ends ----
-test('qa: dispatch pauses while a restart is scheduled and the pause ends — on cancel, and after the restart boots', () => {
+test('qa: dispatch pauses while a restart is scheduled and the pause ends — on cancel, and after the restart boots', async () => {
   const d = tmp('squad-restart-qa-');
   const { s, o, a } = setup(d);
   const up = wireUpdater(o);
@@ -135,7 +136,7 @@ test('qa: the dispatch pause is bounded — past the drain grace the restart pro
 });
 
 // ---- case 4: the saved schedule is cleared only after the new process starts ----
-test('qa: the fired schedule survives every sweep of the old process and is consumed only on boot', () => {
+test('qa: the fired schedule survives every sweep of the old process and is consumed only on boot', async () => {
   const d = tmp('squad-restart-qa-');
   const { s, o } = setup(d);
   const up = wireUpdater(o);
@@ -175,7 +176,7 @@ const wireUpdaterQa = (o) => ({
   cancel() { this.calls.push('cancel'); this.phase = 'idle'; o.dispatchPaused = false; o.running = true; o.tick(); },
 });
 
-test('qa: schedule while an agent is busy stays pending; the agent idling fires it; boot clears the chip', () => {
+test('qa: schedule while an agent is busy stays pending; the agent idling fires it; boot clears the chip', async () => {
   const d = tmp('squad-restart-qa-');
   const { s, o, pm, a } = setupQa(d);
   const up = wireUpdaterQa(o);
@@ -241,7 +242,7 @@ test('qa: schedule while an agent is busy stays pending; the agent idling fires 
   assert.deepEqual(up.calls, ['scheduled restart (now)'], 'the cleared schedule never re-fires');
 });
 
-test('qa: an anchor still in review blocks the fire; completing the anchor fires it once the company is idle', () => {
+test('qa: an anchor still in review blocks the fire; completing the anchor fires it once the company is idle', async () => {
   const d = tmp('squad-restart-qa-');
   const { s, o, pm, a } = setupQa(d);
   const up = wireUpdaterQa(o);
@@ -330,6 +331,7 @@ test('qa: restart-now at the running commit returns {status:noop}, clears the st
   s.addNode({ name: 'A', role: 'Dev' });
   const o = new Orchestrator(s, { repoDir: repo }); // boot records buildSha = sha0
   clearInterval(o._wakeTimer); clearInterval(o._stallTimer); clearInterval(o._tickTimer); clearInterval(o._restartTimer);
+  for (let i = 0; i < 200 && !(s.meta() || {}).buildSha; i++) await new Promise((r) => setTimeout(r, 10)); // buildSha lands in the background
   const up = wireUpdater(o);
   o.updater = up;
   assert.equal((s.meta() || {}).buildSha, sha0, 'pre: the running build sha is recorded');
@@ -363,6 +365,7 @@ test('qa: a target N commits ahead reads count N and the noop decision uses the 
   s.addNode({ name: 'A', role: 'Dev' });
   const o = new Orchestrator(s, { repoDir: repo }); // boot: buildSha = sha0
   clearInterval(o._wakeTimer); clearInterval(o._stallTimer); clearInterval(o._tickTimer); clearInterval(o._restartTimer);
+  for (let i = 0; i < 200 && !(s.meta() || {}).buildSha; i++) await new Promise((r) => setTimeout(r, 10)); // buildSha lands in the background
   const up = wireUpdater(o);
   o.updater = up;
   assert.equal((s.meta() || {}).buildSha, sha0, 'pre: the running build sha is recorded');
@@ -394,6 +397,7 @@ test('qa: the watcher skip guard clears the stale tally and disarms so the gate 
   s.addNode({ name: 'A', role: 'Dev' });
   const o = new Orchestrator(s, { repoDir: repo });
   clearInterval(o._wakeTimer); clearInterval(o._stallTimer); clearInterval(o._tickTimer); clearInterval(o._restartTimer);
+  for (let i = 0; i < 200 && !(s.meta() || {}).buildSha; i++) await new Promise((r) => setTimeout(r, 10)); // buildSha lands in the background
   o.updater = wireUpdater(o);
   // A fired schedule that stood down: the bug's stuck state (its log line fires below).
   s.setRestartPending({ count: 5, sha: sha0, since: new Date().toISOString(), scheduledNow: true, firedAt: new Date().toISOString(), firedCount: 5 });
@@ -454,6 +458,7 @@ test('qa: an armed stale schedule heals through the fire -> stand-down chain (t_
   clearInterval(w._timer);
   const o = new Orchestrator(s, { repoDir: repo });
   clearInterval(o._wakeTimer); clearInterval(o._stallTimer); clearInterval(o._tickTimer); clearInterval(o._restartTimer);
+  for (let i = 0; i < 200 && !(s.meta() || {}).buildSha; i++) await new Promise((r) => setTimeout(r, 10)); // buildSha lands in the background
   o.updater = w;
   // Boot left a stale armed schedule behind (not fired: boot's fired-marker consumer misses it).
   s.setRestartPending({ count: 5, sha: sha0, since: new Date().toISOString(), scheduledNow: true });

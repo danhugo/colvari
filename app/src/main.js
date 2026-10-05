@@ -26,20 +26,22 @@ const APP_ROOT = path.join(__dirname, '..', '..');
 // The commit this app process launched on (t_7426095a): the self-update same-commit skip compares
 // the restart target against it. Captured once here — before any watcher/orchestrator exists, so
 // no auto-merge can have landed yet. Null (git failed) makes the watcher fall back to restarting.
-const BOOT_SHA = (() => {
-  try {
-    const r = require('child_process').spawnSync('git', ['rev-parse', 'HEAD'], { cwd: APP_ROOT, encoding: 'utf8' });
-    return r.status === 0 ? String(r.stdout || '').trim() || null : null;
-  } catch { return null; }
-})();
+// Async-captured (t_5a78aa95: the old spawnSync git blocked boot): null until git answers, which
+// reads as "unknown boot sha" to the watcher — its documented restart-anyway fallback.
+let BOOT_SHA = null;
+require('./cp').run('git', ['rev-parse', 'HEAD'], { cwd: APP_ROOT, timeoutMs: 5000 })
+  .then((r) => { BOOT_SHA = r.status === 0 ? String(r.stdout || '').trim() || null : null; })
+  .catch(() => {});
 // Self-update (auto-restart on new merged code) is a developer/dogfood feature: only unpackaged
 // runs (electron .) get it. A packaged build — real users — never starts a watcher and shows no
 // update UI; AGENTS_SQUAD_DEV=1 opts a packaged build back into dogfood mode, =0 forces it off
 // from source (e.g. to check the gated-off UX). Exported so agents' MCP servers inherit the gate.
 const DEV_MODE = process.env.AGENTS_SQUAD_DEV ? process.env.AGENTS_SQUAD_DEV !== '0' : !app.isPackaged;
 if (DEV_MODE) process.env.AGENTS_SQUAD_DEV = '1';
-let runtimesCache = null; // detected once per app start (binary + version)
-const runtimes = (settings) => (runtimesCache ||= RT.detectRuntimes(settings, { ...process.env, PATH: [process.env.PATH, require('os').homedir() + '/.local/bin', '/opt/homebrew/bin', '/usr/local/bin'].join(':') }));
+let runtimesPromise = null; // detected once per app start (binary + version) — one shared promise (t_5a78aa95):
+// the old sync detectRuntimes froze boot ~10s/runtime, and an async detection must never be seen
+// as an empty list (Cato t_f7c42eef #3): every consumer awaits this same promise.
+const runtimes = (settings) => (runtimesPromise ||= RT.detectRuntimes(settings, { ...process.env, PATH: [process.env.PATH, require('os').homedir() + '/.local/bin', '/opt/homebrew/bin', '/usr/local/bin'].join(':') }));
 
 // Test instances (gui-e2e / smoke) must never touch real data and never linger: an inherited
 // AGENTS_SQUAD_HOME (the live app's root) loses to an explicit AGENTS_SQUAD_PROJECT, with neither
@@ -72,7 +74,7 @@ if (HARNESS_RUN) {
     setTimeout(() => { try { app.exit(0); } catch {} }, 5000).unref?.();
   }; })();
   try {
-    HS.recordRun({ runId: HARNESS_RUN, ownerPid: process.ppid, log: (m) => console.log(m) });
+    HS.recordRun({ runId: HARNESS_RUN, ownerPid: process.ppid, log: (m) => console.log(m) }).catch((e) => console.error('[agents-squad] harness record failed:', e.message));
     HS.armParentWatchdog({ runId: HARNESS_RUN, ownerPid: process.ppid, quit: harnessQuit, log: (m) => console.error(m) });
   } catch (e) { console.error('[agents-squad] harness record/watchdog failed:', e.message); }
 }
@@ -106,29 +108,35 @@ const orchs = new Map(); // projectId -> Orchestrator (projects run independentl
 // whether the previous instance died without notice; its orphaned run groups are reaped by
 // recorded pid (t_3f830e64 — never by name) and the interrupted tasks get a system comment.
 // The result is exposed to the renderer via getLastExit for the recovery banner (Uma, t_6911ba60).
-const lastExits = new Map(); // projectId -> { unclean, lastAliveAt, lastAlivePid, reaped, interruptedTasks }
+const lastExits = new Map(); // projectId -> Promise<{ unclean, lastAliveAt, lastAlivePid, reaped, interruptedTasks }>
 function bootRecovery(projectId) {
   if (lastExits.has(projectId)) return lastExits.get(projectId);
-  const store = pm.store(projectId);
-  let prev = null; try { prev = BS.detectUnclean(store.dir); } catch {}
-  const reapOut = { killed: [], skipped: [] };
-  try { if (appLockHeld) Object.assign(reapOut, reapRunPids(store.dir)); } catch {}
-  let marked = [];
-  try { if (reapOut.killed.length) marked = interruptedFromReap(store, reapOut.killed); } catch {}
-  const info = {
-    unclean: !!prev,
-    lastAliveAt: prev && prev.at,
-    lastAlivePid: prev && prev.pid,
-    reaped: reapOut.killed,
-    interruptedTasks: marked.map((m) => m.taskId),
-  };
-  lastExits.set(projectId, info);
-  if (prev && appLockHeld) {
-    try {
-      store.appendLog({ at: Date.now(), nodeId: null, kind: 'system', text: `previous app instance (pid ${prev.pid}) died without a clean exit — last heartbeat ${new Date(prev.at).toISOString()}; reaped ${reapOut.killed.length} orphan run group(s)${info.interruptedTasks.length ? `; interrupted: ${info.interruptedTasks.join(', ')}` : ''}` });
-    } catch {}
-  }
-  return info;
+  const p = (async () => {
+    const store = pm.store(projectId);
+    let prev = null; try { prev = BS.detectUnclean(store.dir); } catch {}
+    // Async orphan reap (t_5a78aa95): identity-verified pid reaping forks ps per record.
+    const reapOut = { killed: [], skipped: [] };
+    try { if (appLockHeld) Object.assign(reapOut, await reapRunPids(store.dir)); } catch {}
+    let marked = [];
+    try { if (reapOut.killed.length) marked = interruptedFromReap(store, reapOut.killed); } catch {}
+    return {
+      unclean: !!prev,
+      lastAliveAt: prev && prev.at,
+      lastAlivePid: prev && prev.pid,
+      reaped: reapOut.killed,
+      interruptedTasks: marked.map((m) => m.taskId),
+    };
+  })();
+  p.then((info) => {
+    lastExits.set(projectId, info);
+    if (info.unclean && appLockHeld) {
+      try {
+        pm.store(projectId).appendLog({ at: Date.now(), nodeId: null, kind: 'system', text: `previous app instance (pid ${info.lastAlivePid}) died without a clean exit — last heartbeat ${new Date(info.lastAliveAt).toISOString()}; reaped ${info.reaped.length} orphan run group(s)${info.interruptedTasks.length ? `; interrupted: ${info.interruptedTasks.join(', ')}` : ''}` });
+      } catch {}
+    }
+  }).catch(() => {}); // fire-and-forget callers must not see unhandled rejections; awaiters still see errors
+  lastExits.set(projectId, p);
+  return p;
 }
 function orchFor(pid) {
   let o = orchs.get(pid);
@@ -213,12 +221,14 @@ function watcherFor(pid) {
 function probeNodeLater(pid, node) {
   if (!CAP.needsInitialProbe(node)) { healStaleModes(pid, node); return; }
   setImmediate(() => {
-    try {
-      const s = pm.store(pid, node.teamId || null);
-      const rt = RT.getRuntime(node.runtime);
-      const capabilities = CAP.discoverCapabilities(rt, s.getSettings());
-      s.updateNode(node.id, { capabilities, capabilitiesProbedAt: capabilities.probedAt });
-    } catch {}
+    (async () => {
+      try {
+        const s = pm.store(pid, node.teamId || null);
+        const rt = RT.getRuntime(node.runtime);
+        const capabilities = await CAP.discoverCapabilities(rt, s.getSettings());
+        s.updateNode(node.id, { capabilities, capabilitiesProbedAt: capabilities.probedAt });
+      } catch {}
+    })();
   });
 }
 // An init-event snapshot captured before modes/categorized were derived from slashCommands (or with a Refresh
@@ -1171,7 +1181,7 @@ async function guiE2E() {
     const initEvent = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'test', 'fixtures', 'real-init-event.json'), 'utf8'));
     const rt = RT.getRuntime(pm1.runtime || 'claude');
     // Same call main.js's discoverCapabilities IPC makes on a real Refresh once a live init event exists.
-    const capabilities = CAP.discoverCapabilities(rt, s.getSettings(), { exec: () => '', initEvent });
+    const capabilities = await CAP.discoverCapabilities(rt, s.getSettings(), { exec: () => '', initEvent });
     ts.updateNode(pm1.id, { capabilities, capabilitiesProbedAt: capabilities.probedAt });
     const prevLim = s.getSettings().usageLimits; s.saveSettings({ usageLimits: { fiveHourLimit: 0, weeklyLimit: 0, tokenLimit: 0, costLimit: 0, warnPct: 80 } });
     await ex(`$('#tabs button[data-tab=usage]').click(); await refresh(); await w(400);`);
@@ -1859,17 +1869,19 @@ async function guiE2E() {
   const conflictShots = async () => {
     await waitFor(`return !!document.querySelector('#tpl-select option')`); await ex(`await refresh();`); const cur = await ex(`return { p: ctx.p, t: S.teamId }`);
     const p = cur.p || pid(); const s = pm.store(p, cur.t);
-    const { execFileSync } = require('child_process'); const g = (cwd, ...a) => execFileSync('git', ['-c', 'user.email=a@b', '-c', 'user.name=a', ...a], { cwd, stdio: 'pipe' }).toString().trim();
+    const { execFileSync } = require('child_process'); const g = (cwd, ...a) => execFileSync('git', ['-c', 'user.email=a@b', '-c', 'user.name=a', ...a], { cwd, stdio: 'pipe' }).toString().trim(); // gui-e2e fixture setup only — never on the app's main path
     const repo = ttmp('squad-conflict-repo-');
     g(repo, 'init', '-q', '-b', 'main'); fs.writeFileSync(path.join(repo, 'a.txt'), 'base\n'); g(repo, 'add', '.'); g(repo, 'commit', '-q', '-m', 'init');
-    const { ensureWorktree } = require('./worktree'); const wt = ensureWorktree(repo, 'conflictdemo');
+    const { ensureWorktree } = require('./worktree'); const wt = await ensureWorktree(repo, 'conflictdemo');
     let nodes = s.getTeam().nodes; if (!nodes.length) { s.addNode({ name: 'Devon', role: 'Dev', x: 60, y: 60 }); nodes = s.getTeam().nodes; }
     const dev = nodes.find((n) => n.role === 'Dev') || nodes[0];
     let task = s.createTask({ title: 'Conflict demo: edit a.txt', assignee: dev.id });
     task = s._updateTask(task.id, { worktreePath: wt.worktreePath, worktreeBranch: wt.worktreeBranch });
     fs.writeFileSync(path.join(wt.worktreePath, 'a.txt'), 'theirs\n'); g(wt.worktreePath, 'commit', '-qam', 'theirs edit');
     fs.writeFileSync(path.join(repo, 'a.txt'), 'ours\n'); g(repo, 'commit', '-qam', 'ours edit');
-    task = s.updateTask(task.id, { status: 'done' });
+    s.updateTask(task.id, { status: 'done' });
+    await s._mergeQueue.catch(() => {}); // the gate is async now — wait for the conflict park
+    task = s.getTask(task.id);
     expect('conflict: guard parks the task as merge_conflict instead of done', task.status === 'merge_conflict', task);
     await ex(`$('#tabs button[data-tab=board]').click(); lastV = null; await refresh(); await w(300);`); // full pull: deltas mark task versions seen, refresh would skip team/nodes
     const col = await ex(`return [...document.querySelectorAll('#columns h3')].map((h) => h.textContent)`);
@@ -2833,13 +2845,13 @@ const api = {
   // Slow-path watchdog (t_a2566d54): getAll is the one IPC every poll hits — a main-thread stall
   // here delays every channel, so the tail must stay visible. Steady state is ~2 ms; >150 ms means
   // a sync write/spin snuck back in front of the loop, and the phase split says which one.
-  getAll: (c, since) => {
+  getAll: async (c, since) => {
     const t0 = Date.now(); const ph = [];
     const mark = (k) => ph.push(k + '=' + (Date.now() - t0));
     const s = ST(c); mark('store'); const t = TS(c); mark('team'); probeUnprobedAgents(c.p); mark('probe');
     const v = stateVersion(c); mark('ver');
     const all = { project: s.meta(), team: { ...t.getTeam(), nodes: withPF(t.getTeam().nodes, s.getSettings()) }, allNodes: withPF(s.getTeam().nodes, s.getSettings()), tasks: s.listTasks(), wiki: s.listWiki(), settings: s.getSettings(), messages: s.listMessages().slice(-200), orch: orchFor(c.p).snapshotSlim(),
-      config: { runtimes: runtimes(s.getSettings()), billingModes: U.BILLING_MODES, permissionModes: AC.PERMISSION_MODES, edgeTypes: AC.EDGE_TYPES, boardTools: AC.BOARD_TOOLS, roles: AC.roleSuggestions(s.getSettings().rolePresets, s.getTeam().nodes) } };
+      config: { runtimes: await runtimes(s.getSettings()), billingModes: U.BILLING_MODES, permissionModes: AC.PERMISSION_MODES, edgeTypes: AC.EDGE_TYPES, boardTools: AC.BOARD_TOOLS, roles: AC.roleSuggestions(s.getSettings().rolePresets, s.getTeam().nodes) } };
     mark('body');
     const sectionOf = { project: 'project', team: 'team', teams: 'allNodes', board: 'tasks', wiki: 'wiki', settings: 'settings', messages: 'messages', orch: 'orch' };
     const out = { v, teamId: t.teamId, dir: s.dir };
@@ -2851,11 +2863,11 @@ const api = {
   getStateVersion: (c) => stateVersion(c),
   // New agents are auto-probed for capabilities right away (same probe as the manual Refresh button) so the
   // node form and graph badges never sit on "not probed yet" for an agent the user just added.
-  addNode: (c, n) => {
+  addNode: async (c, n) => {
     const node = TS(c).addNode(n);
     try {
       const rt = RT.getRuntime(node.runtime);
-      const capabilities = CAP.discoverCapabilities(rt, ST(c).getSettings());
+      const capabilities = await CAP.discoverCapabilities(rt, ST(c).getSettings());
       return TS(c).updateNode(node.id, { capabilities, capabilitiesProbedAt: capabilities.probedAt });
     } catch (e) { return node; }
   },
@@ -2906,10 +2918,11 @@ const api = {
   },
   // Real per-provider subscription usage (5h/weekly used % + reset time) for one agent, as self-reported by its
   // own CLI's init event — with an explicit reason when there is nothing to report yet.
-  providerUsage: (c, nodeId) => {
+  providerUsage: async (c, nodeId) => {
     const s = ST(c); const node = TS(c).getTeam().nodes.find((n) => n.id === nodeId); if (!node) throw new Error('no agent ' + nodeId);
     const rl = U.nodeLiveRateLimits(node, orchFor(c.p).subscriptionRateLimits || {}) || null;
-    const installed = runtimes(s.getSettings())[node.runtime] ? runtimes(s.getSettings())[node.runtime].installed : undefined;
+    const rts = await runtimes(s.getSettings());
+    const installed = rts[node.runtime] ? rts[node.runtime].installed : undefined;
     return U.providerUsageStatus(rl, { installed, billingMode: node.billingMode });
   },
   // Manual Refresh: the --help probe alone. If this node has never had a real init event (no capabilities at
@@ -2926,7 +2939,7 @@ const api = {
     const prevCap = node.capabilities;
     const hasPrevInit = !!(prevCap && prevCap.source === 'init-event');
     const prevSlashCommands = (prevCap && Array.isArray(prevCap.slashCommands)) ? prevCap.slashCommands : [];
-    let capabilities = CAP.discoverCapabilities(rt, settings, { prevSlashCommands });
+    let capabilities = await CAP.discoverCapabilities(rt, settings, { prevSlashCommands });
     if (hasPrevInit) {
       const mcpServers = Object.keys((settings.mcpServers && typeof settings.mcpServers === 'object') ? settings.mcpServers : {});
       const modes = [...new Set([...CAP.detectAppModes('', prevCap.slashCommands), ...(prevCap.modes || [])])];
@@ -2938,7 +2951,7 @@ const api = {
       try {
         const { init, rateLimit } = await CAP.probeInitEvent(rt.bin(settings), { cwd: settings.workdir, env: process.env });
         if (init) {
-          capabilities = CAP.discoverCapabilities(rt, settings, { initEvent: init });
+          capabilities = await CAP.discoverCapabilities(rt, settings, { initEvent: init });
           patch.capabilities = capabilities; patch.capabilitiesProbedAt = capabilities.probedAt;
         }
         const rl0 = rateLimit ? U.parseRateLimits(rateLimit) : null;
@@ -2959,9 +2972,9 @@ const api = {
   answerInbox: (c, id, answer) => { const s = ST(c); const r = s.answerInbox(id, answer); applyAnsweredChange(s, orchFor(c.p), s.getInboxItem(id), answer); return r; },
   inboxCounts: () => Object.fromEntries(pm.list().map((p) => [p.id, pm.store(p.id).listInbox({ status: 'open' }).length])),
   approveTask: (c, id, ok, note) => ST(c).approveTask(id, ok, note), getLogs: (c, n) => ST(c).readLogs(n || 2000), clearLogs: (c) => ST(c).clearLogs(),
-  taskDiff: (c, id) => WT.worktreeDiff(wtTask(c, id)),
+  taskDiff: async (c, id) => WT.worktreeDiff(wtTask(c, id)),
   taskMerge: (c, id, opts) => ST(c).mergeTask(id, opts),
-  taskDiscard: (c, id) => { const r = WT.worktreeDiscard(wtTask(c, id)); ST(c).updateTask(id, { worktreePath: null, worktreeBranch: null }); return r; },
+  taskDiscard: async (c, id) => { const r = await WT.worktreeDiscard(wtTask(c, id)); ST(c).updateTask(id, { worktreePath: null, worktreeBranch: null }); return r; },
   unmergedBranches: (c) => ST(c).listUnmergedBranches(),
   // Worktree lifecycle (t_9b662983): cached worktree count + bytes for the header/settings UI.
   getDiskUsage: (c) => WT.diskUsage(APP_ROOT),
@@ -3014,7 +3027,7 @@ app.whenReady().then(() => {
   if (!appLockHeld) return; // second launch: the running instance stays, this one exits
   // Harness orphan sweep (t_98eed830): reap only pidfile-recorded harness runs whose owner died —
   // identity-checked (start time + marker) and never by name, so live processes are untouched.
-  try { HS.sweep({ log: (m) => console.log(m) }); } catch (e) { console.error('[agents-squad] harness sweep failed:', e.message); }
+  try { HS.sweep({ log: (m) => console.log(m) }).catch((e) => console.error('[agents-squad] harness sweep failed:', e.message)); } catch (e) { console.error('[agents-squad] harness sweep failed:', e.message); }
   createWindow();
   probeUnprobedAgents();
   for (const p of pm.list()) pumpFor(p.id); // delta pumps stream every project's changes (t_39bf39ac)
@@ -3024,7 +3037,7 @@ app.whenReady().then(() => {
   for (const p of pm.list()) { try { bootRecovery(p.id); } catch {} }
   // Heartbeat breadcrumb (t_2ca99830): the lock holder stamps each store dir every few seconds;
   // a boot that finds the stamp without a clean marker knows the last instance died silently.
-  const heartbeat = () => { for (const p of pm.list()) { try { BS.writeAlive(pm.store(p.id).dir); } catch {} } };
+  const heartbeat = () => { for (const p of pm.list()) { try { BS.writeAlive(pm.store(p.id).dir).catch(() => {}); } catch {} } };
   heartbeat();
   setInterval(heartbeat, 5000);
   // Worktree lifecycle sweep (t_9b662983): at boot (before any agent can spawn) and periodically
@@ -3034,18 +3047,17 @@ app.whenReady().then(() => {
   // whose store knows none of this repo's tasks — sweeping APP_ROOT from it deleted live worktrees
   // (worktree.js also retains unknown ids as the second belt). Only a real install root may sweep.
   const sweepableRoot = !TEST_MODE && !pm.root.startsWith(require('os').tmpdir());
-  const sweepWorktrees = () => { if (!sweepableRoot) return; for (const p of pm.list()) { try { const o = orchs.get(p.id); if (o && o.running) continue; const r = WT.sweepWorktrees({ repoDir: APP_ROOT, store: pm.store(p.id) }); if (r.removed.length || r.retained.length) console.log('[worktrees]', JSON.stringify(r)); } catch {} } };
+  const sweepWorktrees = () => { if (!sweepableRoot) return; for (const p of pm.list()) { const o = orchs.get(p.id); if (o && o.running) continue; WT.sweepWorktrees({ repoDir: APP_ROOT, store: pm.store(p.id) }).then((r) => { if (r.removed.length || r.retained.length) console.log('[worktrees]', JSON.stringify(r)); }).catch(() => {}); } };
   sweepWorktrees();
   setInterval(sweepWorktrees, 10 * 60_000).unref();
   // Self-update: resume a Run interrupted by a safe restart (or roll back a bad update that fails to
   // boot). markBootOk ~15s in proves the new code booted, so a later crash is not a boot failure.
   for (const p of pm.list()) {
     if (!DEV_MODE) continue; // real users: no self-update polling, no boot resume/rollback
-    try {
-      const r = SU.bootResume(pm.store(p.id), { repoDir: APP_ROOT });
-      watcherFor(p.id); // start polling for new commits right away
+    SU.bootResume(pm.store(p.id), { repoDir: APP_ROOT }).then((r) => {
       if (r.resume) setImmediate(() => orchFor(p.id).start());
-    } catch (e) { console.error('[self-update] boot resume failed:', e.message); }
+    }).catch((e) => console.error('[self-update] boot resume failed:', e.message));
+    watcherFor(p.id); // start polling for new commits right away
   }
   setTimeout(() => { for (const p of pm.list()) { try { SU.markBootOk(pm.store(p.id)); } catch {} } }, 15000).unref();
   console.log('[agents-squad] ready, data root:', pm.root);
@@ -3057,7 +3069,7 @@ app.on('window-all-closed', () => { for (const o of orchs.values()) if (o.runnin
 function markCleanExits() {
   try { if (HARNESS_RUN) HS.removeRun(HARNESS_RUN); } catch {} // a clean quit needs no sweep record
   if (!appLockHeld) return;
-  for (const p of pm.list()) { try { BS.writeAlive(pm.store(p.id).dir, { cleanExitAt: Date.now() }); } catch {} }
+  for (const p of pm.list()) { try { BS.writeAlive(pm.store(p.id).dir, { cleanExitAt: Date.now() }).catch(() => {}); } catch {} }
 }
 app.on('will-quit', () => { try { BoardCache.closeAll(); } catch {} }); // no leaked fs.watch handles across project switches/quit
 app.on('will-quit', markCleanExits);

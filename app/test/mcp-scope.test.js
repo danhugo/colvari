@@ -14,7 +14,7 @@ function setup() {
   return { s, pm, dev, qa };
 }
 
-test('create_task allowed along outgoing edge and to self', () => {
+test('create_task allowed along outgoing edge and to self', async () => {
   const { s, pm, dev } = setup();
   const t = makeTools(s, pm.id);
   assert.equal(t.create_task({ title: 'x', assignee: dev.id }).assignee, dev.id);
@@ -22,7 +22,7 @@ test('create_task allowed along outgoing edge and to self', () => {
   assert.equal(t.create_task({ title: 'z' }).assignee, pm.id); // self
 });
 
-test('create_task rejected without edge (reverse or unrelated)', () => {
+test('create_task rejected without edge (reverse or unrelated)', async () => {
   const { s, pm, dev, qa } = setup();
   assert.throws(() => makeTools(s, dev.id).create_task({ title: 'x', assignee: pm.id }), /scope violation/);
   assert.throws(() => makeTools(s, pm.id).create_task({ title: 'x', assignee: qa.id }), /scope violation/);
@@ -30,11 +30,11 @@ test('create_task rejected without edge (reverse or unrelated)', () => {
   assert.equal(s.listTasks().length, 0);
 });
 
-test('status/comment/visibility scope', () => {
+test('status/comment/visibility scope', async () => {
   const { s, pm, dev, qa } = setup();
   const t = makeTools(s, pm.id).create_task({ title: 'x', assignee: dev.id });
-  makeTools(s, dev.id).update_task_status({ taskId: t.id, status: 'done' });
-  assert.throws(() => makeTools(s, qa.id).update_task_status({ taskId: t.id, status: 'todo' }), /scope/);
+  await makeTools(s, dev.id).update_task_status({ taskId: t.id, status: 'done' });
+  await assert.rejects(() => makeTools(s, qa.id).update_task_status({ taskId: t.id, status: 'todo' }), /scope/);
   assert.throws(() => makeTools(s, qa.id).comment_task({ taskId: t.id, text: 'hi' }), /scope/);
   assert.equal(makeTools(s, qa.id).list_tasks().length, 0);
   assert.equal(makeTools(s, pm.id).list_tasks().length, 0); // done tasks excluded by default
@@ -76,7 +76,7 @@ test('real stdio MCP server enforces scope', async () => {
   } finally { await cn.close(); }
 });
 
-test('reassign_task: PM-only, needs assign edge, refuses non-todo, keeps comments', () => {
+test('reassign_task: PM-only, needs assign edge, refuses non-todo, keeps comments', async () => {
   const { s, pm, dev, qa } = setup();
   s.addEdge(pm.id, qa.id);
   const t = makeTools(s, pm.id);
@@ -90,7 +90,7 @@ test('reassign_task: PM-only, needs assign edge, refuses non-todo, keeps comment
   assert.throws(() => t.reassign_task({ taskId: tk.id, assignee: dev.id }), /only todo/);
 });
 
-test('list_tasks sorts by assignee then priority; read_messages defaults to unread + limit', () => {
+test('list_tasks sorts by assignee then priority; read_messages defaults to unread + limit', async () => {
   const { s, pm, dev } = setup();
   const t = makeTools(s, pm.id);
   t.create_task({ title: 'low', assignee: dev.id, priority: 'P3' });

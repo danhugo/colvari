@@ -9,12 +9,12 @@ const { mktemp, mktempReal } = require('./harness/tmp');
 
 // Sets up a git repo (base branch `main`) plus a Store whose task carries a worktree
 // pointing at squad/<taskId> inside that repo.
-function setup(taskId) {
+async function setup(taskId) {
   const repo = mktempReal('am-repo-');
   const g = (cwd, ...a) => execFileSync('git', ['-c', 'user.email=a@b', '-c', 'user.name=a', ...a], { cwd, stdio: 'pipe' }).toString().trim();
   g(repo, 'init', '-q', '-b', 'main'); fs.writeFileSync(path.join(repo, 'a.txt'), 'base\n'); fs.writeFileSync(path.join(repo, '.gitignore'), '.squad/\n');
   g(repo, 'add', '.'); g(repo, 'commit', '-q', '-m', 'init');
-  const w = ensureWorktree(repo, taskId);
+  const w = await ensureWorktree(repo, taskId);
   const s = new Store(mktemp('am-store-'));
   let task = s.createTask({ title: 'do the thing', assignee: 'n_dev' });
   task = s._updateTask(task.id, { worktreePath: w.worktreePath, worktreeBranch: w.worktreeBranch });
@@ -46,7 +46,7 @@ function done(s, id) {
 }
 
 test('marking a task done auto-merges its squad branch into base', async () => {
-  const { repo, g, s, task, worktreePath } = setup('t_am1');
+  const { repo, g, s, task, worktreePath } = await setup('t_am1');
   fs.writeFileSync(path.join(worktreePath, 'b.txt'), 'new\n');
   g(worktreePath, 'add', '.'); g(worktreePath, 'commit', '-q', '-m', 'work');
   const updated = await done(s, task.id);
@@ -56,7 +56,7 @@ test('marking a task done auto-merges its squad branch into base', async () => {
 });
 
 test('conflicting merge aborts, marks merge_conflict, and creates a follow-up task', async () => {
-  const { repo, g, s, task, worktreePath } = setup('t_am2');
+  const { repo, g, s, task, worktreePath } = await setup('t_am2');
   fs.writeFileSync(path.join(worktreePath, 'a.txt'), 'theirs\n'); g(worktreePath, 'commit', '-qam', 'w');
   fs.writeFileSync(path.join(repo, 'a.txt'), 'ours\n'); g(repo, 'commit', '-qam', 'o');
   const head = g(repo, 'rev-parse', 'HEAD');
@@ -73,7 +73,7 @@ test('conflicting merge aborts, marks merge_conflict, and creates a follow-up ta
 });
 
 test('already-merged branch: marking done again is a no-op success, not an error', async () => {
-  const { s, task, worktreePath } = setup('t_am3');
+  const { s, task, worktreePath } = await setup('t_am3');
   fs.writeFileSync(path.join(worktreePath, 'b.txt'), 'new\n');
   execFileSync('git', ['-c', 'user.email=a@b', '-c', 'user.name=a', 'add', '.'], { cwd: worktreePath });
   execFileSync('git', ['-c', 'user.email=a@b', '-c', 'user.name=a', 'commit', '-q', '-m', 'work'], { cwd: worktreePath });
@@ -86,7 +86,7 @@ test('already-merged branch: marking done again is a no-op success, not an error
 });
 
 test('a second conflict on the same branch does not spawn a second resolve task', async () => {
-  const { repo, g, s, task, worktreePath } = setup('t_am5');
+  const { repo, g, s, task, worktreePath } = await setup('t_am5');
   fs.writeFileSync(path.join(worktreePath, 'a.txt'), 'theirs\n'); g(worktreePath, 'commit', '-qam', 'w');
   fs.writeFileSync(path.join(repo, 'a.txt'), 'ours\n'); g(repo, 'commit', '-qam', 'o');
 
@@ -99,7 +99,7 @@ test('a second conflict on the same branch does not spawn a second resolve task'
 });
 
 test('resolve task reuses the original branch/worktree and never doubles its title', async () => {
-  const { repo, g, s, task, worktreePath } = setup('t_am6');
+  const { repo, g, s, task, worktreePath } = await setup('t_am6');
   fs.writeFileSync(path.join(worktreePath, 'a.txt'), 'theirs\n'); g(worktreePath, 'commit', '-qam', 'w');
   fs.writeFileSync(path.join(repo, 'a.txt'), 'ours\n'); g(repo, 'commit', '-qam', 'o');
   await done(s, task.id);
@@ -117,7 +117,7 @@ test('resolve task reuses the original branch/worktree and never doubles its tit
 });
 
 test('a resolve task that keeps conflicting is reopened, then escalated to a human, never re-spawned', async () => {
-  const { repo, g, s, task, worktreePath } = setup('t_am7');
+  const { repo, g, s, task, worktreePath } = await setup('t_am7');
   fs.writeFileSync(path.join(worktreePath, 'a.txt'), 'theirs\n'); g(worktreePath, 'commit', '-qam', 'w');
   fs.writeFileSync(path.join(repo, 'a.txt'), 'ours\n'); g(repo, 'commit', '-qam', 'o');
   await done(s, task.id);
@@ -138,7 +138,7 @@ test('a resolve task that keeps conflicting is reopened, then escalated to a hum
 });
 
 test('a task whose title already carries the resolve prefix never gets it doubled', async () => {
-  const { repo, g, s, task, worktreePath } = setup('t_am8');
+  const { repo, g, s, task, worktreePath } = await setup('t_am8');
   s._updateTask(task.id, { title: 'Resolve merge conflict: something' });
   fs.writeFileSync(path.join(worktreePath, 'a.txt'), 'theirs\n'); g(worktreePath, 'commit', '-qam', 'w');
   fs.writeFileSync(path.join(repo, 'a.txt'), 'ours\n'); g(repo, 'commit', '-qam', 'o');
@@ -148,23 +148,23 @@ test('a task whose title already carries the resolve prefix never gets it double
 });
 
 test('listUnmergedBranches reports branches not yet merged into base', async () => {
-  const { s, task, worktreePath } = setup('t_am4');
+  const { s, task, worktreePath } = await setup('t_am4');
   fs.writeFileSync(path.join(worktreePath, 'b.txt'), 'new\n');
   execFileSync('git', ['-c', 'user.email=a@b', '-c', 'user.name=a', 'add', '.'], { cwd: worktreePath });
   execFileSync('git', ['-c', 'user.email=a@b', '-c', 'user.name=a', 'commit', '-q', '-m', 'work'], { cwd: worktreePath });
 
-  let unmerged = s.listUnmergedBranches();
+  let unmerged = await s.listUnmergedBranches();
   assert.ok(unmerged.some((b) => b.branch === task.worktreeBranch));
 
   await done(s, task.id);
-  unmerged = s.listUnmergedBranches();
+  unmerged = await s.listUnmergedBranches();
   assert.ok(!unmerged.some((b) => b.branch === task.worktreeBranch));
 });
 
 // t_6aea5305: the registered branch is empty because the work landed on a differently-named
 // branch (the t_bf1b168a review finding) — done must say so instead of claiming "auto-merged".
 test('work committed on another branch: done stays done but the comment reports nothing merged', async () => {
-  const { repo, g, s, task } = setup('t_am9');
+  const { repo, g, s, task } = await setup('t_am9');
   g(repo, 'checkout', '-qb', 'squad/side-work');
   fs.writeFileSync(path.join(repo, 'b.txt'), 'real work\n');
   g(repo, 'add', '.'); g(repo, 'commit', '-qm', 'real work');
@@ -182,7 +182,7 @@ test('work committed on another branch: done stays done but the comment reports 
 // message (files + how to retry), park the task in review (NOT merge_conflict — no resolve
 // task), and let a later done after cleanup merge normally.
 test('dirty main checkout: done refuses merge, parks task in review, names files; retry after cleanup merges', async () => {
-  const { repo, g, s, task, worktreePath } = setup('t_am10');
+  const { repo, g, s, task, worktreePath } = await setup('t_am10');
   fs.writeFileSync(path.join(worktreePath, 'b.txt'), 'new\n');
   g(worktreePath, 'add', '.'); g(worktreePath, 'commit', '-q', '-m', 'work');
   fs.writeFileSync(path.join(repo, 'dirty.txt'), 'someone edits main\n');
@@ -211,7 +211,7 @@ function conflictAgain(g, repo, worktreePath, tag) {
 }
 
 test('repeated conflict on the same task reuses the one open resolve task (no duplicate)', async () => {
-  const { repo, g, s, task, worktreePath } = setup('t_am5b');
+  const { repo, g, s, task, worktreePath } = await setup('t_am5b');
   conflictAgain(g, repo, worktreePath, 1);
   let updated = await done(s, task.id);
   assert.strictEqual(updated.status, 'merge_conflict');
@@ -229,7 +229,7 @@ test('repeated conflict on the same task reuses the one open resolve task (no du
 });
 
 test('a conflict while resolving a conflict task never nests the title and stays bounded', async () => {
-  const { repo, g, s, task, worktreePath } = setup('t_am6b');
+  const { repo, g, s, task, worktreePath } = await setup('t_am6b');
   conflictAgain(g, repo, worktreePath, 1);
   await done(s, task.id);
   const resolveTask = s.listTasks().find((t) => t.parentId === task.id);
@@ -238,7 +238,7 @@ test('a conflict while resolving a conflict task never nests the title and stays
 
   // The resolve task itself picks up a worktree branch (e.g. an assignee fixes it in its own
   // branch) and that branch *also* fails to auto-merge cleanly.
-  const w2 = ensureWorktree(repo, resolveTask.id);
+  const w2 = await ensureWorktree(repo, resolveTask.id);
   s._updateTask(resolveTask.id, { worktreePath: w2.worktreePath, worktreeBranch: w2.worktreeBranch });
   conflictAgain(g, repo, w2.worktreePath, 2);
   await done(s, resolveTask.id);
@@ -250,11 +250,11 @@ test('a conflict while resolving a conflict task never nests the title and stays
 });
 
 test('once the conflict is actually fixed, re-marking the task done lands its branch on master', async () => {
-  const { repo, g, s, task, worktreePath } = setup('t_am7b');
+  const { repo, g, s, task, worktreePath } = await setup('t_am7b');
   conflictAgain(g, repo, worktreePath, 1);
   const parked = await done(s, task.id);
   assert.strictEqual(parked.status, 'merge_conflict');
-  assert.ok(s.listUnmergedBranches().some((b) => b.branch === task.worktreeBranch));
+  assert.ok((await s.listUnmergedBranches()).some((b) => b.branch === task.worktreeBranch));
 
   // Resolve the conflict for real: make the worktree branch match base, then commit.
   const baseContent = fs.readFileSync(path.join(repo, 'a.txt'), 'utf8');
@@ -264,5 +264,5 @@ test('once the conflict is actually fixed, re-marking the task done lands its br
   const resolved = await done(s, task.id);
   assert.strictEqual(resolved.status, 'done');
   assert.doesNotThrow(() => g(repo, 'merge-base', '--is-ancestor', task.worktreeBranch, 'main'));
-  assert.ok(!s.listUnmergedBranches().some((b) => b.branch === task.worktreeBranch));
+  assert.ok(!(await s.listUnmergedBranches()).some((b) => b.branch === task.worktreeBranch));
 });

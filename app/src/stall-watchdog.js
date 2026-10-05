@@ -45,9 +45,13 @@ function stallPrompt(task) {
 }
 
 // [{pid, ppid, state, cpuMs, command}] for every process, or null when ps is unavailable.
-function procTable() {
+// Async (t_5a78aa95): the old execFileSync forked a full `ps -ax` ON the Electron main process
+// every stall sweep (every 5s with silent runs) — now awaited on the event loop.
+async function procTable() {
+  const CP = require('./cp');
   try {
-    const out = require('child_process').execFileSync('ps', ['-axo', 'pid=,ppid=,state=,time=,command='], { timeout: 4000 }).toString();
+    const r = await CP.run('ps', ['-axo', 'pid=,ppid=,state=,time=,command='], { timeoutMs: 4000 });
+    const out = String(r.stdout || '');
     return out.split('\n').map((l) => l.trim().split(/\s+/)).filter((p) => p.length >= 3)
       .map((p) => ({ pid: Number(p[0]), ppid: Number(p[1]), state: p[2], cpuMs: stimeToMs(p[3]), command: p.slice(4).join(' ') }));
   } catch { return null; }
@@ -61,10 +65,10 @@ function procTable() {
 // otherwise keep a hung CLI "alive" forever.
 // snapshot: optional shared proc table — the sweep passes one so a pass with N silent runs forks
 // ps once, not N times (all reads within a sweep are the same instant anyway).
-function runAlive(orch, nodeId, child, snapshot) {
+async function runAlive(orch, nodeId, child, snapshot) {
   if (!child || !child.pid) return true;
   if (child.exitCode != null) return false; // already exited; the close event just hasn't fired
-  const rows = snapshot === undefined ? orch.procTable() : snapshot;
+  const rows = snapshot === undefined ? await orch.procTable() : snapshot;
   if (!rows) return true;
   const me = rows.find((r) => r.pid === child.pid);
   const prev = orch._stallCpu.get(nodeId);
@@ -87,8 +91,8 @@ function runAlive(orch, nodeId, child, snapshot) {
 
 // Live (non-zombie) descendants of the run's CLI, for the hard-cap log: they show what kept a
 // silent run "alive" (board MCP helpers excluded, same scan as runAlive).
-function stallLiveKids(orch, child, snapshot) {
-  const rows = snapshot === undefined ? orch.procTable() : snapshot;
+async function stallLiveKids(orch, child, snapshot) {
+  const rows = snapshot === undefined ? await orch.procTable() : snapshot;
   if (!rows || !child || !child.pid) return [];
   const kids = new Map();
   for (const r of rows) { if (!kids.has(r.ppid)) kids.set(r.ppid, []); kids.get(r.ppid).push(r); }
@@ -111,7 +115,7 @@ function stallLiveKids(orch, child, snapshot) {
 // stopped: the sweep re-delivers what still matters. Hard cap: silence for HARD_CAP_MULT x the
 // timeout kills any run even with live descendants (runtimes whose own helpers pin runAlive()
 // forever). Manual interrupts (stopAgent, a queued human message) always take precedence.
-function sweepStalls(orch) {
+async function sweepStalls(orch) {
   if (orch.userStopped) return;
   // Task-run recovery is the Run's business (it re-dispatches through runTask), but a no-task run
   // can be live with the Run over (dispatchWake does not require it) — those still get watched.
@@ -129,12 +133,12 @@ function sweepStalls(orch) {
   if (!(timeoutMin > 0)) return;
   const now = Date.now();
   const hardCapMs = timeoutMin * STALL.HARD_CAP_MULT * 60000;
-  // One shared proc table per sweep, forked lazily on the first liveness check (ps is a blocking
-  // execFileSync — the whole point of this cache): a sweep that must judge N silent runs reads a
-  // single snapshot instead of forking ps per run. null (ps unavailable) stays falsy, so a failed
-  // fork is retried on the next run rather than pinned for the pass.
+  // One shared proc table per sweep, forked lazily on the first liveness check: a sweep that must
+  // judge N silent runs reads a single snapshot instead of forking ps per run. null (ps
+  // unavailable) stays falsy, so a failed fork is retried on the next run rather than pinned for
+  // the pass.
   let rows;
-  const table = () => rows || (rows = orch.procTable());
+  const table = async () => rows || (rows = await orch.procTable());
   for (const [nodeId, child] of [...orch.procs]) {
     const a = orch.agents[nodeId];
     const run = a && a.currentRun;
@@ -149,13 +153,13 @@ function sweepStalls(orch) {
       if (idleMs < timeoutMin * 60000) continue;
       // A live descendant (long silent tool call) protects the run — up to the hard cap, where
       // silence wins: the cap is what recovers runs whose runtime keeps helpers alive forever.
-      // Debounce the probe (runAlive forks a blocking `ps` on the main loop): a run verified alive
-      // stays trusted-alive for LIVE_RECHECK_MS — only cap-eligible runs probe on every sweep,
-      // because there the verdict decides the kill and must read fresh data.
+      // Debounce the probe (runAlive forks `ps`): a run verified alive stays trusted-alive for
+      // LIVE_RECHECK_MS — only cap-eligible runs probe on every sweep, because there the verdict
+      // decides the kill and must read fresh data.
       const cappedIdle = idleMs >= hardCapMs;
       const probed = orch._stallProbe || (orch._stallProbe = new Map());
       if (!cappedIdle && now - (probed.get(nodeId) || 0) < STALL.LIVE_RECHECK_MS) continue;
-      const alive = orch.runAlive(nodeId, child, table());
+      const alive = await orch.runAlive(nodeId, child, await table());
       probed.set(nodeId, now);
       const capped = alive && cappedIdle;
       if (alive && !capped) continue;
@@ -169,7 +173,7 @@ function sweepStalls(orch) {
       // never strand a claimed run (later sweeps skip it, and without the TERM there is no close, so
       // no recovery would ever fire).
       try {
-        const kids = capped ? stallLiveKids(orch, child, table()) : null;
+        const kids = capped ? await stallLiveKids(orch, child, await table()) : null;
         orch.log(nodeId, 'error', capped
           ? `stall: no output for ${idleMin} min (${STALL.HARD_CAP_MULT}x the ${timeoutMin} min timeout) — killing despite live child processes: ${kids.length ? kids.slice(0, 3).map((k) => `pid ${k.pid} ${String(k.command).slice(0, 80)}`).join('; ') + (kids.length > 3 ? `; +${kids.length - 3} more` : '') : 'none found'}`
           : isWake

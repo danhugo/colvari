@@ -343,6 +343,7 @@ test('restartNow bypasses the guards', async () => {
 test('same-commit restart is skipped: repeated scheduled requests at the running sha are no-ops', async () => {
   const git = fakeGit();
   const w = makeWatcher({ git });
+  await new Promise((r) => setTimeout(r, 50)); // boot sha capture is backgrounded now
   assert.strictEqual(w.bootSha, SHA1, 'the running sha is captured from git at watcher creation');
   assert.strictEqual(w.status().bootSha, SHA1);
   await drain(w); // baseline: learn the running sha
@@ -451,6 +452,7 @@ test('an uncomputable count never clears on a guess (git rev-list fails)', async
 test('unknown running sha (boot capture failed): the same-commit skip stands down and the restart proceeds', async () => {
   const git = fakeGit();
   const w = makeWatcher({ git });
+  await new Promise((r) => setTimeout(r, 50)); // let the backgrounded capture land before faking its failure
   w.bootSha = null; // main.js captures the boot sha itself; a failed capture passes null
   await drain(w);
   w.restartScheduled('scheduled restart (now)');
@@ -645,7 +647,7 @@ test('isInfraSpawnFailure: harness spawn shapes only', async () => {
   assert.strictEqual(isInfraSpawnFailure(null), false);
 });
 
-test('boot reaps a stale locked squad-selfupdate-* registration left by a crashed flow', () => {
+test('boot reaps a stale locked squad-selfupdate-* registration left by a crashed flow', async () => {
   const { execFileSync } = require('child_process');
   const repo = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'su-bootrepo-')));
   const g = (...a) => execFileSync('git', a, { cwd: repo, stdio: 'pipe' });
@@ -658,7 +660,7 @@ test('boot reaps a stale locked squad-selfupdate-* registration left by a crashe
   for (const p of [stale, other]) fs.rmSync(p, { recursive: true, force: true });
   g('worktree', 'add', '--detach', stale, 'HEAD'); g('worktree', 'lock', stale);
   g('worktree', 'add', '--detach', other, 'HEAD'); g('worktree', 'lock', other);
-  bootResume(fakeStore(), { repoDir: repo }); // no restart state: just the boot hygiene
+  await bootResume(fakeStore(), { repoDir: repo }); // no restart state: just the boot hygiene
   assert.strictEqual(fs.existsSync(stale), false, "the crashed flow's locked worktree is reaped at boot");
   assert.strictEqual(g('worktree', 'list').includes('squad-selfupdate-stale'), false, 'its registration is pruned');
   assert.strictEqual(fs.existsSync(other), true, 'non-selfupdate registrations are not ours to touch');
@@ -706,7 +708,7 @@ test('a worktree sweep firing while the restart test step runs does not abort th
         try { fs.unlinkSync(path.join(cwd, 'node_modules')); } catch {}
         const reg = g('worktree', 'list', '--porcelain').split('\n\n').find((b) => /squad-selfupdate-/.test(b)) || '';
         obs.wt = (reg.match(/^worktree (.*)$/m) || [])[1] || obs.wt;
-        const report = WT.sweepWorktrees({ repoDir: repo, store: { listTasks: () => [] } });
+        const report = await WT.sweepWorktrees({ repoDir: repo, store: { listTasks: () => [] } });
         obs.reapedBySweep = report.strays.includes(obs.wt);
         obs.existedAtSweep = fs.existsSync(path.join(obs.wt, '.git'));
         obs.lockedAtSweep = g('worktree', 'list', '--porcelain').split('\n\n')
@@ -769,25 +771,25 @@ test('request_self_update MCP tool: PM-only, dev/dogfood-only, writes the reques
   } finally { delete process.env.AGENTS_SQUAD_DEV; }
 });
 
-test('boot: resume interrupted Run on first boot; markBootOk ends the fragile window', () => {
+test('boot: resume interrupted Run on first boot; markBootOk ends the fragile window', async () => {
   const store = fakeStore();
   writeRestartState(store.dir, { phase: 'restarting', wasRunning: true, reason: 'r', fromSha: SHA1, toSha: SHA2, ts: new Date().toISOString(), bootAttempts: 0 });
-  const r = bootResume(store);
+  const r = await bootResume(store);
   assert.strictEqual(r.resume, true);
   assert.strictEqual(readRestartState(store.dir).bootAttempts, 1);
   markBootOk(store);
   assert.strictEqual(readRestartState(store.dir).phase, 'idle');
-  assert.strictEqual(bootResume(store).resume, false, 'no resume once the boot was marked ok');
+  assert.strictEqual((await bootResume(store)).resume, false, 'no resume once the boot was marked ok');
   clearRestartState(store.dir);
 });
 
-test('boot crash twice: rollback path clears state and disables auto-restart', () => {
+test('boot crash twice: rollback path clears state and disables auto-restart', async () => {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'su-repo-'));
   fs.writeFileSync(path.join(repo, 'package.json'), '{"name":"repo"}');
   const store = fakeStore();
   writeRestartState(store.dir, { phase: 'restarting', wasRunning: true, reason: 'r', fromSha: SHA1, toSha: SHA2, ts: new Date().toISOString(), bootAttempts: 2 });
   // repo is not a git checkout, so the rollback cannot reset; it must still clear state + disable.
-  const r = bootResume(store, { repoDir: repo });
+  const r = await bootResume(store, { repoDir: repo });
   assert.strictEqual(r.rolledBack, true);
   assert.strictEqual(r.resume, false);
   assert.strictEqual(store.settings.autoRestart, false, 'auto-restart is disabled after rollback');
@@ -796,7 +798,7 @@ test('boot crash twice: rollback path clears state and disables auto-restart', (
   assert.ok(store.logs.some((l) => l.kind === 'error' && /rolled back|not rolled back/.test(l.text)));
 });
 
-test('boot rollback refuses to reset a dirty checkout but still disables auto-restart', () => {
+test('boot rollback refuses to reset a dirty checkout but still disables auto-restart', async () => {
   // Real git repo with a commit and an uncommitted change: rollback must not touch it.
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'su-realdirty-'));
   const run = (a) => require('child_process').execFileSync('git', a, { cwd: repo });
@@ -807,7 +809,7 @@ test('boot rollback refuses to reset a dirty checkout but still disables auto-re
   fs.writeFileSync(path.join(repo, 'f.txt'), 'uncommitted work');
   const store = fakeStore();
   writeRestartState(store.dir, { phase: 'restarting', wasRunning: false, reason: 'r', fromSha: SHA1, toSha: SHA2, ts: new Date().toISOString(), bootAttempts: 2 });
-  const r = bootResume(store, { repoDir: repo });
+  const r = await bootResume(store, { repoDir: repo });
   assert.strictEqual(r.rolledBack, true);
   assert.strictEqual(store.settings.autoRestart, false);
   assert.strictEqual(fs.readFileSync(path.join(repo, 'f.txt'), 'utf8'), 'uncommitted work', 'uncommitted changes preserved');

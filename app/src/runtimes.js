@@ -2,7 +2,6 @@
 // runs through the generic profile path: the introspector derives a RuntimeProfile from the binary
 // itself (no hand-built per-CLI profiles, no CLI-specific parsing), and this module spawns/parses
 // purely from that profile data.
-const { execFileSync } = require('child_process');
 const { buildClaudeArgs, normalizeNode, splitArgs } = require('./agent-config');
 const { buildProfileArgs, writePerRunMcpConfig, binConfigEnvKey, getPath } = require('./profile-runner');
 const { introspectRuntime, defaultExec, makeExec } = require('./introspector');
@@ -12,16 +11,18 @@ const { isSubagentTool } = require('./subagents');
 // version and reused until it changes (re-derived automatically after an upgrade). Two entries per
 // binary: the full one (probe included — needs one real run) for actual runs, and a cheap help-only
 // one (key "|help") for capability detection, which must not cost a model call.
+// Async since t_5a78aa95: derivation spawns (--version/--help/models/probe) and used to block the
+// main process for seconds at dispatch time. Sync fakes injected by tests keep working under await.
 const derivedProfiles = new Map(); // cacheKey -> { version, profile }
-function deriveRuntimeProfile(bin, { exec, label, probe = true, askAgent = false, env } = {}) {
+async function deriveRuntimeProfile(bin, { exec, label, probe = true, askAgent = false, env } = {}) {
   const key = probe ? bin : `${bin}|help`;
   const run = exec || (env ? makeExec(env) : defaultExec);
   let version = '';
-  try { version = String(run(bin, ['--version']) || '').trim(); } catch { /* binary missing; still try to derive */ }
+  try { version = String((await run(bin, ['--version'])) || '').trim(); } catch { /* binary missing; still try to derive */ }
   const hit = derivedProfiles.get(key);
   if (hit && hit.version === version) return hit.profile;
   const id = String(bin).split(/[\\/]/).pop().replace(/\.(exe|sh)$/i, '').toLowerCase().replace(/[^a-z0-9_.-]/g, '_');
-  const { profile } = introspectRuntime(bin, run, { id, label: label || id, probe, askAgent });
+  const { profile } = await introspectRuntime(bin, run, { id, label: label || id, probe, askAgent });
   // Binary not found (e.g. packaged app launched from Finder with a minimal PATH): do not cache the
   // empty profile, or it would stick for the whole session. Re-derives next call (cheap: no run).
   if (version) derivedProfiles.set(key, { version, profile });
@@ -45,17 +46,17 @@ function capabilitiesFromProfile(profile) {
 // user of this factory. exec/askAgent injectable via opts for tests (askAgent opts into the
 // expensive ask-the-agent introspection layer; never on by default).
 function profileRuntime(id, label, binFromSettings) {
-  const profileFor = (settings, opts = {}) => deriveRuntimeProfile(binFromSettings(settings || {}), { label, exec: opts.exec, probe: opts.probe !== false, askAgent: !!opts.askAgent, env: opts.env });
+  const profileFor = async (settings, opts = {}) => deriveRuntimeProfile(binFromSettings(settings || {}), { label, exec: opts.exec, probe: opts.probe !== false, askAgent: !!opts.askAgent, env: opts.env });
   return {
     id, label, bin: binFromSettings,
     // help-only derivation: cheap, no probe/model call (used by detectRuntimes)
-    capabilities(settings, exec) {
-      try { return capabilitiesFromProfile(deriveRuntimeProfile(binFromSettings(settings || {}), { label, exec, probe: false })); }
+    async capabilities(settings, exec) {
+      try { return capabilitiesFromProfile(await deriveRuntimeProfile(binFromSettings(settings || {}), { label, exec, probe: false })); }
       catch { return { tokens: false, cost: false, mcp: false, resume: false }; }
     },
-    buildArgs(node, prompt, settings, mcp, opts = {}) {
+    async buildArgs(node, prompt, settings, mcp, opts = {}) {
       const n = normalizeNode(node);
-      const profile = profileFor(settings, opts);
+      const profile = await profileFor(settings, opts);
       if (mcp && mcp.mcpServers && Object.keys(mcp.mcpServers).length && profile.mcp.method === 'file') {
         // One config per run in a fresh temp dir, delivered via <BIN>_CONFIG (opencode-style). Writing
         // it into a shared cwd made concurrent agents overwrite each other's board identity ("task not
@@ -78,8 +79,16 @@ function profileRuntime(id, label, binFromSettings) {
       return args;
     },
     // Generic JSON-event parsing driven by the profile's eventMapping; wired into the orchestrator
-    // via rt.parseEvent (no per-CLI branch there).
-    parseEvent(ev, settings, opts = {}) { return parseProfileEvent(ev, profileFor(settings, opts)); },
+    // via rt.parseEvent (no per-CLI branch there). Must stay sync (hot per-event path): it reads the
+    // profile derived and cached by the buildArgs run that spawned this stream — events never arrive
+    // before their run's buildArgs. No cached profile (parse without a derived run): a loud error
+    // event instead of a blocking derive on the stream path.
+    parseEvent(ev, settings, opts = {}) {
+      const bin = binFromSettings(settings || {});
+      const hit = derivedProfiles.get(bin);
+      if (!hit || !hit.profile) return { logs: [['error', `${label}: runtime profile not derived yet (run buildArgs first) — event dropped`]] };
+      return parseProfileEvent(ev, hit.profile);
+    },
   };
 }
 
@@ -232,15 +241,17 @@ function parseProfileEvent(ev, profile) {
 }
 
 const parseVersion = (s) => { const m = String(s || '').match(/\d+\.\d+(\.\d+)?/); return m ? m[0] : null; };
-// Detect each runtime binary + version. exec is injectable for tests.
-function detectRuntimes(settings = {}, env = process.env, exec = (b, a) => execFileSync(b, a, { env, encoding: 'utf8', timeout: 10000, stdio: ['ignore', 'pipe', 'pipe'] })) {
+// Detect each runtime binary + version. exec is injectable for tests; the default probe is async
+// (t_5a78aa95 — the old default execFileSync froze the booting main process ~10s/runtime) and
+// detectRuntimes itself is awaited through one shared promise per app start (main.js).
+async function detectRuntimes(settings = {}, env = process.env, exec = async (b, a) => { const CP = require('./cp'); return CP.runThrow(b, a, { env, timeoutMs: 10000 }); }) {
   const r = {};
   for (const id of RUNTIME_IDS) {
     const rt = RUNTIMES[id];
     try {
-      const v = exec(rt.bin(settings), ['--version']);
+      const v = await exec(rt.bin(settings), ['--version']);
       let caps;
-      try { caps = typeof rt.capabilities === 'function' ? rt.capabilities(settings, exec) : rt.capabilities; }
+      try { caps = typeof rt.capabilities === 'function' ? await rt.capabilities(settings, exec) : rt.capabilities; }
       catch { caps = { tokens: false, cost: false, mcp: false, resume: false }; }
       r[id] = { installed: true, version: parseVersion(v) || String(v).trim(), label: rt.label, capabilities: caps };
     } catch (e) {

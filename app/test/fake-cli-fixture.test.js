@@ -9,9 +9,9 @@ const { runProfile } = require('../src/profile-runner');
 
 const FIXTURE = path.join(__dirname, 'fixtures/fake-agent-cli.js');
 
-test('introspectRuntime derives a working profile from a real spawned process', () => {
+test('introspectRuntime derives a working profile from a real spawned process', async () => {
   const exec = (bin, args) => execFileSync(process.execPath, [bin, ...args], { encoding: 'utf8' });
-  const { profile } = introspectRuntime(FIXTURE, exec, { id: 'fake', label: 'Fake' });
+  const { profile } = await introspectRuntime(FIXTURE, exec, { id: 'fake', label: 'Fake' });
   assert.ok(profile.argsTemplate.includes('run'));
   assert.deepStrictEqual(profile.modelsCommand, ['models']);
   assert.deepStrictEqual(profile.effortValues, ['low', 'medium', 'high']);
@@ -27,7 +27,7 @@ test('introspectRuntime derives a working profile from a real spawned process', 
 
 test('runProfile drives the real fixture process end-to-end (tokens, variant, resume)', async () => {
   const exec = (bin, args) => execFileSync(process.execPath, [bin, ...args], { encoding: 'utf8' });
-  const { profile } = introspectRuntime(FIXTURE, exec, { id: 'fake', label: 'Fake' });
+  const { profile } = await introspectRuntime(FIXTURE, exec, { id: 'fake', label: 'Fake' });
 
   const run1 = await runProfile(profile, { model: 'fake/small', variant: 'high', prompt: 'say pong' });
   assert.strictEqual(run1.exitCode, 0);

@@ -9,7 +9,7 @@ const AC = require('../src/agent-config');
 
 const tmp = () => new Store(fs.mkdtempSync(path.join(os.tmpdir(), 'squad-perm-')));
 
-test('splitArgs, toList, toEnv', () => {
+test('splitArgs, toList, toEnv', async () => {
   assert.deepEqual(AC.splitArgs(`--foo bar "a b" 'c d' e\\ f ""`), ['--foo', 'bar', 'a b', 'c d', 'e f', '']);
   assert.deepEqual(AC.splitArgs('  '), []);
   assert.throws(() => AC.splitArgs('"open'), /unbalanced/);
@@ -18,7 +18,7 @@ test('splitArgs, toList, toEnv', () => {
   assert.equal(AC.envToText({ A: '1', B: '2' }), 'A=1\nB=2');
 });
 
-test('buildClaudeArgs maps per-agent settings to claude flags', () => {
+test('buildClaudeArgs maps per-agent settings to claude flags', async () => {
   const mcp = { mcpServers: {} };
   const base = AC.buildClaudeArgs({ name: 'x' }, 'P', { permissionMode: 'acceptEdits' }, mcp);
   assert.deepEqual(base.slice(0, 2), ['-p', 'P']);
@@ -38,7 +38,7 @@ test('buildClaudeArgs maps per-agent settings to claude flags', () => {
   assert.throws(() => AC.buildClaudeArgs({ permissionMode: 'nope' }, 'P', {}, mcp), /permission mode/);
 });
 
-test('free-form roles and per-project role presets', () => {
+test('free-form roles and per-project role presets', async () => {
   const s = tmp();
   s.savePreset({ name: 'Architect', systemPrompt: 'Design first.', allowedTools: 'Read,Grep', permissionMode: 'plan' });
   assert.throws(() => s.savePreset({ name: '' }), /name/);
@@ -65,7 +65,7 @@ function team() {
   return { s, pm, dev, rev, qa };
 }
 
-test('edge types: assign vs message vs review', () => {
+test('edge types: assign vs message vs review', async () => {
   const { s, pm, dev, rev, qa } = team();
   assert.throws(() => s.addEdge(pm.id, qa.id, 'weird'), /edge type/);
   assert.equal(s.getTeam().edges.length, 3);
@@ -83,9 +83,9 @@ test('edge types: assign vs message vs review', () => {
   // review edge Dev -> Rev: Rev may move Dev's task to review/done but not back to todo
   const t = makeTools(s, pm.id).create_task({ title: 'impl', assignee: dev.id });
   assert.equal(makeTools(s, rev.id).list_tasks().length, 1);
-  assert.throws(() => makeTools(s, rev.id).update_task_status({ taskId: t.id, status: 'todo' }), /scope/);
-  assert.equal(makeTools(s, rev.id).update_task_status({ taskId: t.id, status: 'done' }).status, 'done');
-  assert.throws(() => makeTools(s, qa.id).update_task_status({ taskId: t.id, status: 'done' }), /scope/);
+  await assert.rejects(() => makeTools(s, rev.id).update_task_status({ taskId: t.id, status: 'todo' }), /scope/);
+  assert.equal((await makeTools(s, rev.id).update_task_status({ taskId: t.id, status: 'done' })).status, 'done');
+  await assert.rejects(() => makeTools(s, qa.id).update_task_status({ taskId: t.id, status: 'done' }), /scope/);
   const lt = makeTools(s, rev.id).list_team();
   assert.deepEqual(lt.reviews.map((n) => n.name), ['Dev']);
   assert.deepEqual(makeTools(s, dev.id).list_team().canMessage.map((n) => n.name), ['QA']);
@@ -99,7 +99,7 @@ test('edge types: assign vs message vs review', () => {
   assert.equal(makeTools(s2, a.id).create_task({ title: 'x', assignee: b.id }).assignee, b.id);
 });
 
-test('board tools can be disabled per agent', () => {
+test('board tools can be disabled per agent', async () => {
   const { s, pm, dev } = team();
   s.updateNode(pm.id, { disabledBoardTools: ['write_wiki', 'send_message'] });
   assert.throws(() => makeTools(s, pm.id).write_wiki({ title: 'x', content: 'y' }), /disabled/);
@@ -134,7 +134,7 @@ test('MCP server only registers enabled tools and enforces message edges', async
   assert.equal(s.listMessages({ to: qa.id }).length, 1);
 });
 
-test('export/import keeps per-agent settings and edge types', () => {
+test('export/import keeps per-agent settings and edge types', async () => {
   const pm = new ProjectManager(fs.mkdtempSync(path.join(os.tmpdir(), 'squad-perm-pm-')));
   const pid = pm.list()[0].id; const tid = pm.get(pid).teams[0].id; const s = pm.store(pid, tid);
   const a = s.addNode({ name: 'A', role: 'Designer', allowedTools: 'Read', env: { X: '1' }, maxTurns: 3 });

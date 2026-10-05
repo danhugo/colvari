@@ -57,8 +57,8 @@ function disarm(orch) { for (const t of orch._stallKill.values()) clearTimeout(t
 function waitFor(predicate, timeout = 4000) {
   const started = Date.now();
   return new Promise((resolve, reject) => {
-    const check = () => {
-      try { if (predicate()) return resolve(); } catch (e) { return reject(e); }
+    const check = async () => {
+      try { if (await predicate()) return resolve(); } catch (e) { return reject(e); }
       if (Date.now() - started > timeout) return reject(new Error('timed out waiting for condition'));
       setTimeout(check, 10);
     };
@@ -135,7 +135,7 @@ test('stall timeout defaults to ten minutes when the setting is absent', () => {
   assert.equal(store.getSettings().stallTimeoutMin, 10);
 });
 
-test('no double resume: a claimed run cannot be claimed or recovered twice', () => {
+test('no double resume: a claimed run cannot be claimed or recovered twice', async () => {
   const { node, orch } = setup();
   orch.running = true; // sweepStalls only runs while the orchestrator is up
   let stalled = 0; orch.on('run.stalled', () => stalled++);
@@ -143,8 +143,8 @@ test('no double resume: a claimed run cannot be claimed or recovered twice', () 
   a.status = 'working'; a.taskId = 't1'; a.lastActivityAt = Date.now() - 5000;
   const run = { done: false }; a.currentRun = run;
   orch.procs.set(node.id, { pid: 123, kill() {} });
-  orch.sweepStalls();
-  orch.sweepStalls(); // same tick: the one-way run.stalled claim must win
+  await orch.sweepStalls();
+  await orch.sweepStalls(); // same tick: the one-way run.stalled claim must win
   assert.equal(stalled, 1);
   assert.equal(run.stalled, true);
   disarm(orch);
@@ -184,8 +184,8 @@ test('runAlive: an idle board MCP helper child does not keep a silent run alive'
   const { root, orch } = setup();
   const cli = spawnFakeCli(root, 'helper');
   try {
-    await waitFor(() => (orch.procTable() || []).some((r) => r.ppid === cli.pid && /mcp-server\.js/.test(r.command || '')));
-    assert.equal(realRunAlive(orch, cli), false);
+    await waitFor(async () => ((await orch.procTable()) || []).some((r) => r.ppid === cli.pid && /mcp-server\.js/.test(r.command || '')));
+    assert.equal(await realRunAlive(orch, cli), false);
   } finally { killTree(cli.pid); }
 });
 
@@ -194,13 +194,13 @@ test('runAlive: the helper subtree is skipped even when the helper has a child o
   const cli = spawnFakeCli(root, 'helper-tree');
   try {
     let helperPid = 0;
-    await waitFor(() => {
-      const rows = orch.procTable() || [];
+    await waitFor(async () => {
+      const rows = (await orch.procTable()) || [];
       const h = rows.find((r) => r.ppid === cli.pid && /mcp-server\.js/.test(r.command || ''));
       if (h) helperPid = h.pid;
       return !!(h && rows.some((r) => r.ppid === helperPid && /sleep/.test(r.command || '')));
     });
-    assert.equal(realRunAlive(orch, cli), false);
+    assert.equal(await realRunAlive(orch, cli), false);
   } finally { killTree(cli.pid); }
 });
 
@@ -208,20 +208,20 @@ test('runAlive: a real working child still counts as alive', async () => {
   const { root, orch } = setup();
   const cli = spawnFakeCli(root, 'worker');
   try {
-    await waitFor(() => (orch.procTable() || []).some((r) => r.ppid === cli.pid && /sleep/.test(r.command || '')));
-    assert.equal(realRunAlive(orch, cli), true);
+    await waitFor(async () => ((await orch.procTable()) || []).some((r) => r.ppid === cli.pid && /sleep/.test(r.command || '')));
+    assert.equal(await realRunAlive(orch, cli), true);
   } finally { killTree(cli.pid); }
 });
 
 // A stopped CLI cannot reap its exited children, so defunct descendants pile up under it. Their ps
 // state carries flags ('ZN', 'Z+'...) — only the first char is the primary state (live-proved
 // 2026-09-28: state 'ZN' defeated the old `!== 'Z'` check and blocked recovery forever).
-test('runAlive: defunct descendants with flagged ps state (ZN/Z+) do not count as alive', () => {
+test('runAlive: defunct descendants with flagged ps state (ZN/Z+) do not count as alive', async () => {
   const { orch } = setup();
   orch.procTable = () => [
     { pid: 100, ppid: 1, state: 'TN', cpuMs: 6680, command: 'helpycode run --format json' },
     { pid: 101, ppid: 100, state: 'ZN', cpuMs: 0, command: '<defunct>' },
     { pid: 102, ppid: 100, state: 'Z+', cpuMs: 0, command: '<defunct>' },
   ];
-  assert.equal(realRunAlive(orch, { pid: 100, exitCode: null }), false);
+  assert.equal(await realRunAlive(orch, { pid: 100, exitCode: null }), false);
 });

@@ -40,35 +40,35 @@ function realRepoFixture() {
 }
 
 const masterSha = (repo) => g(repo, 'rev-parse', 'HEAD');
-const withTestRoot = (root, fn) => {
+const withTestRoot = async (root, fn) => {
   const prev = process.env.AGENTS_SQUAD_TEST_ROOT;
   process.env.AGENTS_SQUAD_TEST_ROOT = root;
-  try { return fn(); } finally { if (prev === undefined) delete process.env.AGENTS_SQUAD_TEST_ROOT; else process.env.AGENTS_SQUAD_TEST_ROOT = prev; }
+  try { return await fn(); } finally { if (prev === undefined) delete process.env.AGENTS_SQUAD_TEST_ROOT; else process.env.AGENTS_SQUAD_TEST_ROOT = prev; }
 };
 
-test('sandbox: no task worktree can be created in a repo outside the test data root', () => {
+test('sandbox: no task worktree can be created in a repo outside the test data root', async () => {
   const real = realRepoFixture();
   const sandbox = mktempReal('sandbox-root-');
-  withTestRoot(sandbox, () => {
-    const w = WT.ensureWorktree(real, 't_leak1');
+  await withTestRoot(sandbox, async () => {
+    const w = await WT.ensureWorktree(real, 't_leak1');
     assert.match(String(w.warning), /sandbox: refusing/);
     assert.equal(fs.existsSync(path.join(real, '.squad', 'worktrees', 't_leak1')), false, 'no worktree dir in the real repo');
     assert.equal(g(real, 'branch', '--list', 'squad/t_leak1').trim(), '', 'no branch in the real repo');
     // inside the sandbox it still works
-    const ok = WT.ensureWorktree(SB.agentRepo(sandbox), 't_ok1');
+    const ok = await WT.ensureWorktree(SB.agentRepo(sandbox), 't_ok1');
     assert.ok(ok.worktreePath && !ok.warning, 'inside the sandbox worktrees work');
     assert.ok(SB.inside(sandbox, ok.worktreePath));
   });
 });
 
-test('sandbox: auto-merge refuses to land commits in a repo outside the test data root', () => {
+test('sandbox: auto-merge refuses to land commits in a repo outside the test data root', async () => {
   const real = realRepoFixture();
   const sandbox = mktempReal('sandbox-root-');
   // The leaked shape: a task whose worktreePath points INTO the real repo, branch ahead of base.
-  const leaked = WT.ensureWorktree(real, 't_leak2'); // built WITHOUT the guard: emulate the stray agent's worktree
+  const leaked = await WT.ensureWorktree(real, 't_leak2'); // built WITHOUT the guard: emulate the stray agent's worktree
   assert.equal(WT.ensureWorktree.length, 2); // sanity: the fixture call itself is unguarded
   assert.ok(fs.existsSync(leaked.worktreePath), 'fixture worktree exists');
-  withTestRoot(sandbox, () => {
+  await withTestRoot(sandbox, async () => {
     fs.writeFileSync(path.join(leaked.worktreePath, 'seed.txt'), '(seed 484) agent work\n');
     g(leaked.worktreePath, 'add', '.');
     g(leaked.worktreePath, 'commit', '-q', '-m', 'perf(t_seed): seeded work that must never land');
@@ -76,24 +76,24 @@ test('sandbox: auto-merge refuses to land commits in a repo outside the test dat
     const store = new Store(mktemp('sandbox-store-'));
     const task = store.createTask({ title: 'leaked', assignee: 'n_x' });
     store._updateTask(task.id, { worktreePath: leaked.worktreePath, worktreeBranch: 'squad/t_leak2' });
-    assert.throws(() => MG.gateMerge(store.getTask(task.id)), /sandbox: refusing to auto-merge/, 'gateMerge refuses before any git side effect');
+    await assert.rejects(() => MG.gateMerge(store.getTask(task.id)), /sandbox: refusing to auto-merge/, 'gateMerge refuses before any git side effect');
     assert.equal(masterSha(real), before, 'real repo master unchanged — no commit landed');
     assert.equal(g(real, 'log', '--oneline', '-1').includes('seed'), false, 'no seed commit on the real base');
   });
   // and the destructive lifecycle paths refuse too
-  withTestRoot(sandbox, () => {
+  await withTestRoot(sandbox, async () => {
     const t = { worktreePath: leaked.worktreePath, worktreeBranch: 'squad/t_leak2' };
-    assert.throws(() => WT.worktreeDiscard(t), /sandbox: refusing/);
-    assert.throws(() => WT.removeWorktree(t), /sandbox: refusing/);
+    await assert.rejects(() => WT.worktreeDiscard(t), /sandbox: refusing/);
+    await assert.rejects(() => WT.removeWorktree(t), /sandbox: refusing/);
     assert.ok(fs.existsSync(leaked.worktreePath), 'stray worktree left untouched for the human to clean');
   });
 });
 
-test('sandbox: inside the test data root the merge path still lands', () => {
+test('sandbox: inside the test data root the merge path still lands', async () => {
   const sandbox = mktempReal('sandbox-root-');
-  withTestRoot(sandbox, () => {
+  await withTestRoot(sandbox, async () => {
     const repo = SB.agentRepo(sandbox);
-    const w = WT.ensureWorktree(repo, 't_ok2');
+    const w = await WT.ensureWorktree(repo, 't_ok2');
     assert.ok(w.worktreePath && !w.warning);
     fs.writeFileSync(path.join(w.worktreePath, 'fix.txt'), 'legit\n');
     g(w.worktreePath, 'add', '.');
@@ -102,7 +102,7 @@ test('sandbox: inside the test data root the merge path still lands', () => {
     const task = store.createTask({ title: 'ok', assignee: 'n_x' });
     store._updateTask(task.id, { worktreePath: w.worktreePath, worktreeBranch: 'squad/t_ok2' });
     const before = masterSha(repo);
-    const r = MG.gateMerge(store.getTask(task.id));
+    const r = await MG.gateMerge(store.getTask(task.id));
     assert.equal(r.merged, true, 'merge lands inside the sandbox');
     assert.notEqual(masterSha(repo), before);
   });
@@ -119,13 +119,13 @@ test('sandbox: startup gate hard-fails on a node workdir outside the data root o
   SB.assertGitInside(sandbox, ws, 'node Real-1');
 });
 
-test('sandbox: with no test root set (production) the guards are inert', () => {
+test('sandbox: with no test root set (production) the guards are inert', async () => {
   const real = realRepoFixture();
   const prev = process.env.AGENTS_SQUAD_TEST_ROOT;
   delete process.env.AGENTS_SQUAD_TEST_ROOT;
   try {
     assert.equal(SB.refusal(real, 'auto-merge into'), null);
-    const w = WT.ensureWorktree(real, 't_prod');
+    const w = await WT.ensureWorktree(real, 't_prod');
     assert.ok(w.worktreePath && !w.warning, 'production worktrees unaffected');
   } finally { if (prev !== undefined) process.env.AGENTS_SQUAD_TEST_ROOT = prev; }
 });

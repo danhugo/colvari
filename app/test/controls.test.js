@@ -12,7 +12,7 @@ const RESULT = (cost, inTok = 10, outTok = 10) => `echo '{"type":"result","subty
 const runToDone = (o) => new Promise((res) => { o.once('done', res); o.start(); });
 const waitFor = async (fn, ms = 5000) => { const t0 = Date.now(); while (!fn()) { if (Date.now() - t0 > ms) throw new Error('timeout'); await new Promise((r) => setTimeout(r, 20)); } };
 
-test('dependencies: openBlockers, cycles and self references', () => {
+test('dependencies: openBlockers, cycles and self references', async () => {
   const tasks = [{ id: 'a', status: 'done' }, { id: 'b', status: 'todo', blockedBy: ['a'] }, { id: 'c', status: 'todo', blockedBy: ['b', 'gone'] }];
   assert.deepEqual(C.openBlockers(tasks[1], tasks), []);
   assert.deepEqual(C.openBlockers(tasks[2], tasks), ['b']); // unknown ids do not block
@@ -23,7 +23,7 @@ test('dependencies: openBlockers, cycles and self references', () => {
   assert.deepEqual(C.validateDeps('d', 'b, b c', tasks), ['b', 'c']);
 });
 
-test('budgets: agent and project caps', () => {
+test('budgets: agent and project caps', async () => {
   assert.equal(C.budgetExceeded({ node: {}, agent: { cost: 9 }, settings: {} }), null);
   assert.match(C.budgetExceeded({ node: { budgetUsd: 0.5 }, agent: { cost: 0.5 } }), /agent budget \$0.5/);
   assert.match(C.budgetExceeded({ node: { budgetTokens: 100 }, agent: { inputTokens: 60, outputTokens: 40 } }), /token budget 100/);
@@ -31,14 +31,14 @@ test('budgets: agent and project caps', () => {
   assert.match(C.projectBudgetExceeded({ budgetTokens: 10 }, { tokens: 11 }), /project token budget/);
 });
 
-test('approval gate: agent done becomes review + awaitingApproval', () => {
+test('approval gate: agent done becomes review + awaitingApproval', async () => {
   assert.deepEqual(C.gateStatus('done', { requireApproval: true }, {}), { status: 'review', awaitingApproval: true });
   assert.deepEqual(C.gateStatus('done', {}, { requireApproval: true }), { status: 'review', awaitingApproval: true });
   assert.deepEqual(C.gateStatus('done', { requireApproval: true }, {}, true), { status: 'done', awaitingApproval: false });
   assert.equal(C.gateStatus('done', {}, {}).status, 'done');
 });
 
-test('store: blockedBy, approveTask, deleteTask cleans deps, persisted logs', () => {
+test('store: blockedBy, approveTask, deleteTask cleans deps, persisted logs', async () => {
   const s = new Store(tmp('squad-ctl-'));
   const a = s.createTask({ title: 'A' }); const b = s.createTask({ title: 'B', blockedBy: [a.id] });
   assert.deepEqual(b.blockedBy, [a.id]);
@@ -56,7 +56,7 @@ test('store: blockedBy, approveTask, deleteTask cleans deps, persisted logs', ()
   s.clearLogs(); assert.deepEqual(s.readLogs(), []);
 });
 
-test('board tools: blockedBy on create_task, approval gate, human messages in inbox', () => {
+test('board tools: blockedBy on create_task, approval gate, human messages in inbox', async () => {
   const s = new Store(tmp('squad-ctl-'));
   const pm = s.addNode({ name: 'PM', role: 'PM' }); const dev = s.addNode({ name: 'Dev', role: 'Dev', requireApproval: true });
   s.addEdge(pm.id, dev.id);
@@ -64,9 +64,9 @@ test('board tools: blockedBy on create_task, approval gate, human messages in in
   const t1 = tp.create_task({ title: 'build', assignee: 'Dev' });
   const t2 = tp.create_task({ title: 'ship', assignee: 'Dev', blockedBy: [t1.id] });
   assert.deepEqual(tp.list_tasks({}).find((x) => x.id === t2.id).blockedByOpen, [t1.id]);
-  const r = td.update_task_status({ taskId: t1.id, status: 'done' });
+  const r = await td.update_task_status({ taskId: t1.id, status: 'done' });
   assert.equal(r.status, 'review'); assert.equal(r.awaitingApproval, true); assert.match(r.note, /approve/);
-  assert.throws(() => tp.update_task_status({ taskId: t1.id, status: 'done' }), /human approval/);
+  await assert.rejects(() => tp.update_task_status({ taskId: t1.id, status: 'done' }), /human approval/);
   s.sendMessage({ from: 'human', to: dev.id, text: 'use port 8080' });
   const inbox = td.read_messages({});
   assert.equal(inbox.length, 1); assert.equal(inbox[0].fromName, 'human');
@@ -169,7 +169,7 @@ exec sleep 5
   assert.match(humanPrompt('hi', 'BASE'), /^BASE\n\nMessage from the human/);
 });
 
-test('persisted logs: monitor events keep their structured fields, other kinds stay whitelisted', () => {  const mon = { at: 123, nodeId: 'core', kind: 'monitor', text: 'woke the core', reason: '2 open tasks, all agents idle', taskIds: ['t_1', 't_2'], action: 'woke core' };
+test('persisted logs: monitor events keep their structured fields, other kinds stay whitelisted', async () => {  const mon = { at: 123, nodeId: 'core', kind: 'monitor', text: 'woke the core', reason: '2 open tasks, all agents idle', taskIds: ['t_1', 't_2'], action: 'woke core' };
   const back = C.parseLogs(C.logLine(mon))[0];
   assert.equal(back.reason, '2 open tasks, all agents idle');
   assert.deepEqual(back.taskIds, ['t_1', 't_2']);
