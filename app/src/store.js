@@ -236,16 +236,76 @@ class Store {
   // One-shot lock attempt for periodic background work on the main thread: never spins. Contention
   // (an agent's MCP process mid-write-burst) used to block the whole main thread in sleepSync(10)
   // slices here — getAll queued behind the spin and measured as a multi-second stall (Quinn
-  // t_f4f6d15e). Callers must be safe to skip a round; the next tick retries.
+  // t_f4f6d15e). A stale lock is taken over with withLock's own steal policy (t_7e53747c); a live
+  // holder means the caller skips this round (safe to retry next tick). Release removes only a
+  // lock whose pid is still ours — a stealer that took it over mid-hold must keep its lock.
   withLockTry(fn) {
     const lock = path.join(this.dir, '.lock');
-    try { fs.mkdirSync(lock); } catch { return false; }
+    try { fs.mkdirSync(lock); } catch (e) {
+      if (e.code !== 'EEXIST') throw e;
+      if (!lockHolderDead(lock)) return false;
+      const stolen = lock + '.stolen.' + process.pid;
+      try { fs.rmSync(stolen, { recursive: true, force: true }); fs.renameSync(lock, stolen); fs.rmSync(stolen, { recursive: true, force: true }); } catch { return false; }
+      try { fs.mkdirSync(lock); } catch { return false; }
+    }
     try {
       const tmp = path.join(lock, 'pid.' + process.pid + '.tmp');
       fs.writeFileSync(tmp, String(process.pid));
       fs.renameSync(tmp, path.join(lock, 'pid'));
     } catch {}
-    try { fn(); return true; } finally { try { fs.rmSync(lock, { recursive: true, force: true }); } catch {} }
+    // Same depth contract as withLock/withLockAsync (write-through hooks consult it).
+    this._lockDepth = (this._lockDepth || 0) + 1;
+    try { fn(); return true; } finally {
+      this._lockDepth--;
+      let ours = true;
+      try { ours = fs.readFileSync(path.join(lock, 'pid'), 'utf8').trim() === String(process.pid); }
+      catch (e) { ours = e.code === 'ENOENT'; }
+      if (ours) { try { fs.rmSync(lock, { recursive: true, force: true }); } catch {} }
+    }
+  }
+  // Async twin of withLock for the main process's own dispatch/run-end task writes: the WAIT for
+  // a busy lock yields the event loop (setTimeout) instead of sleepSync(10)-spinning, so a burst
+  // of agent MCP writes no longer freezes main while it queues (t_a2566d54 — getAll tail). The
+  // critical section itself stays SYNCHRONOUS: `fn` must not await. Holding this lock across an
+  // await would let the same process's sync writers self-deadlock (single thread: their
+  // Atomics.wait spin would block the very continuation that would release us). Same steal policy
+  // and pid-checked release as the sync lock.
+  withLockAsync(fn) {
+    const lock = path.join(this.dir, '.lock');
+    const start = Date.now();
+    const attempt = () => {
+      try { fs.mkdirSync(lock); } catch (e) {
+        if (e.code !== 'EEXIST') throw e;
+        if (Date.now() - start > LOCK.waitMs && lockHolderDead(lock)) {
+          const stolen = lock + '.stolen.' + process.pid;
+          try { fs.rmSync(stolen, { recursive: true, force: true }); fs.renameSync(lock, stolen); fs.rmSync(stolen, { recursive: true, force: true }); return attempt(); } catch {}
+        }
+        if (Date.now() - start > LOCK.waitMs + 30000) throw new Error('store lock busy (async wait timed out)');
+        return null; // still busy: keep waiting
+      }
+      try {
+        try {
+          const tmp = path.join(lock, 'pid.' + process.pid + '.tmp');
+          fs.writeFileSync(tmp, String(process.pid));
+          fs.renameSync(tmp, path.join(lock, 'pid'));
+        } catch {}
+        // Same depth contract as withLock: write-through hooks fire inside this lock and consult
+        // _lockDepth to skip the re-entrant _ensureBoard/_ensureWiki baselines.
+        this._lockDepth = (this._lockDepth || 0) + 1;
+        try { return fn(); }
+        finally {
+          this._lockDepth--;
+          let ours = true;
+          try { ours = fs.readFileSync(path.join(lock, 'pid'), 'utf8').trim() === String(process.pid); } catch (e) { ours = e.code === 'ENOENT'; }
+          if (ours) { try { fs.rmSync(lock, { recursive: true, force: true }); } catch {} }
+        }
+      } catch (e) {
+        try { fs.rmSync(lock, { recursive: true, force: true }); } catch {}
+        throw e;
+      }
+    };
+    const run = () => { const r = attempt(); if (r !== null) return Promise.resolve(r); return new Promise((res) => setTimeout(res, 10)).then(run); };
+    return run();
   }
   withLock(fn) {
     const lock = path.join(this.dir, '.lock');
@@ -377,7 +437,9 @@ class Store {
   // hand edits would otherwise silently diverge from what the board tools handed out.
   _recordHash(file, data) {
     const h = this._readHashes() || {};
-    h[path.basename(file)] = this._sha256(data);
+    let sig = '';
+    try { const st = fs.statSync(path.join(this.tasksDir(), file)); sig = st.size + ':' + st.mtimeMs; } catch {}
+    h[path.basename(file)] = { sig, hash: this._sha256(data) };
     this._saveHashes(h);
   }
   // Callers hold the .lock (all writes happen inside _withTasks/_migrate/withLock). Writes are
@@ -425,25 +487,42 @@ class Store {
     const hit = this._tcache && this._tcache.get(f);
     if (hit && hit.sig === sig) return hit.task;
     let task; try { task = JSON.parse(fs.readFileSync(p, 'utf8')); } catch { if (this._tcache) this._tcache.delete(f); return null; }
-    try { const st2 = fs.statSync(p); if (st2.size + ':' + st2.mtimeMs === sig) (this._tcache || (this._tcache = new Map())).set(f, { sig, task }); } catch {}
+    try { const st2 = fs.statSync(p); if (st2.size + ':' + st2.mtimeMs === sig) (this._tcache || (this._tcache = new Map())).set(f, { sig, task, str: JSON.stringify(task) }); } catch {}
     return task;
   }
   // Read-modify-write over the whole task set under ONE lock hold. fn mutates the array in place
   // (push/splice/field edits); tasks whose JSON changed are rewritten, removed ids unlinked.
-  _withTasks(fn) {
-    if (this.cache && !this.cache.closed) this.cache.prewarm();
-    this._ensureBoard();
-    return this.withLock(() => {
+  // The before-image reuses the per-file cache's compact form (t_7e53747c): the old code
+  // stringified every task twice per write, all inside the lock — every agent MCP call paid it,
+  // and main-process writers queued behind those holds.
+  _taskWritePass(fn) {
+    return () => {
       const tasks = this._taskFiles().map((f) => this._readTaskFile(f)).filter(Boolean);
-      const before = new Map(tasks.map((t) => [t.id, JSON.stringify(t)]));
+      const beforeIds = new Set(tasks.map((t) => t.id));
+      const beforeStr = new Map();
+      for (const t of tasks) {
+        const hit = this._tcache && this._tcache.get(t.id + '.json');
+        beforeStr.set(t, hit && hit.str !== undefined ? hit.str : JSON.stringify(t));
+      }
       let r;
       try { r = fn(tasks); }
       catch (e) { this._tcache = this._tlast = null; this._ownDir = undefined; throw e; } // fn may have mutated cached tasks it never wrote
-      for (const t of tasks) if (JSON.stringify(t) !== before.get(t.id)) this._writeTask(t);
-      const ids = new Set(tasks.map((t) => t.id));
-      for (const tid0 of before.keys()) if (!ids.has(tid0)) this._unlinkTask(tid0);
+      for (const t of tasks) if (JSON.stringify(t) !== beforeStr.get(t)) this._writeTask(t);
+      for (const t of tasks) beforeIds.delete(t.id);
+      for (const tid0 of beforeIds) this._unlinkTask(tid0);
       return r;
-    });
+    };
+  }
+  _withTasks(fn) {
+    if (this.cache && !this.cache.closed) this.cache.prewarm();
+    this._ensureBoard();
+    return this.withLock(this._taskWritePass(fn));
+  }
+  // Async twin of _withTasks (see withLockAsync): same read/diff/write pass under the async lock.
+  async _withTasksAsync(fn) {
+    if (this.cache && !this.cache.closed) this.cache.prewarm();
+    this._ensureBoard();
+    return this.withLockAsync(this._taskWritePass(fn));
   }
   // One-time per process: heal an interrupted migration, then verify out-of-board edits.
   // Lock is taken per step here; callers must NOT already hold it.
@@ -494,11 +573,22 @@ class Store {
   // Baseline the hash map from disk (migration just wrote everything; nothing to warn about).
   _snapshotTaskHashes() {
     const h = {};
-    for (const f of this._taskFiles()) { try { h[f] = this._sha256(fs.readFileSync(path.join(this.tasksDir(), f))); } catch {} }
+    for (const f of this._taskFiles()) {
+      try {
+        const fp = path.join(this.tasksDir(), f);
+        const st = fs.statSync(fp);
+        h[f] = { sig: st.size + ':' + st.mtimeMs, hash: this._sha256(fs.readFileSync(fp)) };
+      } catch {}
+    }
     try { this._saveHashes(h); } catch {}
   }
   _verifyTaskIntegrity() {
-    this.withLock(() => {
+    // Try-lock, not spin (t_a2566d54): the verify is advisory — out-of-band edits are adopted with a
+    // store-log line, and every sanctioned write maintains the hash map itself — so skipping the
+    // round while an agent's MCP process holds the lock costs nothing. Spinning here put a
+    // multi-second main-thread freeze on every first board load that raced a write burst (the
+    // getAll tail that survived the dispatch fixes).
+    this.withLockTry(() => {
       try {
         const hashes = this._readHashes();
         if (!hashes) { this._snapshotTaskHashes(); return; } // first open of a per-file store: adopt as baseline
@@ -506,11 +596,21 @@ class Store {
         let changed = false;
         for (const f of this._taskFiles()) {
           seen.add(f);
+          // Sig-keyed (t_7e53747c): while the size:mtime pair still matches the recorded hash the
+          // content cannot have changed (every write renames) — skip the read+sha256. This loop
+          // used to re-hash ALL task files under the lock on the first board call of EVERY new
+          // process, and every agent run spawns a fresh board MCP process: a full board hash at
+          // every run start held the lock while dispatches queued behind it.
+          const prev = hashes[f];
+          let sig = null;
+          try { const st = fs.statSync(path.join(this.tasksDir(), f)); sig = st.size + ':' + st.mtimeMs; } catch { continue; }
+          if (prev && typeof prev === 'object' && prev.sig === sig) continue;
           let h = null;
           try { h = this._sha256(fs.readFileSync(path.join(this.tasksDir(), f))); } catch { continue; }
-          if (hashes[f] && hashes[f] !== h) this._logStore(`out-of-band edit: .squad/board/tasks/${f} was modified outside the board tools; adopting the file as-is`);
-          else if (!hashes[f]) this._logStore(`out-of-band file: .squad/board/tasks/${f} appeared outside the board tools; adopting it as a task`);
-          if (hashes[f] !== h) { hashes[f] = h; changed = true; }
+          const prevHash = typeof prev === 'string' ? prev : prev && prev.hash;
+          if (prev && prevHash !== h) this._logStore(`out-of-band edit: .squad/board/tasks/${f} was modified outside the board tools; adopting the file as-is`);
+          else if (!prev) this._logStore(`out-of-band file: .squad/board/tasks/${f} appeared outside the board tools; adopting it as a task`);
+          if (prevHash !== h || typeof prev === 'string') { hashes[f] = { sig, hash: h }; changed = true; } // plain-string entries upgrade too
         }
         for (const f of Object.keys(hashes)) if (!seen.has(f)) { this._logStore(`out-of-band delete: .squad/board/tasks/${f} is gone`); delete hashes[f]; changed = true; }
         if (changed) this._saveHashes(hashes);
@@ -518,7 +618,8 @@ class Store {
     });
   }
   _verifyWikiIntegrity() {
-    this.withLock(() => {
+    // Try-lock, not spin — same contract as _verifyTaskIntegrity (t_a2566d54).
+    this.withLockTry(() => {
       try {
         const idx = this._readWikiIndex();
         let changed = false;
@@ -737,6 +838,77 @@ class Store {
     // Every approval request also shows up in the human inbox.
     if (patch.awaitingApproval && !this.listInbox({ status: 'open' }).some((i) => i.kind === 'approval' && i.taskId === tid)) this.addInbox({ kind: 'approval', taskId: tid, nodeId: t.assignee, question: `Approve "${t.title}"?`, choices: ['approve'] });
     // Never strand finished work in its worktree branch: auto-merge on done, or park as merge_conflict.
+    if (patch.status === 'done' && t.worktreePath && t.worktreeBranch) t = this._mergeOnDone(t, opts);
+    return t;
+  }
+  // Async twin of _updateTask (dispatch/run-end writes on the main process: see withLockAsync).
+  // Uncontended, the write completes SYNCHRONOUSLY in the caller's span — no await suspension —
+  // so dispatch invariants like "slot reserved ⇒ agent marked, disk status written" stay atomic
+  // exactly as with the sync write (tests and the sweep observe no intermediate states). Only a
+  // contended lock defers to the yielding wait, which is the case that never froze the loop before.
+  _updateTaskAsync(tid, patch) {
+    const body = (tasks) => {
+      const t = tasks.find((x) => x.id === tid); if (!t) throw new Error('no task ' + tid);
+      if (patch.status && !STATUSES.includes(patch.status)) throw new Error('bad status ' + patch.status);
+      if (patch.blockedBy !== undefined) t.blockedBy = C.validateDeps(tid, patch.blockedBy, tasks);
+      if (patch.status && patch.status !== 'review') t.awaitingApproval = false;
+      if (patch.priority !== undefined) t.priority = C.normalizePriority(patch.priority);
+      for (const k of ['title', 'description', 'assignee', 'status', 'sessionId', 'sessions', 'iterations', 'awaitingApproval', 'reopenCount', 'worktreePath', 'worktreeBranch', 'isConflictResolution', 'conflictBranch', 'conflictRetries', 'parkedForHuman', 'stallRecoveries', 'drainCuts', 'redMaster', 'reviewStage', 'reviewWakes', 'reviewWakeAt', 'autoResumeTried', 'noAutoResume', 'stuckAlertFor']) if (patch[k] !== undefined) t[k] = patch[k];
+      t.updatedAt = new Date().toISOString();
+      for (let c = t; c.status === 'done' && c.parentId;) {
+        const parent = tasks.find((x) => x.id === c.parentId);
+        if (!parent || parent.status === 'done' || tasks.some((x) => x.parentId === parent.id && x.status !== 'done')) break;
+        parent.status = 'done'; parent.awaitingApproval = false; parent.updatedAt = t.updatedAt; c = parent;
+      }
+      return t;
+    };
+    const pass = this._taskWritePass(body);
+    if (this.cache && !this.cache.closed) this.cache.prewarm();
+    this._ensureBoard();
+    let out, done = false;
+    try { done = this.withLockTry(() => { out = pass(); }); } catch (e) { throw e; }
+    if (done) return Promise.resolve(out);
+    return this.withLockAsync(pass);
+  }
+  // Fire-and-forget twin used by the dispatch path (t_a2566d54): with the lock free it takes the
+  // EXACT sync updateTask path (hooks, merge gate, test mocks — master behavior bit-for-bit).
+  // Only a busy lock defers: the write lands via the yielding async lock a few ms later instead of
+  // sleepSync-spinning the main thread behind an agent MCP write burst (the getAll tail). Every
+  // consumer of these writes — agent MCP reads, board UI, review chains — reads strictly after.
+  // Returns the task view at call time on the deferred path; errors surface in the store log.
+  updateTaskSoon(tid, patch, opts) {
+    const lock = path.join(this.dir, '.lock');
+    let free = false;
+    try { fs.mkdirSync(lock); free = true; } catch (e) { if (e.code !== 'EEXIST') throw e; }
+    if (free) { try { fs.rmSync(lock, { recursive: true, force: true }); } catch {} }
+    if (free) return this.updateTask(tid, patch, opts);
+    const pass = this._taskWritePass((tasks) => {
+      const t = tasks.find((x) => x.id === tid); if (!t) throw new Error('no task ' + tid);
+      if (patch.status && !STATUSES.includes(patch.status)) throw new Error('bad status ' + patch.status);
+      if (patch.blockedBy !== undefined) t.blockedBy = C.validateDeps(tid, patch.blockedBy, tasks);
+      if (patch.status && patch.status !== 'review') t.awaitingApproval = false;
+      if (patch.priority !== undefined) t.priority = C.normalizePriority(patch.priority);
+      for (const k of ['title', 'description', 'assignee', 'status', 'sessionId', 'sessions', 'iterations', 'awaitingApproval', 'reopenCount', 'worktreePath', 'worktreeBranch', 'isConflictResolution', 'conflictBranch', 'conflictRetries', 'parkedForHuman', 'stallRecoveries', 'drainCuts', 'redMaster', 'reviewStage', 'reviewWakes', 'reviewWakeAt', 'autoResumeTried', 'noAutoResume', 'stuckAlertFor']) if (patch[k] !== undefined) t[k] = patch[k];
+      t.updatedAt = new Date().toISOString();
+      for (let c = t; c.status === 'done' && c.parentId;) {
+        const parent = tasks.find((x) => x.id === c.parentId);
+        if (!parent || parent.status === 'done' || tasks.some((x) => x.parentId === parent.id && x.status !== 'done')) break;
+        parent.status = 'done'; parent.awaitingApproval = false; parent.updatedAt = t.updatedAt; c = parent;
+      }
+      return t;
+    });
+    this.withLockAsync(pass).then((t) => {
+      try {
+        if (patch.awaitingApproval && !this.listInbox({ status: 'open' }).some((i) => i.kind === 'approval' && i.taskId === tid)) this.addInbox({ kind: 'approval', taskId: tid, nodeId: t.assignee, question: `Approve "${t.title}"?`, choices: ['approve'] });
+        if (patch.status === 'done' && t.worktreePath && t.worktreeBranch) this._mergeOnDone(t, opts);
+      } catch (e) { try { this._logStore('updateTaskSoon deferred hook failed: ' + e.message); } catch {} }
+    }).catch((e) => { try { this._logStore('updateTaskSoon deferred write failed: ' + e.message); } catch {} });
+    return this.getTask(tid);
+  }
+  async updateTaskAsync(tid, patch, opts) {
+    let t = await this._updateTaskAsync(tid, patch);
+    if (patch.awaitingApproval && !this.listInbox({ status: 'open' }).some((i) => i.kind === 'approval' && i.taskId === tid)) this.addInbox({ kind: 'approval', taskId: tid, nodeId: t.assignee, question: `Approve "${t.title}"?`, choices: ['approve'] });
+    // The merge gate is sync by contract (t_12a92368) and runs in whichever process flips done.
     if (patch.status === 'done' && t.worktreePath && t.worktreeBranch) t = this._mergeOnDone(t, opts);
     return t;
   }
@@ -963,8 +1135,19 @@ class Store {
   }
 
   // ---- messages (agent to agent, scope checked in board-tools) ----
+  // Stat-keyed cache for messages.json (t_a2566d54): every getAll parsed the whole file (~0.7MB
+  // and growing). Same size:mtime contract as the task/runs caches — out-of-band edits bust it,
+  // our own writes invalidate up front.
+  _readMsgs() {
+    let st; try { st = fs.statSync(this.file('messages')); } catch { return []; }
+    const sig = st.size + ':' + st.mtimeMs;
+    if (this._msgsMemo && this._msgsMemo.sig === sig) return this._msgsMemo.ms;
+    let ms; try { ms = JSON.parse(fs.readFileSync(this.file('messages'), 'utf8')).messages || []; } catch { return []; }
+    this._msgsMemo = { sig, ms };
+    return ms;
+  }
   listMessages(filter = {}) {
-    let ms = this.read('messages', { messages: [] }).messages;
+    let ms = this._readMsgs().slice();
     if (filter.to) ms = ms.filter((m) => m.to === filter.to);
     if (filter.from) ms = ms.filter((m) => m.from === filter.from);
     return ms;
@@ -975,11 +1158,13 @@ class Store {
     const atts = sanitizeAttachments(attachments);
     if (atts) m.attachments = atts;
     if (wake) m.wake = true; // the one message kind that may wake an idle agent (see orchestrator.wakeUnread)
+    this._msgsMemo = null;
     this.update('messages', { messages: [] }, (d) => { d.messages.push(m); });
     return m;
   }
   markMessagesRead(ids, read = true) {
     const set = new Set(ids); if (!set.size) return;
+    this._msgsMemo = null;
     this.update('messages', { messages: [] }, (d) => { for (const m of d.messages) if (set.has(m.id)) m.read = !!read; });
   }
 
@@ -1089,7 +1274,11 @@ class Store {
   // deletes instead; here we know the bytes). Callers treat the returned records as read-only
   // snapshots, like listTasks.
   _runsCached() {
-    let st; try { st = fs.statSync(this.file('runs')); } catch { return null; }
+    let st; try { st = fs.statSync(this.file('runs')); } catch {
+      // No file yet: a seeded memo (sig null) is this process's memory truth until the first
+      // flush installs the real stat key — addRun must be immediately visible to listRuns.
+      return this._runsMemo && this._runsMemo.sig === null ? this._runsMemo.runs : null;
+    }
     const sig = st.size + ':' + st.mtimeMs;
     if (this._runsMemo && this._runsMemo.sig === sig) return this._runsMemo.runs;
     let d; try { d = JSON.parse(fs.readFileSync(this.file('runs'), 'utf8')); } catch { return null; }
@@ -1098,22 +1287,89 @@ class Store {
   }
   _writeRuns(runs) {
     const tmp = this.file('runs') + '.' + process.pid + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify({ runs }));
-    fs.renameSync(tmp, this.file('runs'));
+    try {
+      fs.writeFileSync(tmp, JSON.stringify({ runs }));
+      fs.renameSync(tmp, this.file('runs'));
+    } catch (e) {
+      // The caller already mutated the shared cached array; the disk never saw it. Drop the memo
+      // so the next read re-parses the file instead of serving a phantom record (t_7e53747c).
+      this._runsMemo = null;
+      try { fs.rmSync(tmp, { force: true }); } catch {}
+      throw e;
+    }
     try { const st = fs.statSync(this.file('runs')); this._runsMemo = { sig: st.size + ':' + st.mtimeMs, runs }; } catch { this._runsMemo = null; }
   }
+  // Run records are telemetry: the orchestrator records a run at start and rewrites it with proxy
+  // cost at the end — exactly when agents' MCP processes hold the store lock in write bursts.
+  // Persisting synchronously sleepSync-spun the main thread behind those bursts, and getAll queued
+  // behind the spin as a 1.3-1.6s stall (Argo t_44b45119). Memory updates synchronously (listRuns/
+  // getAll never see a gap); the disk write retries from an unref'd timer instead. A hard crash
+  // may lose the last pending records — runs are telemetry, tasks are not. Under the lock the
+  // flush re-reads the file and re-applies this process's pending records, so a second writer's
+  // records can never be dropped by our write.
+  _persistRunsSoon(delayMs = 5) {
+    if (this._runsFlushTimer || !this._runsPending || !this._runsPending.size) return;
+    const t = setTimeout(() => {
+      this._runsFlushTimer = null;
+      if (!this._runsPending || !this._runsPending.size) return;
+      this._runsFlushDelay = Math.min((this._runsFlushDelay || 5) * 2, 500);
+      if (this.flushRunsNow()) this._runsFlushDelay = 5;
+      else this._persistRunsSoon(this._runsFlushDelay);
+    }, delayMs);
+    if (t.unref) t.unref();
+    this._runsFlushTimer = t;
+  }
+  flushRunsNow() {
+    if (!this._runsPending || !this._runsPending.size) return true;
+    let ok = false;
+    try {
+      this.withLockTry(() => {
+        try {
+          let fileRuns;
+          try {
+            // Skip the cross-instance merge re-read when the file still matches our own write
+            // (the common case) — the full parse is only for records another process may have added.
+            let st; try { st = fs.statSync(this.file('runs')); } catch { st = null; }
+            const sig = st ? st.size + ':' + st.mtimeMs : null;
+            if (this._runsMemo && this._runsMemo.sig !== null && sig === this._runsMemo.sig) fileRuns = this._runsMemo.runs;
+            else fileRuns = JSON.parse(fs.readFileSync(this.file('runs'), 'utf8')).runs || [];
+          } catch { fileRuns = []; }
+          const byId = new Map();
+          fileRuns.forEach((x, i) => { if (x) byId.set(x.id != null ? x.id : '#idx' + i, x); }); // id-less records keep their slot
+          for (const [k, r] of this._runsPending) byId.set(k, r);
+          let fresh = [...byId.values()];
+          if (fresh.length > 5000) fresh = fresh.slice(fresh.length - 5000);
+          this._writeRuns(fresh);
+          this._runsPending.clear();
+          ok = true;
+        } catch { ok = false; } // _writeRuns already dropped the memo; the retry loop takes it from here
+      });
+    } catch { ok = false; } // even the lock is unwritable (read-only dir): stay pending, never throw
+    return ok;
+  }
+  _stageRun(r) {
+    if (!this._runsPending) this._runsPending = new Map();
+    this._runsPending.set(r.id != null ? r.id : 'anon-' + (++this._runsAnon || (this._runsAnon = 1)), r);
+    // Fast path: uncontended locks write through immediately (cross-instance readers stay exact).
+    // Contended — the agent MCP-burst case that sleepSync-stalled getAll — defers to the timer.
+    if (this._runsFlushTimer) return; // a retry is already scheduled; it takes this record too
+    if (!this.flushRunsNow()) this._persistRunsSoon();
+  }
   addRun(r) {
-    this.withLock(() => { const runs = this._runsCached() || []; runs.push(r); if (runs.length > 5000) runs.splice(0, runs.length - 5000); this._writeRuns(runs); });
+    let runs = this._runsCached();
+    if (!runs) { runs = []; if (!this._runsMemo) this._runsMemo = { sig: null, runs }; } // no file yet: memory is truth
+    runs.push(r); if (runs.length > 5000) runs.splice(0, runs.length - 5000);
+    this._stageRun(r);
     return r;
   }
   // Re-persist one run after a late in-place update (proxy cost): replaces by id, appends when the
   // run is not present (trimmed the same way), so resolveProxyCost never duplicates or loses it.
   replaceRun(r) {
-    this.withLock(() => {
-      const runs = this._runsCached() || []; const i = runs.findIndex((x) => x.id === r.id);
-      if (i >= 0) runs[i] = r; else { runs.push(r); if (runs.length > 5000) runs.splice(0, runs.length - 5000); }
-      this._writeRuns(runs);
-    });
+    let runs = this._runsCached();
+    if (!runs) { runs = []; if (!this._runsMemo) this._runsMemo = { sig: null, runs }; }
+    const i = runs.findIndex((x) => x.id === r.id);
+    if (i >= 0) runs[i] = r; else { runs.push(r); if (runs.length > 5000) runs.splice(0, runs.length - 5000); }
+    this._stageRun(r);
     return r;
   }
   listRuns(filter = {}) {

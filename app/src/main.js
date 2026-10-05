@@ -4,6 +4,7 @@ const path = require('path');
 // Test instances (gui-e2e / smoke) must never leave fake-CLI children behind: install procguard
 // before the orchestrator loads so every spawn it makes is tracked and reaped (t_92c31037).
 const procguard = (process.env.AGENTS_SQUAD_GUI_E2E || process.env.AGENTS_SQUAD_SMOKE) ? require('../test/harness/procguard').install() : null;
+const HS = require('./harness-sweep');
 const { Orchestrator, reapRunPids, interruptedFromReap } = require('./orchestrator');
 const BS = require('./bootstate');
 const { ProjectManager, TEMPLATES, isolateTestRoot } = require('./projects');
@@ -44,14 +45,36 @@ const runtimes = (settings) => (runtimesCache ||= RT.detectRuntimes(settings, { 
 // AGENTS_SQUAD_HOME (the live app's root) loses to an explicit AGENTS_SQUAD_PROJECT, with neither
 // set a throwaway temp root is created, and the whole run is bounded by a force-exit watchdog.
 const TEST_MODE = !!(process.env.AGENTS_SQUAD_GUI_E2E || process.env.AGENTS_SQUAD_SMOKE);
+// Harness runs (t_98eed830, plan t_b8a2f6c4): an Electron a harness starts — test/perf/* mains,
+// the ab-gate/profile drivers, gui-e2e/smoke — carries AGENTS_SQUAD_HARNESS_RUN (or self-marks in
+// TEST_MODE). The run records its own pidfile, arms a parent-death watchdog that quits when the
+// owning process disappears (drain cut, crash, SIGKILL — no exit handler can fire there), and the
+// boot sweep below reaps only pidfile-recorded orphans, identity-verified, never by name. A
+// production launch has no marker and never gets the watchdog.
+const HARNESS_RUN = process.env.AGENTS_SQUAD_HARNESS_RUN || (TEST_MODE ? HS.harnessRunId('harness') : null);
 if (TEST_MODE) {
   const testRoot = isolateTestRoot();
+  // Durable sandbox root (t_8f7605c4): every repo-mutating path (task worktree create/merge/
+  // discard, agent dispatch cwd) refuses anything resolving outside it. Set here — past the
+  // require-time reads harnesses key on — and never unset, so it also rides into spawned env.
+  process.env.AGENTS_SQUAD_TEST_ROOT = testRoot;
   // Own userData too (t_490eeee8 harness-isolation audit): the default path is shared with the
   // live app, so a test renderer would read the live localStorage ctx AND write its own over it.
   app.setPath('userData', path.join(testRoot, 'userData'));
   console.log(`[agents-squad] test instance pid=${process.pid} data root=${testRoot}`);
   const timeoutMs = Number(process.env.AGENTS_SQUAD_TEST_TIMEOUT_MS) || 30 * 60 * 1000;
-  setTimeout(() => { console.error(`[agents-squad] test instance exceeded ${timeoutMs} ms — force exit (pid ${process.pid}, data root ${testRoot})`); try { cleanupTestTmpDirs(); } catch {} procguard.reapAll(); app.exit(1); }, timeoutMs);
+  setTimeout(() => { console.error(`[agents-squad] test instance exceeded ${timeoutMs} ms — force exit (pid ${process.pid}, data root ${testRoot})`); try { cleanupTestTmpDirs(); } catch {} try { if (HARNESS_RUN) HS.removeRun(HARNESS_RUN); } catch {} procguard.reapAll(); app.exit(1); }, timeoutMs);
+}
+if (HARNESS_RUN) {
+  const harnessQuit = (() => { let armed = false; return () => {
+    if (armed) return; armed = true;
+    try { app.quit(); } catch {}
+    setTimeout(() => { try { app.exit(0); } catch {} }, 5000).unref?.();
+  }; })();
+  try {
+    HS.recordRun({ runId: HARNESS_RUN, ownerPid: process.ppid, log: (m) => console.log(m) });
+    HS.armParentWatchdog({ runId: HARNESS_RUN, ownerPid: process.ppid, quit: harnessQuit, log: (m) => console.error(m) });
+  } catch (e) { console.error('[agents-squad] harness record/watchdog failed:', e.message); }
 }
 
 // Single instance (live profile): a second launch must focus the running window, not fork a second
@@ -236,10 +259,12 @@ async function autorun(file) {
   const p = pm.list().find((x) => x.name === project); if (!p) return console.error('[autorun] no project', project);
   const w = (ms) => new Promise((r) => setTimeout(r, ms));
   await w(800);
+  // The project list renders after the first refresh: wait for the row instead of a fixed sleep.
+  for (let i = 0; i < 60; i++) { if (await win.webContents.executeJavaScript(`!!document.querySelector('#projectlist div[data-pid="${p.id}"]')`)) break; await w(500); }
   await win.webContents.executeJavaScript(`document.querySelector('#projectlist div[data-pid="${p.id}"]').click()`); await w(1200);
-  await win.webContents.executeJavaScript(`document.querySelector('#tabs button[data-tab=team]').click(); document.querySelector('#testteam').click()`);
-  for (let i = 0; i < 90; i++) { await w(2000); const t = await win.webContents.executeJavaScript(`document.querySelector('#pf-summary').textContent`); if (!/testing|untested/.test(t)) { console.log('[autorun] preflight:', t); break; } }
-  await win.webContents.executeJavaScript(`(() => { const g = document.querySelector('#goal'); g.value = ${JSON.stringify(goal)}; document.querySelector('#run').click(); })()`);
+  await win.webContents.executeJavaScript(`document.querySelector('#tabs button[data-tab=team]').click(); const t = document.querySelector('#testteam'); if (t) t.click();`); // the Test team button is gone from some layouts
+  for (let i = 0; i < 90; i++) { await w(2000); const t = await win.webContents.executeJavaScript(`(document.querySelector('#pf-summary') || {}).textContent || ''`); if (!/testing|untested/.test(t)) { console.log('[autorun] preflight:', t); break; } }
+  await win.webContents.executeJavaScript(`(() => { const g = document.querySelector('#goal'); g.value = ${JSON.stringify(goal)}; window.confirm = () => true; document.querySelector('#run').click(); })()`);
   console.log('[autorun] started', p.name);
   orchFor(p.id).once('done', () => console.log('[autorun] done', p.name));
 }
@@ -486,6 +511,17 @@ async function guiE2E() {
     expect('chat: @mention autocomplete + preview + @Name sends a message (no auto task)', mention.includes(b.name) && pv.includes('message to ' + b.name) && sentMsg && sentMsg.from === 'human' && noTaskYet, cm);
     expect('chat: @Name! is the explicit task form for the agent', made && made.assignee === b.id, cm);
     expect('chat: inline answer to ask_human', cm.answered === 'dark', cm);
+    // IME safety (t_h0a1c2fa): Enter during composition belongs to the IME — it must not send
+    // (sending clears the field mid-composition and the IME's restored fragment goes out as a
+    // stray second message, seen in the real store). Commit, then Enter, sends exactly once.
+    const imeDraft = 'mid composition draft';
+    await ex(`const i = $('#chat-input'); i.value = '${imeDraft}'; i.dispatchEvent(new Event('input')); i.dispatchEvent(new CompositionEvent('compositionstart')); i.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', isComposing: true, bubbles: true })); await w(300);`);
+    const noMidSend = !ps.listMessages().some((m) => m.text === imeDraft);
+    const midValue = await ex(`return $('#chat-input').value`);
+    await ex(`const i = $('#chat-input'); i.dispatchEvent(new CompositionEvent('compositionend')); i.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); await w(400);`);
+    const imeMsg = ps.listMessages().find((m) => m.text === imeDraft);
+    if (imeMsg) ps.markMessagesRead([imeMsg.id]);
+    expect('chat: Enter during IME composition does not send or clear; commit+Enter sends once', noMidSend && midValue === imeDraft && !!imeMsg, { noMidSend, midValue, sent: !!imeMsg });
   };
   // Plain text in the composer = a chat message to the core agent (t_7c4538d9): 'hi' wakes the idle
   // core with the humanPrompt wording and its reply lands in the room; no task is created. Runs on
@@ -1554,9 +1590,11 @@ async function guiE2E() {
     expect('logs: pane shows 20+ lines and scrolls', overview.rows > 20 && overview.scrolls, overview);
     for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`await w(300);`); await shot(`main-logs-${t}`); }
     const target = nodes[3];
-    await ex(`document.querySelector('#logagents .logagent-row[data-id="${target.id}"]').click(); await w(300);`);
-    const session = await ex(`return { sel: document.querySelector('#logagents .logagent-row.sel')?.dataset.id, rows: [...document.querySelectorAll('#log .logrow')].map((r) => r.querySelector('.logtext').textContent) }`);
-    expect('logs: clicking an agent opens just its own session conversation (27 lines, 3 "starts session")', session.sel === target.id && session.rows.length === 27 && session.rows.filter((r) => /starts session/.test(r)).length === 3, { sel: session.sel, count: session.rows.length, starts: session.rows.filter((r) => /starts session/.test(r)).length });
+    // No wait: the click handler re-renders synchronously, so the row highlight and the filter
+    // dropdown must move within the same tick (t_h0a1c2fa bug 1 — stale obs agent highlight).
+    await ex(`document.querySelector('#logagents .logagent-row[data-id="${target.id}"]').click();`);
+    const session = await ex(`return { sel: document.querySelector('#logagents .logagent-row.sel')?.dataset.id, filter: $('#logfilter').value, rows: [...document.querySelectorAll('#log .logrow')].map((r) => r.querySelector('.logtext').textContent) }`);
+    expect('logs: clicking an agent opens just its own session conversation (27 lines, 3 "starts session") and the highlight moves instantly', session.sel === target.id && session.filter === target.id && session.rows.length === 27 && session.rows.filter((r) => /starts session/.test(r)).length === 3, { sel: session.sel, filter: session.filter, count: session.rows.length, starts: session.rows.filter((r) => /starts session/.test(r)).length });
     for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`await w(300);`); await shot(`main-logs-session-${t}`); }
     await ex(`$('#logagents .logagent-row[data-id=""]').click(); await w(200);`);
     await ex(`$('#tabs button[data-tab=wiki]').click(); await refresh(); sel.page = null; renderWiki(); await w(300);`);
@@ -2792,14 +2830,22 @@ const api = {
   // Delta getAll (t_9d92c3d3): with `since` (the client's last version map) only sections whose
   // signature changed are returned, so the 2s poll moves kilobytes instead of ~1.8MB of JSON.
   // Without `since` (first load, project switch, old callers) every section is returned as before.
+  // Slow-path watchdog (t_a2566d54): getAll is the one IPC every poll hits — a main-thread stall
+  // here delays every channel, so the tail must stay visible. Steady state is ~2 ms; >150 ms means
+  // a sync write/spin snuck back in front of the loop, and the phase split says which one.
   getAll: (c, since) => {
-    const s = ST(c); const t = TS(c); probeUnprobedAgents(c.p);
-    const v = stateVersion(c);
+    const t0 = Date.now(); const ph = [];
+    const mark = (k) => ph.push(k + '=' + (Date.now() - t0));
+    const s = ST(c); mark('store'); const t = TS(c); mark('team'); probeUnprobedAgents(c.p); mark('probe');
+    const v = stateVersion(c); mark('ver');
     const all = { project: s.meta(), team: { ...t.getTeam(), nodes: withPF(t.getTeam().nodes, s.getSettings()) }, allNodes: withPF(s.getTeam().nodes, s.getSettings()), tasks: s.listTasks(), wiki: s.listWiki(), settings: s.getSettings(), messages: s.listMessages().slice(-200), orch: orchFor(c.p).snapshotSlim(),
       config: { runtimes: runtimes(s.getSettings()), billingModes: U.BILLING_MODES, permissionModes: AC.PERMISSION_MODES, edgeTypes: AC.EDGE_TYPES, boardTools: AC.BOARD_TOOLS, roles: AC.roleSuggestions(s.getSettings().rolePresets, s.getTeam().nodes) } };
+    mark('body');
     const sectionOf = { project: 'project', team: 'team', teams: 'allNodes', board: 'tasks', wiki: 'wiki', settings: 'settings', messages: 'messages', orch: 'orch' };
     const out = { v, teamId: t.teamId, dir: s.dir };
     for (const k of pickChanged(v, since)) { if (sectionOf[k]) out[sectionOf[k]] = all[sectionOf[k]]; if (k === 'settings') out.config = all.config; }
+    mark('pick');
+    if (Date.now() - t0 > 150) console.error('[perf] getAll slow', (Date.now() - t0) + 'ms', ph.join(' '));
     return out;
   },
   getStateVersion: (c) => stateVersion(c),
@@ -2966,6 +3012,9 @@ function pollInbox(first) {
 
 app.whenReady().then(() => {
   if (!appLockHeld) return; // second launch: the running instance stays, this one exits
+  // Harness orphan sweep (t_98eed830): reap only pidfile-recorded harness runs whose owner died —
+  // identity-checked (start time + marker) and never by name, so live processes are untouched.
+  try { HS.sweep({ log: (m) => console.log(m) }); } catch (e) { console.error('[agents-squad] harness sweep failed:', e.message); }
   createWindow();
   probeUnprobedAgents();
   for (const p of pm.list()) pumpFor(p.id); // delta pumps stream every project's changes (t_39bf39ac)
@@ -3006,6 +3055,7 @@ app.on('window-all-closed', () => { for (const o of orchs.values()) if (o.runnin
 // Any exit we can still act on must stamp the breadcrumbs clean (t_2ca99830), or the next boot
 // shows a false "died silently". app.exit() skips 'will-quit' — relaunchApp marks clean itself.
 function markCleanExits() {
+  try { if (HARNESS_RUN) HS.removeRun(HARNESS_RUN); } catch {} // a clean quit needs no sweep record
   if (!appLockHeld) return;
   for (const p of pm.list()) { try { BS.writeAlive(pm.store(p.id).dir, { cleanExitAt: Date.now() }); } catch {} }
 }

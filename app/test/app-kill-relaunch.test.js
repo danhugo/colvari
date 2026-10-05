@@ -35,7 +35,7 @@ function appEnv(extra) {
   const env = { ...process.env, ...extra };
   for (const k of ['NODE_TEST_CONTEXT', 'ELECTRON_RUN_AS_NODE', 'ELECTRON_ENABLE_LOGGING',
     'AGENTS_SQUAD_PROJECT', 'AGENTS_SQUAD_HOME', 'AGENTS_SQUAD_SMOKE', 'AGENTS_SQUAD_GUI_E2E',
-    'AGENTS_SQUAD_TEST_ISOLATION', 'STREAM_SECONDS', 'STREAM_EPS']) delete env[k];
+    'AGENTS_SQUAD_HARNESS_RUN', 'AGENTS_SQUAD_TEST_ISOLATION', 'STREAM_SECONDS', 'STREAM_EPS']) delete env[k];
   return env;
 }
 // Belt and braces alongside procguard's end-of-suite reap: a failed assert between the kill and

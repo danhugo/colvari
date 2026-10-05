@@ -372,7 +372,12 @@ function modelStats(runs = [], tasks = []) {
 //            costSource: 'reported'|'estimated'|'mixed'|'unknown', costPartial }]
 //   byAgent: { [agent]: rows }   byTask: { [taskId]: { task, rows } }
 //   costUsd, apiEq, billed, costPartial — $ totals across all keys (apiEq === costUsd)
+// Instrumented (t_d0f0c9f3): usageLedger.stats accumulates the aggregate's own per-call cost —
+// calls, runs scanned, ledger entries processed, runs served by the synthesized flat fallback
+// (pre-ledger stragglers) and lastMs — complementing the orchestrator's memo-side counters
+// (_ledgerRebuilds/_ledgerHits), which only see when the aggregate runs, not what it cost inside.
 function usageLedger(runs = [], { priceBook = null } = {}) {
+  const t0 = Date.now();
   const TOKEN_FIELDS = ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheCreationTokens'];
   const newRow = (e) => ({ runtime: e.runtime, provider: e.provider, model: e.model, runs: 0,
     inputTokens: 0, outputTokens: 0, cacheReadTokens: null, cacheCreationTokens: null,
@@ -395,9 +400,13 @@ function usageLedger(runs = [], { priceBook = null } = {}) {
     costPartial: unknown > 0 && row.costUsd != null,
   })).sort((a, b) => (a.runtime + a.provider + a.model).localeCompare(b.runtime + b.provider + b.model));
   const top = new Map(), byAgent = new Map(), byTask = new Map();
+  let nEntries = 0, nSynth = 0;
   for (const r of runs) {
     const sub = r.billingSource === 'subscription';
+    const persisted = Array.isArray(r.ledger) && r.ledger.length;
     for (const e0 of ledgerEntriesOf(r, { priceBook })) {
+      nEntries++;
+      if (!persisted) nSynth++;
       // canonicalize the account key at the aggregate layer too, so entries persisted before the
       // normalization fixes (dated suffixes, org prefixes, runtime-less rows, firstParty-vs-
       // subscription labels) still collapse into one row
@@ -418,6 +427,8 @@ function usageLedger(runs = [], { priceBook = null } = {}) {
   const costUsd = rows.reduce((a, r) => a + (r.costUsd || 0), 0);
   const billed = rows.reduce((a, r) => a + (r.billed || 0), 0);
   const costPartial = rows.some((r) => r.costSource === 'unknown' || r.costPartial);
+  const st = usageLedger.stats ||= { calls: 0, runs: 0, entries: 0, synthesized: 0, lastMs: 0 };
+  st.calls++; st.runs += runs.length; st.entries += nEntries; st.synthesized += nSynth; st.lastMs = Date.now() - t0;
   return { rows, byAgent: nest(byAgent), byTask: nest(byTask), costUsd, apiEq: costUsd, billed, costPartial };
 }
 // One run's ledger entries: the persisted split, or — for pre-ledger stragglers that escaped the

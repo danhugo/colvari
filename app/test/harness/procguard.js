@@ -71,11 +71,36 @@ function sameProc(pid, ageSec) {
 }
 
 function killEntry(c) {
+  killDescendants(c.pid); // BEFORE the kill: a dead parent's children are unreachable via pgrep -P; a child that escaped its group (setsid) survives the group kill
+  let ok;
   try {
     if (c.detached && c.pgid === c.pid) process.kill(-c.pid, 'SIGKILL'); // own group: kills its whole tree
     else process.kill(c.pid, 'SIGKILL');
-    return true;
-  } catch (e) { return e.code === 'ESRCH'; }
+    ok = true;
+  } catch (e) { ok = e.code === 'ESRCH'; }
+  return ok;
+}
+
+// All live descendants of pid via repeated `pgrep -P` walks (pid-based, never by name). Cycles
+// guarded by a seen set; our own pid can never appear (we predate every tracked child) but is
+// skipped defensively.
+function descendantsOf(pid, seen = new Set()) {
+  let direct = [];
+  try {
+    const out = cp.execFileSync('pgrep', ['-P', String(pid)], { timeout: PS_TIMEOUT_MS, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+    if (out) direct = out.split('\n').map(Number).filter(Boolean);
+  } catch { /* no children (ESRCH/exit 1) or pgrep unavailable */ }
+  const out = [];
+  for (const d of direct) {
+    if (d === process.pid || seen.has(d)) continue;
+    seen.add(d);
+    out.push(d, ...descendantsOf(d, seen));
+  }
+  return out;
+}
+
+function killDescendants(pid) {
+  for (const d of descendantsOf(pid)) { try { process.kill(d, 'SIGKILL'); } catch {} }
 }
 
 function track(child, label, opts = {}) {

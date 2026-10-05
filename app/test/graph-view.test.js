@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert');
-const { clusterView, mapEdges, CLUSTER_MIN, GROUP_MIN } = require('../src/graph-view');
+const { clusterView, mapEdges, CLUSTER_MIN, GROUP_MIN, treeLayout } = require('../src/graph-view');
 
 const N = (id, x = 0, y = 0) => ({ id, name: id, role: 'Dev', x, y });
 const E = (from, to, type = 'assign') => ({ id: `${from}>${to}:${type}`, from, to, type });
@@ -96,4 +96,17 @@ test('mapEdges rewrites endpoints, drops self-loops and duplicates', () => {
   assert.deepEqual(mapped.map((e) => [e.from, e.to, e.type || 'assign']), [['cl:x', 'c', 'message']]);
   const mapped2 = mapEdges([E('a', 'b'), E('a', 'b'), E('b', 'c', 'message')], { b: 'cl:b' });
   assert.deepEqual(mapped2.map((e) => [e.from, e.to, e.type || 'assign']), [['a', 'cl:b', 'assign'], ['cl:b', 'c', 'message']]);
+});
+
+test('treeLayout instruments each pass: stats ride along as a non-enumerable prop', () => {
+  const nodes = [N('a'), N('b'), N('c')];
+  const edges = [E('a', 'b'), E('a', 'c')];
+  const pos = treeLayout(nodes, edges);
+  assert.deepEqual(Object.keys(pos).sort(), ['a', 'b', 'c']); // `stats` must not pollute the id map
+  const s = pos.stats;
+  assert.ok(s && typeof s.ms === 'number' && s.ms >= 0, 'reports elapsed ms');
+  assert.equal(s.nodes, 3);
+  assert.equal(s.edges, 2);
+  assert.equal(s.placed, 3); // every node got a position
+  assert.equal(typeof pos.a.x, 'number');
 });

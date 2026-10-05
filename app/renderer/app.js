@@ -18,8 +18,9 @@ const logsLoaded = new Set(); // projects whose persisted logs.jsonl was merged 
 async function loadLogs(pid) {
   if (logsLoaded.has(pid)) return; logsLoaded.add(pid);
   let saved = []; try { saved = await call('getLogs', 1500); } catch {}
-  const first = Math.min(...logs.filter((l) => l.projectId === pid).map((l) => l.at), Infinity);
-  logs.unshift(...saved.filter((l) => l.at < first).map((l) => ({ ...l, projectId: pid, saved: true })));
+  if (!Array.isArray(saved)) saved = [];
+  const first = Math.min(...logs.filter((l) => l.projectId === pid).map((l) => l.at || 0), Infinity);
+  logs.unshift(...saved.filter((l) => l && (l.at || 0) < first).map((l) => ({ ...l, projectId: pid, saved: true })));
   renderLog();
 }
 const testing = new Set(); // node ids with a preflight test in flight
@@ -107,8 +108,13 @@ async function refresh() {
   await Promise.all([loadLogs(ctx.p), loadSelfUpdate(), loadCoreState()]); // three independent round-trips, overlapped
   syncRtu(); // banner follows the snapshot across reloads / missed pushes
   chatBump(); // applied changes may cover the sections deltas do not carry (team/nodes) — the chat epoch must follow
+  usCache = null; // this refresh changed state: the alerts/meter must read fresh usageStatus, not the 1s-shared result of a pre-change fetch (a stale hit rendered the limits chip hidden forever — no later render re-checks it; gui-e2e topbar red)
   try { localStorage.setItem('ctx', JSON.stringify(ctx)); } catch {}
-  renderAll();
+  // Debounced draw (t_ae99a65e): refresh's full render joins the same coalesced queue the delta
+  // path draws from, so the 2s backstop poll and the visibility catch-up no longer stack a second
+  // full renderAll on a delta draw in the same frame while agents stream. Idle single-shot refreshes
+  // (user actions) still draw on the scheduler's next tick — last + minMs is in the past, timeout 0.
+  renderSched.bump();
 }
 const nodeName = (id) => (S.allNodes.find((n) => n.id === id) || {}).name || (id ? id : 'unassigned');
 // Tab-scoped rendering (t_8d586961): renderAll draws the always-visible chrome plus ONLY the
@@ -128,14 +134,29 @@ const TAB_VIEW = {
   chat: renderChat,
 };
 function renderAll() {
-  renderSidebar(); renderPreflightBar(); renderHeader(); renderSelfUpdate(); renderAlerts(); renderGuide();
+  renderChrome();
   drawActiveView(true);
 }
+// The sidebar Inbox badge is always-visible chrome: it tracks the inbox count on every render,
+// not only while the inbox tab itself is drawn — an inline update inside renderInbox left the
+// badge stale whenever items landed while another tab was active.
+// Perf instrumentation (t_f6b343a5): ring of recent durations + slow-call count, inspect via
+// window.__perf.inboxBadge — nothing is logged unless a call exceeds SLOW_MS.
+const PERF = { inboxBadge: { samples: [], slow: 0, SLOW_MS: 2 } };
+function renderInboxBadge() {
+  const t0 = performance.now();
+  $('#inbox-tab-badge').textContent = (S.inbox || []).length ? String(S.inbox.length) : '';
+  const ms = performance.now() - t0;
+  const p = PERF.inboxBadge;
+  p.samples.push(ms); if (p.samples.length > 120) p.samples.shift();
+  if (ms > p.SLOW_MS) { p.slow++; console.debug('inbox badge render slow', ms.toFixed(2), 'ms'); }
+}
+window.__perf = PERF;
 // The always-visible chrome (Perry's contract, t_8d586961): badges, counts and the restart chip
 // track state even while their tab is hidden, so they draw synchronously everywhere. Only the
 // heavy active-tab view may defer, and only on a revisit (see drawActiveView).
 function renderChrome() {
-  renderSidebar(); renderPreflightBar(); renderHeader(); renderSelfUpdate(); renderAlerts(); renderGuide();
+  renderSidebar(); renderInboxBadge(); renderPreflightBar(); renderHeader(); renderSelfUpdate(); renderAlerts(); renderGuide();
 }
 // The active tab's view, tracked per tab so activation can tell "never drawn" (synchronous draw —
 // no blank frame) from "DOM left over from the last visit" (draw after the activation paint: the
@@ -432,7 +453,7 @@ function renderSidebar() {
   $('#teamlist').innerHTML = teams.map((t) => `<div data-tid="${t.id}" class="${t.id === ctx.t ? 'sel' : ''}"><i class="teamdot" style="background:var(--agent-${teamHue(t.id)})"></i>${esc(t.name)}</div>`).join('');
 }
 function switchTo(c) {
-  if (c.p !== ctx.p) { sel = { node: null, edge: null, task: null, page: null, logTeam: '', chatTeam: '', boardTeam: '' }; wikiEdit = false; $('#wk-title').value = ''; $('#wk-content').value = ''; }
+  if (c.p !== ctx.p) { if (!discardWikiEdit()) return; sel = { node: null, edge: null, task: null, page: null, logTeam: '', chatTeam: '', boardTeam: '' }; wikiEdit = false; wkBaseUpdated = null; $('#wk-title').value = ''; $('#wk-content').value = ''; }
   else sel = { ...sel, node: null, edge: null };
   connectFrom = null; connectMode = false; $('#connect').classList.remove('on');
   ctx = c;
@@ -491,7 +512,10 @@ $('#importfile').onchange = act(async (e) => {
 // never size against a hidden (0-width) layout. obs and chat keep their signatures instead: their
 // DOM stays valid across the hide, so a revisit is a no-op when nothing moved, an incremental
 // tail-append when only new log lines arrived (flushLogTail), and a full rebuild only on real
-// content change. team/wiki/settings/inbox have no signature — renderAll rebuilds them whenever shown.
+// content change. team/settings/inbox have no signature — renderAll rebuilds them whenever shown.
+// wiki does keep one (t_9bb0596c): its list is plain DOM that stays valid across a hide, so with a
+// signature the every-poll renderAll tick no longer rebuilds the page list (and re-wires its click
+// handlers) when no page, search or selection moved.
 const TAB_RESIG = {
   board: () => { boardSig = null; },
   obs: () => { obsSig = null; },
@@ -517,21 +541,26 @@ function renderHeader() {
   const rs = o.runState || (o.running ? { state: 'running' } : { state: 'stopped', reason: 'not started' });
   const todos = S.tasks.filter((t) => t.status === 'todo').length;
   const pill = $('#runstate');
+  // Guarded writes (t_h0a1c2f9): these pills are rewritten on every renderAll tick while agents
+  // stream; a same-value textContent assignment still dirties the header's layout, and the
+  // layout-shift probe pinned recurring shifts on exactly these chips. Write only on change.
+  const setText = (el, text) => { if (el.textContent !== text) el.textContent = text; };
+  const setTitle = (el, text) => { if (el.title !== text) el.title = text; };
   if (rs.state === 'running') {
-    pill.textContent = `Running (${par || 1})`; // short status chip (t_db67859d): full wording in the tooltip
-    pill.title = `running · ${par > 1 ? `${par} in parallel` : `${par || 1} agent`} · ${o.runs || 0} runs`;
+    setText(pill, `Running (${par || 1})`); // short status chip (t_db67859d): full wording in the tooltip
+    setTitle(pill, `running · ${par > 1 ? `${par} in parallel` : `${par || 1} agent`} · ${o.runs || 0} runs`);
   } else if (rs.state === 'idle') {
-    pill.textContent = 'Idle (nothing to do)';
-    pill.title = `idle · ${rs.reason || 'waiting for todo tasks'} · ${o.runs || 0} runs`;
+    setText(pill, 'Idle (nothing to do)');
+    setTitle(pill, `idle · ${rs.reason || 'waiting for todo tasks'} · ${o.runs || 0} runs`);
   } else {
-    pill.textContent = todos ? `Stopped (${todos} todo)` : 'Stopped';
-    pill.title = `stopped — ${rs.reason || 'scheduler off'}${todos ? ` · ${todos} todo waiting` : ''} · Run (or ⌘⏎) starts the team`;
+    setText(pill, todos ? `Stopped (${todos} todo)` : 'Stopped');
+    setTitle(pill, `stopped — ${rs.reason || 'scheduler off'}${todos ? ` · ${todos} todo waiting` : ''} · Run (or ⌘⏎) starts the team`);
   }
   pill.classList.toggle('on', rs.state === 'running');
   pill.classList.toggle('halt', rs.state === 'stopped' && todos > 0);
   $('#stop').classList.toggle('hidden', rs.state === 'stopped'); // Stop stays in the bar while the run is on — running or idle (⌘. always works)
   $('#runbtn').classList.toggle('hidden', rs.state !== 'stopped'); // the visible way back while the scheduler is off
-  $('#runbtn').textContent = rs.state === 'stopped' && todos ? `${todos} task${todos === 1 ? '' : 's'} waiting — Run` : 'Run'; // the waiting count rides the button (t_bd295f0e)
+  setText($('#runbtn'), rs.state === 'stopped' && todos ? `${todos} task${todos === 1 ? '' : 's'} waiting — Run` : 'Run'); // the waiting count rides the button (t_bd295f0e)
   // Money pill: the app's single cost total — API-eq over ALL recorded runs, the same per-run ledger
   // sum the Usage tab's grand total shows, so pill and tab can never disagree (t_b1115e48). The
   // billed vs subscription split stays in the tooltip: subscription usage is covered by the plan,
@@ -542,14 +571,15 @@ function renderHeader() {
       for (const e of runLedger(r)) { const rc = e.costUsd || 0; total += rc; if (isSub) sub += rc; else billed += rc; } }
   } else { billed = o.billedCost || 0; sub = o.subCost || 0; total = billed + sub; }
   const c = $('#totalcost');
-  c.textContent = total > 0 ? `API-eq $${total.toFixed(2)}` : 'no cost yet';
+  const costText = total > 0 ? `API-eq $${total.toFixed(2)}` : 'no cost yet';
+  setText(c, costText);
   // An empty placeholder pill is dead weight in an already tight header — hide it until it has
   // something to say (the meter chips need every pixel at 1400px).
   c.classList.toggle('hidden', !(total > 0));
   c.classList.toggle('quiet', !(billed > 0));
-  c.title = total > 0
+  setTitle(c, total > 0
     ? `API-eq (API-equivalent) $${total.toFixed(4)} — what all recorded usage would cost at API list prices; the same single total the Usage tab's grand total shows. Actually billed per token (API key / proxy / cloud): $${billed.toFixed(4)}. Covered by subscription, not billed per token: $${sub.toFixed(4)}. "est" marks list-price estimates for keys that report no cost themselves.`
-    : 'No recorded usage yet.';
+    : 'No recorded usage yet.');
   renderWatchPill();
 }
 // ---------- worktree disk pill (t_fe10d3e0; IPC by Devon, t_9b662983) ----------
@@ -569,10 +599,12 @@ function renderWtDisk() {
   const over = wtDisk.count > WT_DISK_CAP.count || wtDisk.bytes > WT_DISK_CAP.bytes;
   c.classList.remove('hidden');
   c.classList.toggle('wtwarn', over);
-  c.textContent = `${over ? '⚠ ' : ''}${wtDisk.count} wt · ${fmtWtBytes(wtDisk.bytes)}`;
-  c.title = over
+  const text = `${over ? '⚠ ' : ''}${wtDisk.count} wt · ${fmtWtBytes(wtDisk.bytes)}`;
+  if (c.textContent !== text) c.textContent = text; // 30s poll: skip the write (and the header reflow) when the number didn't move
+  const title = over
     ? `Worktrees above cap (>20 or >2GB): ${wtDisk.count} worktrees, ${fmtWtBytes(wtDisk.bytes)} in .squad/worktrees. Done+merged tasks are removed on merge; retained ones are flagged on their task.`
     : `.squad/worktrees: ${wtDisk.count} worktree${wtDisk.count === 1 ? '' : 's'}, ${fmtWtBytes(wtDisk.bytes)} of disk.`;
+  if (c.title !== title) c.title = title;
 }
 async function pollWtDisk() { try { const d = await call('getDiskUsage'); if (d && typeof d === 'object') { wtDisk = d; renderWtDisk(); } } catch {} }
 pollWtDisk(); setInterval(pollWtDisk, 30e3);
@@ -888,24 +920,39 @@ const teamHue = (teamId) => {
   _teamHue.set(teamId, hue);
   return hue;
 };
+// O(1) id → node/task indexes (t_94b8df1f): chat open/switch used to scan allNodes and the whole
+// task list linearly per event — a grown 550-task board turned teamSwitch into a 139ms long task
+// inside taskTeamOf. Both caches invalidate on array identity: refresh() swaps the arrays
+// wholesale, deltas mutate entries in place, so an entry may trail one refresh cycle (the same
+// tolerance the taskTitle memo accepted); misses (new/unknown ids) fall back to the linear scan
+// and fill the cache in.
+const _idx = {};
+const nodeById = (id) => { if (_idx.nodes !== S.allNodes) { _idx.nodes = S.allNodes; _idx.nodeMap = new Map(); }
+  let v = _idx.nodeMap.get(id); if (v === undefined) { v = S.allNodes.find((x) => x.id === id) || null; _idx.nodeMap.set(id, v); } return v; };
+const taskById = (id) => { if (_idx.tasks !== S.tasks) { _idx.tasks = S.tasks; _idx.taskMap = new Map(); }
+  let v = _idx.taskMap.get(id); if (v === undefined) { v = S.tasks.find((x) => x.id === id) || null; _idx.taskMap.set(id, v); } return v; };
 const agentColor = (id) => {
-  const n = S.allNodes.find((x) => x.id === id);
+  const n = nodeById(id);
   const hue = n ? teamHue(n.teamId) : 0;
   if (hue) return hue;
   let h = 0; for (const c of String(id)) h = (h * 31 + c.charCodeAt(0)) >>> 0; return (h % 8) + 1;
 };
+// Step within the team (0-2 colour mix) — the per-call filter here allocated a fresh array for
+// every avatar on every draw; memoize per allNodes identity like the id indexes above.
 const agentStep = (id) => {
-  const n = S.allNodes.find((x) => x.id === id);
+  const n = nodeById(id);
   if (!n || !n.teamId) return 0;
-  const i = S.allNodes.filter((x) => x.teamId === n.teamId).findIndex((x) => x.id === id);
-  return i < 0 ? 0 : i % 3;
+  if (_idx.steps !== S.allNodes) { _idx.steps = S.allNodes; _idx.stepMap = new Map(); }
+  let s = _idx.stepMap.get(id);
+  if (s === undefined) { const i = S.allNodes.filter((x) => x.teamId === n.teamId).findIndex((x) => x.id === id); s = i < 0 ? 0 : i % 3; _idx.stepMap.set(id, s); }
+  return s;
 };
 // Team scoping (t_1158f757): one predicate shared by the Logs/Chat/Board team filters.
 // team = '' (All teams) passes everything; an id that is not a team node never passes a
 // real team — chat events get their own "no team anywhere stays visible" rule on top.
-const nodeTeamOf = (id) => { const n = S.allNodes.find((x) => x.id === id); return (n && n.teamId) || null; };
+const nodeTeamOf = (id) => { const n = id ? nodeById(id) : null; return (n && n.teamId) || null; };
 const teamScoped = (team, id) => !team || nodeTeamOf(id) === team;
-const taskTeamOf = (tid) => { const t = S.tasks.find((x) => x.id === tid); return t ? nodeTeamOf(t.assignee) : null; };
+const taskTeamOf = (tid) => { const t = tid ? taskById(tid) : null; return t ? nodeTeamOf(t.assignee) : null; };
 const teamNameOf = (tid) => (((S.project || {}).teams) || []).find((t) => t.id === tid);
 // Cross-team badge: small pill with the other team's name, tinted by its teamHue.
 const teamBadge = (tid) => { const tm = teamNameOf(tid); const name = tm ? tm.name : tid;
@@ -976,6 +1023,16 @@ function drawClusterCard(g, n, onExpand) {
   el('title', {}, g).textContent = n.members.map((m) => `${m.name} — ${nodeLive(m)}`).join('\n');
   g.style.cursor = 'pointer'; g.onclick = (ev) => { ev.stopPropagation(); onExpand(); };
 }
+// Tidy top-down tree over assign edges (the engine behind graphAuto and the Auto-layout button).
+// One parent per node — the first assign edge wins; later ones are ignored. Roots (no assign
+// parent) place left-to-right, core agents first; children place recursively and a parent is
+// centred over its first/last child. More than 5 all-leaf reports wrap under their lead into a
+// 5-wide block instead of one endless row. Agents with no assign edges, plus anything not reached
+// from a root, wrap into a near-landscape grid balanced toward the canvas aspect ratio. Spacing:
+// GX = card width + 36, GY = card height + 64. Pure layout — the stored x/y stay the user's
+// manual layout; the result is applied per render only while graphAuto is on. The same algorithm
+// also lives (shared + instrumented) in app/src/graph-view.js as layoutTree/treeLayout, which
+// test/graph-view.test.js exercises; this renderer copy is the one buildView actually calls.
 function treeLayout(nodes, edges) {
   const ids = new Set(nodes.map((n) => n.id)), kids = {}, hasParent = new Set(); const GX = W + 36, GY = H + 64, pos = {};
   for (const e of edges) if ((e.type || 'assign') === 'assign' && ids.has(e.from) && ids.has(e.to) && e.from !== e.to && !hasParent.has(e.to)) { (kids[e.from] ||= []).push(e.to); hasParent.add(e.to); }
@@ -1082,7 +1139,7 @@ function edgeGeom(a, b, off, obs = [], seed = 0) {
     return null;
   };
   const r = solve() || detour();
-  if (!r) { const p1 = [A.x + NW, A.y + NH / 2 + off * 0.6], p2 = [B.x, B.y + NH / 2 + off * 0.6], rail = (p1[0] + p2[0]) / 2 + off; return { d: orthPath([p1, [rail, p1[1]], [rail, p2[1]], p2].map(P)), mid: P([rail, (p1[1] + p2[1]) / 2]), n: flip ? [1, 0] : [0, 1] }; }
+  if (!r) { const { p1, p2 } = anchors(), rail = (p1[0] + p2[0]) / 2 + off; return { d: orthPath([p1, [rail, p1[1]], [rail, p2[1]], p2].map(P)), mid: P([rail, (p1[1] + p2[1]) / 2]), n: flip ? [1, 0] : [0, 1] }; }
   return { d: orthPath(r.pts.map(P)), mid: P(r.mid), n: flip ? [r.n[1], r.n[0]] : r.n };
 }
 const overlaps = (r, q) => r.x < q.x + q.w && q.x < r.x + r.w && r.y < q.y + q.h && q.y < r.y + r.h;
@@ -1355,7 +1412,10 @@ function canvasMenu(ev) {
   showMenu(ev.clientX, ev.clientY, menuItems(items)); bindMenu(items);
 }
 async function addAgentAt(x, y) { const role = S.team.nodes.length === 0 ? 'PM' : 'Dev'; const n = await call('addNode', { role, x: Math.round(x), y: Math.round(y) }); sel.node = n.id; refresh(); }
-// Layered (Sugiyama-lite) layout: longest-path layers over assign/review edges, barycentre ordering, centred rows.
+// Auto-layout button (also the canvas context menu's "Auto-layout"): flips graphAuto back on so
+// every render recomputes positions via treeLayout above, collapses clusters to their heads,
+// persists the fresh positions when the view is unclustered, then fits the result to the viewport.
+// There is no separate layout pass here — treeLayout is the whole engine.
 async function autoLayout() {
   if (!S.team.nodes.length) return; graphAuto = true; expandedClusters.clear(); renderGraph();
   if (!GV.clustered) await call('setPositions', Object.fromEntries(S.team.nodes.map((n) => [n.id, { x: n.x, y: n.y }])));
@@ -1867,7 +1927,7 @@ const priorityOf = (t) => PRIORITIES.includes(t.priority) ? t.priority : 'P2';
 const priorityBadge = (t) => `<span class="tag prio prio-${priorityOf(t)}" title="Priority ${priorityOf(t)}">${priorityOf(t)}</span>`;
 const byPriorityThenTitle = (a, b) => PRIORITIES.indexOf(priorityOf(a)) - PRIORITIES.indexOf(priorityOf(b)) || a.title.localeCompare(b.title);
 // Relative age for card meta ("2h", "3d") — a card's freshness is part of scanning a board.
-const ago = (ts) => { if (!ts) return ''; const sec = (Date.now() - new Date(ts).getTime()) / 1000;
+const ago = (ts) => { if (!ts) return ''; const ms = new Date(ts).getTime(); if (Number.isNaN(ms)) return ''; const sec = (Date.now() - ms) / 1000;
   return sec < 60 ? 'now' : sec < 3600 ? `${Math.floor(sec / 60)}m` : sec < 86400 ? `${Math.floor(sec / 3600)}h` : `${Math.floor(sec / 86400)}d`; };
 // Skip-no-op renders (t_9315f18a): the storm profile showed every run push re-rendering ALL heavy
 // sections (503-card board, 200-row log window, 300-run usage table) even when their inputs were
@@ -1883,7 +1943,22 @@ const doneCards = (list) => { const all = list.filter((t) => t.status === 'done'
 // #columns innerHTML on every change — which repainted all 300 cards, dropped hover/focus and
 // reset column scroll — each column diffs its card list by task id. A card whose HTML string is
 // unchanged is not touched at all; only inserts, removals, content changes and reorders move DOM.
+// The six board columns (t_c5db7bf0), in workflow order. Every task status the store knows
+// (STATUSES in src/store.js) maps to exactly one column — this list is the board's contract with
+// the store, so the two must stay in lockstep:
+//   todo              — dispatchable work; a card with no open blockers earns the "Ready" tag
+//   in_progress       — claimed by a worker; the live / working elsewhere / No worker tags
+//                       disambiguate whether an agent is actually on this task
+//   waiting_for_human — paused for user input; awaitingApproval adds the "needs approval" tag
+//   review            — work landed; the auto-merge gate (store.js _mergeOnDone) runs from here
+//   merge_conflict    — the gate refused (conflict or dirty main checkout); fix in the worktree,
+//                       then flip done to retry the merge
+//   done              — merged; folded by default to the 20 most recently updated (see doneCards)
 const boardCols = ['todo', 'in_progress', 'waiting_for_human', 'review', 'merge_conflict', 'done'];
+// A task whose status is not one of the six (the store gained a status without a matching column,
+// or a task file lost its status) must neither crash the render nor silently vanish: colStOf
+// buckets it into an "other" column rendered after done.
+const colStOf = (t) => (boardCols.includes(t.status) ? t.status : 'other');
 const cardSigs = new WeakMap(); // card element -> html it was built from
 const tplEl = (html) => { const t = document.createElement('template'); t.innerHTML = html.trim(); return t.content.firstElementChild; };
 const colHead = (st, total) => st === 'done'
@@ -1917,10 +1992,26 @@ function cardHtml(t) {
   const cmtWord = nCmts === 1 ? 'comment' : 'comments';
   return `<div class="card ${sel.task === t.id ? 'sel' : ''}${t.awaitingApproval ? ' approval' : ''}" data-id="${t.id}"><b>${esc(t.title)}</b>${snippet && snippet !== t.title ? `<span class="cdesc" title="${esc(snippet)}">${esc(clipText(snippet, 100))}</span>` : ''}${tags ? `<span class="ctags">${tags}</span>` : ''}<small class="cmeta">${priorityBadge(t)}${t.assignee ? ((w) => `<span class="avatar sm" style="background:${avatarBg(w)}" title="${esc(w.name)}">${avatarBody(t.assignee, w)}</span><span class="cname">${esc(w.name)}</span>`)(who(t.assignee)) : '<span class="muted">unassigned</span>'}<span class="cago" title="last updated">${ago(t.updatedAt) || '—'}</span>${nCmts ? `<span class="ccount" title="${nCmts} ${cmtWord}">💬 ${nCmts}</span>` : ''}</small></div>`;
 }
+// Card-html memo (t_d6c2be24): every store write (any comment, any run push) bumps the board
+// version, and the old path met that by re-running cardHtml for ALL cards — ~500 html strings on
+// the grown board, rebuilt just to be diffed — even though only one card's inputs had moved. The
+// memo keys each card's html on exactly what cardHtml reads: the task's own updatedAt (the store
+// bumps it on every task mutation, comments included), the global env (agent states, running set,
+// restart gate, dev mode, team scope, the board's status mix and size, agent names), the rendered
+// age label (the only clock-driven part) and whether this card is the selected one.
+const cardHtmlCache = new Map(); // task id -> { key, html }
+const cardHtmlCached = (t, envKey) => {
+  const key = `${envKey}|${t.updatedAt || ''}|${ago(t.updatedAt)}|${sel.task === t.id ? 1 : 0}`;
+  let c = cardHtmlCache.get(t.id);
+  if (!c || c.key !== key) cardHtmlCache.set(t.id, c = { key, html: cardHtml(t) });
+  return c.html;
+};
 function patchBoardColumns(tasks) {
   const colsEl = $('#columns');
-  boardCols.forEach((st, ci) => {
-    const colTasks = tasks.filter((t) => t.status === st); // one pass serves the header count and the card list
+  const envKey = [agentStamp(), JSON.stringify(S.orch.running || null), rst.scheduledAfter || '', rst.gating.join(), upd.devMode !== false, sel.boardTeam || '', S.tasks.length, S.tasks.map((x) => colStOf(x)[0]).join(''), S.allNodes.map((n) => n.name).join()].join('|');
+  const strays = tasks.filter((t) => !boardCols.includes(t.status)); // collected once; the "other" column reuses them
+  (strays.length ? boardCols.concat('other') : boardCols).forEach((st, ci) => {
+    const colTasks = st === 'other' ? strays : tasks.filter((t) => t.status === st); // one pass serves the header count and the card list
     const total = colTasks.length;
     const fold = st === 'done' && !doneOpen;
     let col = colsEl.querySelector(':scope > .col.' + st);
@@ -1951,7 +2042,7 @@ function patchBoardColumns(tasks) {
     for (const [id, el] of have) if (!wantIds.has(id)) { el.remove(); have.delete(id); }
     let prev = hint || h3;
     for (let i = 0; i < want.length; i++) {
-      const t = want[i]; const html = cardHtml(t);
+      const t = want[i]; const html = cardHtmlCached(t, envKey);
       let el = have.get(t.id);
       if (el && cardSigs.get(el) !== html) { const nu = tplEl(html); el.replaceWith(nu); have.set(t.id, el = nu); }
       if (!el) { el = tplEl(html); have.set(t.id, el); }
@@ -1966,6 +2057,7 @@ function patchBoardColumns(tasks) {
       if (tb.textContent !== label) tb.textContent = label;
     } else if (tb) tb.remove();
   });
+  if (cardHtmlCache.size > tasks.length) { const live = new Set(tasks.map((t) => t.id)); for (const id of cardHtmlCache.keys()) if (!live.has(id)) cardHtmlCache.delete(id); }
 }
 function renderBoard() {
   if (!$('#tab-board').classList.contains('active')) return;
@@ -2040,10 +2132,9 @@ $('#nt-add').onclick = async () => {
   $('#nt-title').value = ''; $('#nt-desc').value = ''; sel.task = t.id; refresh();
 };
 
-// Memoized per S.tasks identity (t_1fb02462): every thread-linked bubble does this O(tasks) scan;
-// deltas replace the array wholesale, so identity is the invalidation key.
-const taskTitle = (() => { let memo = null; return (id) => { if (!memo || memo.tasks !== S.tasks) memo = { tasks: S.tasks, map: new Map() };
-  let v = memo.map.get(id); if (v === undefined) { v = (S.tasks.find((x) => x.id === id) || {}).title || id; memo.map.set(id, v); } return v; }; })();
+// Thread-linked bubble titles ride the shared taskById index (t_94b8df1f) instead of a private
+// per-S.tasks memo.
+const taskTitle = (id) => { const t = id ? taskById(id) : null; return (t && t.title) || id; };
 function openBlockers(t) { return (t.blockedBy || []).filter((id) => { const x = S.tasks.find((y) => y.id === id); return x && x.status !== 'done'; }); }
 // Per-task live view: the last log lines of the agent working on the selected task.
 function renderLive() {
@@ -2064,22 +2155,46 @@ function md(src) {
     .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
     .replace(/\n{2,}/g, '<br><br>'))).join('');
 }
+let wkSig = null;
 function renderWiki() {
+  // Signature like obsSig (see TAB_RESIG note): every state poll ran through here and rebuilt the
+  // page list + re-wired its handlers even with nothing changed. updatedAt changes on any write, so
+  // keying on titles+updatedAt+author+search+selection can't miss a real edit (including another
+  // agent rewriting the page mid-session).
   const q = ($('#wk-search').value || '').trim().toLowerCase();
+  const pages = Object.keys(S.wiki).sort().map((t) => `${t}|${S.wiki[t].updatedAt || ''}|${S.wiki[t].author || ''}`).join(';');
+  const key = [ctx.p, pages, q, sel.page || '', wikiEdit].join('|');
+  if (key === wkSig) return; wkSig = key;
   const titles = Object.keys(S.wiki).sort().filter((t) => !q || t.toLowerCase().includes(q) || (S.wiki[t].content || '').toLowerCase().includes(q));
   const all = Object.keys(S.wiki).length;
   $('#wikipages').innerHTML = titles.length
     ? titles.map((t) => `<div class="${t === sel.page ? 'sel' : ''}" data-t="${esc(t)}"><b>${esc(t)}</b><small class="wk-meta">${esc(S.wiki[t].author)}${agoTxt(S.wiki[t].updatedAt) ? ' · ' + agoTxt(S.wiki[t].updatedAt) : ''}</small></div>`).join('')
     : all ? '<p class="muted wk-empty-body">No pages match your search.</p>' : '<p class="muted wk-empty-body">No pages yet. Click + New page to write your first one — e.g. a runbook, a glossary, or notes for the team.</p>';
-  document.querySelectorAll('#wikipages div[data-t]').forEach((d) => d.onclick = () => { sel.page = d.dataset.t; wikiEdit = false; loadPage(); renderWiki(); });
+  document.querySelectorAll('#wikipages div[data-t]').forEach((d) => d.onclick = () => { if (!discardWikiEdit()) return; sel.page = d.dataset.t; wikiEdit = false; loadPage(); renderWiki(); });
   if (sel.page && S.wiki[sel.page] && !wikiEdit) loadPage();
   const empty = !sel.page && !wikiEdit;
   $('#wk-empty').classList.toggle('hidden', !empty); $('#wk-editor').classList.toggle('hidden', empty);
   $('#wk-empty h3').textContent = all ? 'No page selected' : 'No wiki pages yet';
 }
-$('#wk-new').onclick = () => { sel.page = null; wikiEdit = true; $('#wk-title').value = ''; $('#wk-content').value = ''; showWiki(); renderWiki(); };
-$('#wk-search').oninput = renderWiki;
-function loadPage() { const p = S.wiki[sel.page]; if (!p) return; $('#wk-title').value = p.title; $('#wk-content').value = p.content; showWiki(); }
+// Dirty-editor guard (t_2a87ef9a): leaving a modified editor used to silently wipe the draft.
+function wikiDirty() {
+  if (!wikiEdit) return false;
+  const title = $('#wk-title').value.trim(), content = $('#wk-content').value;
+  if (!sel.page) return !!(title || content);
+  const p = S.wiki[sel.page];
+  return title !== (p ? p.title : sel.page) || content !== (p ? p.content || '' : '');
+}
+const discardWikiEdit = () => !wikiDirty() || confirm('Discard unsaved changes to this page?');
+// Concurrent-write guard (seed 471): agents write wiki pages through the board tools while a human
+// edits. wkBaseUpdated remembers the page's updatedAt when this editing session began, so Save can
+// detect "the page changed elsewhere since you started typing" instead of silently clobbering it.
+let wkBaseUpdated = null;
+const wikiNew = () => { if (!discardWikiEdit()) return; sel.page = null; wikiEdit = true; wkBaseUpdated = null; $('#wk-title').value = ''; $('#wk-content').value = ''; showWiki(); renderWiki(); };
+$('#wk-new').onclick = wikiNew;
+$('#wk-empty-new').onclick = wikiNew; // was rendered but never wired up — dead button
+let wkSearchTimer = 0;
+$('#wk-search').oninput = () => { clearTimeout(wkSearchTimer); wkSearchTimer = setTimeout(renderWiki, 150); }; // each keystroke re-filters and rebuilds the page list — render once per typing pause
+function loadPage() { const p = S.wiki[sel.page]; if (!p) return; $('#wk-title').value = p.title; $('#wk-content').value = p.content; wkBaseUpdated = p.updatedAt || null; showWiki(); }
 // Cheap backlinks: tasks whose title or description mention this page's title.
 function wikiBacklinks(title) { const q = title.trim().toLowerCase(); if (!q) return []; return S.tasks.filter((t) => (t.title || '').toLowerCase().includes(q) || (t.description || '').toLowerCase().includes(q)); }
 function showWiki() {
@@ -2088,21 +2203,35 @@ function showWiki() {
   $('#wk-view').innerHTML = md($('#wk-content').value) + (bl.length ? `<div class="wk-backlinks"><b>Linked from tasks</b><ul>${bl.map((t) => `<li data-task="${esc(t.id)}">${esc(t.title)}</li>`).join('')}</ul></div>` : '');
   $('#wk-view').querySelectorAll('.wk-backlinks li').forEach((d) => d.onclick = () => { sel.task = d.dataset.task; showTab('board'); renderBoard(); });
 }
-$('#wk-edit').onclick = () => { wikiEdit = !wikiEdit; showWiki(); };
-$('#wk-save').onclick = async () => { const t = $('#wk-title').value.trim(); if (!t) return; await call('writeWiki', t, $('#wk-content').value); sel.page = t; wikiEdit = false; refresh(); };
-$('#wk-del').onclick = async () => { $('#wk-more').open = false; if (sel.page && confirm(`Delete page "${sel.page}"? This can't be undone.`)) { await call('deleteWiki', sel.page); sel.page = null; $('#wk-title').value = ''; $('#wk-content').value = ''; refresh(); } };
+$('#wk-edit').onclick = () => { const on = !wikiEdit; if (on) wkBaseUpdated = (sel.page && S.wiki[sel.page]) ? (S.wiki[sel.page].updatedAt || null) : null; wikiEdit = on; showWiki(); };
+$('#wk-save').onclick = async () => {
+  const t = $('#wk-title').value.trim();
+  if (!t) { alert('Give the page a title before saving.'); $('#wk-title').focus(); return; }
+  if (t !== sel.page && S.wiki[t] && !confirm(`A page titled "${t}" already exists. Overwrite it?`)) return;
+  const prev = sel.page && sel.page !== t && S.wiki[sel.page] ? sel.page : null; // title change would otherwise leave the old page behind as a stray duplicate
+  if (prev && !confirm(`Rename page "${prev}" to "${t}"? The old page will be removed.`)) return;
+  if (t === sel.page && S.wiki[t] && (S.wiki[t].updatedAt || null) !== wkBaseUpdated && !confirm('This page changed elsewhere since you started editing. Save over it?')) return;
+  $('#wk-save').disabled = true;
+  try {
+    await call('writeWiki', t, $('#wk-content').value);
+    if (prev) await call('deleteWiki', prev);
+    sel.page = t; wikiEdit = false; wkBaseUpdated = null; refresh();
+  } catch (e) { alert(String(e.message || e).replace(/^Error invoking remote method 'api': (Error: )?/, '')); }
+  finally { $('#wk-save').disabled = false; }
+};
+$('#wk-del').onclick = async () => { $('#wk-more').open = false; if (sel.page && confirm(`Delete page "${sel.page}"? This can't be undone.`)) { try { await call('deleteWiki', sel.page); sel.page = null; wikiEdit = false; wkBaseUpdated = null; $('#wk-title').value = ''; $('#wk-content').value = ''; refresh(); } catch (e) { alert(String(e.message || e).replace(/^Error invoking remote method 'api': (Error: )?/, '')); } } };
 
 // ---------- observability ----------
 const logTeamNodes = () => S.allNodes.filter((n) => teamScoped(sel.logTeam, n.id));
 const obsIdleOpen = new Set();
 function renderObs() {
   if (!$('#tab-obs').classList.contains('active')) return;
-  const okey = [S.v && S.v.project, S.v && S.v.teams, S.v && S.v.settings, ctx.p, logs.length, (logs[logs.length - 1] || {}).at, S.tasks.length, sel.logTeam, S.orch.runCost, S.orch.runTokens, agentStamp()].join('|');
+  let cur = $('#logfilter').value; // clicking a row changes only this, so it must gate the rebuild (t_h0a1c2fa bug 1)
+  const okey = [S.v && S.v.project, S.v && S.v.teams, S.v && S.v.settings, ctx.p, logs.length, (logs[logs.length - 1] || {}).at, S.tasks.length, sel.logTeam, S.orch.runCost, S.orch.runTokens, agentStamp(), cur].join('|');
   if (okey === obsSig) return; obsSig = okey;
   const teams = (S.project && S.project.teams) || [];
   const tf = $('#logteam'); tf.innerHTML = '<option value="">All teams</option>' + teams.map((t) => `<option value="${t.id}">${esc(t.name)}</option>`).join(''); tf.value = sel.logTeam;
   const nodes = logTeamNodes();
-  let cur = $('#logfilter').value;
   if (cur && !nodes.some((n) => n.id === cur)) cur = '';
   const counts = {}; let total = 0;
   const ids = new Set(nodes.map((n) => n.id));
@@ -2138,7 +2267,7 @@ const LOG_LEVEL = { error: 'error', stderr: 'error', tool_error: 'error', system
 // fields Dev A sends with the event; fall back to the raw text for lines persisted without them.
 function monitorText(l) {
   const ids = Array.isArray(l.taskIds) && l.taskIds.length ? ` (${l.taskIds.join(', ')})` : '';
-  return esc(([l.action, l.reason].filter(Boolean).join(' — ') || l.text) + ids);
+  return esc((([l.action, l.reason].filter(Boolean).join(' — ') || l.text) || '') + ids);
 }
 // "Read {"file_path":"/a/b.js"}" -> summary "Read b.js"; the raw JSON only shows on expand.
 function humanLog(t) {
@@ -2150,13 +2279,15 @@ function humanLog(t) {
   return { head: head.length > 140 ? head.slice(0, 139) + '…' : head, json: JSON.stringify(o, null, 2) };
 }
 function logRow(l) {
+  l = l || {}; // a null/primitive line renders as a system row instead of killing the whole build
   const w = who(l.nodeId); const lvl = LOG_LEVEL[l.kind] || 'text';
   const task = l.taskId ? `<span class="logtask" data-tasklink="${esc(l.taskId)}" title="${esc(l.task || l.taskId)} — open in task thread">${esc(shortTaskId(l.taskId))}</span>` : '';
   const badge = l.kind === 'monitor' ? 'Monitor' : l.kind === 'watch' ? 'Watch' : esc(l.kind);
   let text = l.kind === 'monitor' ? monitorText(l) : esc(l.text);
   const hum = humanLog(l.text);
   if (hum && l.kind !== 'monitor') text = `<details class="logjson"><summary>${esc(hum.head)}</summary><pre>${esc(hum.json)}</pre></details>`;
-  return `<div class="logrow lv-${lvl}"><span class="logtime">${new Date(l.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span><span class="avatar sm" style="background:${avatarBg(w)}" title="${esc(w.name)}">${avatarBody(l.nodeId, w)}</span><span class="logagent" title="${esc(w.name)}">${esc(w.name)}</span>${task}<span class="loglevel lv-${lvl}">${badge}</span><span class="logtext">${text}</span></div>`;
+  const at = new Date(l.at); const tm = isNaN(at) ? '' : at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  return `<div class="logrow lv-${lvl}"><span class="logtime">${tm}</span><span class="avatar sm" style="background:${avatarBg(w)}" title="${esc(w.name)}">${avatarBody(l.nodeId, w)}</span><span class="logagent" title="${esc(w.name)}">${esc(w.name)}</span>${task}<span class="loglevel lv-${lvl}">${badge}</span><span class="logtext">${text}</span></div>`;
 }
 // ---------- subagents (contract: t_c33656ba) ----------
 // Records live on the owning agent (S.orch.agents[id].subagents) for the current run and persist per
@@ -2193,7 +2324,7 @@ function bindSubToggles(rerender) { document.querySelectorAll('[data-subtoggle]'
 // All severities shown by default; chips let you narrow the feed down to warn/error only.
 const logLevels = new Set(['info', 'warn', 'error']);
 const LOG_SEVERITY = { error: 'error', tool_error: 'error', stderr: 'warn' };
-const severityOf = (l) => l.level || LOG_SEVERITY[l.kind] || 'info';
+const severityOf = (l) => (l && (l.level || LOG_SEVERITY[l.kind])) || 'info'; // malformed/null line degrades to info, never throws the filter
 function renderLogLevelChips() {
   $('#loglevels').innerHTML = ['info', 'warn', 'error'].map((lv) => `<button class="lvchip lv-${lv}${logLevels.has(lv) ? ' on' : ''}" data-lv="${lv}" aria-pressed="${logLevels.has(lv)}" title="${logLevels.has(lv) ? 'Hide' : 'Show'} ${lv} lines"><span class="dot" aria-hidden="true"></span>${lv}</button>`).join('');
   document.querySelectorAll('#loglevels [data-lv]').forEach((b) => b.onclick = () => { const lv = b.dataset.lv; logLevels.has(lv) ? logLevels.delete(lv) : logLevels.add(lv); renderLogLevelChips(); renderLog(); });
@@ -2214,7 +2345,8 @@ const repinBottom = (box) => { const top = box.scrollTop; requestAnimationFrame(
 let logSeq = 0, logTailSeq = 0, logTailAt = 0;
 $('#log').addEventListener('scroll', () => { const box = $('#log');
   if (box.scrollTop < 80 && renderLog.total > logWin) { logWin += LOG_PAGE; renderLog(); }
-  else if (box.scrollTop + box.clientHeight >= box.scrollHeight - 20 && logWin > LOG_PAGE) { logWin = LOG_PAGE; renderLog(); } });
+  else if (box.scrollTop + box.clientHeight >= box.scrollHeight - 20 && logWin > LOG_PAGE) { logWin = LOG_PAGE; renderLog(); }
+  else if (logTailDirty && box.scrollTop + box.clientHeight >= box.scrollHeight - 20) renderLog(); });
 // Signature of exactly what the log DOM shows — shared by the full render and the fast-append
 // path, so a redundant renderLog after an append early-returns.
 const logKey = () => [ctx.p, logs.length, (logs[logs.length - 1] || {}).at, logWin, $('#logfilter').value, $('#logsearch').value, [...logLevels].join(), sel.logTeam, logsLoaded.has(ctx.p)].join('|');
@@ -2222,13 +2354,16 @@ function renderLog() {
   CH.subIndex = null; // per-draw subagent record index (see subRecOf)
   if (!$('#tab-obs').classList.contains('active')) return;
   const lkey = logKey();
-  if (lkey === logSig) return; logSig = lkey;
+  if (lkey === logSig) return;
   const f = $('#logfilter').value; const q = ($('#logsearch').value || '').trim().toLowerCase();
   const teamIds = sel.logTeam ? new Set(logTeamNodes().map((n) => n.id)) : null;
   const box = $('#log'); const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 20;
   const prevH = box.scrollHeight, prevTop = box.scrollTop;
-  const all = logs.filter((l) => l.projectId === ctx.p && (!teamIds || teamIds.has(l.nodeId)));
-  const base = all.filter((l) => (!f || l.nodeId === f) && (!q || l.text.toLowerCase().includes(q)));
+  // Malformed stored lines (null entry, non-string text from a bad push) must be skipped or
+  // stringified here — a throw mid-build leaves logSig unstamped, so every later render throws
+  // again and the pane freezes (logRow's own guard would never be reached).
+  const all = logs.filter((l) => l && l.projectId === ctx.p && (!teamIds || teamIds.has(l.nodeId)));
+  const base = all.filter((l) => (!f || l.nodeId === f) && (!q || String(l.text ?? '').toLowerCase().includes(q)));
   base.sort((a, b) => (a.at || 0) - (b.at || 0));
   let rows = base.filter((l) => logLevels.has(severityOf(l)));
   let hiddenInfo = 0;
@@ -2239,12 +2374,16 @@ function renderLog() {
   renderLog.total = rows.length;
   const page = Chat.pageOf(rows, logWin);
   renderLog.winItems = page.items.length;
-  logTailAt = rows.length ? rows[rows.length - 1].at : 0;
-  logTailSeq = logSeq;
+  // The tail cursor is captured but stamped only after the DOM actually built: a throw mid-build
+  // (malformed line, bad subagent record) must not mark lines as rendered — appendLogTail would
+  // then treat them as already shown and hide them for good.
+  const tailAt = rows.length ? rows[rows.length - 1].at : 0;
+  const tailSeq = logSeq;
   const empty = teamIds && !all.length ? 'No messages for this team.' : (all.length ? 'No log lines match your filter.' : 'No activity yet — run the team to see agent logs here.');
   const older = page.hidden ? `<button id="log-older" class="olderbar linklike">↑ ${page.hidden} earlier line${page.hidden === 1 ? '' : 's'} — scroll up or click to load</button>` : '';
   box.innerHTML = rows.length ? (hiddenInfo ? `<p class="muted logempty">${hiddenInfo} info line(s) hidden by the level filter — showing all. <button id="log-showall" class="linklike">Show all</button></p>` : '') + older +
     Subagents.nestRows(page.items, subRecOf, null).map((x) => x.kind === 'sub' ? subBlockHtml(x) : logRow(x.l)).join('') : `<p class="muted logempty">${empty}</p>`;
+  logTailAt = tailAt; logTailSeq = tailSeq; logSig = lkey; logTailDirty = false; // stamped only after the DOM actually built: a throw mid-build (malformed line, bad subagent record) must not mark the pane as rendered — renderLog would then early-return forever and freeze it
   const sa = document.getElementById('log-showall'); if (sa) sa.onclick = () => { logLevels.add('info'); logLevels.add('warn'); logLevels.add('error'); renderLogLevelChips(); renderLog(); };
   const ob = document.getElementById('log-older'); if (ob) ob.onclick = () => { logWin += LOG_PAGE; renderLog(); };
   bindSubToggles(renderLog);
@@ -2254,7 +2393,8 @@ function renderLog() {
 }
 $('#logteam').onchange = () => { sel.logTeam = $('#logteam').value; $('#logfilter').value = ''; renderObs(); renderLog(); };
 $('#logfilter').onchange = renderLog;
-$('#logsearch').oninput = renderLog;
+let logSearchTimer = 0;
+$('#logsearch').oninput = () => { clearTimeout(logSearchTimer); logSearchTimer = setTimeout(renderLog, 150); }; // each keystroke re-filters and rebuilds the whole window (~56ms at profile sizes) — render once per typing pause
 $('#clearlog').onclick = act(async () => { if (!confirm('Clear the log of this project (also the saved log file)?')) return; for (let i = logs.length - 1; i >= 0; i--) if (logs[i].projectId === ctx.p) logs.splice(i, 1); await call('clearLogs'); renderLog(); });
 
 // ---------- usage & billing ----------
@@ -2596,9 +2736,9 @@ function renderSettings() {
     <div class="set-row"><div class="set-lab"><label for="st-perm">Default permission mode</label><p class="set-hint">Agents can override this per node.</p></div><div class="set-ctl"><select id="st-perm">${['bypassPermissions', 'acceptEdits', 'default', 'plan'].map((m) => `<option ${m === s.permissionMode ? 'selected' : ''}>${m}</option>`).join('')}</select></div></div>
     </div></section>
     <section class="set-sec"><h3>Limits &amp; budgets</h3><div class="set-rows">
-    <div class="set-row"><div class="set-lab"><label for="st-conc">Max concurrent agents</label><p class="set-hint">How many agents may run at the same time.</p></div><div class="set-num"><input id="st-conc" type="number" min="1" max="8" value="${s.maxConcurrency}"><span class="set-unit">agents</span></div></div>
+    <div class="set-row"><div class="set-lab"><label for="st-conc">Max concurrent agents</label><p class="set-hint">How many agents may run at the same time.</p></div><div class="set-num"><input id="st-conc" type="number" min="1" max="8" value="${s.maxConcurrency ?? 2}"><span class="set-unit">agents</span></div></div>
     <div class="set-row"><div class="set-lab"><label for="st-maxagents">Max agents per team</label><p class="set-hint">Core agent recruit limit.</p></div><div class="set-num"><input id="st-maxagents" type="number" min="1" value="${s.maxAgents ?? 6}"><span class="set-unit">agents</span></div></div>
-    <div class="set-row"><div class="set-lab"><label for="st-runs">Max agent runs per Run</label><p class="set-hint">Safety cap for the scheduler.</p></div><div class="set-num"><input id="st-runs" type="number" min="1" value="${s.maxRuns}"><span class="set-unit">runs</span></div></div>
+    <div class="set-row"><div class="set-lab"><label for="st-runs">Max agent runs per Run</label><p class="set-hint">Safety cap for the scheduler.</p></div><div class="set-num"><input id="st-runs" type="number" min="1" value="${s.maxRuns ?? 30}"><span class="set-unit">runs</span></div></div>
     <div class="set-row"><div class="set-lab"><label for="st-budgetusd">Project budget per Run</label><p class="set-hint">Stops all agents when reached. 0 = no limit.</p></div><div class="set-num"><span class="set-unit">$</span><input id="st-budgetusd" type="number" min="0" step="0.01" value="${s.budgetUsd || 0}"></div></div>
     <div class="set-row"><div class="set-lab"><label for="st-budgettok">Project token budget per Run</label><p class="set-hint">Input + output. 0 = no limit.</p></div><div class="set-num"><input id="st-budgettok" type="number" min="0" step="1000" value="${s.budgetTokens || 0}"><span class="set-unit">tokens</span></div></div>
     <div class="set-row"><div class="set-lab"><label for="st-autocompactpct">Auto-compact at</label><p class="set-hint">Context usage that triggers /compact. 0 = off.</p></div><div class="set-num"><input id="st-autocompactpct" type="number" min="0" max="95" value="${s.autoCompactPct ?? 40}"><span class="set-unit">%</span></div></div>
@@ -2618,7 +2758,7 @@ function renderSettings() {
     <p class="muted">When new commits land on this app's base branch: pause the scheduler, wait for running agents to finish, test the new code, then relaunch and resume the run. Failed tests cancel the restart.</p>
     <div id="upd-history"></div></section>`}
     <h3>Role presets (this project)</h3><p class="muted">Presets appear as role suggestions. A new agent whose role matches a preset gets its prompt, tools and permission mode.</p>
-    <table id="presettable"><tr><th>Name</th><th>Permission</th><th>Allowed</th><th>Disallowed</th><th></th></tr>${(s.rolePresets || []).map((p) => `<tr><td>${esc(p.name)}</td><td>${esc(p.permissionMode || 'default')}</td><td>${esc(p.allowedTools.join(', '))}</td><td>${esc(p.disallowedTools.join(', '))}</td><td><button data-editp="${esc(p.name)}">Edit</button><button data-delp="${esc(p.name)}">Delete</button></td></tr>`).join('')}</table>
+    <table id="presettable"><tr><th>Name</th><th>Permission</th><th>Allowed</th><th>Disallowed</th><th></th></tr>${(s.rolePresets || []).filter((p) => p && p.name).map((p) => `<tr><td>${esc(p.name)}</td><td>${esc(p.permissionMode || 'default')}</td><td>${esc((p.allowedTools || []).join(', '))}</td><td>${esc((p.disallowedTools || []).join(', '))}</td><td><button data-editp="${esc(p.name)}">Edit</button><button data-delp="${esc(p.name)}">Delete</button></td></tr>`).join('')}</table>
     <div id="presetform"><label>Name</label><input id="pr-name"><label>Default system prompt</label><textarea id="pr-prompt" rows="3"></textarea>
     <label>Default allowed tools</label><input id="pr-allowed" placeholder="Read, Grep"><label>Default disallowed tools</label><input id="pr-disallowed">
     <label>Permission mode</label><select id="pr-perm"><option value="">project default</option>${(S.config.permissionModes || []).map((m) => `<option>${m}</option>`).join('')}</select>
@@ -2631,13 +2771,19 @@ function renderSettings() {
   };
   wireRuntimesSection(); wireDraftForm();
   document.querySelectorAll('[data-delp]').forEach((b) => b.onclick = act(async () => { await call('deletePreset', b.dataset.delp); refresh(); }));
-  document.querySelectorAll('[data-editp]').forEach((b) => b.onclick = () => { const p = s.rolePresets.find((x) => x.name === b.dataset.editp); $('#pr-name').value = p.name; $('#pr-prompt').value = p.systemPrompt; $('#pr-allowed').value = p.allowedTools.join(', '); $('#pr-disallowed').value = p.disallowedTools.join(', '); $('#pr-perm').value = p.permissionMode; });
-  $('#pr-save').onclick = act(async () => { await call('savePreset', { name: $('#pr-name').value, systemPrompt: $('#pr-prompt').value, allowedTools: $('#pr-allowed').value, disallowedTools: $('#pr-disallowed').value, permissionMode: $('#pr-perm').value }); refresh(); });
-  $('#st-save').onclick = async () => { await call('saveSettings', { claudePath: $('#st-claude').value.trim() || 'claude', maxConcurrency: +$('#st-conc').value || 2, maxRuns: +$('#st-runs').value || 30, permissionMode: $('#st-perm').value,
-    budgetUsd: +$('#st-budgetusd').value || 0, budgetTokens: +$('#st-budgettok').value || 0, requireApproval: $('#st-approval').checked, notifications: $('#st-notify').checked, stuckMinutes: +$('#st-stuck').value || 5,
-    stallTimeoutMin: Math.max(1, +$('#st-stall').value || 10),
+  document.querySelectorAll('[data-editp]').forEach((b) => b.onclick = () => { const p = (s.rolePresets || []).find((x) => x.name === b.dataset.editp); if (!p) return; $('#pr-name').value = p.name; $('#pr-prompt').value = p.systemPrompt || ''; $('#pr-allowed').value = (p.allowedTools || []).join(', '); $('#pr-disallowed').value = (p.disallowedTools || []).join(', '); $('#pr-perm').value = p.permissionMode || ''; });
+  $('#pr-save').onclick = act(async () => { const name = $('#pr-name').value.trim(); if (!name) return; await call('savePreset', { name, systemPrompt: $('#pr-prompt').value, allowedTools: $('#pr-allowed').value, disallowedTools: $('#pr-disallowed').value, permissionMode: $('#pr-perm').value }); refresh(); });
+  // Clamp every number to its declared min/max: the HTML attrs only constrain spinner clicks, and
+  // `+x || fallback` lets a hand-typed negative through (e.g. -5 concurrency, a negative budget
+  // that disables the limit it was meant to enforce). Typed numbers clamp; only empty/garbage
+  // input takes the default — `+0 || fb` misread a hand-typed 0 as "empty" and saved the default
+  // instead of the min (0 max-runs meant "no cap" to the user but stored 30, 0 concurrency 2).
+  const numv = (id, fb, lo, hi) => { const v = $('#' + id).value.trim(); if (v === '' || !Number.isFinite(+v)) return fb; return Math.max(lo, hi === undefined ? +v : Math.min(hi, +v)); };
+  $('#st-save').onclick = act(async () => { await call('saveSettings', { claudePath: $('#st-claude').value.trim() || 'claude', maxConcurrency: numv('st-conc', 2, 1, 8), maxRuns: numv('st-runs', 30, 1), permissionMode: $('#st-perm').value,
+    budgetUsd: Math.max(0, +$('#st-budgetusd').value || 0), budgetTokens: Math.max(0, +$('#st-budgettok').value || 0), requireApproval: $('#st-approval').checked, notifications: $('#st-notify').checked, stuckMinutes: numv('st-stuck', 5, 1),
+    stallTimeoutMin: numv('st-stall', 10, 1),
     maxAgents: Math.max(1, parseInt($('#st-maxagents').value, 10) || 6), teamChangeApproval: $('#st-tcappr').value === 'auto' ? 'auto' : 'ask',
-    autoCompactPct: Math.max(0, Math.min(95, +$('#st-autocompactpct').value || 0)) }); refresh(); };
+    autoCompactPct: Math.max(0, Math.min(95, +$('#st-autocompactpct').value || 0)) }); refresh(); });
   renderUpdSettings();
   const stAr = $('#st-autorestart');
   if (stAr) stAr.onchange = act(async (ev) => {
@@ -2772,7 +2918,7 @@ function renderUpdSettings() {
 // ---------- shared helpers (used by several views) ----------
 const projLogs = () => logs.filter((l) => l.projectId === ctx.p);
 // ---------- chat: #company room, task threads, working indicator, composer ----------
-const CH = { thread: null, key: '', mi: 0, asks: [] };
+const CH = { thread: null, key: '', mi: 0, asks: [], openChips: new Set() };
 // Chat team scope (t_1158f757): an event belongs to the selected team when its sender or
 // receiver does, or (one lookup) its task's assignee does — that covers human/orchestrator
 // authored comments and questions on this team's tasks. An event with no team node and no
@@ -2788,11 +2934,11 @@ const crossTeamOf = (e) => { const st = sel.chatTeam; if (!st) return null;
   const a = nodeTeamOf(e.who); if (a && a !== st) return a;
   const b = nodeTeamOf(e.to); if (b && b !== st) return b;
   const tt = e.taskId ? taskTeamOf(e.taskId) : null; return tt && tt !== st ? tt : null; };
-const who = (id) => { const n = S.allNodes.find((x) => x.id === id); return n ? { name: n.name, role: n.role, color: agentVar(n.id), bg: roleBg(n.role), ini: Chat.initials(n.name), lead: isLeadRole(n.role) } : id === 'human' ? { name: 'You', role: '', color: 'transparent', ini: '', human: true } : { name: id || 'system', role: '', color: 'var(--bg-hover)', ini: '⚙', sys: true }; };
+const who = (id) => { const n = nodeById(id); return n ? { name: n.name, role: n.role, color: agentVar(n.id), bg: roleBg(n.role), ini: Chat.initials(n.name), lead: isLeadRole(n.role) } : id === 'human' ? { name: 'You', role: '', color: 'transparent', ini: '', human: true } : { name: id || 'system', role: '', color: 'var(--bg-hover)', ini: '⚙', sys: true }; };
 function bubble(e) {
   const link = e.taskId && !CH.thread ? ` data-thread="${e.taskId}"` : ''; const tt = link ? taskTitle(e.taskId) : ''; const tl = link && !e._sameTask ? `<span class="tlink" title="${esc(tt)}">↳ ${esc(tt)}</span>` : '';
   const rep = e.count > 1 ? `<span class="repeat" title="repeated ${e.count} times">×${e.count}</span>` : '';
-  if (e.type === 'tool') return `<details class="cchip"><summary>🔧 ${esc(e.label)}</summary><pre>${esc(e.text)}${e.result != null ? '\n→ ' + esc(String(e.result).slice(0, 2000)) : ''}</pre></details>${tl ? `<span class="bubble linked"${link}>${tl}</span>` : ''}<br>`;
+  if (e.type === 'tool') return `<details class="cchip" data-chip="t:${e.at}:${esc(e.label)}"><summary>🔧 ${esc(e.label)}</summary><pre>${esc(e.text)}${e.result != null ? '\n→ ' + esc(String(e.result).slice(0, 2000)) : ''}</pre></details>${tl ? `<span class="bubble linked"${link}>${tl}</span>` : ''}<br>`;
   // One collapsible bubble per subagent (children folded in roomEvents, sub-subagents nested inside):
   // summary header carries description/status/duration/tokens; expanded shows compact child lines.
   if (e.type === 'subagent') {
@@ -2801,8 +2947,8 @@ function bubble(e) {
     const meta = [dur, `tok: ${Subagents.tokensLabel(rec.tokens)}`].filter(Boolean).join(' · ');
     const line = (x) => x.kind === 'tool' ? `<span class="sev-tool">🔧 ${esc(Chat.toolLabel(x.text))}</span>` : x.kind === 'tool_result' ? `<span class="sev-res">→ ${esc(String(x.text).slice(0, 160))}</span>` : esc(String(x.text).slice(0, 160));
     const sevHtml = (ev2) => ev2.events.map((x) => `<div class="sev">${line(x)}</div>`).join('') + (ev2.total > ev2.events.length ? `<div class="sev muted">+ ${ev2.total - ev2.events.length} more event(s)</div>` : '');
-    const childHtml = (e2) => `<details class="cchip subagent child"><summary>↳ 🤖 ${esc((subRecOf(e2.subagentId) || e2).description || 'Subagent')} <span class="substatus ss-${esc((subRecOf(e2.subagentId) || {}).status || 'unknown')}">${esc((subRecOf(e2.subagentId) || {}).status || 'unknown')}</span> <span class="submeta">${esc([Subagents.fmtDuration(Subagents.durationMs(subRecOf(e2.subagentId) || {})), `tok: ${Subagents.tokensLabel((subRecOf(e2.subagentId) || {}).tokens)}`].filter(Boolean).join(' · '))}</span> <span class="subcount">${e2.total}</span></summary><div class="subevents">${sevHtml(e2)}${(e2.children || []).map(childHtml).join('')}</div></details>`;
-    return `<details class="cchip subagent"><summary>🤖 ${esc(rec.description || 'Subagent')} <span class="substatus ss-${esc(rec.status || 'unknown')}">${esc(rec.status || 'unknown')}</span> <span class="submeta">${esc(meta)}</span> <span class="subcount">${e.total}</span></summary><div class="subevents">${sevHtml(e)}${(e.children || []).map(childHtml).join('')}</div></details>${tl ? `<span class="bubble linked"${link}>${tl}</span>` : ''}<br>`;
+    const childHtml = (e2) => `<details class="cchip subagent child" data-chip="s:${esc(e2.subagentId)}"><summary>↳ 🤖 ${esc((subRecOf(e2.subagentId) || e2).description || 'Subagent')} <span class="substatus ss-${esc((subRecOf(e2.subagentId) || {}).status || 'unknown')}">${esc((subRecOf(e2.subagentId) || {}).status || 'unknown')}</span> <span class="submeta">${esc([Subagents.fmtDuration(Subagents.durationMs(subRecOf(e2.subagentId) || {})), `tok: ${Subagents.tokensLabel((subRecOf(e2.subagentId) || {}).tokens)}`].filter(Boolean).join(' · '))}</span> <span class="subcount">${e2.total}</span></summary><div class="subevents">${sevHtml(e2)}${(e2.children || []).map(childHtml).join('')}</div></details>`;
+    return `<details class="cchip subagent" data-chip="s:${esc(e.subagentId)}"><summary>🤖 ${esc(rec.description || 'Subagent')} <span class="substatus ss-${esc(rec.status || 'unknown')}">${esc(rec.status || 'unknown')}</span> <span class="submeta">${esc(meta)}</span> <span class="subcount">${e.total}</span></summary><div class="subevents">${sevHtml(e)}${(e.children || []).map(childHtml).join('')}</div></details>${tl ? `<span class="bubble linked"${link}>${tl}</span>` : ''}<br>`;
   }
   if (e.type === 'question') return `<div class="bubble question" data-iid="${e.inboxId}">❓ <b>Question for you</b>${tl}<br>${esc(e.text)}<br>${e.choices.map((c) => `<button class="primary ch-choice" data-v="${esc(c)}">${esc(c)}</button>`).join('')}<textarea class="ch-ans" rows="1" placeholder="Or type an answer"></textarea><button class="ch-send">Answer</button></div>`;
   const ico = (p) => `<svg viewBox="0 0 24 24" aria-hidden="true">${p}</svg>`;
@@ -2830,7 +2976,7 @@ const needsYou = () => new Set([...(S.inbox || []).map((i) => i.nodeId), ...CH.a
 // Agents wear a DiceBear face (wiki decision-dicebear-avatars) over their role colour; human/system keep initials/glyph.
 // avatarUri.faceSvg drops DiceBear's coloured background rect so the role token shows behind the face.
 const faceCache = new Map();
-const faceUri = (id, seed) => { seed = seed || ((S.allNodes || []).find((x) => x.id === id) || {}).avatarSeed || id; let u = faceCache.get(seed);
+const faceUri = (id, seed) => { seed = seed || ((nodeById(id) || {}).avatarSeed || id); let u = faceCache.get(seed);
   if (!u) { u = 'data:image/svg+xml;utf8,' + encodeURIComponent(avatarUri.faceSvg(seed));
     faceCache.set(seed, u); }
   return u; };
@@ -2843,7 +2989,7 @@ const bubbleRuns = (items) => { const out = []; items.forEach((it, k) => { it._s
 // One group's name/time header (shared by the full render and the append path, which rebuilds a
 // group's body in place without touching its avatar).
 const groupHeadHtml = (g) => { const w = who(g.who);
-  return `<div class="cname">${esc(w.name)}${w.role ? `<span class="role">${esc(w.role)}</span>` : ''}${w.human ? '' : vbadge((S.allNodes || []).find((n) => n.id === g.who))}<time>${new Date(g.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time></div>`; };
+  return `<div class="cname">${esc(w.name)}${w.role ? `<span class="role">${esc(w.role)}</span>` : ''}${w.human ? '' : vbadge(nodeById(g.who))}<time>${new Date(g.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time></div>`; };
 // data-cnt = event count of the group (repeat-collapsed bubbles carry it in .count) — the append
 // path slides the window from the front in whole groups and needs the count to keep the books.
 const renderGroups = (events, working) => { const ask = needsYou(); return mergeGroups(Chat.group(events)).map((g) => { const w = who(g.who); const cnt = g.items.reduce((a, it) => a + (it.count || 1), 0);
@@ -2868,6 +3014,9 @@ const chatGrow = () => { CH.win = (CH.win || Chat.PAGE) + Chat.PAGE; chatSched.f
 $('#chat-room').addEventListener('scroll', () => { const room = $('#chat-room');
   if (room.scrollHeight - room.scrollTop - room.clientHeight < 40) { CH.pendingNew = 0; if ((CH.win || Chat.PAGE) > Chat.PAGE) { CH.win = Chat.PAGE; chatSched.force(); } updateNewPill(); }
   else if (room.scrollTop < 80 && CH.ev && CH.ev.length > (CH.win || Chat.PAGE)) chatGrow(); });
+// toggle does not bubble; capture on the tab (room + thread panel) so expanded tool/subagent
+// chips keep their state across the streaming redraws (restoreChips re-applies the Set).
+$('#tab-chat').addEventListener('toggle', (e) => { const d = e.target; if (!(d instanceof HTMLDetailsElement) || !d.dataset.chip) return; if (d.open) CH.openChips.add(d.dataset.chip); else CH.openChips.delete(d.dataset.chip); }, true);
 // Skip-no-op renders (t_9d92c3d3), counters since t_e116438b: the room redraws only when a
 // chat-relevant event moved the epoch — an O(1) integer check in place of the old per-call
 // Chat.feedKey signature (a JSON.stringify over every log/task/message/inbox/node/agent/run,
@@ -2899,7 +3048,10 @@ function renderChatBody() {
   CH.ev = ev;
   CH.asks = ev.filter((e) => e.type === 'question').map((e) => e.who);
   const workingT = sel.chatTeam ? new Set([...working].filter((id) => teamScoped(sel.chatTeam, id))) : working;
-  $('#chat-typing').innerHTML = [...workingT].map((id) => { const wk = wakeLabel(id); return `<span class="typing"><span class="spin"></span>${esc(clipText(wk || `${who(id).name} is working`, 64))}<span class="dots"></span></span>`; }).join(' · ');
+  // Same-string rewrites still destroy + recreate the strip's nodes every draw (a repaint of the
+  // header each streaming tick) — write only when the content actually changed.
+  const typingHtml = [...workingT].map((id) => { const wk = wakeLabel(id); return `<span class="typing"><span class="spin"></span>${esc(clipText(wk || `${who(id).name} is working`, 64))}<span class="dots"></span></span>`; }).join(' · ');
+  if (CH.typingKey !== typingHtml) { CH.typingKey = typingHtml; $('#chat-typing').innerHTML = typingHtml; }
   renderYourTurn(ev);
   const room = $('#chat-room'); const atBottom = room.scrollHeight - room.scrollTop - room.clientHeight < 40;
   const prevH = room.scrollHeight, prevTop = room.scrollTop;
@@ -2933,8 +3085,18 @@ function renderChatBody() {
     }
   }
   CH.stamp = stamp; CH.workKey = workKey;
-  CH.evFp = page.items.map((e) => Chat.eventFp(e, subRecOf));
-  room.innerHTML = page.items.length ? (page.hidden ? `<button id="chat-older" class="olderbar linklike">↑ ${page.hidden} earlier message${page.hidden === 1 ? '' : 's'} — scroll up or click to load</button>` : '') + renderGroups(page.items, workingT)
+  // Progressive first paint (t_7e53747c): the cold render of a full page (100 events, fat board)
+  // measured 87ms under load — over the 50ms bar. Split at a GROUP boundary (Chat.group is what
+  // renderGroups applies anyway, so two half-renders group exactly like one) and prepend the
+  // older half on the next frame: the newest groups — what the user came to read — paint first.
+  const split = Chat.splitPage(page.items);
+  const headItems = split && split.head, tailItems = split ? split.tail : page.items;
+  const headFps = split ? split.head.map((e) => Chat.eventFp(e, subRecOf)) : null;
+  const tailFps = tailItems.map((e) => Chat.eventFp(e, subRecOf));
+  CH.evFp = tailFps;
+  CH.renderGen = (CH.renderGen || 0) + 1;
+  const myGen = CH.renderGen;
+  room.innerHTML = page.items.length ? (page.hidden ? `<button id="chat-older" class="olderbar linklike">↑ ${page.hidden} earlier message${page.hidden === 1 ? '' : 's'} — scroll up or click to load</button>` : '') + renderGroups(tailItems, workingT)
     : sel.chatTeam ? '<p class="muted logempty" data-testid="chat-empty-team">No messages for this team.</p>'
     : S.team.nodes.length ? `<div class="cempty"><svg class="brandmark big" viewBox="0 0 32 32" aria-hidden="true"><path d="M23 9A10 10 0 1 0 23 23" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/><g fill="currentColor"><circle cx="23" cy="9" r="3.6"/><circle cx="6" cy="16" r="3.6"/><circle cx="23" cy="23" r="3.6"/></g></svg><b>#company is quiet</b>Type a goal below, or @mention an agent (e.g. <code>@${esc(S.team.nodes[0].name)} write hello.txt</code>).</div>` : '<div class="cempty"><svg class="brandmark big" viewBox="0 0 32 32" aria-hidden="true"><path d="M23 9A10 10 0 1 0 23 23" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/><g fill="currentColor"><circle cx="23" cy="9" r="3.6"/><circle cx="6" cy="16" r="3.6"/><circle cx="23" cy="23" r="3.6"/></g></svg><b>No team yet</b>Create your team in the Team tab (or use the first-run guide), then chat with it here.</div>';
   if (atBottom) { CH.win = Chat.PAGE; room.scrollTop = room.scrollHeight; repinBottom(room); CH.pendingNew = 0; }
@@ -2944,13 +3106,51 @@ function renderChatBody() {
   updateNewPill();
   syncThreadPanel(ev, workingT);
   bindChatBubbles($('#tab-chat'));
+  if (headItems) {
+    // The older half goes in across frames, adaptively chunked: one big rAF still measured 60ms
+    // (a long task wherever it runs). Each frame builds+inserts as many groups as fit ~24ms,
+    // grows the books by exactly what it inserted, and re-anchors; a superseded generation stops
+    // early — the next draw heals the remaining books (a short books list plans a rebuild).
+    const endTop = room.scrollTop, endH = room.scrollHeight; // phase-A end state for the re-anchor
+    const groups2 = split.headGroups; const perGroupFps = groups2.map((grp) => grp.items.map((e) => Chat.eventFp(e, subRecOf)));
+    let gi = 0, chunk = 6;
+    const step = () => {
+      if (CH.renderGen !== myGen || gi >= groups2.length) return; // a newer draw owns the room; it heals the books itself
+      const t0 = performance.now();
+      const take = groups2.slice(gi, gi + chunk);
+      const t = document.createElement('template');
+      t.innerHTML = renderGroups(take.flatMap((grp) => grp.items), workingT);
+      const ob2 = $('#chat-older'); const anchor = ob2 ? ob2.nextSibling : room.firstChild;
+      room.insertBefore(t.content, anchor);
+      let fps = CH.evFp;
+      for (let k = take.length - 1; k >= 0; k--) fps = perGroupFps[gi + k].concat(fps);
+      CH.evFp = fps;
+      bindChatBubbles(t);
+      if (room.scrollHeight - room.scrollTop - room.clientHeight < 40) { room.scrollTop = room.scrollHeight; repinBottom(room); }
+      else room.scrollTop = Chat.anchorScroll(endTop, endH, room.scrollHeight);
+      gi += take.length;
+      if (gi < groups2.length) {
+        chunk = Math.max(2, Math.min(24, Math.round(chunk * 24 / Math.max(1, performance.now() - t0))));
+        requestAnimationFrame(step);
+      }
+    };
+    requestAnimationFrame(step);
+  }
 }
 // Thread links and ask-human answer forms ride the bubbles; both paths (full render and tail
 // append) wire them through here — property assignment, so re-binding over old nodes is a no-op.
 // The patch paths must pass a LIVE scope (the fragment before its nodes move into the room, or an
 // in-place rebuilt group): a template drained by appendChild/insertBefore matches nothing and
 // silently leaves the fresh bubbles dead (t_c69c2170).
+// Open chip state (t_h0a1c2f9): a tool/subagent chip the user expanded must survive the room
+// redraws a streaming feed causes — a rebuild used to collapse it every draw, visibly moving the
+// conversation each time. Chips carry a stable data-chip key; the Set is maintained by the
+// delegated toggle listener below and re-applied here.
+function restoreChips(scope) {
+  scope.querySelectorAll('details[data-chip]').forEach((d) => { const on = CH.openChips.has(d.dataset.chip); if (d.open !== on) d.open = on; });
+}
 function bindChatBubbles(scope) {
+  restoreChips(scope);
   scope.querySelectorAll('[data-thread]').forEach((b) => b.onclick = () => { CH.thread = b.dataset.thread; chatSched.force(); });
   scope.querySelectorAll('.bubble.question').forEach((d) => {
     const answer = (v) => act(async () => { if (!v) return; await call('answerInbox', d.dataset.iid, v); refresh(); })();
@@ -2987,6 +3187,7 @@ function applyChatAppend(ev, plan, workingT) {
   if (cut < 0 && alignFrom + alignLen < target.length) cut = alignFrom + alignLen; // fresh events past the drawn stretch
   if (cut < 0) { // nothing to re-render: books unchanged (a no-op or eviction-only draw)
     if (evicted) CH.evFp = CH.evFp.slice(evicted);
+    CH.renderGen = (CH.renderGen || 0) + 1; // owns the room: pending split chunks must stop
     patchChatAvatars(room, workingT);
     finishAppend(room, ev, win, ob, workingT);
     return true;
@@ -3005,6 +3206,7 @@ function applyChatAppend(ev, plan, workingT) {
   bindChatBubbles(t.content); // bind BEFORE the insert moves the nodes out — a drained template matches nothing
   room.appendChild(t.content);
   CH.evFp = keptFps.concat(rebuild.map((e) => Chat.eventFp(e, subRecOf)));
+  CH.renderGen = (CH.renderGen || 0) + 1; // owns the room: pending split chunks must stop
   patchChatAvatars(room, workingT);
   finishAppend(room, ev, win, ob, workingT);
   return true;
@@ -3062,6 +3264,7 @@ function applyChatPrepend(ev, workingT, prevTop, prevH) {
     room.insertBefore(t.content, anchor);
   }
   CH.evFp = target.map((e) => Chat.eventFp(e, subRecOf));
+  CH.renderGen = (CH.renderGen || 0) + 1; // owns the room: pending split chunks must stop
   CH.domWin = win;
   if (ob) { const hidden = ev.length - win; const label = `↑ ${hidden} earlier message${hidden === 1 ? '' : 's'} — scroll up or click to load`;
     if (hidden > 0) { if (ob.textContent !== label) ob.textContent = label; }
@@ -3079,14 +3282,24 @@ function applyChatPrepend(ev, workingT, prevTop, prevH) {
 // Working/needs-you rings live in the group avatars; append/prepend/no-op draws don't touch their
 // HTML, so ring changes (a run starting or stopping) patch class-wise here. Group authorship comes
 // from the books (CH.evFp mirrors the DOM), so legacy groups without data-who are covered too.
+// Off-screen groups are skipped: a DOM write inside a content-visibility:auto group drops its
+// remembered intrinsic size, and the skip pass then collapses the group to the 72px placeholder —
+// the whole conversation below jumps (measured -410px layout shifts seconds after a run flip,
+// t_h0a1c2f9). Off-screen rings can't be seen anyway; the next draw that finds them on screen
+// patches them.
 function patchChatAvatars(room, workingT) {
   const ask = needsYou(); const fps = CH.evFp || [];
+  const vr = typeof room.getBoundingClientRect === 'function' ? room.getBoundingClientRect() : null; // one forced layout; the per-group reads after it are clean
   let i = 0;
   room.querySelectorAll('.cgroup').forEach((g) => {
     const cnt = +g.dataset.cnt || 1;
     const id = i < fps.length ? fps[i].slice(0, fps[i].indexOf('|')) : g.dataset.who || null;
     i += cnt;
     if (!id) return;
+    if (vr && typeof g.getBoundingClientRect === 'function') {
+      const r = g.getBoundingClientRect();
+      if (r.bottom < vr.top - 200 || r.top > vr.bottom + 200) return;
+    }
     const av = g.querySelector('.avatar'); if (!av) return;
     const w = workingT.has(id), a = ask.has(id);
     if (av.classList.contains('working') !== w) av.classList.toggle('working', w);
@@ -3107,19 +3320,37 @@ function syncThreadPanel(ev, workingT) {
   if (key === CH.thKey) return;
   CH.thKey = key;
   th.innerHTML = `<div class="chat-head"><b>🧵 ${esc(t.title)}</b><span class="role">${esc(t.status)}</span><span class="spacer"></span><button id="ch-close" title="Close thread">✕</button></div><div id="chat-threadroom">${tev.length ? renderGroups(tev, wt) : '<p class="muted" style="padding:16px">Nothing in this thread yet.</p>'}</div>`;
+  restoreChips(th); // the panel rebuilds as its thread streams: keep the user's expanded chips open
   $('#ch-close').onclick = () => { CH.thread = null; CH.thKey = null; chatSched.force(); };
 }
+// IME state of the composer (Vietnamese Telex and friends compose straight into the textarea):
+// while a composition is live, Enter/Tab/arrows belong to the IME, and acting on them sends
+// unfinalized text and clears the field out from under the IME — the IME's restored fragment then
+// goes out as a stray second message (t_h0a1c2fa: "đang làm gì v" followed by a lone "v" 52ms
+// later, straight from the real store). The wiring sits with the other input listeners below.
+let chatComposing = false;
 function chatPreview() {
-  const v = $('#chat-input').value; const p = Chat.parseComposer(v, S.team.nodes); const pv = $('#chat-preview');
-  pv.textContent = Chat.preview(p); pv.className = p ? p.kind : 'muted';
-  const ms = Chat.mentionMatches(v, S.team.nodes); const box = $('#chat-mentions'); box.classList.toggle('hidden', !ms || !ms.length);
-  CH.mi = Math.min(CH.mi, Math.max(0, (ms || []).length - 1));
-  box.innerHTML = (ms || []).map((n, i) => `<div data-name="${esc(n.name)}" class="${i === CH.mi ? 'sel' : ''}"><span class="avatar${isLeadRole(n.role) ? ' is-lead' : ''}" style="background:${roleBg(n.role)}">${avatarBody(n.id, who(n.id))}</span>${esc(n.name)} <span class="role">${esc(n.role)}</span></div>`).join('');
-  box.querySelectorAll('div').forEach((d) => d.onmousedown = (e) => { e.preventDefault(); pickMention(d.dataset.name); });
+  const i = $('#chat-input'); const v = i.value; const p = Chat.parseComposer(v, S.team.nodes); const pv = $('#chat-preview');
+  // Guarded writes: chatPreview runs on every keystroke AND mid-composition — same-value
+  // textContent/className assignments still dirty the composer's layout each keystroke, and a
+  // mentions-box rebuild the user can't see is churn on top (same finding as the header pills).
+  const ptxt = Chat.preview(p); if (pv.textContent !== ptxt) pv.textContent = ptxt;
+  const pcls = p ? p.kind : 'muted'; if (pv.className !== pcls) pv.className = pcls;
+  const ms = Chat.mentionMatches(v, S.team.nodes); const box = $('#chat-mentions'); const open = !!(ms && ms.length);
+  box.classList.toggle('hidden', !open);
+  if (open) {
+    CH.mi = Math.min(CH.mi, Math.max(0, ms.length - 1));
+    const html = ms.map((n, i) => `<div data-name="${esc(n.name)}" class="${i === CH.mi ? 'sel' : ''}"><span class="avatar${isLeadRole(n.role) ? ' is-lead' : ''}" style="background:${roleBg(n.role)}">${avatarBody(n.id, who(n.id))}</span>${esc(n.name)} <span class="role">${esc(n.role)}</span></div>`).join('');
+    if (box.innerHTML !== html) {
+      box.innerHTML = html;
+      box.querySelectorAll('div').forEach((d) => d.onmousedown = (e) => { e.preventDefault(); pickMention(d.dataset.name); });
+    }
+  }
 }
 function pickMention(name) { const i = $('#chat-input'); i.value = i.value.replace(/@(\w*)$/, '@' + name + ' '); i.focus(); CH.mi = 0; chatPreview(); }
 async function chatSend() {
-  const i = $('#chat-input'); const p = Chat.parseComposer(i.value, S.team.nodes); if (!p) return;
+  const i = $('#chat-input'); if (chatComposing) return; // the Send button can click mid-composition too — same stray-message risk as Enter
+  const p = Chat.parseComposer(i.value, S.team.nodes); if (!p) return;
   if (p.kind === 'error') return chatPreview();
   if (chatAtts.some((a) => !a.path)) return; // blocked until every chip saved (a failed chip must be removed first)
   const atts = chatAtts.length ? chatAtts.map(({ path, name, mime, size }) => ({ path, name, mime, size })) : null;
@@ -3134,7 +3365,10 @@ async function chatSend() {
   refresh();
 }
 $('#chat-input').addEventListener('input', chatPreview);
+$('#chat-input').addEventListener('compositionstart', () => { chatComposing = true; });
+$('#chat-input').addEventListener('compositionend', () => { chatComposing = false; chatPreview(); });
 $('#chat-input').addEventListener('keydown', (e) => {
+  if (e.isComposing || e.keyCode === 229) return; // IME composition: Enter commits the text, it must not also send it (t_h0a1c2fa)
   const box = $('#chat-mentions'); const open = !box.classList.contains('hidden'); const items = box.querySelectorAll('div');
   if (open && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) { e.preventDefault(); CH.mi = (CH.mi + (e.key === 'ArrowDown' ? 1 : items.length - 1)) % items.length; chatPreview(); }
   else if (open && (e.key === 'Tab' || e.key === 'Enter')) { e.preventDefault(); pickMention(items[CH.mi].dataset.name); }
@@ -3199,8 +3433,7 @@ composerEl.addEventListener('drop', (e) => { e.preventDefault(); composerEl.clas
 // ---------- human inbox (ask_human questions + approvals) ----------
 const ibOpen = new Map();
 function renderInbox() {
-  const items = [...(S.inbox || [])].sort((a, b) => (b.createdAt || b.at || 0) - (a.createdAt || a.at || 0)); const n = items.length ? String(items.length) : '';
-  $('#inbox-tab-badge').textContent = n;
+  const items = [...(S.inbox || [])].sort((a, b) => (b.createdAt || b.at || 0) - (a.createdAt || a.at || 0)); // the badge itself rides renderChrome (renderInboxBadge)
   const taskTitle = (id) => (S.tasks.find((t) => t.id === id) || {}).title || '';
   $('#inboxlist').innerHTML = items.length ? items.map((i) => `<div class="inboxitem" data-iid="${i.id}">
     <div class="ib-head" role="button" tabindex="0" aria-expanded="false">${S.allNodes.some((x) => x.id === i.nodeId) ? avatarHtml(i.nodeId, new Set(), new Set([i.nodeId])) : '<div class="avatar" style="background:#3a3f4b" title="System">⚙</div>'}<div class="ib-main"><div class="ib-q">${esc(i.question)}</div><small class="ib-meta">${i.kind === 'approval' ? 'Approval' : 'Question'} · ${S.allNodes.some((x) => x.id === i.nodeId) ? esc(nodeName(i.nodeId)) : 'System'}${i.taskId ? ' · ' + esc(taskTitle(i.taskId)) : ''}</small></div><small class="ib-time" title="${esc(new Date(i.at).toLocaleString())}">${esc(agoTxt(i.at) || 'just now')}</small></div>
@@ -3241,7 +3474,7 @@ squad.on('runtime-available', onRtaPush); squad.on('runtimeAvailable', onRtaPush
 // Streamed log lines (t_8d586961): pushes arrive one per tool event; a full renderLog per line
 // rebuilt the whole window each time (~56ms at profile sizes). Coalesce to one flush per frame
 // and, while the view is pinned to the live tail with trivial filters, append only the new rows.
-let logFlushQueued = false;
+let logFlushQueued = false, logTailDirty = false;
 function scheduleLogRender() {
   if (document.hidden) return; // hidden window: rAF is stalled and the fallback would only build DOM nobody sees; the catch-up refresh on visible redraws the tail
   if (logFlushQueued) return; logFlushQueued = true;
@@ -3250,7 +3483,20 @@ function scheduleLogRender() {
   setTimeout(flush, 150); // rAF can starve in occluded windows; never let the tail stall
 }
 function flushLogTail() {
-  if ($('#tab-obs').classList.contains('active') && !appendLogTail()) renderLog();
+  // One malformed streamed line must not kill the scheduler: the throw would otherwise recur on
+  // every queued flush, taking renderLive's task-detail refresh down with it.
+  try {
+    if ($('#tab-obs').classList.contains('active') && !appendLogTail()) {
+      const box = $('#log');
+      // Reading history while the stream runs: the user is scrolled away from the tail, so every
+      // flush would rebuild the whole window (~56ms at profile sizes) only to anchor-scroll back
+      // to the same rows. Defer the rebuild — the scroll handler rebuilds once when the tail
+      // comes back into view (any explicit renderLog also clears it via its stamp).
+      if (box && renderLog.winItems && box.scrollTop + box.clientHeight < box.scrollHeight - 20) logTailDirty = true;
+      else renderLog();
+    }
+  }
+  catch (e) { console.warn('log pane flush failed', e); }
   renderLive(); // board task-detail pane follows the stream even while Obs is hidden
 }
 // Fast append path: only when the DOM is the plain live tail (no search, all levels on, no subagent
@@ -3265,13 +3511,15 @@ function appendLogTail() {
   if (box.scrollTop + box.clientHeight < box.scrollHeight - 20 || !$('#logauto').checked) return false;
   const f = $('#logfilter').value;
   const teamIds = sel.logTeam ? new Set(logTeamNodes().map((n) => n.id)) : null;
-  const fresh = logs.filter((l) => l.projectId === ctx.p && (!teamIds || teamIds.has(l.nodeId)) && (!f || l.nodeId === f) && (l._seq === undefined || l._seq > logTailSeq));
-  logTailSeq = logSeq;
+  const fresh = logs.filter((l) => l && l.projectId === ctx.p && (!teamIds || teamIds.has(l.nodeId)) && (!f || l.nodeId === f) && (l._seq === undefined || l._seq > logTailSeq));
+  // logTailSeq is NOT advanced here: a throw inside the row build below would otherwise stamp the
+  // cursor past lines the DOM never received, hiding them for good. It moves only after the append
+  // succeeded (or when nothing new needed drawing); a bail just falls back to a full render.
   // Lines injected out-of-band (no _seq — tests, restored sessions) were never counted by the
   // cursor; claiming them here would stamp a signature the DOM never rendered and hide them for
   // good. Same for subagent lines: they nest into blocks only a full render can build.
   if (fresh.some((l) => l._seq === undefined || l.subagentId)) return false;
-  if (!fresh.length) { logSig = logKey(); return true; } // only already-rendered or filtered-out lines arrived
+  if (!fresh.length) { logTailSeq = logSeq; logSig = logKey(); return true; } // only already-rendered or filtered-out lines arrived
   const added = fresh;
   added.sort((a, b) => (a.at || 0) - (b.at || 0));
   if (added[0].at < logTailAt) return false; // straggler older than the tail: let renderLog re-sort
@@ -3288,6 +3536,7 @@ function appendLogTail() {
     olderBar.textContent = `↑ ${hidden} earlier line${hidden === 1 ? '' : 's'} — scroll up or click to load`;
   } else renderLog.winItems += added.length;
   renderLog.total += added.length;
+  logTailSeq = logSeq;
   logTailAt = added[added.length - 1].at;
   logSig = logKey();
   box.scrollTop = box.scrollHeight;
@@ -3296,7 +3545,7 @@ function appendLogTail() {
 }
 // Direct 'log' pushes now carry only the low-volume paths (self-update watcher); orchestrator log
 // lines arrive batched on the 'delta' channel above (t_d22a6cf2).
-squad.on('log', (l) => { l._seq = ++logSeq; logs.push(l); if (logs.length > 8000) logs.splice(0, 1000); if (l.projectId === ctx.p) chatBump(); scheduleLogRender(); });
+squad.on('log', (l) => { if (!l || typeof l !== 'object') return; l._seq = ++logSeq; logs.push(l); if (logs.length > 8000) logs.splice(0, 1000); if (l.projectId === ctx.p) chatBump(); scheduleLogRender(); });
 // In-app toast for orchestrator notifications (desktop notifications are shown by the main process).
 squad.on('notify', (n) => {
   if (n.projectId && n.projectId !== ctx.p) return;
@@ -3329,7 +3578,7 @@ document.addEventListener('keydown', (e) => {
 // renderer patches its local store and re-renders the visible views; a seq gap or resync marker
 // falls back to a full getAll pull (wiki rule 5). The 2s tick below stays as the backstop for the
 // sections deltas do not cover.
-let lastDeltaSeq = null, lastDeltaProject = null, deltaRaf = 0;
+let lastDeltaSeq = null, lastDeltaProject = null;
 // Log-line ingest shared by both paths (t_d22a6cf2): batched deltas for the active project and the
 // cross-project batches below keep the old 'log'-channel semantics — lines from every project
 // accumulate (tagged with projectId), only the active project's redraw the views.
@@ -3341,6 +3590,16 @@ function ingestLogs(lines) {
   if (!lines[0] || !lines[0].projectId || lines[0].projectId === ctx.p) chatBump();
   scheduleLogRender();
 }
+// Main render path (t_d0a816d9): every same-project delta batch used to end in a renderAll one
+// rAF later — while agents stream, batches arrive several per frame and the whole chrome + active
+// view rebuild at up to 60/s. The same event-driven scheduler the chat room uses coalesces the
+// burst to one draw per minMs with a guaranteed trailing edge, so the last patch always lands.
+const renderSched = RenderSched.create({
+  minMs: 200,
+  hidden: () => document.hidden,
+  gate: () => true, // the chrome renderSched draws is on screen on every tab
+  draw: () => renderAll(), // late-binding: e2e/perf harnesses wrap the global by name
+});
 squad.on('delta', (b) => {
   if (!b || !Array.isArray(b.deltas)) return;
   if (b.projectId && b.projectId !== ctx.p) {
@@ -3362,16 +3621,16 @@ squad.on('delta', (b) => {
     if (d.type === 'task' || d.type === 'messages' || d.type === 'inbox' || d.type === 'orch') chatBump();
   }
   if (b.v && lastV) Object.assign(lastV, b.v); // keep the version poll quiet about what we already applied
-  if (!deltaRaf) deltaRaf = requestAnimationFrame(() => { deltaRaf = 0; renderAll(); });
+  renderSched.bump(); // coalesced full draw: the state is patched, the pixels follow on the scheduler's trailing edge
 });
 squad.on('state', (st) => { if (st.projectId && st.projectId !== ctx.p) { clearTimeout(pendingP); pendingP = setTimeout(async () => { P = await call('listProjects'); renderSidebar(); }, 200); return; } clearTimeout(pending); }); // same-project state arrives as deltas now; cancel a pending pull instead of scheduling one
 // Pause-when-hidden (t_e116438b): while the window is hidden the schedulers arm nothing (rAF is
 // stalled anyway, and DOM built in the dark is wasted work) and the backstop poll sleeps; on show,
 // one catch-up pull plus a chat bump redraw whatever moved while dark. Deltas keep patching S and
-// leave a pending rAF, so every view (not just chat) is current again by the frame after show.
+// bump the schedulers, so every view (not just chat) is current again by the frame after show.
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'hidden') { chatSched.hide(); return; }
-  chatBump(); refresh();
+  if (document.visibilityState === 'hidden') { chatSched.hide(); renderSched.hide(); return; }
+  chatBump(); renderSched.bump(); refresh();
 });
 setInterval(() => { if (S.orch.running && !document.hidden) refresh(); }, 2000); // backstop for the sections deltas do not carry (team/nodes/nstat); version-gated inside refresh, paused while hidden
 refresh().then(() => syncRecovery()); // recovery banner needs a settled ctx.p (t_6911ba60)

@@ -2,6 +2,7 @@
 const { execFileSync, execFile } = require('child_process');
 const path = require('path');
 const fs = require('fs');
+const SB = require('./sandbox');
 
 function git(cwd, args) { return execFileSync('git', args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] }).toString().trim(); }
 
@@ -44,6 +45,8 @@ function linkNodeModules(repoDir, root, dir) {
 function ensureWorktree(repoDir, taskId) {
   let root;
   try { root = git(repoDir, ['rev-parse', '--show-toplevel']); } catch { return { cwd: repoDir, warning: `not a git repo: ${repoDir}, using shared dir` }; }
+  const refuse = SB.refusal(root, 'create a task worktree in');
+  if (refuse) return { cwd: repoDir, warning: refuse }; // sandbox: never place task worktrees outside the test data root (t_8f7605c4)
   const branch = `squad/${taskId}`;
   const dir = path.join(root, '.squad', 'worktrees', taskId);
   try {
@@ -92,6 +95,7 @@ function dirtyMergeMessage(dirty) {
 // git fail around uncommitted work.
 function worktreeMerge(t) {
   const root = rootOf(t); const base = baseOf(root);
+  SB.guardRepo(root, 'auto-merge into'); // sandbox: a harness instance never merges into a real repo (t_8f7605c4)
   let ahead;
   try { ahead = Number(git(root, ['rev-list', '--count', `${base}..${t.worktreeBranch}`])); } catch { ahead = 1; }
   if (ahead === 0) return { base, branch: t.worktreeBranch, merged: false };
@@ -104,6 +108,7 @@ function worktreeMerge(t) {
 
 function worktreeDiscard(t) {
   const root = rootOf(t);
+  SB.guardRepo(root, 'discard a task worktree in');
   try { git(root, ['worktree', 'remove', '--force', t.worktreePath]); } catch (e) { if (fs.existsSync(t.worktreePath)) throw new Error(errOf(e)); }
   try { git(root, ['branch', '-D', t.worktreeBranch]); } catch {}
   return { ok: true };
@@ -170,6 +175,7 @@ function worktreeDirty(wtPath) {
 function removeWorktree(t) {
   const wp = t && t.worktreePath;
   if (!wp || !fs.existsSync(path.join(wp, '.git'))) return { removed: false, absent: true };
+  SB.guardRepo(rootOf(t), 'remove a task worktree in'); // sandbox: retained, never touched (t_8f7605c4)
   if (worktreeDirty(wp)) throw new Error('worktree has uncommitted changes');
   // Drop our own share-links first: `git worktree remove` runs its own safety pass, which still
   // counts the untracked link and refuses without --force (t_1ff80eba). Only ever the link —
@@ -292,19 +298,22 @@ function sweepWorktrees(opts = {}) {
 
 const DU = { TTL_MS: 60_000 };
 const duCache = new Map(); // repo root -> { at, val }
-const duRoots = new Map(); // repoDir -> resolved worktrees root (null when not a repo top-level)
+const duRoots = new Map(); // repoDir -> resolved worktrees root | { bad, at } (failures retry)
+const DU_ROOT_RETRY_MS = 600_000; // a failed `git rev-parse` (repo not born yet) retries after 10 min, not every poll
 // Disk use of a repo's .squad/worktrees: { count, bytes }. bytes via `du -sk` (never follows
 // symlinks, so a linked node_modules costs only the link); cached for a TTL so a header poll
 // cannot hammer the filesystem. Async — callers (IPC) must not block the main process. The root
 // resolution and worktree listing are also behind the TTL now (t_1fb02462): the poll used to run
-// a synchronous `git rev-parse` spawn on the main process every call, rain or shine.
+// a synchronous `git rev-parse` spawn on the main process every call, rain or shine. Failed
+// resolutions retry after DU_ROOT_RETRY_MS instead of caching null forever (t_7e53747c).
 async function diskUsage(repoDir, opts = {}) {
   const ttl = opts.ttlMs ?? DU.TTL_MS;
-  let root = duRoots.get(repoDir);
-  if (root === undefined) {
-    try { root = git(repoDir, ['rev-parse', '--show-toplevel']); } catch { root = null; }
-    duRoots.set(repoDir, root);
+  let entry = duRoots.get(repoDir);
+  if (entry && entry.bad && Date.now() - entry.at > (opts.rootRetryMs ?? DU_ROOT_RETRY_MS)) entry = undefined;
+  if (entry === undefined) {
+    try { entry = git(repoDir, ['rev-parse', '--show-toplevel']); duRoots.set(repoDir, entry); } catch { duRoots.set(repoDir, { bad: true, at: Date.now() }); }
   }
+  const root = entry && !entry.bad ? entry : null;
   if (!root) return { count: 0, bytes: 0 };
   const cached = duCache.get(root);
   if (!opts.force && cached && Date.now() - cached.at < ttl) return cached.val;
