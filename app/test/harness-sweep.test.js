@@ -9,7 +9,16 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const cp = require('child_process');
 const fs = require('fs');
+const os = require('os');
+const path = require('path');
 const HS = require('../src/harness-sweep');
+
+// Private harness-pids dir for THIS file only (same reasoning as harness-reap.test.js): pidsDir()
+// reads AGENTS_SQUAD_REAL_TMP at call time, so a throwaway dir inside the run's private tmp keeps
+// peer sweeps — other test files, app instances booted mid-suite — from reaping our planted runs
+// between "owner dead" and "my sweep asserts the reap" (t_ea6c2c33 gate flake). The run dir goes
+// away with the whole suite run.
+process.env.AGENTS_SQUAD_REAL_TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'squad-hpids-'));
 
 const until = async (fn, ms, every = 60) => {
   const end = Date.now() + ms;

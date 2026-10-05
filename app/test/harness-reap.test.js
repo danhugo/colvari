@@ -10,7 +10,8 @@
 //       identify: a live pid with no marker on it and a marker-shaped but lstart-recycled pid
 //       are skipped (record deleted, nothing signalled), and the sweep's own tree is untouchable.
 // Fixtures spawn through the real marker + recordRun + armParentWatchdog path; the pidfiles land
-// in the shared harness-pids dir, so every planted/fixture runId is namespaced and removed again.
+// in this file's private harness-pids dir (see the AGENTS_SQUAD_REAL_TMP redirect below), so no
+// peer sweeper can judge or reap them.
 // The file skips loudly until src/harness-sweep.js lands so the suite stays green in the interim.
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -21,6 +22,15 @@ const { spawn } = require('node:child_process');
 const pg = require('./harness/procguard');
 
 pg.install();
+
+// Private harness-pids dir for THIS file only: pidsDir() reads AGENTS_SQUAD_REAL_TMP at call
+// time, so pointing it at a throwaway dir inside the run's private tmp isolates our records from
+// every other sweeper that shares the real system tmpdir — peer test files, and any app instance
+// that boots mid-suite (app-kill-relaunch boots two, and the live app reboots too). A peer sweep
+// reaping our orphan between "owner dead" and "my sweep" used to fail the report asserts (the
+// t_ea6c2c33 gate flakes); with a private dir my sweeps are the only sweeps that can judge them.
+// The run dir is removed with the whole suite run, records and all (fixtures want no survival).
+process.env.AGENTS_SQUAD_REAL_TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'squad-hpids-'));
 
 const SWEEP = path.join(__dirname, '..', 'src', 'harness-sweep.js');
 const HAS_SWEEP = fs.existsSync(SWEEP);
@@ -95,12 +105,25 @@ async function launchFixture(name, { watch = true } = {}) {
   // zombie keeps answering signal 0 with its old lstart, and the sweep would legitimately
   // read that as "owner still alive" (in production the driver is long reaped).
   const driverExited = new Promise((resolve) => driver.once('exit', resolve));
-  assert.ok(await until(() => fs.existsSync(info), 6000), `driver fixture (${name}) never spawned a child`);
-  const { child } = JSON.parse(fs.readFileSync(info, 'utf8'));
-  assert.ok(await until(() => fs.existsSync(path.join(d, 'ready')), 6000), `stub child (${name}) never reported ready`);
-  const pidfile = hs().pidFileOf(runId);
-  assert.ok(fs.existsSync(pidfile), `recordRun (${name}) wrote no pidfile at ${pidfile}`);
-  return { d, driver, driverExited, child, runId, pidfile };
+  try {
+    // Wait for PARSEABLE info, not mere existence: writeFileSync's open(truncate)->write gap is
+    // real under a loaded machine, and an empty read here threw before the caller's try/finally,
+    // leaking the driver and its detached stub (t_ea6c2c33 suite flake).
+    const readInfo = () => { try { return JSON.parse(fs.readFileSync(info, 'utf8')); } catch { return null; } };
+    assert.ok(await until(() => readInfo(info), 6000), `driver fixture (${name}) never spawned a child`);
+    const { child } = readInfo(info);
+    assert.ok(await until(() => fs.existsSync(path.join(d, 'ready')), 6000), `stub child (${name}) never reported ready`);
+    const pidfile = hs().pidFileOf(runId);
+    assert.ok(fs.existsSync(pidfile), `recordRun (${name}) wrote no pidfile at ${pidfile}`);
+    return { d, driver, driverExited, child, runId, pidfile };
+  } catch (e) {
+    // Nothing returned -> the caller's finally cannot clean up: kill the driver here, and let
+    // the sweep reap the stub through its own pidfile record (it records before reporting ready).
+    killQuiet(driver.pid);
+    try { await Promise.race([driverExited, until(() => false, 1000)]); } catch { /* best effort */ }
+    try { hs().sweep({ log: () => {} }); } catch { /* best effort */ }
+    throw e;
+  }
 }
 
 // SIGKILL the fixture driver and wait until it is fully reaped (kill(0) = ESRCH, not zombie).

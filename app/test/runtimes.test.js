@@ -60,6 +60,7 @@ test('codex gets board MCP via -c overrides and honors model', () => {
 // bin path: deriveRuntimeProfile caches per binary+version.
 const path = require('node:path');
 const fs = require('node:fs');
+const os = require('node:os');
 const realHelpycodeTop = fs.readFileSync(path.join(__dirname, 'fixtures/help-helpycode-real-top.txt'), 'utf8');
 const realHelpycodeRun = fs.readFileSync(path.join(__dirname, 'fixtures/help-helpycode-real-run.txt'), 'utf8');
 const probeLines = fs.readFileSync(path.join(__dirname, 'fixtures/probe-helpycode-real.jsonl'), 'utf8');
@@ -260,8 +261,31 @@ test('send_message to "human" says how to reply', () => {
   assert.match(src, /To reply to the human, put the reply in your final answer, or use ask_human/);
 });
 
-test('helpycode parseEvent with env finds the binary under a Finder-like PATH', { skip: !require('child_process').spawnSync('which', ['helpycode']).stdout.length }, () => {
-  const dir = path.dirname(require('child_process').spawnSync('which', ['helpycode'], { encoding: 'utf8' }).stdout.trim());
+test('helpycode parseEvent with env finds the binary under a Finder-like PATH', () => {
+  // The binary resolves from the RUN env's PATH (opts.env), never the test process's: a stub
+  // `helpycode` living ONLY on opts.env.PATH proves it. The stub answers introspection instantly —
+  // the real CLI's help/models/probe calls each carry a 15s timeout and starve out on a loaded
+  // machine (t_ea6c2c33 gate flake) without adding any resolution coverage.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'squad-pathbin-'));
+  const shim = path.join(dir, 'helpycode');
+  fs.writeFileSync(shim, `#!${process.execPath}
+const arg = process.argv[2] || '';
+if (arg === '--version') { console.log('stub 0.0.1'); process.exit(0); }
+if (arg === '--help') {
+  console.log('Commands:');
+  console.log('  helpycode run [message..]   run HelpyCode with a message');
+  console.log('  helpycode models            list available models');
+  console.log('Options:');
+  console.log('  --format <format>  output format (default: json)');
+  console.log('  --model <model>    model to use');
+  process.exit(0);
+}
+if (arg === 'models') { console.log('stub-model-x'); process.exit(0); }
+console.log(JSON.stringify({ type: 'step_start', sessionID: 's1' }));
+console.log(JSON.stringify({ type: 'text', part: { type: 'text', text: 'HELLO' } }));
+console.log(JSON.stringify({ type: 'step_finish', sessionID: 's1' }));
+`);
+  fs.chmodSync(shim, 0o755);
   const saved = process.env.PATH; process.env.PATH = '/usr/bin:/bin';
   try {
     const ev = { type: 'text', part: { text: 'HELLO' } };
