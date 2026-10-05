@@ -63,13 +63,19 @@ function interruptedFromReap(store, killed) {
 }
 
 // 'ps -o time=' CPU time, e.g. '12:05.44' (MM:SS.cc) or '1:02:03' (H:MM:SS) -> ms.
+// Linux reports day-scale CPU as '2-03:12:45' (DD-HH:MM:SS): without parsing the day
+// segment, Number('2-03') is NaN and every runAlive() cpuMs comparison is false — the
+// CPU-liveness check silently dies and a CPU-busy run reads as stalled.
 function stimeToMs(s) {
   const seg = String(s || '').trim().split(':');
   if (!seg[seg.length - 1]) return null;
+  let days = 0;
+  const dm = /^(\d+)-/.exec(seg[0]);
+  if (dm) { days = Number(dm[1]); seg[0] = seg[0].slice(dm[0].length); }
   const last = seg.pop().split('.');
   const secs = Number(last[0]) + Number('0.' + (last[1] || '0'));
   const mins = Number(seg.pop() || 0), hrs = Number(seg.pop() || 0);
-  return Math.round(((hrs * 60 + mins) * 60 + secs) * 1000);
+  return Math.round((((days * 24 + hrs) * 60 + mins) * 60 + secs) * 1000);
 }
 
 // CLAUDE_AUTOCOMPACT_PCT_OVERRIDE value for a configured percent. claude 2.1.284 parses the env as a

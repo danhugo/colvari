@@ -133,7 +133,7 @@ const INSTRUMENT = `
   // Ring that evicts the OLDEST entry once full: frames/renders must always cover "now",
   // otherwise a long window fills the buffer with early samples and every peek starves.
   const ring = (a, x, cap = 6000) => { if (a.length >= cap) a.shift(); a.push(x); };
-  for (const name of ['renderSidebar','renderGraph','renderPreflightBar','renderNodeForm','renderBoard','renderWiki','renderObs','renderSettings','renderHeader','renderSelfUpdate','renderAlerts','renderUsage','renderOverview','renderInbox','renderGuide','renderChat','renderLog','renderLive']) {
+  for (const name of ['renderSidebar','renderGraph','renderPreflightBar','renderNodeForm','renderBoard','renderWiki','renderObs','renderSettings','renderHeader','renderSelfUpdate','renderAlerts','renderUsage','renderUsageNow','renderOverview','renderInbox','renderGuide','renderChat','renderLog','renderLive']) {
     const f = window[name];
     if (typeof f !== 'function') continue;
     P.renders[name] = [];
