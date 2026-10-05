@@ -74,6 +74,24 @@ process.env.AGENTS_SQUAD_DEV = '0';
 process.on('exit', () => { try { fs.rmSync(process.env.AGENTS_SQUAD_PROJECT, { recursive: true, force: true, maxRetries: 3 }); } catch {} });
 if (!process.env.AGENTS_SQUAD_PROJECT.startsWith(os.tmpdir())) throw new Error('[realperf] AGENTS_SQUAD_PROJECT must be an isolated temp root');
 
+// Sandbox (t_8f7605c4): every agent works in a private clone of a throwaway git repo inside the
+// data root — never in a shared non-repo cwd (which once let real helpycode agents wander into
+// the developer's real repo and land seed commits on its master). The startup gate below
+// hard-fails the run unless every node's workdir and git root resolve inside the data root.
+const SB = require(path.join(APP, 'test', 'harness', 'sandbox'));
+const AGENT_WS = Array.from({ length: AGENTS }, (_, i) => SB.agentWorkspace(process.env.AGENTS_SQUAD_PROJECT, i));
+function assertAgentSandbox(seeded) {
+  const { Store } = require(path.join(APP, 'src/store.js'));
+  const store = new Store(seeded.dir);
+  const nodes = store.read(store.teamFile(), { nodes: [] }).nodes || [];
+  if (nodes.length < AGENTS) throw new Error(`[sandbox] only ${nodes.length}/${AGENTS} nodes found after seed`);
+  for (const n of nodes) {
+    const wd = path.resolve(n.workdir || seeded.dir);
+    SB.assertSandboxed(process.env.AGENTS_SQUAD_PROJECT, [{ label: `node ${n.name} workdir`, path: wd }]);
+    if (n.workdir) SB.assertGitInside(process.env.AGENTS_SQUAD_PROJECT, wd, `node ${n.name}`);
+  }
+}
+
 // Teardown note: call('stop') can hang forever when real helpycode children ignore its kill
 // (observed twice) — stopOrchestrator below time-boxes it; Electron's exit reaps the child
 // tree (verified: killing a wedged instance left zero orphan helpycode processes), and a
@@ -430,7 +448,7 @@ async function seed() {
     switchTo({ p: p.id }); await w(600); await refresh();
     await call('saveSettings', { helpycodePath: ${jsq(HCPATH)}, useWorktrees: false, maxConcurrency: ${AGENTS}, maxRuns: ${AGENTS * TASKS_PER_AGENT + 2}, requireApproval: false, stallTimeoutMin: ${STALL_MIN} });
     const nodes = [];
-    for (let i = 0; i < ${AGENTS}; i++) nodes.push(await call('addNode', { name: 'Real-' + (i + 1), role: 'Dev', x: 90 + (i % 3) * 240, y: 110 + Math.floor(i / 3) * 190, runtime: 'helpycode', model: ${jsq(MODEL)} }));
+    for (let i = 0; i < ${AGENTS}; i++) nodes.push(await call('addNode', { name: 'Real-' + (i + 1), role: 'Dev', x: 90 + (i % 3) * 240, y: 110 + Math.floor(i / 3) * 190, runtime: 'helpycode', model: ${jsq(MODEL)}, workdir: ${jsq(AGENT_WS[i])} }));
     for (const n of nodes.slice(1)) await call('addEdge', nodes[0].id, n.id, 'assign');
     await refresh();
     return { project: ctx.p, dir: S.dir, nodes: nodes.map((n) => n.id) };
@@ -562,6 +580,7 @@ async function main() {
   if (maxLoad > 0 && LOAD_START[0] > maxLoad) throw new Error(`load1m ${LOAD_START[0].toFixed(1)} > PERF_MAX_LOAD ${maxLoad} — rerun on a quiet machine (5-agent passes want load1m under ~6)`);
   await WAIT(1200);
   const seeded = await seed();
+  assertAgentSandbox(seeded); // hard gate: agents only start in a sandboxed git workdir (t_8f7605c4)
   const bulk = bulkSeed(seeded.dir, seeded.nodes);
   console.log('[realperf] seeded', JSON.stringify({ nodes: seeded.nodes.length, tasks: AGENTS * TASKS_PER_AGENT, staggerMs: STAGGER_MS, stallMin: STALL_MIN, ...bulk }));
   await ex(`await refresh(); showTab('chat'); await w(400);`);

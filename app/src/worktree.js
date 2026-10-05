@@ -2,6 +2,7 @@
 const { execFileSync, execFile } = require('child_process');
 const path = require('path');
 const fs = require('fs');
+const SB = require('./sandbox');
 
 function git(cwd, args) { return execFileSync('git', args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] }).toString().trim(); }
 
@@ -44,6 +45,8 @@ function linkNodeModules(repoDir, root, dir) {
 function ensureWorktree(repoDir, taskId) {
   let root;
   try { root = git(repoDir, ['rev-parse', '--show-toplevel']); } catch { return { cwd: repoDir, warning: `not a git repo: ${repoDir}, using shared dir` }; }
+  const refuse = SB.refusal(root, 'create a task worktree in');
+  if (refuse) return { cwd: repoDir, warning: refuse }; // sandbox: never place task worktrees outside the test data root (t_8f7605c4)
   const branch = `squad/${taskId}`;
   const dir = path.join(root, '.squad', 'worktrees', taskId);
   try {
@@ -92,6 +95,7 @@ function dirtyMergeMessage(dirty) {
 // git fail around uncommitted work.
 function worktreeMerge(t) {
   const root = rootOf(t); const base = baseOf(root);
+  SB.guardRepo(root, 'auto-merge into'); // sandbox: a harness instance never merges into a real repo (t_8f7605c4)
   let ahead;
   try { ahead = Number(git(root, ['rev-list', '--count', `${base}..${t.worktreeBranch}`])); } catch { ahead = 1; }
   if (ahead === 0) return { base, branch: t.worktreeBranch, merged: false };
@@ -104,6 +108,7 @@ function worktreeMerge(t) {
 
 function worktreeDiscard(t) {
   const root = rootOf(t);
+  SB.guardRepo(root, 'discard a task worktree in');
   try { git(root, ['worktree', 'remove', '--force', t.worktreePath]); } catch (e) { if (fs.existsSync(t.worktreePath)) throw new Error(errOf(e)); }
   try { git(root, ['branch', '-D', t.worktreeBranch]); } catch {}
   return { ok: true };
@@ -170,6 +175,7 @@ function worktreeDirty(wtPath) {
 function removeWorktree(t) {
   const wp = t && t.worktreePath;
   if (!wp || !fs.existsSync(path.join(wp, '.git'))) return { removed: false, absent: true };
+  SB.guardRepo(rootOf(t), 'remove a task worktree in'); // sandbox: retained, never touched (t_8f7605c4)
   if (worktreeDirty(wp)) throw new Error('worktree has uncommitted changes');
   // Drop our own share-links first: `git worktree remove` runs its own safety pass, which still
   // counts the untracked link and refuses without --force (t_1ff80eba). Only ever the link —

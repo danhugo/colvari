@@ -17,6 +17,7 @@ const PF = require('./preflight');
 const C = require('./controls');
 const IDLE = require('./idle');
 const WT = require('./worktree');
+const SB = require('./sandbox');
 const MG = require('./merge-gate');
 const RT = require('./runtimes');
 const { removePerRunMcpDirs } = require('./profile-runner');
@@ -1561,6 +1562,13 @@ class Orchestrator extends EventEmitter {
     // Single-run lock, enforced at the last choke point: never a second live run for one agent, even
     // if a caller raced past its own guard.
     if (this.procs.has(node.id)) { this.log(node.id, 'error', `dispatch refused: ${node.name} already has a live run (single run per agent)`); return; }
+    // Sandbox (t_8f7605c4): in a test instance no agent may start outside the data root — the
+    // harness's nodes carry sandboxed workdirs, so this only fires when harness state is wrong.
+    const sbRoot = SB.testRoot();
+    if (sbRoot && !SB.inside(sbRoot, path.resolve(node.workdir || this.store.dir))) {
+      this.log(node.id, 'error', `sandbox: dispatch refused — workdir ${path.resolve(node.workdir || this.store.dir)} is outside the test data root (${sbRoot})`);
+      return;
+    }
     this._idleSince = null; this._idleReason = null; // real work: the idle episode is over (t_b2273507)
     this.runs++;
     // A run for this task started (dispatch, manual button, or auto resume): new stuck episode — the
