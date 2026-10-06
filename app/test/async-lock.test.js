@@ -21,10 +21,12 @@ test('withLockAsync: waits by yielding the event loop, never freezing it', async
   const timer = setInterval(() => ticks++, 5); // must keep firing while the write waits
   let done = false;
   const p = s.withLockAsync(async () => { done = true; return 'ran'; });
-  // Give the async lock time to be waiting; timers must fire throughout the wait.
-  await new Promise((r) => setTimeout(r, 60));
+  // Give the async lock time to be waiting; timers must fire throughout the wait. The window is
+  // generous and the bar low because a parallel suite starves timers arbitrarily hard — the
+  // regression this pins (the old sync spin) freezes the loop completely, i.e. zero ticks.
+  await new Promise((r) => setTimeout(r, 150));
   assert.equal(done, false, 'the body must not run while the lock is held');
-  assert.ok(ticks >= 5, `event loop starved: only ${ticks} timer ticks in 60ms of waiting`);
+  assert.ok(ticks >= 3, `event loop starved: only ${ticks} timer ticks in 150ms of waiting`);
   fs.rmSync(path.join(dir, '.lock'), { recursive: true, force: true }); // release
   assert.equal(await p, 'ran');
   clearInterval(timer);

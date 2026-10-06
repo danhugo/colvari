@@ -14,7 +14,8 @@
 // logs the reason. On boot, bootResume() resumes a Run interrupted by a restart, or rolls back to
 // the previous sha and disables auto-restart after repeated boot failures. All git/npm/relaunch
 // steps are injectable for tests.
-const { spawn, spawnSync } = require('child_process');
+const CP = require('./cp');
+const { spawn } = require('child_process');
 const { EventEmitter } = require('events');
 const fs = require('fs');
 const os = require('os');
@@ -40,22 +41,27 @@ const writeRestartState = (dir, st) => writeJson(stateFile(dir), st);
 const clearRestartState = (dir) => { try { fs.unlinkSync(stateFile(dir)); } catch {} };
 
 // Default runners, never throwing: {code, out}. git runs in the app repo, npm in any cwd.
+// Async since t_5a78aa95 (the old spawnSync blocked the app's main thread per poll/step); all
+// call sites await, so tests' sync {code, out} fakes keep working unchanged.
 function defaultGit(repoDir) {
-  return (args) => {
-    const r = spawnSync('git', args, { cwd: repoDir, encoding: 'utf8' });
-    return { code: r.status == null ? 1 : r.status, out: (r.stdout || '') + (r.error ? ' ' + r.error : '') + (r.stderr || '') };
+  return async (args) => {
+    const r = await CP.run('git', args, { cwd: repoDir, timeoutMs: 60_000 });
+    return { code: r.status, out: r.stdout + (r.error ? ' ' + (r.error.message || r.error) : '') + r.stderr };
   };
 }
 function defaultNpm(repoDir) {
-  return (args, cwd) => {
-    const r = spawnSync('npm', args, { cwd: cwd || repoDir, encoding: 'utf8' });
-    return { code: r.status == null ? 1 : r.status, out: (r.stdout || '') + (r.error ? ' ' + r.error : '') + (r.stderr || '') };
+  return async (args, cwd) => {
+    const r = await CP.run('npm', args, { cwd: cwd || repoDir, timeoutMs: 10 * 60_000 });
+    return { code: r.status, out: r.stdout + (r.error ? ' ' + (r.error.message || r.error) : '') + r.stderr };
   };
 }
 
 // Hard cap for the restart test step: a hung suite (wake.test.js once stalled 8.5 min against the
-// live app) must fail the restart, not freeze the team forever.
-const TEST_TIMEOUT_MS = 10 * 60 * 1000;
+// live app) must fail the restart, not freeze the team forever. The child also queues in the
+// machine-wide heavy slot (test/harness/heavy-slot.js, up to 20 min) before its tests start —
+// the cap must cover the wait PLUS the suite (Pia relay of t_h0a1c2fe).
+const HEAVY_SLOT_WAIT_MS = Number(process.env.AGENTS_SQUAD_HEAVY_MAX_WAIT_MS) || 20 * 60_000;
+const TEST_TIMEOUT_MS = HEAVY_SLOT_WAIT_MS + 10 * 60 * 1000;
 
 // The restart test step: `npm test` in its own process group with a hard timeout. The old
 // spawnSync blocked the app's main thread for the whole suite and had no ceiling; now the app
@@ -124,8 +130,22 @@ class UpdateWatcher extends EventEmitter {
     // The commit this app process is actually running (the sha it launched on, captured by main.js
     // before any watcher exists). A restart targeting it is a no-op and is skipped; null (git
     // failed at boot) falls back to the old restart-anyway behavior — never skip on unknown state.
-    this.bootSha = opts.bootSha !== undefined ? opts.bootSha
-      : (() => { const r = this.git(['rev-parse', 'HEAD']); return r.code === 0 ? r.out.trim() || null : null; })();
+    // Async capture (t_5a78aa95): with no explicit bootSha, git resolves in the background — the
+    // first tick reads it long after. Explicit opts (tests, main.js) win as before.
+    this.bootSha = opts.bootSha !== undefined ? opts.bootSha : null;
+    // Explicit bootSha (main.js resolves it before the window opens; tests pass it): ready at once.
+    // Otherwise (null or absent) capture it async (t_5a78aa95) and hold ticks until it lands: the
+    // flow's same-commit stand-down READS bootSha, and an early tick with a still-null sha would
+    // read as "unknown running commit" and restart anyway — interrupting healthy runs.
+    this._bootShaCaptured = !(opts.bootSha === undefined || opts.bootSha === null);
+    this._bootShaReady = Promise.resolve();
+    if (!this._bootShaCaptured) {
+      this._bootShaReady = Promise.resolve(this.git(['rev-parse', 'HEAD'])).then((r) => {
+        if (this.bootSha == null) this.bootSha = r.code === 0 ? r.out.trim() || null : null;
+        this._bootShaCaptured = true;
+        this.emitStatus();
+      }).catch(() => { this._bootShaCaptured = true; });
+    }
     this.relaunch = opts.relaunch || (() => { const { app } = require('electron'); app.relaunch(); app.exit(0); });
     this.procCount = opts.procCount || (() => 0);
     this.runActive = opts.runActive || (() => false);
@@ -173,23 +193,26 @@ class UpdateWatcher extends EventEmitter {
     if (min === 0) return Infinity;
     return min > 0 ? min * 60000 : 30 * 60000;
   }
-  baseBranch() {
+  async baseBranch() {
     if (this.branch) return this.branch;
-    const r = this.git(['rev-parse', '--abbrev-ref', 'HEAD']);
+    const r = await this.git(['rev-parse', '--abbrev-ref', 'HEAD']);
     this.branch = r.code === 0 && r.out.trim() ? r.out.trim() : 'master';
     return this.branch;
   }
+  // Sync read for status(): the cached branch once resolved ('master' until then — same display
+  // fallback the async resolver lands on).
+  branchName() { return this.branch || 'master'; }
   // Local HEAD plus fetched origin head; `to` is what we would update to (origin when ahead of local).
-  shas() {
-    const local = this.git(['rev-parse', 'HEAD']);
+  async shas() {
+    const local = await this.git(['rev-parse', 'HEAD']);
     if (local.code !== 0) return null;
     const sha = local.out.trim();
-    this.git(['fetch', 'origin']); // best effort: offline / no remote is fine (local merges still count)
-    const origin = this.git(['rev-parse', 'origin/' + this.baseBranch()]);
+    await this.git(['fetch', 'origin']); // best effort: offline / no remote is fine (local merges still count)
+    const origin = await this.git(['rev-parse', 'origin/' + (await this.baseBranch())]);
     const originSha = origin.code === 0 ? origin.out.trim() : null;
     // Only update *to* origin when it is strictly ahead of local (local is its ancestor); when local has
     // unpushed merges (the usual dogfood case) origin is behind and local HEAD is the target.
-    const originAhead = originSha && originSha !== sha && this.git(['merge-base', '--is-ancestor', sha, originSha]).code === 0;
+    const originAhead = originSha && originSha !== sha && (await this.git(['merge-base', '--is-ancestor', sha, originSha])).code === 0;
     return { local: sha, origin: originSha, to: originAhead ? originSha : sha };
   }
   restartsLastHour() { const t = this.now(); return readHistory(this.store.dir).filter((x) => x.result === 'restarting' && t - Date.parse(x.ts) < 3600 * 1000).length; }
@@ -199,7 +222,7 @@ class UpdateWatcher extends EventEmitter {
       waitingOn: this.waitingOn, lastError: this.lastError, lastCheckAt: this.lastCheckAt,
       drainEndsAt: this.drainEndsAt, drainTimeoutMin: this.phase === 'draining' && isFinite(this.drainMs()) ? this.drainMs() / 60000 : null,
       lastSeenSha: this._seenSha, deferredTo: this._deferred ? this._deferred.sha : null,
-      branch: this.baseBranch(), autoRestart: this.autoRestart(), bootSha: this.bootSha, testTimeoutMs: this.testTimeoutMs,
+      branch: this.branchName(), autoRestart: this.autoRestart(), bootSha: this.bootSha, testTimeoutMs: this.testTimeoutMs,
       lastRestartAt: this.lastRestartAt || null, restartsLastHour: this.restartsLastHour(),
       history: readHistory(this.store.dir).slice(-10).reverse(),
     };
@@ -209,11 +232,11 @@ class UpdateWatcher extends EventEmitter {
   // Commits the running build (bootSha) still lacks up to the pending restart's target, computed
   // from git — the same "running..target" count the merge site stores. Null when it cannot be
   // computed (no boot sha, no target, git failure): never guess 0, never clear on a guess.
-  _pendingBehind(rp) {
+  async _pendingBehind(rp) {
     if (!rp || !this.bootSha) return null;
     const target = rp.sha || this.toSha;
     if (!target) return null;
-    const r = this.git(['rev-list', '--count', `${this.bootSha}..${target}`]);
+    const r = await this.git(['rev-list', '--count', `${this.bootSha}..${target}`]);
     return r.code === 0 ? (Number(String(r.out).trim()) || 0) : null;
   }
   // A stand-down (nothing to restart onto) never relaunches, but it must release what the restart
@@ -222,7 +245,7 @@ class UpdateWatcher extends EventEmitter {
   // already contains the pending target (count 0), the tally itself is stale: clear it, or it
   // holds the bell row up forever and the cap re-arms restarts onto live code (t_7426095a,
   // t_f6d37ca4). Best-effort: test stores without restart state are skipped.
-  _standDown() {
+  async _standDown() {
     try {
       const rp = this.store.restartPending && this.store.restartPending();
       if (!rp) return;
@@ -230,7 +253,7 @@ class UpdateWatcher extends EventEmitter {
         this.store.setRestartPending({ scheduledNow: false, afterTaskId: null, firedAt: null, firedCount: null });
         this._log('system', 'self-update: stood-down restart released the dispatch schedule.');
       }
-      if (this._pendingBehind(rp) === 0) {
+      if ((await this._pendingBehind(rp)) === 0) {
         this.store.clearRestartPending();
         this._log('system', 'self-update: cleared the pending state — the running build already has the pending target (0 commits behind).');
         this.emit('pending-cleared');
@@ -277,10 +300,12 @@ class UpdateWatcher extends EventEmitter {
   // auto-restart setting: an explicit restart request is itself the decision to restart.
   async tick(force = false, reasonOverride = null) {
     if (this.phase !== 'idle' || this._busy) return;
+    await this._bootShaReady; // the flow's same-commit guard reads bootSha: never decide before it lands
+    if (this.phase !== 'idle' || this._busy) return;
     this.lastCheckAt = new Date().toISOString();
     const req = readJson(requestFile(this.store.dir), null);
     if (req) { try { fs.unlinkSync(requestFile(this.store.dir)); } catch {} }
-    const s = this.shas();
+    const s = await this.shas();
     if (!s) { this.emitStatus(); return; }
     const prevSeen = this._seenSha;
     const baseline = prevSeen === null;
@@ -289,7 +314,7 @@ class UpdateWatcher extends EventEmitter {
     const keepDefer = !isNew && !!this._deferred && this._deferred.sha === s.to;
     this._seenSha = s.to;
     if (!isNew && !keepDefer && !req && !force) { this.emitStatus(); return; }
-    const reason = reasonOverride || (req && req.reason) || (keepDefer && this._deferred.reason) || `new commits on ${this.baseBranch()}`;
+    const reason = reasonOverride || (req && req.reason) || (keepDefer && this._deferred.reason) || `new commits on ${await this.baseBranch()}`;
     // Never restart onto the commit this process is already running (t_7426095a): the incident
     // boot scheduled f83c8cd -> f83c8cd ("21 changes" was a stale pending count), paused the
     // team and froze on the test step for code that was already live. Unknown boot sha: fall
@@ -297,7 +322,7 @@ class UpdateWatcher extends EventEmitter {
     if (this.bootSha && s.to === this.bootSha) {
       this._deferred = null;
       this._log('system', `self-update: ${reason} skipped — target ${s.to.slice(0, 7)} is the commit already running; nothing to restart onto.`);
-      this._standDown();
+      await this._standDown();
       this.emitStatus();
       return;
     }
@@ -348,7 +373,7 @@ class UpdateWatcher extends EventEmitter {
       if (this.bootSha && String(to) === String(this.bootSha)) {
         this._log('system', `self-update: target ${String(to).slice(0, 7)} is the commit already running — nothing to restart onto; standing down.`);
         this._busy = false;
-        this._standDown();
+        await this._standDown();
         this.setPhase('idle');
         return;
       }
@@ -356,7 +381,7 @@ class UpdateWatcher extends EventEmitter {
       // Fail fast, before pausing anyone: if the main checkout is dirty (a dev mid-edit) the update
       // is going to abort, and better it costs the team nothing. Re-checked after the drain, since
       // the checkout can dirty while we wait.
-      const dirtyPre = this.git(['status', '--porcelain']);
+      const dirtyPre = await this.git(['status', '--porcelain']);
       if (dirtyPre.code !== 0 || dirtyPre.out.trim()) return abort('main checkout has uncommitted changes; refusing to fast-forward');
       this._log('system', `self-update: ${reason} (${from.slice(0, 7)} -> ${to.slice(0, 7)}); pausing new runs.`);
       this.setPhase('draining');
@@ -394,7 +419,7 @@ class UpdateWatcher extends EventEmitter {
       if (this.phase === 'idle') return; // aborted while draining with nothing left to wait for
       // Commits that landed while the drain waited coalesce into THIS restart: the freeze was
       // already paid once, so re-resolve the target instead of restarting onto a stale sha.
-      const latest = this.shas();
+      const latest = await this.shas();
       if (latest && latest.to !== to) {
         this._log('system', `self-update: newer commits landed during the drain; coalescing this restart ${String(to).slice(0, 7)} -> ${String(latest.to).slice(0, 7)}.`);
         to = latest.to; this.toSha = to; this._seenSha = to;
@@ -405,24 +430,24 @@ class UpdateWatcher extends EventEmitter {
       if (this.bootSha && String(to) === String(this.bootSha)) {
         this._log('system', `self-update: coalesced target is the running commit ${String(to).slice(0, 7)}; standing down — no restart.`);
         this._busy = false;
-        this._standDown();
+        await this._standDown();
         this.setPhase('idle');
         return;
       }
-      const dirty = this.git(['status', '--porcelain']);
+      const dirty = await this.git(['status', '--porcelain']);
       if (dirty.code !== 0 || dirty.out.trim()) return abort('main checkout has uncommitted changes; refusing to fast-forward');
       if (to !== from) {
-        const ff = this.git(['merge', '--ff-only', to]);
+        const ff = await this.git(['merge', '--ff-only', to]);
         if (ff.code !== 0) return abort('fast-forward failed: ' + ff.out.slice(0, 300));
         this._seenSha = to;
       }
-      if (from === to ? this.git(['diff', '--name-only', to + '^', to, '--', path.join(this.rel, 'package-lock.json')]).out.trim()
-        : this.git(['diff', '--name-only', from, to, '--', path.join(this.rel, 'package-lock.json')]).out.trim()) {
+      if (from === to ? (await this.git(['diff', '--name-only', to + '^', to, '--', path.join(this.rel, 'package-lock.json')])).out.trim()
+        : (await this.git(['diff', '--name-only', from, to, '--', path.join(this.rel, 'package-lock.json')])).out.trim()) {
         this._log('system', 'self-update: package-lock.json changed; running npm ci.');
-        const ci = this.npm(['ci']);
+        const ci = await this.npm(['ci']);
         if (ci.code !== 0) return abort('npm ci failed: ' + ci.out.slice(0, 300));
       }
-      const build = this.npm(['run', 'build', '--if-present']);
+      const build = await this.npm(['run', 'build', '--if-present']);
       if (build.code !== 0) return abort('build failed: ' + build.out.slice(0, 300));
       this.setPhase('testing');
       // One attempt: a throwaway worktree at `to`, LOCKED against the worktree sweeps while the
@@ -434,16 +459,16 @@ class UpdateWatcher extends EventEmitter {
       // skips locked entries and git itself refuses to remove one (even with --force).
       const attemptTests = async () => {
         const wt = fs.mkdtempSync(path.join(os.tmpdir(), 'squad-selfupdate-'));
-        const wadd = this.git(['worktree', 'add', '--detach', wt, to]);
+        const wadd = await this.git(['worktree', 'add', '--detach', wt, to]);
         if (wadd.code !== 0) { try { fs.rmSync(wt, { recursive: true, force: true }); } catch {} abort('could not create test worktree: ' + wadd.out.slice(0, 300)); return null; }
         try {
-          this.git(['worktree', 'lock', wt]);
+          await this.git(['worktree', 'lock', wt]);
           try { fs.symlinkSync(path.join(this.npmDir, 'node_modules'), path.join(wt, this.rel, 'node_modules'), 'dir'); } catch {}
           return await this.testRun(path.join(wt, this.rel));
         } finally {
-          this.git(['worktree', 'unlock', wt]); // git refuses to remove a locked tree, even with --force
+          await this.git(['worktree', 'unlock', wt]); // git refuses to remove a locked tree, even with --force
           try { fs.unlinkSync(path.join(wt, this.rel, 'node_modules')); } catch {}
-          this.git(['worktree', 'remove', '--force', wt]);
+          await this.git(['worktree', 'remove', '--force', wt]);
           try { fs.rmSync(wt, { recursive: true, force: true }); } catch {}
         }
       };
@@ -489,11 +514,11 @@ class UpdateWatcher extends EventEmitter {
 // squad-selfupdate-* registration that no worktree sweep may ever reap — that is the point of the
 // lock — so the boot that follows the crash reaps our own stale ones: the flow that owned them
 // died with the old process. Only this prefix; anything else is not ours to touch.
-function reapStaleTestWorktrees(repoDir) {
+async function reapStaleTestWorktrees(repoDir) {
   if (!repoDir) return;
   try {
     const git = defaultGit(repoDir);
-    const list = git(['worktree', 'list', '--porcelain']);
+    const list = await git(['worktree', 'list', '--porcelain']);
     if (list.code !== 0 || !list.out.trim()) return;
     let sawStale = false;
     for (const block of list.out.split('\n\n')) {
@@ -502,20 +527,21 @@ function reapStaleTestWorktrees(repoDir) {
       const p = m.worktree;
       if (!p || !/(^|[\\/])squad-selfupdate-[^/\\]+$/.test(p)) continue;
       sawStale = true;
-      git(['worktree', 'unlock', p]);
-      git(['worktree', 'remove', '--force', '--force', p]); // double force: still-locked leftovers
+      await git(['worktree', 'unlock', p]);
+      await git(['worktree', 'remove', '--force', '--force', p]); // double force: still-locked leftovers
       try { fs.rmSync(p, { recursive: true, force: true }); } catch {}
     }
-    if (sawStale) git(['worktree', 'prune']);
+    if (sawStale) await git(['worktree', 'prune']);
   } catch {}
 }
 
 // Boot, called from main.js before the window is useful. If the last session restarted into new
 // code, count the boot attempt; if it fails to reach markBootOk twice, roll back to fromSha (never
 // through uncommitted changes) and disable auto-restart after repeated boot failures. Returns {resume}: restart the interrupted
-// Run. The activity feed gets one line either way.
-function bootResume(store, { repoDir } = {}) {
-  reapStaleTestWorktrees(repoDir);
+// Run. The activity feed gets one line either way. Async since t_5a78aa95 (git steps off the main
+// thread) — main.js fires it at boot and applies the resume decision when it resolves.
+async function bootResume(store, { repoDir } = {}) {
+  await reapStaleTestWorktrees(repoDir);
   const dir = store.dir;
   const st = readRestartState(dir);
   if (!st || st.phase !== 'restarting') return { resume: false };
@@ -523,9 +549,9 @@ function bootResume(store, { repoDir } = {}) {
   const feed = (kind, text) => { try { store.appendLog({ nodeId: null, kind, text, at: Date.now() }); } catch {} };
   if (st.bootAttempts >= 3) {
     let rollbackNote = '';
-    const dirty = repoDir && defaultGit(repoDir)(['status', '--porcelain']);
+    const dirty = repoDir ? await defaultGit(repoDir)(['status', '--porcelain']) : null;
     if (dirty && dirty.code === 0 && !dirty.out.trim()) {
-      const r = defaultGit(repoDir)(['reset', '--hard', st.fromSha]);
+      const r = await defaultGit(repoDir)(['reset', '--hard', st.fromSha]);
       rollbackNote = r.code === 0 ? `rolled back to ${String(st.fromSha).slice(0, 7)}` : `automatic rollback failed: ${r.out.slice(0, 200)}`;
     } else rollbackNote = 'not rolled back (checkout has uncommitted changes)';
     try { store.saveSettings({ autoRestart: false }); } catch {}

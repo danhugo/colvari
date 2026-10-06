@@ -67,8 +67,9 @@ test('reapRunPids: wrong-lstart pidfile is skipped (recycled pid protected), a m
   const victim = spawn('/bin/sleep', ['30'], { detached: true, stdio: 'ignore' }); victim.unref();
   try {
     fs.writeFileSync(path.join(dir, String(canary.pid)), `${canary.pid}\tWRONG LSTART\tsurvivor\n`);
-    fs.writeFileSync(path.join(dir, String(victim.pid)), `${victim.pid}\t${MG.pidLstart(victim.pid)}\tvictim\n`);
-    const out = reapRunPids(s.dir);
+    const victimLstart = await MG.pidLstart(victim.pid);
+    fs.writeFileSync(path.join(dir, String(victim.pid)), `${victim.pid}\t${victimLstart}\tvictim\n`);
+    const out = await reapRunPids(s.dir);
     assert.ok(out.skipped.some((x) => x.pid === canary.pid), 'mismatched lstart was not reported skipped');
     assert.ok(out.killed.some((x) => x.pid === victim.pid), 'matching pid was not reported killed');
     assert.ok(MG.pidAlive(canary.pid), 'recycled-pid protection failed: canary was killed');

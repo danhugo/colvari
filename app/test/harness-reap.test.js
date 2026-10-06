@@ -10,7 +10,8 @@
 //       identify: a live pid with no marker on it and a marker-shaped but lstart-recycled pid
 //       are skipped (record deleted, nothing signalled), and the sweep's own tree is untouchable.
 // Fixtures spawn through the real marker + recordRun + armParentWatchdog path; the pidfiles land
-// in the shared harness-pids dir, so every planted/fixture runId is namespaced and removed again.
+// in this file's private harness-pids dir (see the AGENTS_SQUAD_REAL_TMP redirect below), so no
+// peer sweeper can judge or reap them.
 // The file skips loudly until src/harness-sweep.js lands so the suite stays green in the interim.
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -21,6 +22,15 @@ const { spawn } = require('node:child_process');
 const pg = require('./harness/procguard');
 
 pg.install();
+
+// Private harness-pids dir for THIS file only: pidsDir() reads AGENTS_SQUAD_REAL_TMP at call
+// time, so pointing it at a throwaway dir inside the run's private tmp isolates our records from
+// every other sweeper that shares the real system tmpdir — peer test files, and any app instance
+// that boots mid-suite (app-kill-relaunch boots two, and the live app reboots too). A peer sweep
+// reaping our orphan between "owner dead" and "my sweep" used to fail the report asserts (the
+// t_ea6c2c33 gate flakes); with a private dir my sweeps are the only sweeps that can judge them.
+// The run dir is removed with the whole suite run, records and all (fixtures want no survival).
+process.env.AGENTS_SQUAD_REAL_TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'squad-hpids-'));
 
 const SWEEP = path.join(__dirname, '..', 'src', 'harness-sweep.js');
 const HAS_SWEEP = fs.existsSync(SWEEP);
@@ -48,9 +58,12 @@ const fs = require('node:fs');
 const HS = require(process.env.SQUAD_SWEEP);
 const arg = process.argv.find((a) => a.startsWith(HS.MARKER_ARG_PREFIX));
 const runId = arg ? arg.slice(HS.MARKER_ARG_PREFIX.length) : process.env.AGENTS_SQUAD_HARNESS_RUN;
-const rec = HS.recordRun({ runId });
-if (!process.env.SQUAD_NO_WATCH) HS.armParentWatchdog({ runId, intervalMs: 150, quit: () => process.exit(0) });
-fs.writeFileSync(process.env.SQUAD_READY, JSON.stringify({ pid: rec.pid, runId: rec.runId }));
+// recordRun is async (t_5a78aa95 — the ps reads): the READY signal must land only after the
+// record (and its pidfile) exists, so the whole handoff moves into the resolution.
+Promise.resolve(HS.recordRun({ runId })).then((rec) => {
+  if (!process.env.SQUAD_NO_WATCH) HS.armParentWatchdog({ runId, intervalMs: 150, quit: () => process.exit(0) });
+  fs.writeFileSync(process.env.SQUAD_READY, JSON.stringify({ pid: rec.pid, runId: rec.runId }));
+});
 setInterval(() => {}, 1e6);
 `);
   return p;
@@ -95,12 +108,25 @@ async function launchFixture(name, { watch = true } = {}) {
   // zombie keeps answering signal 0 with its old lstart, and the sweep would legitimately
   // read that as "owner still alive" (in production the driver is long reaped).
   const driverExited = new Promise((resolve) => driver.once('exit', resolve));
-  assert.ok(await until(() => fs.existsSync(info), 6000), `driver fixture (${name}) never spawned a child`);
-  const { child } = JSON.parse(fs.readFileSync(info, 'utf8'));
-  assert.ok(await until(() => fs.existsSync(path.join(d, 'ready')), 6000), `stub child (${name}) never reported ready`);
-  const pidfile = hs().pidFileOf(runId);
-  assert.ok(fs.existsSync(pidfile), `recordRun (${name}) wrote no pidfile at ${pidfile}`);
-  return { d, driver, driverExited, child, runId, pidfile };
+  try {
+    // Wait for PARSEABLE info, not mere existence: writeFileSync's open(truncate)->write gap is
+    // real under a loaded machine, and an empty read here threw before the caller's try/finally,
+    // leaking the driver and its detached stub (t_ea6c2c33 suite flake).
+    const readInfo = () => { try { return JSON.parse(fs.readFileSync(info, 'utf8')); } catch { return null; } };
+    assert.ok(await until(() => readInfo(info), 6000), `driver fixture (${name}) never spawned a child`);
+    const { child } = readInfo(info);
+    assert.ok(await until(() => fs.existsSync(path.join(d, 'ready')), 6000), `stub child (${name}) never reported ready`);
+    const pidfile = hs().pidFileOf(runId);
+    assert.ok(fs.existsSync(pidfile), `recordRun (${name}) wrote no pidfile at ${pidfile}`);
+    return { d, driver, driverExited, child, runId, pidfile };
+  } catch (e) {
+    // Nothing returned -> the caller's finally cannot clean up: kill the driver here, and let
+    // the sweep reap the stub through its own pidfile record (it records before reporting ready).
+    killQuiet(driver.pid);
+    try { await Promise.race([driverExited, until(() => false, 1000)]); } catch { /* best effort */ }
+    try { hs().sweep({ log: () => {} }); } catch { /* best effort */ }
+    throw e;
+  }
 }
 
 // SIGKILL the fixture driver and wait until it is fully reaped (kill(0) = ESRCH, not zombie).
@@ -139,7 +165,7 @@ t('boot sweep reaps a recorded harness child whose owner died and removes the re
     // still present at MY sweep call — the child-dead and record-gone asserts are unconditional.
     const recordPresent = fs.existsSync(fx.pidfile);
     const logs = [];
-    const report = hs().sweep({ log: (m) => logs.push(String(m)) });
+    const report = await hs().sweep({ log: (m) => logs.push(String(m)) });
     const gone = await until(() => !pg.isAlive(fx.child), 5000);
     assert.ok(gone, 'sweep left the stale harness child alive');
     assert.ok(await until(() => !fs.existsSync(fx.pidfile), 3000), 'sweep left the stale record behind');
@@ -153,7 +179,7 @@ t('boot sweep reaps a recorded harness child whose owner died and removes the re
 t('sweep leaves a recorded run alone while its owner is alive', async () => {
   const fx = await launchFixture('sweep-live', { watch: false });
   try {
-    const report = hs().sweep({ log: () => {} }); // the recorded owner (the driver fixture) is alive
+    const report = await hs().sweep({ log: () => {} }); // the recorded owner (the driver fixture) is alive
     assert.ok(pg.isAlive(fx.child), 'sweep killed a run whose owner is alive');
     assert.ok(fs.existsSync(fx.pidfile), 'sweep deleted a live run\'s record');
     assert.ok(!(report.reaped || []).some((e) => e.runId === fx.runId), `sweep reported reaping a live run: ${JSON.stringify(report)}`);
@@ -166,19 +192,19 @@ t('sweep never signals a live process the record cannot identify (pid-reuse safe
   // A dead owner whose lstart the record can cite, plus a live plain process with NO harness
   // marker on it — what a recycled pid looks like after a reboot.
   const decoy = spawn('/bin/sleep', ['30'], { stdio: 'ignore' });
-  const decoyLstart = hsM.pidLstart(decoy.pid);
+  const decoyLstart = await hsM.pidLstart(decoy.pid);
   decoy.kill('SIGKILL');
   assert.ok(await until(() => !pg.isAlive(decoy.pid), 3000), 'decoy owner never died');
   const innocent = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1e6)'], { detached: true, stdio: 'ignore' });
   try {
     assert.ok(await until(() => pg.isAlive(innocent.pid), 3000), 'innocent process never started');
     hsM.atomicWriteJson(hsM.pidFileOf(runId), {
-      runId, pid: innocent.pid, pgid: innocent.pid, lstart: hsM.pidLstart(innocent.pid),
+      runId, pid: innocent.pid, pgid: innocent.pid, lstart: await hsM.pidLstart(innocent.pid),
       markerArg: hsM.markerArgFor(runId), envMarker: hsM.ENV_MARKER_PREFIX + runId,
       ownerPid: decoy.pid, ownerLstart: decoyLstart, recordedAt: Date.now(),
     });
     const present = fs.existsSync(hsM.pidFileOf(runId)); // a peer sweep may have judged it first
-    const report = hsM.sweep({ log: () => {} });
+    const report = await hsM.sweep({ log: () => {} });
     assert.ok(pg.isAlive(innocent.pid), 'sweep killed a live process with no harness marker on it');
     assert.ok(!fs.existsSync(hsM.pidFileOf(runId)), 'sweep kept an unidentifiable record');
     if (present) assert.ok((report.skipped || []).some((e) => e.runId === runId && e.verdict === 'marker-mismatch'), `sweep did not report the marker mismatch: ${JSON.stringify(report)}`);
@@ -191,7 +217,7 @@ t('sweep refuses a marker-shaped record whose pid was recycled (lstart mismatch)
   const bogusId = `${fx.runId}-recycled`;
   try {
     const decoy = spawn('/bin/sleep', ['30'], { stdio: 'ignore' });
-    const decoyLstart = hsM.pidLstart(decoy.pid);
+    const decoyLstart = await hsM.pidLstart(decoy.pid);
     decoy.kill('SIGKILL');
     assert.ok(await until(() => !pg.isAlive(decoy.pid), 3000), 'decoy owner never died');
     hsM.atomicWriteJson(hsM.pidFileOf(bogusId), {
@@ -200,7 +226,7 @@ t('sweep refuses a marker-shaped record whose pid was recycled (lstart mismatch)
       ownerPid: decoy.pid, ownerLstart: decoyLstart, recordedAt: Date.now(),
     });
     const present = fs.existsSync(hsM.pidFileOf(bogusId)); // a peer sweep may have judged it first
-    const report = hsM.sweep({ log: () => {} });
+    const report = await hsM.sweep({ log: () => {} });
     assert.ok(pg.isAlive(fx.child), 'sweep killed a pid whose lstart does not match the record (recycled-pid kill)');
     assert.ok(!fs.existsSync(hsM.pidFileOf(bogusId)), 'sweep kept an unidentifiable record');
     if (present) assert.ok((report.skipped || []).some((e) => e.runId === bogusId && e.verdict === 'recycled-pid'), `sweep did not report the recycled pid: ${JSON.stringify(report)}`);
@@ -220,7 +246,7 @@ t('sweep skips its own pid and ancestors even when records name them', async () 
         ownerPid: process.pid, ownerLstart: hsM.pidLstart(process.pid), recordedAt: Date.now(),
       });
     }
-    const report = hsM.sweep({ log: () => {} });
+    const report = await hsM.sweep({ log: () => {} });
     for (const id of [selfId, ancestorId]) {
       assert.ok(!(report.reaped || []).some((e) => e.runId === id), `sweep reported reaping its own tree (${id})`);
       assert.ok(fs.existsSync(hsM.pidFileOf(id)), `sweep deleted the live-run record it must keep (${id})`);

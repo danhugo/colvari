@@ -54,7 +54,7 @@ test('deriveEventMapping finds synonyms anywhere in nested probe events', () => 
   assert.strictEqual(m.costPath, 'total_cost_usd');
 });
 
-test('introspectRuntime derives a full draft profile for the fictional "helpycode" CLI', () => {
+test('introspectRuntime derives a full draft profile for the fictional "helpycode" CLI', async () => {
   const probeOut = [
     JSON.stringify({ type: 'session', session_id: 'S1' }),
     JSON.stringify({ type: 'message', text: 'pong' }),
@@ -67,7 +67,7 @@ test('introspectRuntime derives a full draft profile for the fictional "helpycod
     if (args[0] === 'run') return probeOut;
     throw new Error('unexpected exec ' + JSON.stringify(args));
   };
-  const { profile, sources, models } = IN.introspectRuntime('helpycode', exec, { id: 'helpycode', label: 'HelpyCode' });
+  const { profile, sources, models } = await IN.introspectRuntime('helpycode', exec, { id: 'helpycode', label: 'HelpyCode' });
   assert.strictEqual(profile.binary, 'helpycode');
   assert.ok(profile.argsTemplate.includes('run'));
   assert.ok(profile.argsTemplate.includes('--format'));
@@ -90,13 +90,13 @@ test('introspectRuntime derives a full draft profile for the fictional "helpycod
   assert.strictEqual(sources.models, undefined); // no models command in this help
 });
 
-test('introspectRuntime runs the models subcommand and parses names (layer 2)', () => {
+test('introspectRuntime runs the models subcommand and parses names (layer 2)', async () => {
   const exec = (bin, args) => {
     if (args.includes('--help')) return helpycodeHelp;
     if (args[0] === 'models') return ['elice/z-ai/glm-5.3-flash', 'elice/z-ai/glm-5.3', '', 'PROVIDER'].join('\n');
     throw new Error('unexpected exec ' + JSON.stringify(args));
   };
-  const { models, sources } = IN.introspectRuntime('helpycode', exec, { id: 'helpycode', probe: false });
+  const { models, sources } = await IN.introspectRuntime('helpycode', exec, { id: 'helpycode', probe: false });
   assert.deepStrictEqual(models, ['elice/z-ai/glm-5.3-flash', 'elice/z-ai/glm-5.3']); // header rows skipped
   assert.deepStrictEqual(sources.models, { source: 'models', confidence: 'high' });
 });
@@ -118,14 +118,14 @@ test('parseCommands strips the repeated "helpycode <cmd>" prefix real helpycode 
   assert.strictEqual(IN.pickRunCommand(cmds), 'run');
 });
 
-test('introspectRuntime derives a working profile against real installed-helpycode --help output', () => {
+test('introspectRuntime derives a working profile against real installed-helpycode --help output', async () => {
   const exec = (bin, args) => {
     assert.strictEqual(bin, 'helpycode');
     if (args[0] === 'run' && args.includes('--help')) return realHelpycodeRun;
     if (args.includes('--help')) return realHelpycodeTop;
     throw new Error('unexpected exec ' + JSON.stringify(args));
   };
-  const { profile } = IN.introspectRuntime('helpycode', exec, { id: 'helpycode', label: 'HelpyCode', probe: false });
+  const { profile } = await IN.introspectRuntime('helpycode', exec, { id: 'helpycode', label: 'HelpyCode', probe: false });
   assert.deepStrictEqual(profile.argsTemplate, ['run', '--format', 'json', '--model', '{model}', '--variant', '{variant}', '{prompt}']);
   assert.deepStrictEqual(profile.modelsCommand, ['models']);
   assert.strictEqual(profile.effortFlag, '--variant');
@@ -140,8 +140,8 @@ test('introspectRuntime derives a working profile against real installed-helpyco
 
 // Recorded from the real installed `helpycode models` (0.3.5): plain model-id lines, no JSON.
 // The layered introspector runs the models subcommand and parses those bare ids into the draft.
-test('recorded `helpycode models` output: bare model-id lines are parsed into the model list', () => {
-  const { profile, models, sources } = IN.introspectRuntime('helpycode', (bin, args) => {
+test('recorded `helpycode models` output: bare model-id lines are parsed into the model list', async () => {
+  const { profile, models, sources } = await IN.introspectRuntime('helpycode', (bin, args) => {
     assert.strictEqual(bin, 'helpycode');
     if (args[0] === 'run' && args.includes('--help')) return realHelpycodeRun;
     if (args.includes('--help')) return realHelpycodeTop;
@@ -156,14 +156,14 @@ test('recorded `helpycode models` output: bare model-id lines are parsed into th
 // Cato's acceptance bar (t_94eef7a1): the derived helpycode profile must be byte-equal to the old
 // hand-built HELPYCODE_PROFILE, or the diff justified, with a test asserting it. The hand-built
 // profile is restated here (it was deleted from runtimes.js) purely as the parity reference.
-test('parity: derived helpycode profile vs the deleted hand-built HELPYCODE_PROFILE', () => {
+test('parity: derived helpycode profile vs the deleted hand-built HELPYCODE_PROFILE', async () => {
   const exec = (bin, args) => {
     if (args[0] === 'run' && args.includes('--help')) return realHelpycodeRun;
     if (args.includes('--help')) return realHelpycodeTop;
     if (args[0] === 'run') return realHelpycodeProbe;
     throw new Error('unexpected exec ' + JSON.stringify(args));
   };
-  const { profile: derived } = IN.introspectRuntime('helpycode', exec, { id: 'helpycode', label: 'HelpyCode' });
+  const { profile: derived } = await IN.introspectRuntime('helpycode', exec, { id: 'helpycode', label: 'HelpyCode' });
   const handBuilt = {
     argsTemplate: ['run', '--format', 'json', '--model', '{model}', '--variant', '{variant}', '{prompt}'],
     effortValues: ['low', 'medium', 'high', 'max', 'minimal'],
@@ -197,7 +197,7 @@ test('parity: derived helpycode profile vs the deleted hand-built HELPYCODE_PROF
   assert.strictEqual(derived.eventMapping.cachePath, '');
 });
 
-test('ask-agent layer (opt-in) fills only gaps and marks fields low-confidence "agent"', () => {
+test('ask-agent layer (opt-in) fills only gaps and marks fields low-confidence "agent"', async () => {
   const agentJson = JSON.stringify({
     argsTemplate: ['run', '--format', 'json', '--model', '{model}', '--variant', '{variant}', '{prompt}'],
     resumeFlag: '-s', effortFlag: '--variant', effortValues: ['low', 'medium', 'high', 'max', 'minimal'],
@@ -211,7 +211,7 @@ test('ask-agent layer (opt-in) fills only gaps and marks fields low-confidence "
     if (args.join(' ').includes('argsTemplate')) { asked = true; return agentJson; } // the profile request
     throw new Error('unexpected exec ' + JSON.stringify(args));
   };
-  const { profile, sources } = IN.introspectRuntime('helpycode', exec, { id: 'helpycode', label: 'HelpyCode', probe: false, askAgent: true });
+  const { profile, sources } = await IN.introspectRuntime('helpycode', exec, { id: 'helpycode', label: 'HelpyCode', probe: false, askAgent: true });
   assert.ok(asked, 'ask-agent layer did not run');
   // observed fields are never overwritten; the effort vocabulary is unioned in, gaps filled from
   // the agent's own description
@@ -221,7 +221,7 @@ test('ask-agent layer (opt-in) fills only gaps and marks fields low-confidence "
   assert.strictEqual(sources.mcp.source, 'help'); // help already derives it — agent ignored
   assert.strictEqual(sources.argsTemplate.source, 'help'); // help already had it — agent ignored
   // without askAgent the same CLI still gets MCP from help (the `mcp` subcommand)
-  const { profile: quiet } = IN.introspectRuntime('helpycode', exec, { id: 'helpycode', probe: false });
+  const { profile: quiet } = await IN.introspectRuntime('helpycode', exec, { id: 'helpycode', probe: false });
   assert.deepStrictEqual(quiet.mcp, { method: 'file', flag: 'helpycode.json' });
 });
 

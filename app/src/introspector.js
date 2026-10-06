@@ -229,10 +229,12 @@ function assertSafeArgs(args) {
 // Exec factory bound to an env. With no env, uses the filtered sandbox env (safe default for
 // --help/--version/models of an unknown binary). Callers may bind the real run env for the
 // probe/ask layers of an authenticated CLI — the same env it gets on every real run anyway.
+// Async since t_5a78aa95: the old spawnSync blocked the main process up to 15s per probe.
+// The result is stdout+stderr combined; failures resolve to '' like spawnSync's error result.
 function makeExec(env) {
-  return (bin, args) => {
-    const { spawnSync } = require('child_process');
-    const r = spawnSync(bin, args, { encoding: 'utf8', timeout: 15000, cwd: getSandboxDir(), env: env || sandboxEnv() });
+  const CP = require('./cp');
+  return async (bin, args) => {
+    const r = await CP.run(bin, args, { encoding: 'utf8', timeoutMs: 15000, cwd: getSandboxDir(), env: env || sandboxEnv() });
     return String((r.stdout || '') + (r.stderr || ''));
   };
 }
@@ -323,18 +325,19 @@ function mergeAgentFields(profile, agentProfile, sources) {
 
 // exec(bin, args) -> stdout string; must not throw for --help calls that exit non-zero (caller should catch).
 // exec is optional; when omitted (or when the second arg is an opts object instead of a function),
-// falls back to defaultExec above.
-function introspectRuntime(bin, execOrOpts, maybeOpts) {
+// falls back to defaultExec above. Both exec and introspectRuntime are async since t_5a78aa95 —
+// sync fakes injected by tests keep working under await.
+async function introspectRuntime(bin, execOrOpts, maybeOpts) {
   const opts = (typeof execOrOpts === 'function' ? maybeOpts : execOrOpts) || {};
   const exec = typeof execOrOpts === 'function' ? execOrOpts : (opts.env ? makeExec(opts.env) : defaultExec);
-  const safeExec = (args) => { try { return String(exec(bin, args) || ''); } catch (e) { return String((e && e.stdout) || ''); } };
+  const safeExec = async (args) => { try { return String((await exec(bin, args)) || ''); } catch (e) { return String((e && e.stdout) || ''); } };
   const sources = {};
 
   // Layer 1: tolerant --help parsing (top level + the run subcommand).
-  const help = safeExec(['--help']);
+  const help = await safeExec(['--help']);
   const commands = parseCommands(help);
   const runCommand = pickRunCommand(commands);
-  const subHelp = runCommand ? safeExec([runCommand, '--help']) : '';
+  const subHelp = runCommand ? await safeExec([runCommand, '--help']) : '';
   const text = help + '\n' + subHelp;
 
   const { flag: effortFlag, values: effortValues } = findEffort(text);
@@ -360,7 +363,7 @@ function introspectRuntime(bin, execOrOpts, maybeOpts) {
   // Layer 2: models discovery.
   let models = [];
   if (hasModelsCmd && opts.models !== false) {
-    models = parseModelsOutput(safeExec(['models']));
+    models = parseModelsOutput(await safeExec(['models']));
     if (models.length) sources.models = SRC.models;
   }
 
@@ -373,7 +376,7 @@ function introspectRuntime(bin, execOrOpts, maybeOpts) {
       if (filled[i] === '\0') { probeArgs.pop(); continue; } // drop the flag that took this unset placeholder
       probeArgs.push(filled[i]);
     }
-    const probeOut = safeExec(assertSafeArgs(probeArgs));
+    const probeOut = await safeExec(assertSafeArgs(probeArgs));
     const derived = deriveEventMapping(parseJsonLines(probeOut));
     if (Object.values(derived).some(Boolean)) { eventMapping = derived; sources.eventMapping = SRC.probe; }
   }
@@ -390,7 +393,7 @@ function introspectRuntime(bin, execOrOpts, maybeOpts) {
   // callers/UI can show it and never apply it silently.
   if (opts.askAgent) {
     try {
-      const agentProfile = validateAgentProfile(extractJson(safeExec(assertSafeArgs(askAgentArgs(profile, opts)))) , bin);
+      const agentProfile = validateAgentProfile(extractJson(await safeExec(assertSafeArgs(askAgentArgs(profile, opts)))) , bin);
       mergeAgentFields(profile, agentProfile, sources);
     } catch { /* the agent could not describe itself; keep the observed layers only */ }
   }

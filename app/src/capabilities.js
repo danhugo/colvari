@@ -2,7 +2,7 @@
 // supports on this machine right now — slash commands, skills, modes — so the UI never has to guess or drift
 // from what the installed CLI version really offers. Results are cached on the node (capabilities /
 // capabilitiesProbedAt) by the caller and refreshed on demand.
-const { execFileSync, spawn } = require('child_process');
+const { spawn } = require('child_process'); // probeInitEvent streams via spawn (already async)
 const fs = require('fs');
 const path = require('path');
 
@@ -100,11 +100,12 @@ function categorize({ modes = [], skills = [], slashCommands = [], commands = []
   return cat;
 }
 
-// One runtime binary --help probe. exec is injectable for tests. Returns { ok, probedAt, ... } — never throws.
-function probeHelp(bin, args = ['--help'], exec = (b, a) => execFileSync(b, a, { encoding: 'utf8', timeout: 10000, stdio: ['ignore', 'pipe', 'pipe'] })) {
+// One runtime binary --help probe. exec is injectable for tests; both exec and probeHelp are async
+// since t_5a78aa95 (the old execFileSync blocked the main process up to 10s per probe).
+async function probeHelp(bin, args = ['--help'], exec = async (b, a) => { const CP = require('./cp'); return CP.runThrow(b, a, { encoding: 'utf8', timeoutMs: 10000 }); }) {
   const probedAt = new Date().toISOString();
   try {
-    const out = exec(bin, args);
+    const out = await exec(bin, args);
     return { ok: true, probedAt, helpText: String(out || ''), ...parseHelpText(out) };
   } catch (e) {
     try { const out = e.stdout ? String(e.stdout) : ''; if (out) return { ok: true, probedAt, helpText: out, ...parseHelpText(out) }; } catch {}
@@ -123,8 +124,8 @@ function fromInitEvent(ev = {}) {
 
 // Probe one runtime adapter (from ./runtimes RUNTIMES[id]) for this project's settings. Merges a live init
 // event's data over the --help probe when available (init events are more accurate but only exist after a run).
-function discoverCapabilities(rt, settings = {}, { exec, initEvent, cwd, home, prevSlashCommands } = {}) {
-  const help = probeHelp(rt.bin(settings), ['--help'], exec);
+async function discoverCapabilities(rt, settings = {}, { exec, initEvent, cwd, home, prevSlashCommands } = {}) {
+  const help = await probeHelp(rt.bin(settings), ['--help'], exec);
   const local = scanLocalPlugins(cwd || settings.workdir || process.cwd(), { home });
   const skills = [...new Set(local.skills)];
   const mcpServers = Object.keys((settings.mcpServers && typeof settings.mcpServers === 'object') ? settings.mcpServers : {});

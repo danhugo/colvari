@@ -57,14 +57,14 @@ test('orchestrator: scheduler dispatches the highest-priority ready task first',
   assert.ok([low, high].every((t) => s.getTask(t.id).status === 'done'));
 });
 
-test('board-tools: create_task and update_task_status accept/validate priority', () => {
+test('board-tools: create_task and update_task_status accept/validate priority', async () => {
   const { s } = setup();
   const { makeTools } = require('../src/board-tools');
   const a = s.addNode({ name: 'A', role: 'Dev' });
   const tools = makeTools(s, a.id);
   const t = tools.create_task({ title: 'x', priority: 'P1' });
   assert.equal(t.priority, 'P1');
-  const t2 = tools.update_task_status({ taskId: t.id, status: 'in_progress', priority: 'P0' });
+  const t2 = await tools.update_task_status({ taskId: t.id, status: 'in_progress', priority: 'P0' });
   assert.equal(t2.priority, 'P0');
 });
 

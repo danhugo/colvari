@@ -12,7 +12,7 @@ const { ensureWorktree } = require('../src/worktree');
 // the worktree anchor task (so dev starts with a clean open-task count). PM has assign edges to
 // everyone. The anchor gives repo-root derivation (used by the unmerged-branch guard) a real
 // worktree to resolve.
-function setup() {
+async function setup() {
   const repo = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'bg-repo-')));
   const g = (cwd, ...a) => execFileSync('git', ['-c', 'user.email=a@b', '-c', 'user.name=a', ...a], { cwd, stdio: 'pipe' }).toString().trim();
   g(repo, 'init', '-q', '-b', 'main');
@@ -27,7 +27,7 @@ function setup() {
   const keeper = s.addNode({ name: 'Keeper', role: 'Keeper' });
   for (const n of [dev, dev2, qa]) s.addEdge(pm.id, n.id);
   const anchor = s.createTask({ title: 'anchor', assignee: keeper.id, createdBy: pm.id });
-  const w = ensureWorktree(repo, anchor.id);
+  const w = await ensureWorktree(repo, anchor.id);
   s._updateTask(anchor.id, { worktreePath: w.worktreePath, worktreeBranch: w.worktreeBranch });
   return { repo, g, s, pm, dev, dev2, qa, anchor };
 }
@@ -50,23 +50,23 @@ function settle(s, id, from) {
 
 // ---- update_task_status: done must not strand an unmerged branch ----
 
-test('done is refused with the branch named when worktreeBranch is unmerged and there is no worktree', () => {
-  const { repo, g, s, pm, dev } = setup();
+test('done is refused with the branch named when worktreeBranch is unmerged and there is no worktree', async () => {
+  const { repo, g, s, pm, dev } = await setup();
   g(repo, 'checkout', '-qb', 'squad/t_stray');
   fs.writeFileSync(path.join(repo, 'stray.txt'), 'stray\n');
   g(repo, 'add', '.'); g(repo, 'commit', '-q', '-m', 'stray');
   g(repo, 'checkout', 'main');
   const tk = makeTools(s, pm.id).create_task({ title: 'stray work', assignee: dev.id });
   s._updateTask(tk.id, { status: 'in_progress', worktreeBranch: 'squad/t_stray' });
-  assert.throws(
+  await assert.rejects(
     () => makeTools(s, dev.id).update_task_status({ taskId: tk.id, status: 'done' }),
     /squad\/t_stray is not merged into main/
   );
   assert.strictEqual(s.getTask(tk.id).status, 'in_progress', 'status left unchanged by the refusal');
 });
 
-test('done passes when the branch is already merged into the base', () => {
-  const { repo, g, s, pm, dev } = setup();
+test('done passes when the branch is already merged into the base', async () => {
+  const { repo, g, s, pm, dev } = await setup();
   g(repo, 'checkout', '-qb', 'squad/t_merged');
   fs.writeFileSync(path.join(repo, 'm.txt'), 'm\n');
   g(repo, 'add', '.'); g(repo, 'commit', '-q', '-m', 'm');
@@ -74,44 +74,44 @@ test('done passes when the branch is already merged into the base', () => {
   g(repo, 'merge', '--no-ff', '--no-edit', '-qm', 'land t_merged', 'squad/t_merged');
   const tk = makeTools(s, pm.id).create_task({ title: 'merged work', assignee: dev.id });
   s._updateTask(tk.id, { status: 'in_progress', worktreeBranch: 'squad/t_merged' });
-  makeTools(s, dev.id).update_task_status({ taskId: tk.id, status: 'done' });
+  await makeTools(s, dev.id).update_task_status({ taskId: tk.id, status: 'done' });
   assert.strictEqual(s.getTask(tk.id).status, 'done');
 });
 
-test('done is allowed (fail-open) when no repo can be derived to verify the branch', () => {
-  const { s, pm, dev, anchor } = setup();
+test('done is allowed (fail-open) when no repo can be derived to verify the branch', async () => {
+  const { s, pm, dev, anchor } = await setup();
   s._updateTask(anchor.id, { worktreePath: null, worktreeBranch: null });
   const tk = makeTools(s, pm.id).create_task({ title: 'unverifiable', assignee: dev.id });
   s._updateTask(tk.id, { status: 'in_progress', worktreeBranch: 'squad/nowhere' });
-  makeTools(s, dev.id).update_task_status({ taskId: tk.id, status: 'done' });
+  await makeTools(s, dev.id).update_task_status({ taskId: tk.id, status: 'done' });
   assert.strictEqual(s.getTask(tk.id).status, 'done');
 });
 
 test('with a worktree the done flip still runs the auto-merge instead of refusing', async () => {
-  const { repo, g, s, pm, dev } = setup();
+  const { repo, g, s, pm, dev } = await setup();
   const tk = makeTools(s, pm.id).create_task({ title: 'real work', assignee: dev.id });
-  const w = ensureWorktree(repo, tk.id);
+  const w = await ensureWorktree(repo, tk.id);
   s._updateTask(tk.id, { status: 'in_progress', worktreePath: w.worktreePath, worktreeBranch: w.worktreeBranch });
   fs.writeFileSync(path.join(w.worktreePath, 'w.txt'), 'w\n');
   g(w.worktreePath, 'add', '.'); g(w.worktreePath, 'commit', '-q', '-m', 'w');
   const from = (s.getTask(tk.id).comments || []).length;
-  makeTools(s, dev.id).update_task_status({ taskId: tk.id, status: 'done' });
+  await makeTools(s, dev.id).update_task_status({ taskId: tk.id, status: 'done' });
   const final = await settle(s, tk.id, from);
   assert.strictEqual(final.status, 'done');
   assert.ok(fs.existsSync(path.join(repo, 'w.txt')), 'branch work landed on the base branch');
 });
 
 test('done re-links a lost worktree link and runs the merge gate when squad/<id> is unmerged (t_f1939f6d)', async () => {
-  const { repo, g, s, pm, dev } = setup();
+  const { repo, g, s, pm, dev } = await setup();
   const tk = makeTools(s, pm.id).create_task({ title: 'lost link', assignee: dev.id });
-  const w = ensureWorktree(repo, tk.id);
+  const w = await ensureWorktree(repo, tk.id);
   fs.writeFileSync(path.join(w.worktreePath, 'l.txt'), 'lost\n');
   g(w.worktreePath, 'add', '.'); g(w.worktreePath, 'commit', '-q', '-m', 'lost work');
   // The incident state: work exists on squad/<id>, but the record lost both link fields
   // (useWorktrees off + a manually created worktree), so done would silently skip the gate.
   s._updateTask(tk.id, { status: 'in_progress', worktreePath: null, worktreeBranch: null });
   const from = (s.getTask(tk.id).comments || []).length;
-  makeTools(s, dev.id).update_task_status({ taskId: tk.id, status: 'done' });
+  await makeTools(s, dev.id).update_task_status({ taskId: tk.id, status: 'done' });
   assert.ok(fs.existsSync(path.join(repo, 'l.txt')), 'gate ran on done: branch work must land on the base');
   const final = await settle(s, tk.id, from);
   assert.strictEqual(final.status, 'done');
@@ -120,11 +120,11 @@ test('done re-links a lost worktree link and runs the merge gate when squad/<id>
   assert.ok(final.comments.some((c) => /auto-merged/.test(c.text)));
 });
 
-test('done with a null link and no squad branch just completes — no worktree is created', () => {
-  const { repo, s, pm, dev } = setup();
+test('done with a null link and no squad branch just completes — no worktree is created', async () => {
+  const { repo, s, pm, dev } = await setup();
   const tk = makeTools(s, pm.id).create_task({ title: 'plain', assignee: dev.id });
   s._updateTask(tk.id, { status: 'in_progress', worktreePath: null, worktreeBranch: null });
-  makeTools(s, dev.id).update_task_status({ taskId: tk.id, status: 'done' });
+  await makeTools(s, dev.id).update_task_status({ taskId: tk.id, status: 'done' });
   const after = s.getTask(tk.id);
   assert.strictEqual(after.status, 'done');
   assert.strictEqual(after.worktreePath, null);
@@ -134,8 +134,8 @@ test('done with a null link and no squad branch just completes — no worktree i
 
 // ---- create_task: overload warning ----
 
-test('create_task warns when the assignee reaches 2 open tasks while a same-role teammate is idle', () => {
-  const { s, pm, dev } = setup();
+test('create_task warns when the assignee reaches 2 open tasks while a same-role teammate is idle', async () => {
+  const { s, pm, dev } = await setup();
   makeTools(s, pm.id).create_task({ title: 'one', assignee: dev.id });
   const second = makeTools(s, pm.id).create_task({ title: 'two', assignee: dev.id });
   assert.match(second.warning, /overload: Devon now has 2 open tasks/);
@@ -143,22 +143,22 @@ test('create_task warns when the assignee reaches 2 open tasks while a same-role
   assert.strictEqual(second.assignee, dev.id, 'the task is still created — the warning is advisory');
 });
 
-test('no warning when every same-role/dev teammate already has open work', () => {
-  const { s, pm, dev, dev2 } = setup();
+test('no warning when every same-role/dev teammate already has open work', async () => {
+  const { s, pm, dev, dev2 } = await setup();
   makeTools(s, pm.id).create_task({ title: 'd1', assignee: dev.id });
   makeTools(s, pm.id).create_task({ title: 'busy', assignee: dev2.id });
   const r = makeTools(s, pm.id).create_task({ title: 'd2', assignee: dev.id });
   assert.strictEqual(r.warning, undefined);
 });
 
-test('no warning while the assignee has fewer than 2 open tasks', () => {
-  const { s, pm, dev } = setup();
+test('no warning while the assignee has fewer than 2 open tasks', async () => {
+  const { s, pm, dev } = await setup();
   const r = makeTools(s, pm.id).create_task({ title: 'solo', assignee: dev.id });
   assert.strictEqual(r.warning, undefined);
 });
 
-test('a dev-role teammate counts as an idle candidate across role spellings; unrelated roles do not', () => {
-  const { s, pm, dev } = setup();
+test('a dev-role teammate counts as an idle candidate across role spellings; unrelated roles do not', async () => {
+  const { s, pm, dev } = await setup();
   s.addNode({ name: 'Uma', role: 'Dev (UI)' });
   s.addNode({ name: 'Rey', role: 'Reviewer' });
   makeTools(s, pm.id).create_task({ title: 'one', assignee: dev.id });
@@ -167,8 +167,8 @@ test('a dev-role teammate counts as an idle candidate across role spellings; unr
   assert.doesNotMatch(r.warning, /Rey|Quinn/);
 });
 
-test('done tasks do not count toward the open load', () => {
-  const { s, pm, dev } = setup();
+test('done tasks do not count toward the open load', async () => {
+  const { s, pm, dev } = await setup();
   const a = makeTools(s, pm.id).create_task({ title: 'a', assignee: dev.id });
   s.updateTask(a.id, { status: 'done' });
   const b = makeTools(s, pm.id).create_task({ title: 'b', assignee: dev.id });

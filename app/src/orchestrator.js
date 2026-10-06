@@ -17,6 +17,7 @@ const PF = require('./preflight');
 const C = require('./controls');
 const IDLE = require('./idle');
 const WT = require('./worktree');
+const SB = require('./sandbox');
 const MG = require('./merge-gate');
 const RT = require('./runtimes');
 const { removePerRunMcpDirs } = require('./profile-runner');
@@ -33,13 +34,13 @@ const MCP_SERVER = path.join(__dirname, 'mcp-server.js');
 // file per run — parallel runs never share one) so a crashed/killed app leaves a trail the next
 // boot reaps via MG.reapGatePidFile — pid + lstart verified, never by name.
 const runPidsDir = (storeDir) => path.join(storeDir, '.squad', 'run-pids');
-function reapRunPids(storeDir) {
+async function reapRunPids(storeDir) {
   const out = { killed: [], skipped: [] };
   let files = []; try { files = fs.readdirSync(runPidsDir(storeDir)); } catch { return out; }
   for (const f of files) {
     const fp = path.join(runPidsDir(storeDir), f);
     try { if (!fs.statSync(fp).isFile()) continue; } catch { continue; }
-    const r = MG.reapGatePidFile(fp); // wrong lstart (recycled pid) is skipped and kept for a later retry
+    const r = await MG.reapGatePidFile(fp); // wrong lstart (recycled pid) is skipped and kept for a later retry
     out.killed.push(...r.killed); out.skipped.push(...r.skipped);
   }
   return out;
@@ -282,10 +283,10 @@ class Orchestrator extends EventEmitter {
     // process holds the store (an agent's board server flips tasks done), not just the app.
     this.repoDir = opts.repoDir || null; // the worktree lifecycle sweep (t_9b662983) needs it too
     if (opts.repoDir) {
-      try {
-        const sha = WT.headSha(opts.repoDir);
+      // Async (t_5a78aa95): the boot sha capture no longer forks git on the main thread.
+      WT.headSha(opts.repoDir).then((sha) => {
         if (sha && sha !== (store.meta() || {}).buildSha) store.update('project', {}, (m) => { m.buildSha = sha; return m; });
-      } catch {}
+      }).catch(() => {});
     }
     // Stall watchdog state: last seen cumulative CPU time of each run's CLI process (nodeId -> {pid, cpuMs}),
     // the pending SIGKILL grace timers for stalled runs that ignore SIGTERM, and the last liveness
@@ -692,7 +693,7 @@ class Orchestrator extends EventEmitter {
       // humanPrompt wording — wakePrompt's "teammate"/send_message framing is wrong for the human
       // operator. Mixed or teammate-only wakes keep the teammate wording.
       const prompt = msgs.every((m) => m.from === 'human') ? humanPrompt(msgs.map((m) => m.text).join('\n\n'), null, wakeAtts) : wakePrompt(team, node, msgs);
-      try { args = RT.getRuntime(cfg.runtime).buildArgs(cfg, prompt, settings, this.mcpConfig(node), { resume, cwd, env, ...(wakeAtts.length ? { attachDir: this.store.attachmentsDir() } : {}) }); }
+      try { args = await RT.getRuntime(cfg.runtime).buildArgs(cfg, prompt, settings, this.mcpConfig(node), { resume, cwd, env, ...(wakeAtts.length ? { attachDir: this.store.attachmentsDir() } : {}) }); }
       catch (e) { this.log(node.id, 'error', 'bad agent settings: ' + e.message); }
       const r = await this.spawnRun(node, args, cwd, env, settings, { ...meta, resumedFrom: args && resume ? resume : null });
       a.status = 'idle'; a.iteration = 0; a.activity = null;
@@ -724,7 +725,8 @@ class Orchestrator extends EventEmitter {
   // dispatches through `orch.runAlive(...)` so a stub is honored. ----
   // The sweep runs off a bare interval: an exception here would be an uncaught one (the 5s timer
   // callback has no guard of its own), so the sweep itself is crash-proof like tick/sweepRestart.
-  sweepStalls() { try { SW.sweepStalls(this); } catch (e) { try { this.log(null, 'error', 'stall sweep: ' + e.message); } catch {} } }
+  // Async (t_5a78aa95): the liveness probes fork ps — awaited, never blocking the interval.
+  sweepStalls() { return SW.sweepStalls(this).catch((e) => { try { this.log(null, 'error', 'stall sweep: ' + e.message); } catch {} }); }
 
   stallLiveKids(child) { return SW.stallLiveKids(this, child); }
 
@@ -745,9 +747,9 @@ class Orchestrator extends EventEmitter {
     // Worktree lifecycle sweep (t_9b662983): before any agent spawns — worktrees whose task is
     // done/missing go away (clean + merged only; in-flight tasks are never touched) and stale
     // git worktree entries are pruned. A busy task id list is not needed here: nothing is running.
-    try {
-      if (this.repoDir) WT.sweepWorktrees({ repoDir: this.repoDir, store: this.store, log: (r) => this.log(null, 'system', `worktree sweep: removed ${r.removed.length}, retained ${r.retained.length}`) });
-    } catch {}
+    // Async fire-and-forget (t_5a78aa95): the sweep only ever touches DONE tasks' worktrees, so it
+    // cannot collide with the dispatch this start() immediately kicks off.
+    if (this.repoDir) WT.sweepWorktrees({ repoDir: this.repoDir, store: this.store, log: (r) => this.log(null, 'system', `worktree sweep: removed ${r.removed.length}, retained ${r.retained.length}`) }).catch(() => {});
     this.log(null, 'system', 'Orchestrator started');
     this.changed();
     this.tick();
@@ -765,7 +767,7 @@ class Orchestrator extends EventEmitter {
     // tree is unproven, and app startup must never block on it — results land through the store.
     try {
       if (this.store && this.store.dir) {
-        const script = `try{const MG=require(${JSON.stringify(require.resolve('./merge-gate'))});const {Store}=require(${JSON.stringify(require.resolve('./store'))});MG.checkMasterHealth(new Store(${JSON.stringify(this.store.dir)}));}catch(e){}process.exit(0)`;
+        const script = `(async()=>{try{const MG=require(${JSON.stringify(require.resolve('./merge-gate'))});const {Store}=require(${JSON.stringify(require.resolve('./store'))});await MG.checkMasterHealth(new Store(${JSON.stringify(this.store.dir)}));}catch(e){}process.exit(0)})()`;
         // ELECTRON_RUN_AS_NODE: process.execPath is the Electron binary in the app; without it the
         // '-e' child opens the 'Error launching app' dialog and the check never runs (t_1f379c6c).
         this.spawnFn(process.execPath, ['-e', script], { detached: true, stdio: 'ignore', env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' } }).unref();
@@ -1138,7 +1140,8 @@ class Orchestrator extends EventEmitter {
   // message}. noop = the pending target is the commit already running (0 commits behind, computed
   // from git) — the flow would stand down anyway, so say so, clear the stale state and push,
   // instead of arming a schedule whose gate freezes dispatch for a restart that cannot happen.
-  restartNow() {
+  // Async (t_5a78aa95): the behind-count forks git.
+  async restartNow() {
     if (this.devMode === false) {
       this.log(null, 'system', 'restart: unavailable in a packaged build — request ignored');
       return { status: 'error', message: 'restart scheduling is unavailable in a packaged build' };
@@ -1146,7 +1149,7 @@ class Orchestrator extends EventEmitter {
     const meta = this.store.meta() || {};
     const rp = meta.restartPending || null;
     const behind = rp && rp.sha && meta.buildSha && this.repoDir
-      ? WT.commitsBehind(this.repoDir, meta.buildSha, rp.sha)
+      ? await WT.commitsBehind(this.repoDir, meta.buildSha, rp.sha)
       : null;
     if (behind === 0) {
       this.store.clearRestartPending();
@@ -1429,7 +1432,11 @@ class Orchestrator extends EventEmitter {
     return null;
   }
 
-  // One claude process. Resolves {code, sessionId, result}.
+  // One claude process. Resolves {code, sessionId, result}. Still resolves through the same
+  // promise shape; the recycled-pid lstart captures (t_5a78aa95) fork ps and are read in the
+  // BACKGROUND after the child is registered — an await BEFORE the spawn would leave the
+  // synchronous placeholder ({kill(){}} slot reservation) in procs for ~30ms, so a drain
+  // haltProcs in that window would signal nothing. The watchdog + pidfile arm a beat later.
   spawnRun(node, args, cwd, env, settings, meta = {}) {
     return new Promise((resolve) => {
       const startedMs = Date.now();
@@ -1449,23 +1456,28 @@ class Orchestrator extends EventEmitter {
       // Die-with-the-app watchdog (t_2ca99830): SIGKILL on the app never reaches this detached
       // group, so a child process per run watches the app pid and TERMs/KILLs the group seconds
       // after the app vanishes (2026-10-01 01:47: four runs worked on as orphans for minutes).
-      let wd = null;
-      if (child.pid) {
-        try {
-          wd = spawn(process.execPath, [path.join(__dirname, 'run-watchdog.js'), '--app-pid', String(process.pid), '--app-lstart', MG.pidLstart(process.pid), '--group-pid', String(child.pid), '--interval-ms', '2000'],
-            { cwd: this.store.dir, env: { ...env, ELECTRON_RUN_AS_NODE: '1' }, detached: true, stdio: 'ignore' });
-          if (typeof wd.unref === 'function') wd.unref();
-        } catch { wd = null; }
-      }
-      let pidFile = null;
+      let wd = null; let pidFile = null;
       if (child.pid) {
         const realKill = child.kill.bind(child);
         child.kill = (sig) => { try { process.kill(-child.pid, sig || 'SIGTERM'); } catch {} return realKill(sig || 'SIGTERM'); };
+        // A drain halt that ran while only the {kill(){}} placeholder was registered marked
+        // drainCutNodes but could not signal anything — cut the real child now that it exists.
+        if (this.drainCutNodes.has(node.id)) { try { child.kill('SIGTERM'); } catch {} }
         try {
           pidFile = path.join(runPidsDir(this.store.dir), String(child.pid));
           fs.mkdirSync(path.dirname(pidFile), { recursive: true });
-          fs.writeFileSync(pidFile, `${child.pid}\t${MG.pidLstart(child.pid)}\tagent-run ${node.name}${meta.taskId ? ' task:' + meta.taskId : ''}\n`);
         } catch { pidFile = null; }
+        // Watchdog + pidfile arm in the background (async ps reads, t_5a78aa95): crash protection
+        // over minutes, so a ~30ms arming delay changes nothing. wd/pidFile stay in this scope —
+        // the close handler reaps them below.
+        Promise.all([MG.pidLstart(process.pid), MG.pidLstart(child.pid)]).then(([appLstart, ls]) => {
+          try {
+            wd = spawn(process.execPath, [path.join(__dirname, 'run-watchdog.js'), '--app-pid', String(process.pid), '--app-lstart', appLstart, '--group-pid', String(child.pid), '--interval-ms', '2000'],
+              { cwd: this.store.dir, env: { ...env, ELECTRON_RUN_AS_NODE: '1' }, detached: true, stdio: 'ignore' });
+            if (typeof wd.unref === 'function') wd.unref();
+          } catch { wd = null; }
+          try { if (pidFile) fs.writeFileSync(pidFile, `${child.pid}\t${ls}\tagent-run ${node.name}${meta.taskId ? ' task:' + meta.taskId : ''}\n`); } catch {}
+        }).catch(() => {});
         child.on('exit', () => { // leader gone; orphaned CLI children keep the group (and the pipes) alive
           try { if (wd && wd.exitCode == null && wd.signalCode == null) wd.kill('SIGKILL'); } catch {} // normal end: the watchdog's job is over (skip if it already left — its pid may be recycled)
           try { process.kill(-child.pid, 'SIGTERM'); } catch {}
@@ -1561,6 +1573,13 @@ class Orchestrator extends EventEmitter {
     // Single-run lock, enforced at the last choke point: never a second live run for one agent, even
     // if a caller raced past its own guard.
     if (this.procs.has(node.id)) { this.log(node.id, 'error', `dispatch refused: ${node.name} already has a live run (single run per agent)`); return; }
+    // Sandbox (t_8f7605c4): in a test instance no agent may start outside the data root — the
+    // harness's nodes carry sandboxed workdirs, so this only fires when harness state is wrong.
+    const sbRoot = SB.testRoot();
+    if (sbRoot && !SB.inside(sbRoot, path.resolve(node.workdir || this.store.dir))) {
+      this.log(node.id, 'error', `sandbox: dispatch refused — workdir ${path.resolve(node.workdir || this.store.dir)} is outside the test data root (${sbRoot})`);
+      return;
+    }
     this._idleSince = null; this._idleReason = null; // real work: the idle episode is over (t_b2273507)
     this.runs++;
     // A run for this task started (dispatch, manual button, or auto resume): new stuck episode — the
@@ -1586,7 +1605,7 @@ class Orchestrator extends EventEmitter {
         // fresh one) so resolving them re-merges the SAME branch instead of stranding it behind a new one.
         if (task.isConflictResolution && task.worktreePath && fs.existsSync(task.worktreePath)) { cwd = task.worktreePath; worktree = true; }
         else {
-          const w = WT.ensureWorktree(cwd, task.id);
+          const w = await WT.ensureWorktree(cwd, task.id);
           if (w.warning) this.log(node.id, 'error', 'warning: ' + w.warning);
           else { cwd = w.cwd; worktree = true; this.store.updateTaskSoon(task.id, { worktreePath: w.worktreePath, worktreeBranch: w.worktreeBranch }); }
         }
@@ -1632,7 +1651,7 @@ class Orchestrator extends EventEmitter {
           // Only runs that actually carry attachments get the attachments dir passed (claude maps it
           // to --add-dir; profile runtimes work from the paths in the prompt).
           const runAtts = (task.attachments || []).concat(humanAtts);
-          try { args = RT.getRuntime(cfg.runtime).buildArgs(runCfg, prompt, settings, mcp, { resume, cwd, env, ...(runAtts.length ? { attachDir: this.store.attachmentsDir() } : {}) }); }
+          try { args = await RT.getRuntime(cfg.runtime).buildArgs(runCfg, prompt, settings, mcp, { resume, cwd, env, ...(runAtts.length ? { attachDir: this.store.attachmentsDir() } : {}) }); }
           catch (e) { this.log(node.id, 'error', 'bad agent settings: ' + e.message); }
         }
         if (i > 0) this.log(node.id, 'system', `↻ ${node.name} iteration ${i + 1} (${m.mode})`);
@@ -1959,7 +1978,7 @@ class Orchestrator extends EventEmitter {
     let cfg;
     try { cfg = normalizeNode(applyPreset(node, presets)); } catch (e) { return { ok: false, checks: [{ id: 'config', label: 'agent settings', ok: false, detail: e.message }], error: 'agent settings: ' + e.message, at: new Date().toISOString() }; }
     if (cfg.runtime && cfg.runtime !== 'claude') { // other runtimes: binary + version check only
-      const d = RT.detectRuntimes(settings, this.env(cfg))[cfg.runtime] || { installed: false, version: null, error: 'unknown runtime' };
+      const d = (await RT.detectRuntimes(settings, this.env(cfg)))[cfg.runtime] || { installed: false, version: null, error: 'unknown runtime' };
       const r = { ok: d.installed, runtime: cfg.runtime, checks: [{ id: 'binary', label: cfg.runtime + ' binary', ok: d.installed, detail: d.installed ? cfg.runtime + ' ' + d.version : d.error }], error: d.installed ? null : cfg.runtime + ' ' + d.error, at: new Date().toISOString(), configHash: PF.configHash(node, settings) };
       this.log(node.id, r.ok ? 'result' : 'error', `⚑ preflight ${node.name} [${cfg.runtime}] ${r.ok ? 'PASS' : 'FAIL'}: ${r.checks[0].detail}`);
       this.changed(); return r;

@@ -101,13 +101,12 @@ test('silent task run with a live sleeping child: protected below the hard cap, 
   orch.on('run.recovering', (e) => events.push(['recovering', e]));
   // 1s timeout, 3s hard cap: at 1.5s silent the live child still protects the run.
   a.lastActivityAt = Date.now() - 1500;
-  orch.sweepStalls();
-  await new Promise((r) => setTimeout(r, 50));
+  await orch.sweepStalls();
   assert.equal(events.length, 0, 'below the cap a live descendant still protects the run');
   assert.equal(a.currentRun.stalled, undefined);
   // Past the cap the same run is claimed despite the live child, and the log names what kept it "alive".
   a.lastActivityAt = Date.now() - 3500;
-  orch.sweepStalls();
+  await orch.sweepStalls();
   assert.equal(a.currentRun.stalled, true, 'the hard cap kills the run even with a live child');
   assert.match(logText(store), /killing despite live child processes/);
   assert.match(logText(store), /sleep 251/, 'the log names the process that pinned liveness');
@@ -164,7 +163,7 @@ test('incident repro: system nudge wakes an idle agent, the hung wake run is cap
   disarm(orch); orch.stop();
 });
 
-test('no-task run with a non-message trigger (loop) is watched now, not skipped', () => {
+test('no-task run with a non-message trigger (loop) is watched now, not skipped', async () => {
   const { node, orch } = setup();
   orch.running = true; // sweepStalls only runs while the orchestrator is up
   const events = [];
@@ -175,10 +174,10 @@ test('no-task run with a non-message trigger (loop) is watched now, not skipped'
   const run = { done: false }; a.currentRun = run;
   orch.procs.set(node.id, { pid: 123456, kill() {} });
   a.lastActivityAt = Date.now() - 1500; // past the 1s timeout, below the 3s cap
-  orch.sweepStalls();
+  await orch.sweepStalls();
   assert.equal(run.stalled, undefined, 'below the cap the (stubbed) live child protects it');
   a.lastActivityAt = Date.now() - 3500;
-  orch.sweepStalls();
+  await orch.sweepStalls();
   assert.equal(run.stalled, true, 'past the cap the no-task loop run is claimed');
   assert.equal(events.length, 1);
   assert.equal(events[0].kind, 'wake'); // no-task runs recover as 'wake' kind (stop only, no resume)
@@ -201,19 +200,19 @@ test('a protected silent run is probed at most once per LIVE_RECHECK_MS; a cap-e
     const run = { done: false }; a.currentRun = run;
     orch.procs.set(node.id, { pid: 123456, kill() {} });
     a.lastActivityAt = Date.now() - 2000; // silent 2s: past the 1s timeout, below the 3s cap
-    orch.sweepStalls();
+    await orch.sweepStalls();
     assert.equal(probes, 1, 'first sweep probes');
     assert.equal(run.stalled, undefined);
-    orch.sweepStalls();
-    orch.sweepStalls();
+    await orch.sweepStalls();
+    await orch.sweepStalls();
     assert.equal(probes, 1, 'sweeps inside the recheck window skip the probe entirely');
     await new Promise((r) => setTimeout(r, STALL.LIVE_RECHECK_MS + 100));
     a.lastActivityAt = Date.now() - 2000; // keep the run below the cap regardless of elapsed time
-    orch.sweepStalls();
+    await orch.sweepStalls();
     assert.equal(probes, 2, 'the window only defers the probe, it never expires the run');
     assert.equal(run.stalled, undefined);
     a.lastActivityAt = Date.now() - 3500; // past the 3s hard cap: the kill path always probes fresh
-    orch.sweepStalls();
+    await orch.sweepStalls();
     assert.equal(probes, 3, 'a cap-eligible run probes on every sweep');
     assert.equal(run.stalled, true, 'the cap claims the run despite the (stubbed) live child');
     disarm(orch);
@@ -262,7 +261,7 @@ test('a watchdog-killed run that traps TERM and exits 0 still recovers; the budg
   orch.on('run.stalled', (e) => events.push(['stalled', e]));
   orch.on('run.recovering', (e) => events.push(['recovering', e]));
   a.lastActivityAt = Date.now() - 3500; // 1s timeout, past the 3s hard cap — the sleeper keeps runAlive true
-  orch.sweepStalls();
+  await orch.sweepStalls();
   assert.equal(a.currentRun.stalled, true, 'the cap claims the run despite the live child');
   assert.equal(store.getTask(task.id).status, 'in_progress');
   // Recovery fires for the exit-0 kill exactly as for a signal death.

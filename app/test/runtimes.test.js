@@ -29,9 +29,9 @@ test('capabilities are honest: opencode claims nothing, codex no cost/mcp', () =
   assert.deepStrictEqual(RT.RUNTIMES.opencode.capabilities, { tokens: false, cost: false, mcp: false, resume: false });
   assert.strictEqual(RT.RUNTIMES.codex.capabilities.cost, false); assert.strictEqual(RT.RUNTIMES.codex.capabilities.mcp, true);
 });
-test('detectRuntimes marks missing binaries not installed', () => {
+test('detectRuntimes marks missing binaries not installed', async () => {
   const exec = (bin) => { if (bin === 'opencode') { const e = new Error('spawn opencode ENOENT'); e.code = 'ENOENT'; throw e; } return bin === 'codex' ? 'codex-cli 0.144.6\n' : '2.1.0 (Claude Code)\n'; };
-  const d = RT.detectRuntimes({}, {}, exec);
+  const d = await RT.detectRuntimes({}, {}, exec);
   assert.deepStrictEqual([d.claude.installed, d.codex.installed, d.opencode.installed], [true, true, false]);
   assert.strictEqual(d.codex.version, '0.144.6'); assert.strictEqual(d.opencode.error, 'not installed');
   // helpycode now reports what the (fake) CLI itself shows: installed, but help-only derivation
@@ -39,8 +39,8 @@ test('detectRuntimes marks missing binaries not installed', () => {
   assert.strictEqual(d.helpycode.installed, true);
   assert.deepStrictEqual(d.helpycode.capabilities, { tokens: false, cost: false, mcp: false, resume: false });
 });
-test('detectRuntimes on this machine', () => {
-  const d = RT.detectRuntimes({}, { ...process.env, PATH: process.env.PATH + ':' + require('os').homedir() + '/.local/bin' });
+test('detectRuntimes on this machine', async () => {
+  const d = await RT.detectRuntimes({}, { ...process.env, PATH: process.env.PATH + ':' + require('os').homedir() + '/.local/bin' });
   assert.strictEqual(typeof d.opencode.installed, 'boolean');
 });
 
@@ -60,6 +60,7 @@ test('codex gets board MCP via -c overrides and honors model', () => {
 // bin path: deriveRuntimeProfile caches per binary+version.
 const path = require('node:path');
 const fs = require('node:fs');
+const os = require('node:os');
 const realHelpycodeTop = fs.readFileSync(path.join(__dirname, 'fixtures/help-helpycode-real-top.txt'), 'utf8');
 const realHelpycodeRun = fs.readFileSync(path.join(__dirname, 'fixtures/help-helpycode-real-run.txt'), 'utf8');
 const probeLines = fs.readFileSync(path.join(__dirname, 'fixtures/probe-helpycode-real.jsonl'), 'utf8');
@@ -79,55 +80,55 @@ function fakeHelpyExec(bin, args) {
   throw new Error('unexpected exec ' + JSON.stringify(args));
 }
 
-test('helpycode is profile-driven: args derive from the introspector (no hand-built profile)', () => {
+test('helpycode is profile-driven: args derive from the introspector (no hand-built profile)', async () => {
   const rt = RT.getRuntime('helpycode');
   // default (unset) permission mode falls through to bypassPermissions: the derived bypass flag
   // must be there, or non-interactive runs auto-reject permission asks (external_directory)
-  const a = rt.buildArgs({ model: 'elice/z-ai/glm-5.3-flash', effort: 'high' }, 'hi', { helpycodePath: '/fake/hc-args' }, {}, { resume: 'S1', exec: fakeHelpyExec });
+  const a = await rt.buildArgs({ model: 'elice/z-ai/glm-5.3-flash', effort: 'high' }, 'hi', { helpycodePath: '/fake/hc-args' }, {}, { resume: 'S1', exec: fakeHelpyExec });
   assert.deepStrictEqual(a, ['run', '-s', 'S1', '--dangerously-skip-permissions', '--format', 'json', '--model', 'elice/z-ai/glm-5.3-flash', '--variant', 'high', 'hi']);
 });
-test('helpycode long prompt goes over stdin, not argv (ENAMETOOLONG from realpath of the message)', () => {
+test('helpycode long prompt goes over stdin, not argv (ENAMETOOLONG from realpath of the message)', async () => {
   const rt = RT.getRuntime('helpycode');
   const long = 'You are "Devon". ' + 'x'.repeat(3000);
-  const a = rt.buildArgs({ model: 'm1' }, long, { helpycodePath: '/fake/hc-long' }, {}, { exec: fakeHelpyExec });
+  const a = await rt.buildArgs({ model: 'm1' }, long, { helpycodePath: '/fake/hc-long' }, {}, { exec: fakeHelpyExec });
   assert.ok(!a.includes(long), 'a long prompt must not be a positional arg');
   assert.equal(a.stdin, long, 'the prompt rides on args.stdin for spawnRun to pipe');
-  const s = rt.buildArgs({ model: 'm1' }, 'hi', { helpycodePath: '/fake/hc-long' }, {}, { exec: fakeHelpyExec });
+  const s = await rt.buildArgs({ model: 'm1' }, 'hi', { helpycodePath: '/fake/hc-long' }, {}, { exec: fakeHelpyExec });
   assert.equal(s[s.length - 1], 'hi'); assert.equal(s.stdin, undefined, 'short prompts stay positional');
 });
-test('helpycode >300KB prompt still rides stdin whole (over ARG_MAX/E2BIG: unspawnable as argv)', () => {
+test('helpycode >300KB prompt still rides stdin whole (over ARG_MAX/E2BIG: unspawnable as argv)', async () => {
   const rt = RT.getRuntime('helpycode');
   const huge = 'You are "Devon". ' + 'x'.repeat(300 * 1024); // > macOS 256KiB/arg and Linux 128KiB MAX_ARG_STRLEN
-  const a = rt.buildArgs({ model: 'm1' }, huge, { helpycodePath: '/fake/hc-huge' }, {}, { exec: fakeHelpyExec });
+  const a = await rt.buildArgs({ model: 'm1' }, huge, { helpycodePath: '/fake/hc-huge' }, {}, { exec: fakeHelpyExec });
   assert.ok(!a.some((x) => typeof x === 'string' && x.length > 200), 'no oversized positional arg at all');
   assert.equal(a.stdin, huge, 'the full payload rides on args.stdin, untruncated');
 });
-test('helpycode bypass flag respects the permission mode: explicit non-bypass modes leave it off', () => {
+test('helpycode bypass flag respects the permission mode: explicit non-bypass modes leave it off', async () => {
   const rt = RT.getRuntime('helpycode');
   const S = { helpycodePath: '/fake/hc-nobypass' };
   for (const mode of ['default', 'acceptEdits', 'plan']) {
-    const a = rt.buildArgs({ permissionMode: mode }, 'hi', S, {}, { exec: fakeHelpyExec });
+    const a = await rt.buildArgs({ permissionMode: mode }, 'hi', S, {}, { exec: fakeHelpyExec });
     assert.ok(!a.includes('--dangerously-skip-permissions'), mode + ' must not bypass');
-    const b = rt.buildArgs({ permissionMode: 'bypassPermissions' }, 'hi', S, {}, { exec: fakeHelpyExec });
+    const b = await rt.buildArgs({ permissionMode: 'bypassPermissions' }, 'hi', S, {}, { exec: fakeHelpyExec });
     assert.ok(b.includes('--dangerously-skip-permissions'));
     // node setting wins over the project default
-    const c = rt.buildArgs({ permissionMode: 'default' }, 'hi', { permissionMode: 'bypassPermissions', helpycodePath: '/fake/hc-nobypass' }, {}, { exec: fakeHelpyExec });
+    const c = await rt.buildArgs({ permissionMode: 'default' }, 'hi', { permissionMode: 'bypassPermissions', helpycodePath: '/fake/hc-nobypass' }, {}, { exec: fakeHelpyExec });
     assert.ok(!c.includes('--dangerously-skip-permissions'));
   }
 });
-test('helpycode mcp: file-method without opts.env throws (no safe way to deliver the config)', () => {
-  assert.throws(
-    () => RT.getRuntime('helpycode').buildArgs({ model: 'm1' }, 'hi', { helpycodePath: '/fake/hc-noenv' }, { mcpServers: { board: {} } }, { exec: fakeHelpyExec }),
+test('helpycode mcp: file-method without opts.env throws (no safe way to deliver the config)', async () => {
+  await assert.rejects(
+    RT.getRuntime('helpycode').buildArgs({ model: 'm1' }, 'hi', { helpycodePath: '/fake/hc-noenv' }, { mcpServers: { board: {} } }, { exec: fakeHelpyExec }),
     /needs opts\.env/,
   );
 });
-test('helpycode mcp: per-run config in a temp dir via <BIN>_CONFIG, never in the shared cwd', () => {
+test('helpycode mcp: per-run config in a temp dir via <BIN>_CONFIG, never in the shared cwd', async () => {
   const os = require('node:os');
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'hc-test-'));
   const mcp = { mcpServers: { board: { command: '/bin/node', args: ['srv.js', '--node', 'n1'], env: { ELECTRON_RUN_AS_NODE: '1' } } } };
   const rt = RT.getRuntime('helpycode');
   const env = {};
-  const a = rt.buildArgs({ model: 'm1' }, 'hi', { helpycodePath: '/fake/a/helpycode' }, mcp, { cwd, exec: fakeHelpyExec, askAgent: true, env });
+  const a = await rt.buildArgs({ model: 'm1' }, 'hi', { helpycodePath: '/fake/a/helpycode' }, mcp, { cwd, exec: fakeHelpyExec, askAgent: true, env });
   assert.ok(a.includes('--model') && a.includes('m1') && a[a.length - 1] === 'hi');
   assert.ok(env.HELPYCODE_CONFIG && env.HELPYCODE_CONFIG.endsWith('helpycode.json'));
   const cfg = JSON.parse(fs.readFileSync(env.HELPYCODE_CONFIG, 'utf8'));
@@ -138,14 +139,14 @@ test('helpycode mcp: per-run config in a temp dir via <BIN>_CONFIG, never in the
   fs.rmSync(path.dirname(env.HELPYCODE_CONFIG), { recursive: true, force: true });
   fs.rmSync(cwd, { recursive: true, force: true });
 });
-test('helpycode mcp: two concurrent dispatches get distinct configs with their own node id', () => {
+test('helpycode mcp: two concurrent dispatches get distinct configs with their own node id', async () => {
   const os = require('node:os');
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'hc-race-'));
   const mk = (nodeId) => ({ mcpServers: { board: { command: '/bin/node', args: ['srv.js', '--node', nodeId] } } });
   const envA = {}; const envB = {};
   const rt = RT.getRuntime('helpycode');
-  rt.buildArgs({ model: 'm1' }, 'hi', { helpycodePath: '/fake/a/helpycode' }, mk('n_A'), { cwd, exec: fakeHelpyExec, askAgent: true, env: envA });
-  rt.buildArgs({ model: 'm1' }, 'hi', { helpycodePath: '/fake/b/helpycode' }, mk('n_B'), { cwd, exec: fakeHelpyExec, askAgent: true, env: envB });
+  await rt.buildArgs({ model: 'm1' }, 'hi', { helpycodePath: '/fake/a/helpycode' }, mk('n_A'), { cwd, exec: fakeHelpyExec, askAgent: true, env: envA });
+  await rt.buildArgs({ model: 'm1' }, 'hi', { helpycodePath: '/fake/b/helpycode' }, mk('n_B'), { cwd, exec: fakeHelpyExec, askAgent: true, env: envB });
   assert.notStrictEqual(envA.HELPYCODE_CONFIG, envB.HELPYCODE_CONFIG);
   assert.strictEqual(JSON.parse(fs.readFileSync(envA.HELPYCODE_CONFIG, 'utf8')).mcp.board.command[3], 'n_A');
   assert.strictEqual(JSON.parse(fs.readFileSync(envB.HELPYCODE_CONFIG, 'utf8')).mcp.board.command[3], 'n_B');
@@ -164,10 +165,10 @@ test('helpycode parseEvent is generic profile-driven parsing (older documented e
   assert.strictEqual(r.cost, 0.0003); assert.ok(r.done);
   assert.ok(RT.parseProfileEvent({ type: 'error', message: 'boom' }, profile).failed);
 });
-test('helpycode parseEvent on the CURRENT stream shape: totals fire on usage-bearing step_finish', () => {
+test('helpycode parseEvent on the CURRENT stream shape: totals fire on usage-bearing step_finish', async () => {
   // derived from the real fixtures end-to-end (help -> probe -> mapping), no hand-built mapping
   const rt = RT.getRuntime('helpycode');
-  const profile = RT.deriveRuntimeProfile('/fake/hc-live-events', { exec: fakeHelpyExec, label: 'HelpyCode' });
+  const profile = await RT.deriveRuntimeProfile('/fake/hc-live-events', { exec: fakeHelpyExec, label: 'HelpyCode' });
   const lines = probeLines.trim().split('\n').map((l) => JSON.parse(l));
   const stepFinish = rt.parseEvent(lines[2], { helpycodePath: '/fake/hc-live-events' }, { exec: fakeHelpyExec });
   assert.deepStrictEqual(stepFinish.tokens, { inputTokens: 10, outputTokens: 29 }); // 3 output + 26 reasoning
@@ -190,9 +191,9 @@ function liveHelpyExec(bin, args) {
   if (args[0] === 'run') return liveLines;
   throw new Error('unexpected exec ' + JSON.stringify(args));
 }
-test('helpycode parseEvent on the live 0.3.5 stream: tool calls stream, only reason=stop is done', () => {
+test('helpycode parseEvent on the live 0.3.5 stream: tool calls stream, only reason=stop is done', async () => {
   const rt = RT.getRuntime('helpycode');
-  const profile = RT.deriveRuntimeProfile('/fake/hc-real-stream', { exec: liveHelpyExec, label: 'HelpyCode' });
+  const profile = await RT.deriveRuntimeProfile('/fake/hc-real-stream', { exec: liveHelpyExec, label: 'HelpyCode' });
   // derivation from the tool-bearing probe stream: token paths must claim the numeric token leaves,
   // not the tool event's string output
   assert.strictEqual(profile.eventMapping.inputPath, 'part.tokens.input');
@@ -222,37 +223,39 @@ test('helpycode parseEvent on the live 0.3.5 stream: tool calls stream, only rea
   assert.strictEqual(bad.logs[0][0], 'tool_error');
   assert.ok(RT.parseProfileEvent({ type: 'error', message: 'bad model' }, profile).failed);
 });
-test('capabilities derive from the profile, honestly: help-only sees resume only', () => {
+test('capabilities derive from the profile, honestly: help-only sees resume only', async () => {
   // help-only derivation (no probe/model call) knows the resume flag but nothing about the event stream
-  assert.deepStrictEqual(RT.getRuntime('helpycode').capabilities({ helpycodePath: '/fake/hc-caps' }, fakeHelpyExec), { tokens: false, cost: false, mcp: true, resume: true });
+  assert.deepStrictEqual(await RT.getRuntime('helpycode').capabilities({ helpycodePath: '/fake/hc-caps' }, fakeHelpyExec), { tokens: false, cost: false, mcp: true, resume: true });
   // with a probe + ask-agent-derived profile, every claim is backed by a profile field
-  const full = RT.deriveRuntimeProfile('/fake/hc-caps-full', { exec: fakeHelpyExec, label: 'HelpyCode', askAgent: true });
+  const full = await RT.deriveRuntimeProfile('/fake/hc-caps-full', { exec: fakeHelpyExec, label: 'HelpyCode', askAgent: true });
   assert.deepStrictEqual(RT.capabilitiesFromProfile(full), { tokens: true, cost: true, mcp: true, resume: true });
 });
-test('derived profiles are cached per binary and re-derived when the CLI version changes', () => {
+test('derived profiles are cached per binary and re-derived when the CLI version changes', async () => {
   let version = 'helpycode 0.3.5\n'; let helpCalls = 0;
   const countingExec = (bin, args) => { if (args[0] === '--version') return version; if (args.includes('--help')) { helpCalls++; return realHelpycodeTop; } return ''; };
-  const p1 = RT.deriveRuntimeProfile('/fake/hc-cache', { exec: countingExec, probe: false });
+  const p1 = await RT.deriveRuntimeProfile('/fake/hc-cache', { exec: countingExec, probe: false });
   const callsAfterFirst = helpCalls;
-  const p2 = RT.deriveRuntimeProfile('/fake/hc-cache', { exec: countingExec, probe: false });
+  const p2 = await RT.deriveRuntimeProfile('/fake/hc-cache', { exec: countingExec, probe: false });
   assert.strictEqual(p2, p1); // same version -> cache hit, no re-derivation
   assert.strictEqual(helpCalls, callsAfterFirst);
   version = 'helpycode 0.4.0\n'; // upgrade -> the cached profile goes stale
-  const p3 = RT.deriveRuntimeProfile('/fake/hc-cache', { exec: countingExec, probe: false });
+  const p3 = await RT.deriveRuntimeProfile('/fake/hc-cache', { exec: countingExec, probe: false });
   assert.notStrictEqual(p3, p1);
   assert.ok(helpCalls > callsAfterFirst, 'expected re-derivation after version change');
 });
 
 test('helpycode text event with an empty profile fails loud, not silent', () => {
-  const rt = RT.getRuntime('helpycode');
-  const noBin = () => '';
-  const o = rt.parseEvent({ type: 'text', part: { type: 'text', text: 'hi' } }, { helpycodePath: '/fake/missing' }, { exec: noBin });
+  const { normalizeRuntimeProfile } = require('../src/runtime-profile');
+  // parseEvent no longer derives on the hot path: an empty/failed profile is exercised directly
+  // through the same parser rt.parseEvent hands events to
+  const empty = normalizeRuntimeProfile({ id: 'helpycode', label: 'HelpyCode', binary: 'helpycode' });
+  const o = RT.parseProfileEvent({ type: 'text', part: { type: 'text', text: 'hi' } }, empty);
   assert.ok(o.logs.some(([k, t]) => k === 'error' && /no textPath/.test(t)));
 });
-test('empty-version (binary missing) profile is not cached', () => {
+test('empty-version (binary missing) profile is not cached', async () => {
   let n = 0; const ex = () => { n++; return ''; };
-  RT.deriveRuntimeProfile('/fake/hc-gone', { exec: ex, probe: false });
-  const first = n; RT.deriveRuntimeProfile('/fake/hc-gone', { exec: ex, probe: false });
+  await RT.deriveRuntimeProfile('/fake/hc-gone', { exec: ex, probe: false });
+  const first = n; await RT.deriveRuntimeProfile('/fake/hc-gone', { exec: ex, probe: false });
   assert.ok(n > first);
 });
 test('send_message to "human" says how to reply', () => {
@@ -260,12 +263,39 @@ test('send_message to "human" says how to reply', () => {
   assert.match(src, /To reply to the human, put the reply in your final answer, or use ask_human/);
 });
 
-test('helpycode parseEvent with env finds the binary under a Finder-like PATH', { skip: !require('child_process').spawnSync('which', ['helpycode']).stdout.length }, () => {
-  const dir = path.dirname(require('child_process').spawnSync('which', ['helpycode'], { encoding: 'utf8' }).stdout.trim());
+test('helpycode parseEvent with env finds the binary under a Finder-like PATH', async () => {
+  // The binary resolves from the RUN env's PATH (opts.env), never the test process's: a stub
+  // `helpycode` living ONLY on opts.env.PATH proves it. The stub answers introspection instantly —
+  // the real CLI's help/models/probe calls each carry a 15s timeout and starve out on a loaded
+  // machine (t_ea6c2c33 gate flake) without adding any resolution coverage.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'squad-pathbin-'));
+  const shim = path.join(dir, 'helpycode');
+  fs.writeFileSync(shim, `#!${process.execPath}
+const arg = process.argv[2] || '';
+if (arg === '--version') { console.log('stub 0.0.1'); process.exit(0); }
+if (arg === '--help') {
+  console.log('Commands:');
+  console.log('  helpycode run [message..]   run HelpyCode with a message');
+  console.log('  helpycode models            list available models');
+  console.log('Options:');
+  console.log('  --format <format>  output format (default: json)');
+  console.log('  --model <model>    model to use');
+  process.exit(0);
+}
+if (arg === 'models') { console.log('stub-model-x'); process.exit(0); }
+console.log(JSON.stringify({ type: 'step_start', sessionID: 's1' }));
+console.log(JSON.stringify({ type: 'text', part: { type: 'text', text: 'HELLO' } }));
+console.log(JSON.stringify({ type: 'step_finish', sessionID: 's1' }));
+`);
+  fs.chmodSync(shim, 0o755);
   const saved = process.env.PATH; process.env.PATH = '/usr/bin:/bin';
   try {
+    // parseEvent is sync and reads the profile cache: derive first via the same env-restricted PATH
+    // (makeExec resolves the binary from opts.env, never the test process's PATH)
+    const derivEnv = { PATH: `/usr/bin:/bin:${dir}` };
+    await RT.deriveRuntimeProfile('helpycode', { env: derivEnv });
     const ev = { type: 'text', part: { text: 'HELLO' } };
-    const o = RT.getRuntime('helpycode').parseEvent(ev, {}, { env: { PATH: `/usr/bin:/bin:${dir}` } });
+    const o = RT.getRuntime('helpycode').parseEvent(ev, {}, { env: derivEnv });
     assert.deepStrictEqual(o.logs, [['text', 'HELLO']]);
   } finally { process.env.PATH = saved; }
 });
