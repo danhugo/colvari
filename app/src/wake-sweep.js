@@ -75,7 +75,11 @@ function sweepWakes(orch) {
       const a = orch.agent(node.id);
       if (orch.procs.has(node.id) || a.status === 'working') continue;
       scanned++;
-      if (sweepAgent(orch, node, a, team, st, now, mkey)) withUnread++;
+      // One broken agent state (or a throwing wakeUnread seam) must not blind the rest of the
+      // roster: the failure is logged against its node and the sweep moves on.
+      try {
+        if (sweepAgent(orch, node, a, team, st, now, mkey)) withUnread++;
+      } catch (e) { orch.log(node.id, 'error', 'wake sweep: ' + node.id + ': ' + e.message); }
     }
   } catch (e) { orch.log(null, 'error', 'wake sweep: ' + e.message); }
   const sweepMs = Date.now() - sweepStart;
@@ -100,6 +104,7 @@ function unreadMap(orch, team, key) {
   const byNode = new Map();
   const known = new Set(team.nodes.map((n) => n.id));
   for (const m of orch.store.listMessages()) {
+    if (!m || typeof m !== 'object') continue; // corrupt entry: dropped — the memo only commits on a clean pass, so a throwing build would fail every sweep forever
     if (m.read || m.from === m.to) continue;
     if (m.from === 'system' ? !m.wake : !(m.from === 'human' || known.has(m.from))) continue;
     let arr = byNode.get(m.to);

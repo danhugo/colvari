@@ -57,6 +57,25 @@ async function procTable() {
   } catch { return null; }
 }
 
+// Live (non-zombie) descendants of rootPid, board MCP helper subtree excluded (isBoardHelper):
+// the single scan both liveness verdicts and the hard-cap log read, so the two can never drift
+// (a descendant counted for recovery is by construction the same one a kill would report).
+// Primary ps state is the first char; flags follow ('ZN' = defunct+nice). A stopped CLI cannot
+// reap its exited children, so defunct descendants pile up — they are not liveness.
+function liveDescendants(rows, rootPid) {
+  const kids = new Map();
+  for (const r of rows) { if (!kids.has(r.ppid)) kids.set(r.ppid, []); kids.get(r.ppid).push(r); }
+  const out = []; const queue = [rootPid]; const seen = new Set(queue);
+  while (queue.length) {
+    for (const r of kids.get(queue.pop()) || []) {
+      if (seen.has(r.pid) || isBoardHelper(r)) continue; // skipped node's subtree stays unreachable
+      seen.add(r.pid); queue.push(r.pid);
+      if (r.state[0] !== 'Z') out.push(r);
+    }
+  }
+  return out;
+}
+
 // Liveness beyond emitted events: a live (non-zombie) descendant of the run's CLI process counts as
 // alive — a long silent tool call (build, sleep, network) keeps a grandchild process running even
 // though no events stream. So does the CLI's own CPU time advancing between sweeps. Unknowable
@@ -74,19 +93,7 @@ async function runAlive(orch, nodeId, child, snapshot) {
   const prev = orch._stallCpu.get(nodeId);
   orch._stallCpu.set(nodeId, { pid: child.pid, cpuMs: me ? me.cpuMs : null });
   if (me && prev && prev.pid === child.pid && prev.cpuMs != null && me.cpuMs > prev.cpuMs) return true;
-  const kids = new Map();
-  for (const r of rows) { if (!kids.has(r.ppid)) kids.set(r.ppid, []); kids.get(r.ppid).push(r); }
-  const queue = [child.pid]; const seen = new Set(queue);
-  while (queue.length) {
-    for (const r of kids.get(queue.pop()) || []) {
-      if (seen.has(r.pid) || isBoardHelper(r)) continue; // skipped node's subtree stays unreachable
-      seen.add(r.pid); queue.push(r.pid);
-      // Primary ps state is the first char; flags follow ('ZN' = defunct+nice). A stopped CLI cannot
-      // reap its exited children, so defunct descendants pile up — they are not liveness.
-      if (r.state[0] !== 'Z') return true;
-    }
-  }
-  return false;
+  return liveDescendants(rows, child.pid).length > 0;
 }
 
 // Live (non-zombie) descendants of the run's CLI, for the hard-cap log: they show what kept a
@@ -94,17 +101,7 @@ async function runAlive(orch, nodeId, child, snapshot) {
 async function stallLiveKids(orch, child, snapshot) {
   const rows = snapshot === undefined ? await orch.procTable() : snapshot;
   if (!rows || !child || !child.pid) return [];
-  const kids = new Map();
-  for (const r of rows) { if (!kids.has(r.ppid)) kids.set(r.ppid, []); kids.get(r.ppid).push(r); }
-  const out = []; const queue = [child.pid]; const seen = new Set(queue);
-  while (queue.length) {
-    for (const r of kids.get(queue.pop()) || []) {
-      if (seen.has(r.pid) || isBoardHelper(r)) continue;
-      seen.add(r.pid); queue.push(r.pid);
-      if (r.state[0] !== 'Z') out.push({ pid: r.pid, command: r.command });
-    }
-  }
-  return out;
+  return liveDescendants(rows, child.pid).map((r) => ({ pid: r.pid, command: r.command }));
 }
 
 // A run that has emitted nothing AND has no live child/descendant process for stallTimeoutMin
@@ -115,7 +112,17 @@ async function stallLiveKids(orch, child, snapshot) {
 // stopped: the sweep re-delivers what still matters. Hard cap: silence for HARD_CAP_MULT x the
 // timeout kills any run even with live descendants (runtimes whose own helpers pin runAlive()
 // forever). Manual interrupts (stopAgent, a queued human message) always take precedence.
+// Overlap debounce (seed 488): the 5s sweep interval fires regardless of the last pass — a sweep
+// still awaiting its proc table (ps up to its 4s timeout on a loaded main loop) must not race the
+// next tick into a second concurrent fork and duplicate probes. The busy pass owns the sweep; a
+// later tick is dropped, not queued — the pass after that re-reads live state anyway.
 async function sweepStalls(orch) {
+  if (orch._stallSweepBusy) return;
+  orch._stallSweepBusy = true;
+  try { return await sweepStallsPass(orch); } finally { orch._stallSweepBusy = false; }
+}
+
+async function sweepStallsPass(orch) {
   if (orch.userStopped) return;
   // Task-run recovery is the Run's business (it re-dispatches through runTask), but a no-task run
   // can be live with the Run over (dispatchWake does not require it) — those still get watched.
@@ -198,4 +205,16 @@ async function sweepStalls(orch) {
   }
 }
 
-module.exports = { STALL, stallPrompt, stimeToMs, isBoardHelper, procTable, runAlive, stallLiveKids, sweepStalls };
+module.exports = { STALL, stallPrompt, stimeToMs, isBoardHelper, procTable, runAlive, stallLiveKids, liveDescendants, sweepStalls };
+
+// A run that got through (exit 0, no stall claim) is real progress: the per-task recovery counter
+// resets (persisted on the task, so it survives app restarts — otherwise a restart would re-arm the
+// recovery budget). A code 0 under an active stall claim is NOT progress — the watchdog killed a
+// run whose CLI trapped TERM and exited 0; resetting there would disarm the max-recoveries limit.
+// Migrated from runTask: the recovery-budget policy belongs with STALL.MAX_RECOVERIES, which reads it.
+function resetRecoveries(orch, taskId) {
+  const tp = orch.store.getTask(taskId);
+  if (tp && tp.stallRecoveries) orch.store.updateTaskSoon(taskId, { stallRecoveries: 0 });
+}
+
+module.exports.resetRecoveries = resetRecoveries;

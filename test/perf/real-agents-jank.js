@@ -28,6 +28,7 @@
  * Screenshots land in PERF_OUT: chat-open / thread-open (first campaign rep), scroll-up (top of
  * the first scroll pass), streaming (mid stream window).
  */
+Error.stackTraceLimit = 50; // lock-wait stacks must reach past the wrapper frames to the real caller
 const { app } = require('electron');
 const fs = require('fs');
 const os = require('os');

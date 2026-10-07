@@ -25,8 +25,8 @@ test('creates worktree on squad/<taskId> and reuses it', async () => {
 
 // npm install in a worktree must not write through the shared node_modules into the main checkout
 // (t_0fd83668): a worktree whose package files differ gets NO shared node_modules, an unchanged
-// one still shares via symlink.
-test('node_modules share: unchanged package files -> symlink, changed package.json -> none (t_0fd83668)', async () => {
+// one gets its own copy-on-write clone (never a symlink, t_09a2c1e0).
+test('node_modules share: unchanged package files -> clone, changed package.json -> none (t_0fd83668)', async () => {
   const d = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'wt-')));
   const g = (cwd, ...a) => execFileSync('git', ['-c', 'user.email=a@b', '-c', 'user.name=a', ...a], { cwd, stdio: 'pipe' }).toString().trim();
   g(d, 'init', '-q', '-b', 'main');
@@ -36,7 +36,8 @@ test('node_modules share: unchanged package files -> symlink, changed package.js
   fs.mkdirSync(path.join(d, 'node_modules'));
   fs.writeFileSync(path.join(d, 'node_modules', 'dep.js'), 'x');
   const same = await ensureWorktree(d, 't_nmA');
-  assert.ok(fs.lstatSync(path.join(same.worktreePath, 'node_modules')).isSymbolicLink(), 'unchanged package files: node_modules is a symlink to main');
+  assert.strictEqual(fs.readFileSync(path.join(same.worktreePath, 'node_modules', 'dep.js'), 'utf8'), 'x', 'unchanged package files: node_modules cloned from main');
+  assert.strictEqual(fs.lstatSync(path.join(same.worktreePath, 'node_modules')).isSymbolicLink(), false, 'a real dir, never a link');
   // A branch that changes package.json: commit the change on a scratch worktree, then let
   // ensureWorktree recreate the task worktree from that branch.
   const scratch = path.join(d, '.squad', 'scratch-t_nmB');
@@ -50,7 +51,7 @@ test('node_modules share: unchanged package files -> symlink, changed package.js
   assert.strictEqual(fs.lstatSync(path.join(d, 'node_modules')).isSymbolicLink(), false, 'main checkout node_modules stays a real dir');
 });
 
-test('node_modules share: differing package-lock.json also skips the share (t_0fd83668)', () => {
+test('node_modules share: differing package-lock.json also skips the share (t_0fd83668)', async () => {
   const main = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'wt-main-')));
   const wt = fs.mkdtempSync(path.join(os.tmpdir(), 'wt-lock-'));
   fs.writeFileSync(path.join(main, 'package.json'), '{"name":"m"}\n');
@@ -58,11 +59,11 @@ test('node_modules share: differing package-lock.json also skips the share (t_0f
   fs.mkdirSync(path.join(main, 'node_modules'));
   fs.writeFileSync(path.join(wt, 'package.json'), '{"name":"m"}\n');
   fs.writeFileSync(path.join(wt, 'package-lock.json'), '{"lock":2}\n');
-  linkNodeModules(main, main, wt);
+  await linkNodeModules(main, main, wt);
   assert.strictEqual(fs.existsSync(path.join(wt, 'node_modules')), false, 'lock-only difference: no shared node_modules');
   fs.writeFileSync(path.join(wt, 'package-lock.json'), '{"lock":1}\n');
-  linkNodeModules(main, main, wt);
-  assert.ok(fs.lstatSync(path.join(wt, 'node_modules')).isSymbolicLink(), 'identical files: the share happens');
+  await linkNodeModules(main, main, wt);
+  assert.ok(fs.lstatSync(path.join(wt, 'node_modules')).isDirectory(), 'identical files: the clone happens');
 });
 
 test('useWorktrees defaults on (t_064066e5: code tasks get worktrees unless a project opts out)', () => {

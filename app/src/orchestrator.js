@@ -29,6 +29,13 @@ const SW = require('./stall-watchdog');
 const WS = require('./wake-sweep');
 
 const MCP_SERVER = path.join(__dirname, 'mcp-server.js');
+// The init event only says "failed" (often a misleading ENOENT posix_spawn): name the real cause.
+function boardMcpCause(status, execPath = process.execPath, appDir = path.join(__dirname, '..')) {
+  const why = !fs.existsSync(execPath) ? `app/node_modules is missing or broken (Electron binary not found: ${execPath}) — run npm install in app/`
+    : !fs.existsSync(path.join(appDir, 'node_modules', '@modelcontextprotocol', 'sdk')) ? 'app/node_modules is missing or broken (MCP SDK not found) — run npm install in app/'
+    : 'cause unknown (Electron binary and MCP deps exist) — check the mcp-server.js log';
+  return `board MCP server ${status}: ${why}`;
+}
 
 // Per-run pidfiles (t_3f830e64): each run records .squad/run-pids/<pid> under the store dir (one
 // file per run — parallel runs never share one) so a crashed/killed app leaves a trail the next
@@ -290,10 +297,12 @@ class Orchestrator extends EventEmitter {
     }
     // Stall watchdog state: last seen cumulative CPU time of each run's CLI process (nodeId -> {pid, cpuMs}),
     // the pending SIGKILL grace timers for stalled runs that ignore SIGTERM, and the last liveness
-    // probe time per node (nodeId -> ts, the STALL.LIVE_RECHECK_MS debounce in sweepStalls).
+    // probe time per node (nodeId -> ts, the STALL.LIVE_RECHECK_MS debounce in sweepStalls),
+    // and the overlap-debounce flag that drops a sweep tick while the previous pass is in flight.
     this._stallCpu = new Map();
     this._stallKill = new Map();
     this._stallProbe = new Map();
+    this._stallSweepBusy = false;
     this._stallTimer = setInterval(() => this.sweepStalls(), STALL.SWEEP_MS);
     if (this._stallTimer.unref) this._stallTimer.unref();
     // Review watchdog state (sweepReviews): per review task, which link of the review chain is current
@@ -857,6 +866,16 @@ class Orchestrator extends EventEmitter {
       const a = this.agents[t.assignee];
       const live = a && a.taskId === t.id && this.procs.has(t.assignee);
       if (live) continue;
+      // Re-dispatch cap (t_7509d1b0): counted from the task's own reset comments, like the crash cap.
+      const resets = (t.comments || []).filter((c) => c.author === 'orchestrator' && /^No live session/.test(c.text)).length;
+      if (resets >= 3) {
+        this.store.updateTask(t.id, { status: 'review', parkedForHuman: true });
+        this.store.commentTask(t.id, 'orchestrator', `Orphaned ${resets + 1} times (no live session each time) — parked for a human instead of re-queuing.`);
+        const node = this.store.getTeam().nodes.find((n) => n.id === t.assignee) || { id: t.assignee };
+        this.alertCrashPark(node, t, resets + 1, 'no live session (orphaned run)');
+        changed = true;
+        continue;
+      }
       this.store.updateTask(t.id, { status: 'todo' });
       this.store.commentTask(t.id, 'orchestrator', 'No live session for this task (its agent has no running process); reset to todo for re-dispatch.');
       this.log(t.assignee, 'system', `↺ "${t.title}" had no live session; reset to todo`);
@@ -1275,7 +1294,6 @@ class Orchestrator extends EventEmitter {
     this.store.updateTask(t.id, { status: 'review', awaitingApproval: true });
     this.store.commentTask(t.id, 'orchestrator', `Review watchdog:${idleMin ? ` the review sat ${idleMin} min past its deadline and ` : ' '}no reviewer acted after the fallbacks — this task now waits for a human. Review it yourself or move it to done.`);
     this.log(t.assignee, 'system', `⏸ "${t.title}" waits for a human: no reviewer acted after the watchdog fallbacks`);
-    this.notify('Approval needed', `${t.id}: ${t.title}`, { taskId: t.id });
   }
 
   // P0 stuck sweep (t_829d0220, wiki dispatch-monitoring-decision final): the ONE alert rule — a P0
@@ -1786,7 +1804,7 @@ class Orchestrator extends EventEmitter {
         this.store.commentTask(task.id, 'orchestrator', `Agent exited (code ${code}) after moving this task to review during iteration ${i}; parked for a human because the run crashed.`);
       }
       const t2 = this.store.getTask(task.id);
-      if (t2 && t2.awaitingApproval) { this.log(node.id, 'system', `⏸ "${task.title}" waits for human approval`); this.notify('Approval needed', `${node.name}: ${task.title}`, { taskId: task.id }); }
+      if (t2 && t2.awaitingApproval) { this.log(node.id, 'system', `⏸ "${task.title}" waits for human approval`); }
       this.log(node.id, 'system', `■ ${node.name} finished (exit ${code}, ${i} iteration(s), ${reason})`);
       this.changed();
       if (code === 0) okRuntime = meta.runtime; // free signal below fires after the slot is released
@@ -1837,14 +1855,15 @@ class Orchestrator extends EventEmitter {
   // failedTaskId (t_829d0220, option B): the streak counts tasks, not runs — re-crashes of the SAME
   // task (the crash→todo re-queue, however interleaved) never advance it, so one bad task must be
   // able to retry-and-park without pausing the runtime for everyone.
-  noteRuntimeFailure(nodeId, rt, r, failedTaskId) {
+  // forcedKind (t_7509d1b0): a caller that already knows the cause (board MCP failed) trips at once.
+  noteRuntimeFailure(nodeId, rt, r, failedTaskId, forcedKind) {
     if (!rt || rt === 'unknown' || r.stalled) return;
     const a = this.agents[nodeId];
     if (a && (a.stopRequested || this.drainCutNodes.has(nodeId))) return;
     const raw = [r.stderr, r.result].filter(Boolean).join('\n').trim();
     const text = FQ.redactError(raw) || `exit ${r.code}`;
     this.log(nodeId, 'error', `runtime ${rt} run failed (exit ${r.code}): ${text.slice(0, 500)}`);
-    const kind = FQ.classifyFailure(raw);
+    const kind = forcedKind || FQ.classifyFailure(raw);
     const dur = r.usage && r.usage.durationMs;
     const f = this._rtFailures.get(rt) || { signature: null, count: 0, taskIds: new Set() };
     this._rtFailures.set(rt, f);
@@ -2138,6 +2157,10 @@ class Orchestrator extends EventEmitter {
       }
     } else if (ev.type === 'system' && ev.subtype === 'init') {
       const mcpStatus = (ev.mcp_servers || []).map((s) => `${s.name}:${s.status}`).join(',');
+      // Board MCP down (t_7509d1b0): the agent can't touch the board, so every run just loops.
+      // Trip the runtime breaker now (pause + ONE askHuman per episode) with the real cause.
+      const board = (ev.mcp_servers || []).find((s) => s.name === 'board');
+      if (board && board.status !== 'connected') this.noteRuntimeFailure(node.id, runtime, { stderr: boardMcpCause(board.status) }, null, 'board MCP failed');
       if (run && ev.session_id) run.sessionId = ev.session_id;
       if (run && run.usage) U.applyEvent(run.usage, ev);
       const rl0 = U.parseRateLimits(ev);
@@ -2172,4 +2195,4 @@ class Orchestrator extends EventEmitter {
     }
   }
 }
-module.exports = { Orchestrator, buildPrompt, humanPrompt, wakePrompt, stallPrompt, attachedFilesLines, WAKE, WATCH, STALL, SCHED, RESTART, autoCompactEnv, runPidsDir, reapRunPids, interruptedFromReap };
+module.exports = { Orchestrator, boardMcpCause, buildPrompt, humanPrompt, wakePrompt, stallPrompt, attachedFilesLines, WAKE, WATCH, STALL, SCHED, RESTART, autoCompactEnv, runPidsDir, reapRunPids, interruptedFromReap };

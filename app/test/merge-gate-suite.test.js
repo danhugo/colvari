@@ -30,7 +30,7 @@ async function fixture(id, { pkg = true } = {}) {
     fs.mkdirSync(path.join(root, 'app', 'test'), { recursive: true });
     fs.writeFileSync(path.join(root, 'app', 'package.json'), JSON.stringify({ name: 'fx', version: '1.0.0', scripts: { test: 'node --test test/*.test.js' } }, null, 2) + '\n');
     fs.writeFileSync(path.join(root, 'app', 'test', 'a.test.js'), PASS_TEST);
-    fs.mkdirSync(path.join(root, 'app', 'node_modules')); // untracked: lets the gate symlink deps instead of npm install
+    fs.mkdirSync(path.join(root, 'app', 'node_modules')); // untracked: lets the gate clone deps instead of npm install
   }
   g(root, 'init', '-q', '-b', 'main');
   g(root, 'add', '-f', '.'); g(root, 'commit', '-q', '-m', 'init');

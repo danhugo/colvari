@@ -29,7 +29,7 @@ const els = {
 
 const factory = (logs) => {
   const S = { v: { project: 1 }, tasks: [], settings: {}, project: { teams: [] }, orch: { agents: {} } };
-  const names = ['$','document','S','logs','ctx','sel','logsLoaded','logTeamNodes','who','avatarBg','avatarBody','esc','shortTaskId','Chat','Subagents','RUNS','CH','requestAnimationFrame','logSig'];
+  const names = ['$','document','S','logs','ctx','sel','logsLoaded','logTeamNodes','who','avatarBg','avatarBody','esc','shortTaskId','Chat','Subagents','RUNS','CH','requestAnimationFrame','logSig','PERF'];
   const args = [
     (x) => els[x],
     { querySelectorAll: () => [], getElementById: () => null },
@@ -38,7 +38,7 @@ const factory = (logs) => {
     (s) => String(s).replace(/[<>&]/g, '_'),
     { pageOf: (rows) => ({ items: rows, hidden: 0 }), anchorScroll: () => 0 },
     { nestRows: (items) => items.map((l) => ({ kind: 'log', l })), durationMs: () => 0, fmtDuration: () => '', tokensLabel: () => '' },
-    [], {}, (f) => f(), '',
+    [], {}, (f) => f(), '', { logPane: { samples: [], slow: 0, SLOW_MS: 16 } }, // PERF stub (t_a5eb243c instrumentation samples renderLog's tail)
   ];
   return new Function(...names, `${block}\nreturn { renderLog };`)(...args);
 };

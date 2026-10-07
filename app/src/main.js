@@ -11,6 +11,8 @@ const { ProjectManager, TEMPLATES, isolateTestRoot } = require('./projects');
 const { BoardCache } = require('./board-cache');
 const { DeltaPump } = require('./delta-pump');
 const { pickChanged } = require('./store');
+// Main process: sync store writers never sleepSync-spin on an agent-held lock (t_42816253, Store._soon).
+require('./store').Store.noSpin = true;
 const AC = require('./agent-config');
 const WT = require('./worktree');
 const U = require('./usage');
@@ -41,7 +43,11 @@ if (DEV_MODE) process.env.AGENTS_SQUAD_DEV = '1';
 let runtimesPromise = null; // detected once per app start (binary + version) — one shared promise (t_5a78aa95):
 // the old sync detectRuntimes froze boot ~10s/runtime, and an async detection must never be seen
 // as an empty list (Cato t_f7c42eef #3): every consumer awaits this same promise.
-const runtimes = (settings) => (runtimesPromise ||= RT.detectRuntimes(settings, { ...process.env, PATH: [process.env.PATH, require('os').homedir() + '/.local/bin', '/opt/homebrew/bin', '/usr/local/bin'].join(':') }));
+const runtimes = (settings) => (runtimesPromise ||= RT.detectRuntimes(settings, { ...process.env, PATH: [process.env.PATH, require('os').homedir() + '/.local/bin', '/opt/homebrew/bin', '/usr/local/bin'].join(':') }).then((r) => (runtimesReady = r)));
+// getAll must not await detection (t_42816253: it spawns every CLI, 1.5 s of boot getAll wall).
+// Until it lands getAll ships config.runtimes = null and a '|rt' settings version, so the poll
+// re-fetches config once it resolves — never an empty list mistaken for "nothing installed".
+let runtimesReady = null;
 
 // Test instances (gui-e2e / smoke) must never touch real data and never linger: an inherited
 // AGENTS_SQUAD_HOME (the live app's root) loses to an explicit AGENTS_SQUAD_PROJECT, with neither
@@ -586,13 +592,14 @@ async function guiE2E() {
     const pngShot = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAJUlEQVR4nGN41PIfiPRsKoCIGDYDyRqIVwphk65h1A+jfqCSHwBRLqOQWccwggAAAABJRU5ErkJggg==', 'base64');
     fs.writeFileSync(path.join(wt, 'shot.png'), pngShot);
     const prevCwd = process.cwd();
-    let msg = null, cmt = null;
+    let msg = null, cmt = null, hmsg = null;
     try {
       process.chdir(wt);
       const tools = makeTools(ps, a.id);
       msg = tools.send_message({ to: b.id, text: 'Here is the screenshot.', attachments: [{ path: 'shot.png' }] });
       const t = ps.createTask({ title: 'Agent image demo', assignee: b.id, createdBy: a.id });
       cmt = tools.comment_task({ taskId: t.id, text: 'Same image on the task.', attachments: [{ path: 'shot.png' }] });
+      hmsg = tools.send_message({ to: 'human', text: 'Human: here is the result.', attachments: [{ path: 'shot.png' }] });
     } finally { process.chdir(prevCwd); }
     expect('agentimage: send_message copied the png and stored only the 4-field reference', msg && msg.attachments && msg.attachments.length === 1
       && msg.attachments[0].path.startsWith(path.join(ps.attachmentsDir(), '') ) && fs.readFileSync(msg.attachments[0].path).equals(pngShot)
@@ -603,6 +610,10 @@ async function guiE2E() {
     await ex(`$('#tabs button[data-tab=chat]').click(); await refresh(); chatSched.force(); await w(300);`);
     const thumbs = await waitFor(`return [...document.querySelectorAll('#chat-room .att-thumb')].filter((i) => i.naturalWidth > 0).length >= 2`, 8000);
     expect('agentimage: message and comment thumbnails render as loaded file:// images', thumbs, { thumbs });
+    // t_91bb6abe: agent -> human image is a separate full-width block below the bubble, not a thumb.
+    expect('agentimage: send_message to human stores the attachment', hmsg && hmsg.to === 'human' && hmsg.attachments && hmsg.attachments.length === 1, hmsg);
+    const block = await waitFor(`const a = document.querySelector('#chat-room a.att-block[target=_blank] > img'); return !!a && a.naturalWidth > 0 && a.getBoundingClientRect().width > 100 && !a.closest('.bubble')`, 8000);
+    expect('agentimage: human image renders as a block <img> outside the bubble', block, { block });
     await shot('agentimage-chat');
     console.log('[gui-e2e] agentimage', JSON.stringify({ msg: !!msg, cmt: !!cmt, thumbs }));
   };
@@ -2789,7 +2800,7 @@ function send(ch, data) { if (win && !win.isDestroyed()) win.webContents.send(ch
   const TS = (c) => { const ts = pm.get(c.p).teams; return pm.store(c.p, (ts.find((t) => t.id === c.t) || ts[0]).id); }; // the selected team graph
   // Cheap change fingerprint for the renderer's polling (t_9d92c3d3): file signatures + the
   // orchestrator's in-memory sig. `team` folds in settings because getAll decorates team nodes withPF.
-  const stateVersion = (c) => { const s = ST(c); const t = TS(c); const v = s.versions(); v.team = t.sigFile(t.teamFile()) + '|' + v.settings; v.teams = v.teams + '|' + v.settings; v.orch = orchFor(c.p).versionSig(); return v; };
+  const stateVersion = (c) => { const s = ST(c); const t = TS(c); const v = s.versions(); v.team = t.sigFile(t.teamFile()) + '|' + v.settings; v.teams = v.teams + '|' + v.settings; if (!runtimesReady) { runtimes(s.getSettings()).catch(() => {}); v.settings += '|rt'; } v.orch = orchFor(c.p).versionSig(); return v; };
 const withPF = (nodes, settings) => nodes.map((n) => ({ ...n, preflightStatus: PF.preflightStatus(n, settings) }));
 // Test one agent with its exact config and save the result on the node (in whichever team owns it).
 async function testAgent(c, nodeId) {
@@ -2851,7 +2862,7 @@ const api = {
     const s = ST(c); mark('store'); const t = TS(c); mark('team'); probeUnprobedAgents(c.p); mark('probe');
     const v = stateVersion(c); mark('ver');
     const all = { project: s.meta(), team: { ...t.getTeam(), nodes: withPF(t.getTeam().nodes, s.getSettings()) }, allNodes: withPF(s.getTeam().nodes, s.getSettings()), tasks: s.listTasks(), wiki: s.listWiki(), settings: s.getSettings(), messages: s.listMessages().slice(-200), orch: orchFor(c.p).snapshotSlim(),
-      config: { runtimes: await runtimes(s.getSettings()), billingModes: U.BILLING_MODES, permissionModes: AC.PERMISSION_MODES, edgeTypes: AC.EDGE_TYPES, boardTools: AC.BOARD_TOOLS, roles: AC.roleSuggestions(s.getSettings().rolePresets, s.getTeam().nodes) } };
+      config: { runtimes: runtimesReady, billingModes: U.BILLING_MODES, permissionModes: AC.PERMISSION_MODES, edgeTypes: AC.EDGE_TYPES, boardTools: AC.BOARD_TOOLS, roles: AC.roleSuggestions(s.getSettings().rolePresets, s.getTeam().nodes) } };
     mark('body');
     const sectionOf = { project: 'project', team: 'team', teams: 'allNodes', board: 'tasks', wiki: 'wiki', settings: 'settings', messages: 'messages', orch: 'orch' };
     const out = { v, teamId: t.teamId, dir: s.dir };
@@ -2877,7 +2888,8 @@ const api = {
   setNodeProtected: (c, id, v) => TS(c).setNodeProtected(id, v),
   addEdge: (c, a, b, type) => TS(c).addEdge(a, b, type), updateEdge: (c, id, p) => TS(c).updateEdge(id, p),
   savePreset: (c, p) => ST(c).savePreset(p), deletePreset: (c, name) => ST(c).deletePreset(name), removeEdge: (c, id) => TS(c).removeEdge(id),
-  createTask: (c, t) => ST(c).createTaskAsync(t), updateTask: (c, id, p) => ST(c).updateTaskSoon(id, p), deleteTask: (c, id) => ST(c).deleteTask(id),
+    // Writes from IPC await settled(): a deferred (lock-busy, Store.noSpin) write that fails still rejects to the renderer.
+  createTask: (c, t) => ST(c).createTaskAsync(t), updateTask: async (c, id, p) => { const s = ST(c); const t = s.updateTask(id, p); await s.settled(); return t; }, deleteTask: async (c, id) => { const s = ST(c); s.deleteTask(id); await s.settled(); },
   // Paste/upload: bytes land on disk under <store>/attachments and only {path,name,mime,size} comes
   // back ({error} on rejection) — messages.json never holds base64.
   saveAttachment: (c, input) => ST(c).saveAttachment(input || {}),

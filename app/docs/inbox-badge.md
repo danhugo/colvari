@@ -22,6 +22,11 @@ Key properties:
   the update was inlined in `renderInbox()`, which left the badge stale whenever
   an item landed while another tab was active — the bug the `renderChrome`
   extraction fixed, t_8d586961.)
+- **Debounced, leading+trailing (100 ms)**: a quiet render draws the badge at once, and a
+  burst of chrome redraws while `S.inbox` churns coalesces into at most one further write per
+  window, with the trailing draw guaranteeing the last count lands (same discipline as the
+  usage ledger, t_6cbe12ed). Unlike `renderUsage` there is no tab gate — the badge is
+  always-visible chrome, so every window still ends with the current count on screen.
 - **Hides itself when empty**: writing `''` (not `'0'`) lets the CSS rule
   `.badge:empty { display:none; }` (`app/renderer/style.css:177`, restyled for
   the sidebar at `style.css:941`) collapse the chip. There is never a visible
