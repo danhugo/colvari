@@ -586,13 +586,14 @@ async function guiE2E() {
     const pngShot = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAJUlEQVR4nGN41PIfiPRsKoCIGDYDyRqIVwphk65h1A+jfqCSHwBRLqOQWccwggAAAABJRU5ErkJggg==', 'base64');
     fs.writeFileSync(path.join(wt, 'shot.png'), pngShot);
     const prevCwd = process.cwd();
-    let msg = null, cmt = null;
+    let msg = null, cmt = null, hmsg = null;
     try {
       process.chdir(wt);
       const tools = makeTools(ps, a.id);
       msg = tools.send_message({ to: b.id, text: 'Here is the screenshot.', attachments: [{ path: 'shot.png' }] });
       const t = ps.createTask({ title: 'Agent image demo', assignee: b.id, createdBy: a.id });
       cmt = tools.comment_task({ taskId: t.id, text: 'Same image on the task.', attachments: [{ path: 'shot.png' }] });
+      hmsg = tools.send_message({ to: 'human', text: 'Human: here is the result.', attachments: [{ path: 'shot.png' }] });
     } finally { process.chdir(prevCwd); }
     expect('agentimage: send_message copied the png and stored only the 4-field reference', msg && msg.attachments && msg.attachments.length === 1
       && msg.attachments[0].path.startsWith(path.join(ps.attachmentsDir(), '') ) && fs.readFileSync(msg.attachments[0].path).equals(pngShot)
@@ -603,6 +604,10 @@ async function guiE2E() {
     await ex(`$('#tabs button[data-tab=chat]').click(); await refresh(); chatSched.force(); await w(300);`);
     const thumbs = await waitFor(`return [...document.querySelectorAll('#chat-room .att-thumb')].filter((i) => i.naturalWidth > 0).length >= 2`, 8000);
     expect('agentimage: message and comment thumbnails render as loaded file:// images', thumbs, { thumbs });
+    // t_91bb6abe: agent -> human image is a separate full-width block below the bubble, not a thumb.
+    expect('agentimage: send_message to human stores the attachment', hmsg && hmsg.to === 'human' && hmsg.attachments && hmsg.attachments.length === 1, hmsg);
+    const block = await waitFor(`const a = document.querySelector('#chat-room a.att-block[target=_blank] > img'); return !!a && a.naturalWidth > 0 && a.getBoundingClientRect().width > 100 && !a.closest('.bubble')`, 8000);
+    expect('agentimage: human image renders as a block <img> outside the bubble', block, { block });
     await shot('agentimage-chat');
     console.log('[gui-e2e] agentimage', JSON.stringify({ msg: !!msg, cmt: !!cmt, thumbs }));
   };
