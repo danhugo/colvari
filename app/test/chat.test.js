@@ -67,3 +67,10 @@ test('attachments: identical consecutive messages collapse, but only when neithe
   const c2 = C.collapseRepeats(C.roomEvents([], [], withAtt, []));
   assert.strictEqual(c2.length, 2); assert.strictEqual(c2[0].count, undefined); // atts keep bubbles apart
 });
+
+test('mdTables renders a GFM table with alignment and escapes cells via the cell fn', () => {
+  const esc = (s) => s.replace(/</g, '&lt;'); const txt = (s) => `[${s}]`;
+  const out = C.mdTables('hi\n| a | <b> |\n|:---|---:|\n| 1 | x\\|y |\n| 2 |\nbye', esc, txt);
+  assert.strictEqual(out, '[hi\n]<div class="md-table"><table><thead><tr><th style="text-align:left">a</th><th style="text-align:right">&lt;b></th></tr></thead><tbody><tr><td style="text-align:left">1</td><td style="text-align:right">x|y</td></tr><tr><td style="text-align:left">2</td><td style="text-align:right"></td></tr></tbody></table></div>[bye]');
+  assert.strictEqual(C.mdTables('| a | b |\nno sep', esc, txt), '[| a | b |\nno sep]'); // no separator row -> plain text
+});

@@ -3040,7 +3040,7 @@ const mdLine = (b) => esc(b)
 function chatMd(src) {
   return String(src ?? '').split(/```/).map((b, i) => { if (i % 2) { const body = b.replace(/^\w*\n/, '').replace(/\n$/, '');
     return /^\s*<svg[\s>]/i.test(body) && /<\/svg>\s*$/i.test(body) ? svgImg(body) : `<pre class="cmd-pre">${esc(body)}</pre>`; }
-    return b.split(/(<svg[\s>][\s\S]*?<\/svg>)/i).map((t, j) => j % 2 ? svgImg(t) : mdLine(t)).join(''); }).join('');
+    return b.split(/(<svg[\s>][\s\S]*?<\/svg>)/i).map((t, j) => j % 2 ? svgImg(t) : Chat.mdTables(t, mdLine, mdLine)).join(''); }).join('');
 }
 // Collapse repeats moved to Chat.collapseRepeats (pure, unit-tested); merge adjacent same-author groups (no repeated "You" headers); questions stay separate.
 const mergeGroups = (gs) => gs.reduce((out, g) => { const p = out[out.length - 1]; if (p && p.who === g.who && g.items[0].type !== 'question' && p.items[0].type !== 'question') p.items.push(...g.items); else out.push({ ...g, items: [...g.items] }); return out; }, []).map((g) => ({ ...g, items: Chat.collapseRepeats(g.items) }));

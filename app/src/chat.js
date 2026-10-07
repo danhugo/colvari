@@ -217,6 +217,25 @@
   // Collapse consecutive identical messages (same type/target/text) from one author into one bubble + a ×N
   // badge at the end. Messages carrying attachments never collapse (each file needs its own thumbs).
   const collapseRepeats = (items) => items.reduce((out, it) => { const p = out[out.length - 1]; if (p && p.type === it.type && p.text === it.text && p.to === it.to && !p.atts && !it.atts && it.type !== 'tool' && it.type !== 'question' && it.type !== 'subagent') p.count = (p.count || 1) + 1; else out.push({ ...it }); return out; }, []);
-  return { avatarColor, initials, toolLabel, roomEvents, group, splitPage, parseComposer, preview, mentionMatches, fmtSize, fileUrl, attThumbs, attBlock, collapseRepeats, GROUP_MS, MAX, PAGE, pageOf, anchorScroll, eventFp, tailPlan, prependPlan, feedKey };
+  // GFM tables: header row + |:---|---:| separator + body rows -> <table>. cell() must escape (it gets raw
+  // cell text); text() renders everything outside tables. Lines without a valid separator stay text.
+  const mdTables = (src, cell, text) => {
+    const row = (l) => l.trim().replace(/^\|/, '').replace(/(^|[^\\])\|$/, '$1').split(/(?<!\\)\|/).map((c) => c.trim().replace(/\\\|/g, '|'));
+    const isRow = (l) => l != null && l.includes('|') && l.trim() !== '';
+    const lines = String(src).split('\n'); let out = '', buf = [];
+    const flush = () => { if (buf.length) out += text(buf.join('\n')); buf = []; };
+    for (let i = 0; i < lines.length; i++) {
+      const h = lines[i], sep = lines[i + 1];
+      const al = isRow(h) && sep != null && /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/.test(sep) ? row(sep) : null;
+      if (!al || row(h).length !== al.length) { buf.push(h); continue; }
+      if (buf.length) buf[buf.length - 1] += '\n'; flush();
+      const st = al.map((a) => /^:-+:$/.test(a) ? ' style="text-align:center"' : /-:$/.test(a) ? ' style="text-align:right"' : /^:/.test(a) ? ' style="text-align:left"' : '');
+      const tr = (cs, tag) => `<tr>${al.map((_, k) => `<${tag}${st[k]}>${cell(cs[k] || '')}</${tag}>`).join('')}</tr>`;
+      let body = ''; i += 2; while (isRow(lines[i])) body += tr(row(lines[i++]), 'td'); i--;
+      out += `<div class="md-table"><table><thead>${tr(row(h), 'th')}</thead><tbody>${body}</tbody></table></div>`;
+    }
+    flush(); return out;
+  };
+  return { mdTables, avatarColor, initials, toolLabel, roomEvents, group, splitPage, parseComposer, preview, mentionMatches, fmtSize, fileUrl, attThumbs, attBlock, collapseRepeats, GROUP_MS, MAX, PAGE, pageOf, anchorScroll, eventFp, tailPlan, prependPlan, feedKey };
 });
 
