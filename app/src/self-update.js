@@ -463,11 +463,10 @@ class UpdateWatcher extends EventEmitter {
         if (wadd.code !== 0) { try { fs.rmSync(wt, { recursive: true, force: true }); } catch {} abort('could not create test worktree: ' + wadd.out.slice(0, 300)); return null; }
         try {
           await this.git(['worktree', 'lock', wt]);
-          try { fs.symlinkSync(path.join(this.npmDir, 'node_modules'), path.join(wt, this.rel, 'node_modules'), 'dir'); } catch {}
+          await require('./worktree').cloneNodeModules(path.join(this.npmDir, 'node_modules'), path.join(wt, this.rel, 'node_modules')); // own clone, never a link (t_09a2c1e0)
           return await this.testRun(path.join(wt, this.rel));
         } finally {
           await this.git(['worktree', 'unlock', wt]); // git refuses to remove a locked tree, even with --force
-          try { fs.unlinkSync(path.join(wt, this.rel, 'node_modules')); } catch {}
           await this.git(['worktree', 'remove', '--force', wt]);
           try { fs.rmSync(wt, { recursive: true, force: true }); } catch {}
         }

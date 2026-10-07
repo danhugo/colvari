@@ -356,17 +356,19 @@ test('merge gate: two simultaneous gates on one task across processes run the su
 
 // npm install in a worktree must never resolve through a stale shared symlink into the main
 // checkout (t_0fd83668): once the branch's package files differ from main, the gate drops the
-// link and installs into a real local dir; a matching share stays untouched.
-test('ensureDeps: stale node_modules symlink is dropped when package files differ (t_0fd83668)', { skip: SKIP }, async () => {
+// link and installs into a real local dir; with matching files the link is swapped for a clone (t_09a2c1e0).
+test('ensureDeps: a node_modules symlink is always dropped (t_0fd83668, t_09a2c1e0)', { skip: SKIP }, async () => {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'mgate-nm-main-')));
   const wt = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'mgate-nm-wt-')));
   fs.writeFileSync(path.join(root, 'package.json'), '{"name":"main"}\n');
   fs.writeFileSync(path.join(wt, 'package.json'), '{"name":"main"}\n');
   fs.mkdirSync(path.join(root, 'node_modules')); fs.writeFileSync(path.join(root, 'node_modules', 'dep.js'), 'x');
-  // matching files: the existing symlink share stays, no install runs
+  // matching files: the link is replaced by a clone, no install runs
   fs.symlinkSync(path.join(root, 'node_modules'), path.join(wt, 'node_modules'), 'dir');
   assert.strictEqual(await MG.ensureDeps(wt, root, null), null);
-  assert.ok(fs.lstatSync(path.join(wt, 'node_modules')).isSymbolicLink(), 'matching share is kept');
+  assert.strictEqual(fs.lstatSync(path.join(wt, 'node_modules')).isSymbolicLink(), false, 'link replaced');
+  assert.strictEqual(fs.readFileSync(path.join(wt, 'node_modules', 'dep.js'), 'utf8'), 'x', 'cloned from main');
+  fs.rmSync(path.join(wt, 'node_modules'), { recursive: true }); fs.symlinkSync(path.join(root, 'node_modules'), path.join(wt, 'node_modules'), 'dir');
   // branch changes its package files (no new deps: the local install stays offline): the symlink
   // must be dropped and a LOCAL install happens
   fs.writeFileSync(path.join(wt, 'package.json'), '{"name":"main","version":"2.0.0"}\n');

@@ -82,18 +82,18 @@ function gateDecision({ baseRuns, trackRuns, minImprove = 0.2, maxDropRate = 0.2
   return { verdict, minImprove, perPair: pairs, pooled, need95, everyPair, p95Win, p50NotWorse, reasons };
 }
 
-// ---- per-commit checkout: detached temp worktree + node_modules symlink (same electron) ----
+// ---- per-commit checkout: detached temp worktree + own node_modules clone (same electron) ----
 function repoRoot() {
   return execFileSync('git', ['rev-parse', '--show-toplevel'], { cwd: APP, encoding: 'utf8' }).trim();
 }
-function ensureWorktree(sha, root) {
+async function ensureWorktree(sha, root) {
   const dir = path.join(os.tmpdir(), `ab-wt-${String(sha).slice(0, 10)}`);
   if (!fs.existsSync(path.join(dir, 'app', 'src', 'main.js'))) {
     fs.rmSync(dir, { recursive: true, force: true });
     execFileSync('git', ['worktree', 'add', '--detach', dir, sha], { cwd: root, stdio: 'pipe' });
   }
   const nm = path.join(dir, 'app', 'node_modules');
-  try { fs.symlinkSync(path.join(APP, 'node_modules'), nm, 'dir'); } catch (e) { if (e.code !== 'EEXIST') throw e; }
+  if (!await require('../../src/worktree').cloneNodeModules(path.join(APP, 'node_modules'), nm)) throw new Error('node_modules clone failed: ' + nm); // never a link (t_09a2c1e0)
   return dir;
 }
 
@@ -150,7 +150,7 @@ async function main() {
   if (process.env.PERF_TRACE) {
     // One traced run (function split), never part of a gate comparison.
     const sha = process.env.PERF_TRACE_COMMIT ? full(process.env.PERF_TRACE_COMMIT) : trackSha;
-    const wt = ensureWorktree(sha, root);
+    const wt = await ensureWorktree(sha, root);
     const r = await runOne('trace', { wtDir: wt, outDir: path.join(OUT, 'trace'), traceMs: Number(process.env.PERF_TRACE_MS || 12000) });
     const s = JSON.parse(fs.readFileSync(path.join(OUT, 'trace', 'baseline.json'), 'utf8'));
     if (s.trace) {
@@ -166,7 +166,7 @@ async function main() {
   }
 
   console.log(`[ab] base ${baseSha} vs track ${trackSha}, ${PAIRS} pairs, ${REPS} reps/run, out ${OUT}`);
-  const wts = { [baseSha]: ensureWorktree(baseSha, root), [trackSha]: ensureWorktree(trackSha, root) };
+  const wts = { [baseSha]: await ensureWorktree(baseSha, root), [trackSha]: await ensureWorktree(trackSha, root) };
   const baseRuns = [], trackRuns = [];
   for (let pair = 1; pair <= PAIRS; pair++) {
     for (const [side, sha, bucket] of [['base', baseSha, baseRuns], ['track', trackSha, trackRuns]]) {
