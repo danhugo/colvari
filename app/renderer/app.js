@@ -3030,11 +3030,17 @@ function bubble(e) {
 }
 // Agent messages are markdown: render the light subset (fences, inline code, bold, links, bullets,
 // headings) inside the pre-wrap bubble so real messages don't show raw ** and ` (t_h0a1c2e3).
+// SVG (```svg fence or a raw <svg>…</svg>) shows as the picture via <img src=data:> — an <img> SVG
+// cannot run scripts, so it is never injected into the DOM (t_ddb6c29e).
+const svgImg = (s) => s.length > 200000 ? `<pre class="cmd-pre">${esc(s)}</pre>` : `<img class="chat-svg" src="data:image/svg+xml;utf8,${encodeURIComponent(s.trim())}" alt="SVG image">`;
+const mdLine = (b) => esc(b)
+  .replace(/^(\s*)[-*] /gm, '$1• ').replace(/^#{1,4} (.*)$/gm, '<b>$1</b>')
+  .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>').replace(/`([^`\n]+)`/g, '<code>$1</code>')
+  .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
 function chatMd(src) {
-  return esc(String(src ?? '')).split(/```/).map((b, i) => i % 2 ? `<pre class="cmd-pre">${b.replace(/^\w*\n/, '').replace(/\n$/, '')}</pre>` : b
-    .replace(/^(\s*)[-*] /gm, '$1• ').replace(/^#{1,4} (.*)$/gm, '<b>$1</b>')
-    .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>').replace(/`([^`\n]+)`/g, '<code>$1</code>')
-    .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')).join('');
+  return String(src ?? '').split(/```/).map((b, i) => { if (i % 2) { const body = b.replace(/^\w*\n/, '').replace(/\n$/, '');
+    return /^\s*<svg[\s>]/i.test(body) && /<\/svg>\s*$/i.test(body) ? svgImg(body) : `<pre class="cmd-pre">${esc(body)}</pre>`; }
+    return b.split(/(<svg[\s>][\s\S]*?<\/svg>)/i).map((t, j) => j % 2 ? svgImg(t) : mdLine(t)).join(''); }).join('');
 }
 // Collapse repeats moved to Chat.collapseRepeats (pure, unit-tested); merge adjacent same-author groups (no repeated "You" headers); questions stay separate.
 const mergeGroups = (gs) => gs.reduce((out, g) => { const p = out[out.length - 1]; if (p && p.who === g.who && g.items[0].type !== 'question' && p.items[0].type !== 'question') p.items.push(...g.items); else out.push({ ...g, items: [...g.items] }); return out; }, []).map((g) => ({ ...g, items: Chat.collapseRepeats(g.items) }));
