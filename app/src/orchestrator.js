@@ -290,10 +290,12 @@ class Orchestrator extends EventEmitter {
     }
     // Stall watchdog state: last seen cumulative CPU time of each run's CLI process (nodeId -> {pid, cpuMs}),
     // the pending SIGKILL grace timers for stalled runs that ignore SIGTERM, and the last liveness
-    // probe time per node (nodeId -> ts, the STALL.LIVE_RECHECK_MS debounce in sweepStalls).
+    // probe time per node (nodeId -> ts, the STALL.LIVE_RECHECK_MS debounce in sweepStalls),
+    // and the overlap-debounce flag that drops a sweep tick while the previous pass is in flight.
     this._stallCpu = new Map();
     this._stallKill = new Map();
     this._stallProbe = new Map();
+    this._stallSweepBusy = false;
     this._stallTimer = setInterval(() => this.sweepStalls(), STALL.SWEEP_MS);
     if (this._stallTimer.unref) this._stallTimer.unref();
     // Review watchdog state (sweepReviews): per review task, which link of the review chain is current

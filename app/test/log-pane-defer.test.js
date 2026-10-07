@@ -97,12 +97,14 @@ test('scrolling back to the tail rebuilds a deferred pane exactly once', () => {
   assert.equal(api.renderLog.calls, 1, 'later scroll ticks stay free');
 });
 
-test('a pinned flush is never deferred even when the fast append bails', () => {
+test('a pinned flush rebuilds via the trailing edge when the fast append bails', async () => {
   const logs = seeded(); const api = factory(logs);
   api.renderLog.winItems = 5; // 5 + 10 > logWin 200? no — but the search filter forces a full render
   els['#logsearch'].value = 'line 1';
   api.flushLogTail();
-  assert.equal(api.renderLog.calls, 1, 'visible filtered view keeps rebuilding immediately');
+  assert.equal(api.renderLog.calls, 0, 'no synchronous rebuild while the debounce window is open');
+  await new Promise((r) => setTimeout(r, 200)); // scheduleLogRebuild uses the real 150ms timer here
+  assert.equal(api.renderLog.calls, 1, 'exactly one trailing rebuild landed');
   assert.ok(!api.isDirty(), 'nothing deferred while the user sits at the tail');
 });
 

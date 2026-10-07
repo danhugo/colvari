@@ -112,7 +112,17 @@ async function stallLiveKids(orch, child, snapshot) {
 // stopped: the sweep re-delivers what still matters. Hard cap: silence for HARD_CAP_MULT x the
 // timeout kills any run even with live descendants (runtimes whose own helpers pin runAlive()
 // forever). Manual interrupts (stopAgent, a queued human message) always take precedence.
+// Overlap debounce (seed 488): the 5s sweep interval fires regardless of the last pass — a sweep
+// still awaiting its proc table (ps up to its 4s timeout on a loaded main loop) must not race the
+// next tick into a second concurrent fork and duplicate probes. The busy pass owns the sweep; a
+// later tick is dropped, not queued — the pass after that re-reads live state anyway.
 async function sweepStalls(orch) {
+  if (orch._stallSweepBusy) return;
+  orch._stallSweepBusy = true;
+  try { return await sweepStallsPass(orch); } finally { orch._stallSweepBusy = false; }
+}
+
+async function sweepStallsPass(orch) {
   if (orch.userStopped) return;
   // Task-run recovery is the Run's business (it re-dispatches through runTask), but a no-task run
   // can be live with the Run over (dispatchWake does not require it) — those still get watched.
