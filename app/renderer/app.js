@@ -142,7 +142,7 @@ function renderAll() {
 // badge stale whenever items landed while another tab was active.
 // Perf instrumentation (t_f6b343a5): ring of recent durations + slow-call count, inspect via
 // window.__perf.inboxBadge — nothing is logged unless a call exceeds SLOW_MS.
-const PERF = { inboxBadge: { samples: [], slow: 0, SLOW_MS: 2 } };
+const PERF = { inboxBadge: { samples: [], slow: 0, SLOW_MS: 2 }, logPane: { samples: [], slow: 0, SLOW_MS: 16 } };
 function renderInboxBadge() {
   const t0 = performance.now();
   $('#inbox-tab-badge').textContent = (S.inbox || []).length ? String(S.inbox.length) : '';
@@ -2356,6 +2356,7 @@ function renderLog() {
   if (!$('#tab-obs').classList.contains('active')) return;
   const lkey = logKey();
   if (lkey === logSig) return;
+  const t0 = performance.now();
   const f = $('#logfilter').value; const q = ($('#logsearch').value || '').trim().toLowerCase();
   const teamIds = sel.logTeam ? new Set(logTeamNodes().map((n) => n.id)) : null;
   const box = $('#log'); const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 20;
@@ -2391,6 +2392,10 @@ function renderLog() {
   document.querySelectorAll('#log [data-tasklink]').forEach((d) => d.onclick = () => { sel.task = d.dataset.tasklink; showTab('board'); renderBoard(); });
   if (atBottom && $('#logauto').checked) { box.scrollTop = box.scrollHeight; repinBottom(box); }
   else box.scrollTop = Chat.anchorScroll(prevTop, prevH, box.scrollHeight);
+  const ms = performance.now() - t0;
+  const p = PERF.logPane;
+  p.samples.push(ms); if (p.samples.length > 120) p.samples.shift();
+  if (ms > p.SLOW_MS) { p.slow++; console.debug('log pane render slow', ms.toFixed(2), 'ms'); }
 }
 $('#logteam').onchange = () => { sel.logTeam = $('#logteam').value; $('#logfilter').value = ''; renderObs(); renderLog(); };
 $('#logfilter').onchange = renderLog;
