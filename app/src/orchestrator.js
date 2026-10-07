@@ -1277,7 +1277,6 @@ class Orchestrator extends EventEmitter {
     this.store.updateTask(t.id, { status: 'review', awaitingApproval: true });
     this.store.commentTask(t.id, 'orchestrator', `Review watchdog:${idleMin ? ` the review sat ${idleMin} min past its deadline and ` : ' '}no reviewer acted after the fallbacks — this task now waits for a human. Review it yourself or move it to done.`);
     this.log(t.assignee, 'system', `⏸ "${t.title}" waits for a human: no reviewer acted after the watchdog fallbacks`);
-    this.notify('Approval needed', `${t.id}: ${t.title}`, { taskId: t.id });
   }
 
   // P0 stuck sweep (t_829d0220, wiki dispatch-monitoring-decision final): the ONE alert rule — a P0
@@ -1788,7 +1787,7 @@ class Orchestrator extends EventEmitter {
         this.store.commentTask(task.id, 'orchestrator', `Agent exited (code ${code}) after moving this task to review during iteration ${i}; parked for a human because the run crashed.`);
       }
       const t2 = this.store.getTask(task.id);
-      if (t2 && t2.awaitingApproval) { this.log(node.id, 'system', `⏸ "${task.title}" waits for human approval`); this.notify('Approval needed', `${node.name}: ${task.title}`, { taskId: task.id }); }
+      if (t2 && t2.awaitingApproval) { this.log(node.id, 'system', `⏸ "${task.title}" waits for human approval`); }
       this.log(node.id, 'system', `■ ${node.name} finished (exit ${code}, ${i} iteration(s), ${reason})`);
       this.changed();
       if (code === 0) okRuntime = meta.runtime; // free signal below fires after the slot is released

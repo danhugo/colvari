@@ -260,7 +260,9 @@ function makeTools(store, nodeId) {
       return store.commentTask(taskId, nodeName(t, nodeId), text, saveAgentAttachments(store, attachments));
     },
     send_message({ to, text, taskId = null, attachments }) {
-      const t = me(); if (to === 'human') throw new Error('unknown recipient "human". To reply to the human, put the reply in your final answer, or use ask_human.');
+      const t = me();
+      // to "human" (t_91bb6abe): lands in the human chat; images show as their own block there.
+      if (to === 'human') return store.sendMessage({ from: nodeId, to: 'human', text, taskId, attachments: saveAgentAttachments(store, attachments) });
       const target = resolve(t, to, 'recipient');
       if (!canMessage(t, nodeId, target.id)) throw new Error(`scope violation: ${nodeName(t, nodeId)} cannot message ${target.name} (no message or assign edge)`);
       return store.sendMessage({ from: nodeId, to: target.id, text, taskId, attachments: saveAgentAttachments(store, attachments) });
@@ -334,7 +336,10 @@ function makeTools(store, nodeId) {
       getRuntime(runtime); // runtimes.js is the registry: unknown id -> error (model stays free text)
       const blocked = recruitBudgetBlock(s);
       if (blocked) throw new Error(blocked);
-      const g = askGate({ tool: 'recruit_agent', name, role, prompt, runtime, model, effort }, `Core agent "${core.name}" requests a new agent "${name}" (role ${role})${reason ? ` — ${reason}` : ''}. Approve?`, reason);
+      // Under the cap (with a slot to spare) and inside the budget guard above, recruit needs no human
+      // OK; at or near maxAgents it still asks. Retire/update always go through askGate.
+      const cap = Math.max(1, parseInt(store.getSettings().maxAgents, 10) || 6);
+      const g = s.getTeam().nodes.length + 1 < cap ? { proceed: true } : askGate({ tool: 'recruit_agent', name, role, prompt, runtime, model, effort }, `Core agent "${core.name}" requests a new agent "${name}" (role ${role})${reason ? ` — ${reason}` : ''}. Approve?`, reason);
       if (!g.proceed) { if (g.declined) announce(`recruit of "${name}" declined by the human`); return g.result; }
       // Counted again after approval too: the team may have grown while the request was pending.
       const max = Math.max(1, parseInt(store.getSettings().maxAgents, 10) || 6);

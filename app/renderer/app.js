@@ -3022,7 +3022,8 @@ function bubble(e) {
     // attThumbs rides the span: the evrow branch took over message/comment bubbles after the
     // attachments feature and silently dropped their thumbs (t_6628894d) — '' when none, so
     // plain rows are unchanged.
-    return `<div class="bubble evrow ${e.type}${link ? ' linked' : ''}"${link}>${ico(IC[e.type])}<span>${esc(t)}${Chat.attThumbs(e.atts)}</span>${e._tb ? teamBadge(e._tb) : ''}${tl}${rep}</div>`; }
+    const toHuman = e.type === 'message' && e.to === 'human';
+    return `<div class="bubble evrow ${e.type}${link ? ' linked' : ''}"${link}>${ico(IC[e.type])}<span>${esc(t)}${toHuman ? '' : Chat.attThumbs(e.atts)}</span>${e._tb ? teamBadge(e._tb) : ''}${tl}${rep}</div>${toHuman ? Chat.attBlock(e.atts) : ''}`; }
   const text = e.text;
   const attsHtml = Chat.attThumbs(e.atts);
   return `<div class="bubble ${e.type}${link ? ' linked' : ''}"${link}>${chatMd(text)}${attsHtml}${tl}${e._tb ? teamBadge(e._tb) : ''}${rep}</div>`;
@@ -3065,7 +3066,7 @@ function renderYourTurn(ev) {
   const key = items.map((i) => `${i.id}:${i.question}:${(i.choices || []).join()}`).join('|');
   if (key === CH.ytKey) return; // unchanged: keep the bound DOM (t_1fb02462 — this rebuilt every draw)
   CH.ytKey = key;
-  bar.innerHTML = items.length ? `<div class="yt-head"><span class="yt-badge">!</span><b>Your turn</b><span class="muted">${items.length} waiting</span></div>` + items.map((i) => `<div class="yt-item" data-iid="${i.id}"><b>${esc(nodeName(i.nodeId))}</b> <span>${esc(i.question)}</span><span class="spacer"></span>${(i.kind === 'approval' ? ['approve'] : i.choices || []).map((c) => `<button class="primary yt-choice" data-v="${esc(c)}">${esc(c)}</button>`).join('')}<input class="yt-ans" placeholder="${i.kind === 'approval' ? 'Request changes…' : 'Answer…'}"><button class="yt-send">Send</button></div>`).join('') : '';
+  bar.innerHTML = items.length ? `<div class="yt-head"><span class="yt-badge">!</span><b>Your turn</b><span class="muted">${items.length} pending</span></div>` + items.map((i) => `<div class="yt-item" data-iid="${i.id}"><b>${esc(nodeName(i.nodeId))}</b> <span>${esc(i.question)}</span><span class="spacer"></span>${(i.kind === 'approval' ? ['approve'] : i.change ? ['approve', 'reject'] : i.choices || []).map((c) => `<button class="primary yt-choice" data-v="${esc(c)}">${esc(c)}</button>`).join('')}<input class="yt-ans" placeholder="${i.kind === 'approval' ? 'Request changes…' : 'Answer…'}"><button class="yt-send">Send</button></div>`).join('') : '';
   bar.querySelectorAll('.yt-item').forEach((d) => { const answer = (v) => act(async () => { if (!v) return; await call('answerInbox', d.dataset.iid, v); refresh(); })();
     d.querySelectorAll('.yt-choice').forEach((b) => b.onclick = () => answer(b.dataset.v)); d.querySelector('.yt-send').onclick = () => answer(d.querySelector('.yt-ans').value.trim());
     d.querySelector('.yt-ans').onkeydown = (e) => { if (e.key === 'Enter') answer(e.target.value.trim()); }; });
