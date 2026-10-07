@@ -25,7 +25,9 @@ const { BoardCache } = require('./board-cache');
 const blockPayload = (r) => `${(r.names || []).length ? (r.names || []).map((n) => '- ' + n).join('\n') : '- (test names unavailable)'}\n\ntail of the test output:\n\`\`\`\n${r.output || '(none)'}\n\`\`\``;
 
 const ROLES = SUGGESTED_ROLES; // suggestions only: roles are free text
+const soonQ = new Map(); // dir -> tail promise of this process's queued deferred writes (Store._soon)
 const STATUSES = ['todo', 'in_progress', 'review', 'done', 'waiting_for_human', 'merge_conflict'];
+const SETTINGS_DEFAULTS = { claudePath: 'claude', maxConcurrency: 8, maxRuns: 30, permissionMode: 'bypassPermissions', rolePresets: [], budgetUsd: 0, budgetTokens: 0, requireApproval: false, useWorktrees: true, usageLimits: {}, autoCompactPct: 40, stallTimeoutMin: 10, watchIntervalMin: 10, autoRestart: false, maxAgents: 6, teamChangeApproval: 'ask' };
 
 // Version-map keys whose getAll section changed since the client's last fetch (all keys when `since`
 // is null = first load / project switch). Pure so the delta contract is testable without Electron.
@@ -343,8 +345,34 @@ class Store {
     }
   }
   update(name, dflt, fn) {
-    return this.withLock(() => { const d = this.read(name, dflt); const r = fn(d); this.write(name, d); return r; });
+    return this._soon(() => { const d = this.read(name, structuredClone(dflt)); const r = fn(d); this.write(name, d); return r; },
+      () => fn(this.read(name, structuredClone(dflt))));
   }
+  // Main-process write path (t_42816253). With Store.noSpin (set by main.js only) a sync writer
+  // never sleepSync-spins on a lock an agent's MCP process holds: a free lock runs `real` inline
+  // (exact old behavior); a busy one returns `dry()` — the same fn on a fresh unlocked read, so
+  // validation errors still throw sync — and queues `real` behind the yielding async lock.
+  // Deferred writes run FIFO per dir, and while any is queued new writes queue too (order kept).
+  // Reads in this process may lag a queued write by one lock hold. settled() is the last write's
+  // promise: IPC callers await it so a failing deferred write still reaches them.
+  // Without noSpin (MCP servers, tests) this is plain withLock.
+  _soon(real, dry) {
+    if (!Store.noSpin || this._lockDepth) { const r = this.withLock(real); this._last = Promise.resolve(r); return r; }
+    const dir = this.dir;
+    if (!soonQ.has(dir)) {
+      let out; let done;
+      try { done = this.withLockTry(() => { out = real(); }); } catch (e) { this._last = Promise.reject(e); this._last.catch(() => {}); throw e; }
+      if (done) { this._last = Promise.resolve(out); return out; }
+    }
+    const r = dry();
+    const p = (soonQ.get(dir) || Promise.resolve()).then(() => this.withLockAsync(real));
+    const tail = p.catch((e) => { try { this._logStore('deferred write failed: ' + (e && e.message || e)); } catch {} });
+    soonQ.set(dir, tail);
+    tail.then(() => { if (soonQ.get(dir) === tail) soonQ.delete(dir); });
+    this._last = p; p.catch(() => {});
+    return r;
+  }
+  settled() { return this._last || Promise.resolve(); }
 
   // ---- scheduled restarts (plan t_42f310cf item 1) ----
   // Merges only bump the pending counter; a restart happens solely through an armed schedule
@@ -495,9 +523,10 @@ class Store {
   // The before-image reuses the per-file cache's compact form (t_7e53747c): the old code
   // stringified every task twice per write, all inside the lock — every agent MCP call paid it,
   // and main-process writers queued behind those holds.
-  _taskWritePass(fn) {
+  // `only` (file names) narrows the pass to those files — for patches that cannot touch any other task.
+  _taskWritePass(fn, only) {
     return () => {
-      const tasks = this._taskFiles().map((f) => this._readTaskFile(f)).filter(Boolean);
+      const tasks = (only || this._taskFiles()).map((f) => this._readTaskFile(f)).filter(Boolean);
       const beforeIds = new Set(tasks.map((t) => t.id));
       const beforeStr = new Map();
       for (const t of tasks) {
@@ -513,10 +542,10 @@ class Store {
       return r;
     };
   }
-  _withTasks(fn) {
+  _withTasks(fn, only) {
     if (this.cache && !this.cache.closed) this.cache.prewarm();
     this._ensureBoard();
-    return this.withLock(this._taskWritePass(fn));
+    return this._soon(this._taskWritePass(fn, only), () => fn((only || this._taskFiles()).map((f) => this._readTaskFile(f)).filter(Boolean).map((t) => structuredClone(t))));
   }
   // Async twin of _withTasks (see withLockAsync): same read/diff/write pass under the async lock.
   async _withTasksAsync(fn) {
@@ -650,7 +679,7 @@ class Store {
     }
     return this.read(this.teamFile(), { nodes: [], edges: [] });
   }
-  saveTeam(team) { this.withLock(() => this.write(this.teamFile(), team)); return team; }
+  saveTeam(team) { this._soon(() => this.write(this.teamFile(), team), () => {}); return team; }
   addNode(n) {
     const presets = this.getSettings().rolePresets;
     const node = { id: n.id || id('n'), ...normalizeNode(applyPreset(n, presets)), x: n.x, y: n.y };
@@ -868,7 +897,7 @@ class Store {
       }
       return t;
     };
-    const pass = this._taskWritePass(body);
+    const pass = this._taskWritePass(body, patch.blockedBy === undefined && patch.status !== 'done' ? [tid + '.json'] : undefined);
     if (this.cache && !this.cache.closed) this.cache.prewarm();
     this._ensureBoard();
     let out, done = false;
@@ -1069,6 +1098,10 @@ class Store {
     return out;
   }
   _updateTask(tid, patch) {
+    // Single-file fast path (t_42816253): only blockedBy (dep validation) and done (parent
+    // auto-complete) read other tasks; every other patch skips the stat of the whole board,
+    // which was the main-thread hold of every dispatch write.
+    const only = patch.blockedBy === undefined && patch.status !== 'done' ? [tid + '.json'] : undefined;
     return this._withTasks((tasks) => {
       const t = tasks.find((x) => x.id === tid); if (!t) throw new Error('no task ' + tid);
       if (patch.status && !STATUSES.includes(patch.status)) throw new Error('bad status ' + patch.status);
@@ -1084,7 +1117,7 @@ class Store {
         parent.status = 'done'; parent.awaitingApproval = false; parent.updatedAt = t.updatedAt; c = parent;
       }
       return t;
-    });
+    }, only);
   }
   deleteTask(tid) { this._withTasks((tasks) => { const i = tasks.findIndex((t) => t.id === tid); if (i >= 0) tasks.splice(i, 1); for (const t of tasks) if (t.blockedBy) t.blockedBy = t.blockedBy.filter((x) => x !== tid); }); }
   // Human approval gate: approve -> done, reject -> todo (with the note as a comment, so the agent reworks it).
@@ -1139,7 +1172,7 @@ class Store {
       const atts = sanitizeAttachments(attachments);
       if (atts) c.attachments = atts;
       t.comments.push(c); t.updatedAt = c.at; return c;
-    });
+    }, [tid + '.json']);
   }
 
   // ---- attachments (main-process save; renderer gets {path,name,mime,size}|{error}) ----
@@ -1662,7 +1695,16 @@ class Store {
   }
 
   // ---- settings ----
-  getSettings() { return { claudePath: 'claude', maxConcurrency: 8, maxRuns: 30, permissionMode: 'bypassPermissions', rolePresets: [], budgetUsd: 0, budgetTokens: 0, requireApproval: false, useWorktrees: true, usageLimits: {}, autoCompactPct: 40, stallTimeoutMin: 10, watchIntervalMin: 10, autoRestart: false, maxAgents: 6, teamChangeApproval: 'ask', ...this.read('settings', {}) }; }
+  // Settings are polled hard by periodic main-thread timers (the stall sweep every 5s, the nudge
+  // and review watchdogs, renderer getAll) — a stat-sig memo (same pattern as the board/runs
+  // memos) makes the warm read one stat instead of readFileSync + JSON.parse. Writes invalidate
+  // for free: saveSettings goes through write(), so the sig changes and the next call re-reads
+  // (own-process and out-of-process writers alike).
+  getSettings() {
+    const sig = this.sigFile('settings');
+    if (!this._settingsMemo || this._settingsMemo.sig !== sig) this._settingsMemo = { sig, raw: this.read('settings', {}) };
+    return { ...SETTINGS_DEFAULTS, ...this._settingsMemo.raw };
+  }
   saveSettings(s) {
     const next = { ...this.getSettings(), ...s };
     if (s.rolePresets) {
@@ -1680,4 +1722,5 @@ class Store {
   deletePreset(name) { return this.saveSettings({ rolePresets: this.getSettings().rolePresets.filter((x) => x.name !== name) }).rolePresets; }
 }
 
+Store.noSpin = false; // main.js sets true: see _soon
 module.exports = { Store, ROLES, STATUSES, PRIORITIES: C.PRIORITIES, defaultProjectDir, pickChanged, LOCK, lockHolderDead, LOG_LIMITS };

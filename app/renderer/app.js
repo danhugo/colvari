@@ -142,14 +142,35 @@ function renderAll() {
 // badge stale whenever items landed while another tab was active.
 // Perf instrumentation (t_f6b343a5): ring of recent durations + slow-call count, inspect via
 // window.__perf.inboxBadge — nothing is logged unless a call exceeds SLOW_MS.
-const PERF = { inboxBadge: { samples: [], slow: 0, SLOW_MS: 2 } };
+const PERF = { inboxBadge: { samples: [], slow: 0, SLOW_MS: 2 }, logPane: { samples: [], slow: 0, SLOW_MS: 16 } };
+// Leading+trailing debounce, same discipline as the usage ledger (t_6cbe12ed): the write itself is
+// flat O(1) (perf t_476d3ba0), but tab clicks and direct chrome redraws can stack repeated badge
+// writes while S.inbox churns; a burst coalesces into at most one write per window and the
+// trailing call guarantees the last count lands. The badge is always-visible chrome, so unlike
+// renderUsage there is no tab gate — quiet renders still draw at once.
+const INBOX_BADGE_DEBOUNCE_MS = 100;
+let badgeLastDraw = 0, badgeTimer = 0, badgeText = null;
 function renderInboxBadge() {
-  const t0 = performance.now();
-  $('#inbox-tab-badge').textContent = (S.inbox || []).length ? String(S.inbox.length) : '';
-  const ms = performance.now() - t0;
-  const p = PERF.inboxBadge;
-  p.samples.push(ms); if (p.samples.length > 120) p.samples.shift();
-  if (ms > p.SLOW_MS) { p.slow++; console.debug('inbox badge render slow', ms.toFixed(2), 'ms'); }
+  const draw = () => {
+    const t0 = performance.now();
+    // Text cache (t_2c20c0b0): #inbox-tab-badge is static chrome (index.html) whose only writes
+    // happen here, so an unchanged count string can skip the textContent assignment entirely —
+    // repeated chrome redraws cost no DOM invalidation; a count change writes as before.
+    const text = (S.inbox || []).length ? String(S.inbox.length) : '';
+    if (text !== badgeText) $('#inbox-tab-badge').textContent = badgeText = text;
+    const ms = performance.now() - t0;
+    const p = PERF.inboxBadge;
+    p.samples.push(ms); if (p.samples.length > 120) p.samples.shift();
+    if (ms > p.SLOW_MS) { p.slow++; console.debug('inbox badge render slow', ms.toFixed(2), 'ms'); }
+  };
+  const now = Date.now();
+  if (now - badgeLastDraw >= INBOX_BADGE_DEBOUNCE_MS) {
+    if (badgeTimer) { clearTimeout(badgeTimer); badgeTimer = 0; }
+    badgeLastDraw = now;
+    draw();
+  } else if (!badgeTimer) {
+    badgeTimer = setTimeout(() => { badgeTimer = 0; badgeLastDraw = Date.now(); draw(); }, INBOX_BADGE_DEBOUNCE_MS - (now - badgeLastDraw));
+  }
 }
 window.__perf = PERF;
 // The always-visible chrome (Perry's contract, t_8d586961): badges, counts and the restart chip
@@ -1017,7 +1038,14 @@ function drawClusterCard(g, n, onExpand) {
 // manual layout; the result is applied per render only while graphAuto is on. The same algorithm
 // also lives (shared + instrumented) in app/src/graph-view.js as layoutTree/treeLayout, which
 // test/graph-view.test.js exercises; this renderer copy is the one buildView actually calls.
+// Cache (t_38aa0017): buildView re-runs the layout on every render while graphAuto is on, but it
+// is a pure function of the visible ids (core flag included), the assign edges and the canvas
+// aspect — an unchanged signature reuses the last position map instead of re-placing every node.
+let tlCache = { sig: '', pos: null };
 function treeLayout(nodes, edges) {
+  const cr = ($('#graph') || {}).getBoundingClientRect ? $('#graph').getBoundingClientRect() : { width: 0 }, asp = cr.width && cr.height ? cr.width / cr.height : 1.6;
+  const sig = nodes.map((n) => n.id + (n.core ? '*' : '')).join() + '|' + edges.filter((e) => (e.type || 'assign') === 'assign').map((e) => e.from + '>' + e.to).join() + '|' + asp.toFixed(3);
+  if (tlCache.sig === sig) return tlCache.pos;
   const ids = new Set(nodes.map((n) => n.id)), kids = {}, hasParent = new Set(); const GX = W + 36, GY = H + 64, pos = {};
   for (const e of edges) if ((e.type || 'assign') === 'assign' && ids.has(e.from) && ids.has(e.to) && e.from !== e.to && !hasParent.has(e.to)) { (kids[e.from] ||= []).push(e.to); hasParent.add(e.to); }
   const seen = new Set();
@@ -1036,9 +1064,9 @@ function treeLayout(nodes, edges) {
   const loners = roots.filter((r) => !(kids[r.id] || []).length);
   for (const r of roots) if ((kids[r.id] || []).length) x += place(r.id, x, 40);
   const rest = loners.concat(nodes.filter((n) => !pos[n.id] && !loners.includes(n))).filter((n) => !pos[n.id]);
-  const cr = ($('#graph') || {}).getBoundingClientRect ? $('#graph').getBoundingClientRect() : { width: 0 }, asp = cr.width && cr.height ? cr.width / cr.height : 1.6;
   let cols = rest.length > 4 ? Math.max(3, Math.ceil(Math.sqrt(rest.length * asp * 0.55))) : rest.length; if (rest.length > 4) cols = Math.ceil(rest.length / Math.ceil(rest.length / cols)); // balanced rows (12 -> 4x3)
   rest.forEach((n, i) => { pos[n.id] = { x: x + (i % cols) * GX, y: 40 + Math.floor(i / cols) * (H + 40) }; });
+  tlCache = { sig, pos };
   return pos;
 }
 function buildView() {
@@ -1909,7 +1937,9 @@ function renderIdle() {
 const PRIORITIES = ['P0', 'P1', 'P2', 'P3'];
 const priorityOf = (t) => PRIORITIES.includes(t.priority) ? t.priority : 'P2';
 const priorityBadge = (t) => `<span class="tag prio prio-${priorityOf(t)}" title="Priority ${priorityOf(t)}">${priorityOf(t)}</span>`;
-const byPriorityThenTitle = (a, b) => PRIORITIES.indexOf(priorityOf(a)) - PRIORITIES.indexOf(priorityOf(b)) || a.title.localeCompare(b.title);
+// Titles ride through String() so a corrupted task file without one cannot throw inside
+// localeCompare and kill the whole board render (t_e25151db).
+const byPriorityThenTitle = (a, b) => PRIORITIES.indexOf(priorityOf(a)) - PRIORITIES.indexOf(priorityOf(b)) || String(a.title ?? '').localeCompare(String(b.title ?? ''));
 // Relative age for card meta ("2h", "3d") — a card's freshness is part of scanning a board.
 const ago = (ts) => { if (!ts) return ''; const ms = new Date(ts).getTime(); if (Number.isNaN(ms)) return ''; const sec = (Date.now() - ms) / 1000;
   return sec < 60 ? 'now' : sec < 3600 ? `${Math.floor(sec / 60)}m` : sec < 86400 ? `${Math.floor(sec / 3600)}h` : `${Math.floor(sec / 86400)}d`; };
@@ -2119,11 +2149,11 @@ $('#nt-add').onclick = async () => {
 // Thread-linked bubble titles ride the shared taskById index (t_94b8df1f) instead of a private
 // per-S.tasks memo.
 const taskTitle = (id) => { const t = id ? taskById(id) : null; return (t && t.title) || id; };
-function openBlockers(t) { return (t.blockedBy || []).filter((id) => { const x = S.tasks.find((y) => y.id === id); return x && x.status !== 'done'; }); }
+function openBlockers(t) { return (Array.isArray(t.blockedBy) ? t.blockedBy : []).filter((id) => { const x = S.tasks.find((y) => y.id === id); return x && x.status !== 'done'; }); } // a non-array blockedBy (corrupted file) must not throw out of the card render (t_e25151db)
 // Per-task live view: the last log lines of the agent working on the selected task.
 function renderLive() {
   const box = $('#td-live'); const t = S.tasks.find((x) => x.id === sel.task); if (!box || !t) return;
-  box.innerHTML = logs.filter((l) => l.projectId === ctx.p && l.nodeId === t.assignee && !l.saved).slice(-40).map((l) => `<span class="${l.kind}">${new Date(l.at).toLocaleTimeString()} ${l.kind}: ${esc(String(l.text).slice(0, 400))}</span>`).join('\n');
+  box.innerHTML = logs.filter((l) => l && l.projectId === ctx.p && l.nodeId === t.assignee && !l.saved).slice(-40).map((l) => `<span class="${l.kind}">${new Date(l.at).toLocaleTimeString()} ${l.kind}: ${esc(String(l.text ?? '').slice(0, 400))}</span>`).join('\n');
   box.scrollTop = box.scrollHeight;
 }
 
@@ -2140,15 +2170,27 @@ function md(src) {
     .replace(/\n{2,}/g, '<br><br>'))).join('');
 }
 let wkSig = null;
+// Wiki editor instrumentation (t_e5036ad3): state polls reach renderWiki on every tick, so the
+// perf board needs to see how much the signature guard absorbs between real edits and what a
+// rebuild/preview draw costs. Counters live on wkStats; a full rebuild >= 50 ms warns with the
+// absorb count so list growth stays visible (same discipline as the ledger's slow-rebuild log).
+const wkStats = { calls: 0, sigSkips: 0, renders: 0, shows: 0, lastMs: 0, maxMs: 0 };
 function renderWiki() {
+  wkStats.calls = (wkStats.calls || 0) + 1;
   // Signature like obsSig (see TAB_RESIG note): every state poll ran through here and rebuilt the
   // page list + re-wired its handlers even with nothing changed. updatedAt changes on any write, so
   // keying on titles+updatedAt+author+search+selection can't miss a real edit (including another
   // agent rewriting the page mid-session).
   const q = ($('#wk-search').value || '').trim().toLowerCase();
+  // Remote delete (seed 475): another agent can delete the selected page through the board tools;
+  // the stale selection used to keep a ghost editor alive and Save would silently recreate the
+  // deleted page. View mode has no draft to lose, so drop the selection; an active edit keeps its
+  // draft (same philosophy as the dirty guard) until the user saves or discards it.
+  if (sel.page && !S.wiki[sel.page] && !wikiEdit) sel.page = null;
   const pages = Object.keys(S.wiki).sort().map((t) => `${t}|${S.wiki[t].updatedAt || ''}|${S.wiki[t].author || ''}`).join(';');
   const key = [ctx.p, pages, q, sel.page || '', wikiEdit].join('|');
-  if (key === wkSig) return; wkSig = key;
+  if (key === wkSig) { wkStats.sigSkips = (wkStats.sigSkips || 0) + 1; return; } wkSig = key;
+  const t0 = performance.now();
   const titles = Object.keys(S.wiki).sort().filter((t) => !q || t.toLowerCase().includes(q) || (S.wiki[t].content || '').toLowerCase().includes(q));
   const all = Object.keys(S.wiki).length;
   $('#wikipages').innerHTML = titles.length
@@ -2159,6 +2201,10 @@ function renderWiki() {
   const empty = !sel.page && !wikiEdit;
   $('#wk-empty').classList.toggle('hidden', !empty); $('#wk-editor').classList.toggle('hidden', empty);
   $('#wk-empty h3').textContent = all ? 'No page selected' : 'No wiki pages yet';
+  const ms = performance.now() - t0;
+  wkStats.renders = (wkStats.renders || 0) + 1; wkStats.lastMs = ms;
+  if (ms > wkStats.maxMs) wkStats.maxMs = ms;
+  if (ms >= 50) console.warn(`wiki page list rebuilt in ${Math.round(ms)} ms over ${titles.length} page(s); ${wkStats.sigSkips} sig-skip(s) absorbed since boot`);
 }
 // Dirty-editor guard (t_2a87ef9a): leaving a modified editor used to silently wipe the draft.
 function wikiDirty() {
@@ -2182,10 +2228,14 @@ function loadPage() { const p = S.wiki[sel.page]; if (!p) return; $('#wk-title')
 // Cheap backlinks: tasks whose title or description mention this page's title.
 function wikiBacklinks(title) { const q = title.trim().toLowerCase(); if (!q) return []; return S.tasks.filter((t) => (t.title || '').toLowerCase().includes(q) || (t.description || '').toLowerCase().includes(q)); }
 function showWiki() {
+  const t0 = performance.now();
   $('#wk-content').classList.toggle('hidden', !wikiEdit); $('#wk-view').classList.toggle('hidden', wikiEdit);
   const bl = wikiEdit ? [] : wikiBacklinks($('#wk-title').value);
   $('#wk-view').innerHTML = md($('#wk-content').value) + (bl.length ? `<div class="wk-backlinks"><b>Linked from tasks</b><ul>${bl.map((t) => `<li data-task="${esc(t.id)}">${esc(t.title)}</li>`).join('')}</ul></div>` : '');
   $('#wk-view').querySelectorAll('.wk-backlinks li').forEach((d) => d.onclick = () => { sel.task = d.dataset.task; showTab('board'); renderBoard(); });
+  const ms = performance.now() - t0; // preview/backlink draw cost, same wkStats as the list rebuild
+  wkStats.shows = (wkStats.shows || 0) + 1;
+  if (ms > wkStats.maxMs) wkStats.maxMs = ms;
 }
 $('#wk-edit').onclick = () => { const on = !wikiEdit; if (on) wkBaseUpdated = (sel.page && S.wiki[sel.page]) ? (S.wiki[sel.page].updatedAt || null) : null; wikiEdit = on; showWiki(); };
 $('#wk-save').onclick = async () => {
@@ -2262,6 +2312,21 @@ function humanLog(t) {
   const head = [m[1] || 'Event', arg].filter(Boolean).join(' ');
   return { head: head.length > 140 ? head.slice(0, 139) + '…' : head, json: JSON.stringify(o, null, 2) };
 }
+// logRow re-formats every visible row's clock with toLocaleTimeString on each full rebuild —
+// ~6.5 ms per 200-row window (93% of the row-build compute, measured at profile sizes). The
+// string is a pure function of the raw timestamp (the locale options are fixed), so cache it
+// keyed on the value the line carries; the map is capped and simply resets when full.
+const logTimeCache = new Map();
+function logTime(at) {
+  let tm = logTimeCache.get(at);
+  if (tm === undefined) {
+    const d = new Date(at);
+    tm = isNaN(d) ? '' : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    if (logTimeCache.size >= 20000) logTimeCache.clear();
+    logTimeCache.set(at, tm);
+  }
+  return tm;
+}
 function logRow(l) {
   l = l || {}; // a null/primitive line renders as a system row instead of killing the whole build
   const w = who(l.nodeId); const lvl = LOG_LEVEL[l.kind] || 'text';
@@ -2270,7 +2335,7 @@ function logRow(l) {
   let text = l.kind === 'monitor' ? monitorText(l) : esc(l.text);
   const hum = humanLog(l.text);
   if (hum && l.kind !== 'monitor') text = `<details class="logjson"><summary>${esc(hum.head)}</summary><pre>${esc(hum.json)}</pre></details>`;
-  const at = new Date(l.at); const tm = isNaN(at) ? '' : at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  const tm = logTime(l.at);
   return `<div class="logrow lv-${lvl}"><span class="logtime">${tm}</span><span class="avatar sm" style="background:${avatarBg(w)}" title="${esc(w.name)}">${avatarBody(l.nodeId, w)}</span><span class="logagent" title="${esc(w.name)}">${esc(w.name)}</span>${task}<span class="loglevel lv-${lvl}">${badge}</span><span class="logtext">${text}</span></div>`;
 }
 // ---------- subagents (contract: t_c33656ba) ----------
@@ -2339,6 +2404,7 @@ function renderLog() {
   if (!$('#tab-obs').classList.contains('active')) return;
   const lkey = logKey();
   if (lkey === logSig) return;
+  const t0 = performance.now();
   const f = $('#logfilter').value; const q = ($('#logsearch').value || '').trim().toLowerCase();
   const teamIds = sel.logTeam ? new Set(logTeamNodes().map((n) => n.id)) : null;
   const box = $('#log'); const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 20;
@@ -2374,6 +2440,10 @@ function renderLog() {
   document.querySelectorAll('#log [data-tasklink]').forEach((d) => d.onclick = () => { sel.task = d.dataset.tasklink; showTab('board'); renderBoard(); });
   if (atBottom && $('#logauto').checked) { box.scrollTop = box.scrollHeight; repinBottom(box); }
   else box.scrollTop = Chat.anchorScroll(prevTop, prevH, box.scrollHeight);
+  const ms = performance.now() - t0;
+  const p = PERF.logPane;
+  p.samples.push(ms); if (p.samples.length > 120) p.samples.shift();
+  if (ms > p.SLOW_MS) { p.slow++; console.debug('log pane render slow', ms.toFixed(2), 'ms'); }
 }
 $('#logteam').onchange = () => { sel.logTeam = $('#logteam').value; $('#logfilter').value = ''; renderObs(); renderLog(); };
 $('#logfilter').onchange = renderLog;
@@ -2777,8 +2847,8 @@ function renderSettings(force) {
   $('#st-save').onclick = act(async () => { await call('saveSettings', { claudePath: $('#st-claude').value.trim() || 'claude', maxConcurrency: numv('st-conc', 2, 1, 8), maxRuns: numv('st-runs', 30, 1), permissionMode: $('#st-perm').value,
     budgetUsd: Math.max(0, +$('#st-budgetusd').value || 0), budgetTokens: Math.max(0, +$('#st-budgettok').value || 0), requireApproval: $('#st-approval').checked, notifications: $('#st-notify').checked, stuckMinutes: numv('st-stuck', 5, 1),
     stallTimeoutMin: numv('st-stall', 10, 1),
-    maxAgents: Math.max(1, parseInt($('#st-maxagents').value, 10) || 6), teamChangeApproval: $('#st-tcappr').value === 'auto' ? 'auto' : 'ask',
-    autoCompactPct: Math.max(0, Math.min(95, +$('#st-autocompactpct').value || 0)) }); refresh(); });
+    maxAgents: numv('st-maxagents', 6, 1), teamChangeApproval: $('#st-tcappr').value === 'auto' ? 'auto' : 'ask',
+    autoCompactPct: numv('st-autocompactpct', 40, 0, 95) }); refresh(); });
   renderUpdSettings();
   const stAr = $('#st-autorestart');
   if (stAr) stAr.onchange = act(async (ev) => {
@@ -3478,6 +3548,23 @@ function scheduleLogRender() {
   requestAnimationFrame(flush);
   setTimeout(flush, 150); // rAF can starve in occluded windows; never let the tail stall
 }
+// Full-rebuild rate limit (t_232704bb): when the fast append bails (search or level filter on,
+// subagent lines), every streamed flush used to run the full renderLog (~56ms at profile sizes)
+// — up to 60 rebuilds/s on an already busy main thread. Coalesce the fallback to one rebuild per
+// window; the trailing edge always lands the latest state. User-driven renders (filter, search,
+// scroll) still call renderLog directly — the signature gate dedupes either way.
+const LOG_REBUILD_MS = 150;
+let logRebuildTimer = 0;
+function scheduleLogRebuild() {
+  if (logRebuildTimer) return;
+  logRebuildTimer = setTimeout(() => { logRebuildTimer = 0;
+    const box = $('#log');
+    // Scrolled away between schedule and fire: the scroll handler rebuilds once on return, same
+    // as the deferred path above — don't anchor-jump the pane under the reader.
+    if (box && renderLog.winItems && box.scrollTop + box.clientHeight < box.scrollHeight - 20) { logTailDirty = true; return; }
+    renderLog();
+  }, LOG_REBUILD_MS);
+}
 function flushLogTail() {
   // One malformed streamed line must not kill the scheduler: the throw would otherwise recur on
   // every queued flush, taking renderLive's task-detail refresh down with it.
@@ -3489,11 +3576,12 @@ function flushLogTail() {
       // to the same rows. Defer the rebuild — the scroll handler rebuilds once when the tail
       // comes back into view (any explicit renderLog also clears it via its stamp).
       if (box && renderLog.winItems && box.scrollTop + box.clientHeight < box.scrollHeight - 20) logTailDirty = true;
-      else renderLog();
+      else if (renderLog.winItems) scheduleLogRebuild(); // pane already drawn: rate-limit the rebuild
+      else renderLog(); // empty pane (first draw / tab activation): paint now
     }
   }
   catch (e) { console.warn('log pane flush failed', e); }
-  renderLive(); // board task-detail pane follows the stream even while Obs is hidden
+  try { renderLive(); } catch (e) { console.warn('task-detail live tail render failed', e); } // board task-detail pane follows the stream even while Obs is hidden — a throw here must not escape the scheduler the way a throwing append used to
 }
 // Fast append path: only when the DOM is the plain live tail (no search, all levels on, no subagent
 // blocks, pinned to bottom with auto-scroll) do the new rows equal what a full render would draw —
