@@ -712,6 +712,8 @@ header > strong.brand { display:flex; align-items:center; gap:6px; font-weight:7
 .composer button:disabled { opacity:.45; cursor:not-allowed; }
 #chat-attach { align-self:stretch; margin:0 !important; }
 .att-row { display:inline-flex; flex-wrap:wrap; gap:6px; vertical-align:middle; margin-left:8px; }
+.att-block { display:block; max-width:480px; margin:6px 0; border:1px solid var(--border); border-radius:var(--radius-md); overflow:hidden; cursor:zoom-in; }
+.att-block img { display:block; width:100%; height:auto; }
 .bubble .att-thumb { width:64px; height:64px; object-fit:cover; border-radius:var(--radius-xs); display:block; }
 .bubble .att-file, .att-chip .att-file { font-size:var(--text-xs); border:1px solid var(--border); border-radius:var(--radius-xs); padding:2px 6px; align-self:center; }
 /* t_db029901 (regressions of t_e31f5663): the borderless default was a global override that stripped every

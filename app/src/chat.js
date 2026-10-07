@@ -23,6 +23,13 @@
     const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
     return `<span class="att-row">${atts.map((a) => String(a.mime || '').startsWith('image/') ? `<img class="att-thumb" src="${esc(fileUrl(a.path))}" loading="lazy" alt="${esc(a.name)}" title="${esc(a.name)} · ${fmtSize(a.size)}">` : `<span class="att-file" title="${esc(a.name)} · ${fmtSize(a.size)}">📄 ${esc(a.name)}</span>`).join('')}</span>`;
   };
+  // Agent -> human images (t_91bb6abe): one full-width block per image under the bubble; click opens full size.
+  const attBlock = (atts) => {
+    const imgs = (atts || []).filter((a) => String(a.mime || '').startsWith('image/'));
+    const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    return imgs.map((a) => `<a class="att-block" href="${esc(fileUrl(a.path))}" target="_blank" title="${esc(a.name)} · ${fmtSize(a.size)}"><img src="${esc(fileUrl(a.path))}" loading="lazy" alt="${esc(a.name)}"></a>`).join('')
+      + attThumbs((atts || []).filter((a) => !imgs.includes(a)));
+  };
   const toolName = (text) => String(text).split(' ')[0].replace(/^mcp__\w+__/, '');
   const toolArgs = (text) => { const s = String(text); const i = s.indexOf(' '); return i < 0 ? '' : s.slice(i + 1); };
   function toolLabel(text) {
@@ -210,6 +217,6 @@
   // Collapse consecutive identical messages (same type/target/text) from one author into one bubble + a ×N
   // badge at the end. Messages carrying attachments never collapse (each file needs its own thumbs).
   const collapseRepeats = (items) => items.reduce((out, it) => { const p = out[out.length - 1]; if (p && p.type === it.type && p.text === it.text && p.to === it.to && !p.atts && !it.atts && it.type !== 'tool' && it.type !== 'question' && it.type !== 'subagent') p.count = (p.count || 1) + 1; else out.push({ ...it }); return out; }, []);
-  return { avatarColor, initials, toolLabel, roomEvents, group, splitPage, parseComposer, preview, mentionMatches, fmtSize, fileUrl, attThumbs, collapseRepeats, GROUP_MS, MAX, PAGE, pageOf, anchorScroll, eventFp, tailPlan, prependPlan, feedKey };
+  return { avatarColor, initials, toolLabel, roomEvents, group, splitPage, parseComposer, preview, mentionMatches, fmtSize, fileUrl, attThumbs, attBlock, collapseRepeats, GROUP_MS, MAX, PAGE, pageOf, anchorScroll, eventFp, tailPlan, prependPlan, feedKey };
 });
 

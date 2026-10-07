@@ -2952,7 +2952,8 @@ function bubble(e) {
     // attThumbs rides the span: the evrow branch took over message/comment bubbles after the
     // attachments feature and silently dropped their thumbs (t_6628894d) — '' when none, so
     // plain rows are unchanged.
-    return `<div class="bubble evrow ${e.type}${link ? ' linked' : ''}"${link}>${ico(IC[e.type])}<span>${esc(t)}${Chat.attThumbs(e.atts)}</span>${e._tb ? teamBadge(e._tb) : ''}${tl}${rep}</div>`; }
+    const toHuman = e.type === 'message' && e.to === 'human';
+    return `<div class="bubble evrow ${e.type}${link ? ' linked' : ''}"${link}>${ico(IC[e.type])}<span>${esc(t)}${toHuman ? '' : Chat.attThumbs(e.atts)}</span>${e._tb ? teamBadge(e._tb) : ''}${tl}${rep}</div>${toHuman ? Chat.attBlock(e.atts) : ''}`; }
   const text = e.text;
   const attsHtml = Chat.attThumbs(e.atts);
   return `<div class="bubble ${e.type}${link ? ' linked' : ''}"${link}>${chatMd(text)}${attsHtml}${tl}${e._tb ? teamBadge(e._tb) : ''}${rep}</div>`;
