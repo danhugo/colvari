@@ -29,6 +29,13 @@ const SW = require('./stall-watchdog');
 const WS = require('./wake-sweep');
 
 const MCP_SERVER = path.join(__dirname, 'mcp-server.js');
+// The init event only says "failed" (often a misleading ENOENT posix_spawn): name the real cause.
+function boardMcpCause(status, execPath = process.execPath, appDir = path.join(__dirname, '..')) {
+  const why = !fs.existsSync(execPath) ? `app/node_modules is missing or broken (Electron binary not found: ${execPath}) — run npm install in app/`
+    : !fs.existsSync(path.join(appDir, 'node_modules', '@modelcontextprotocol', 'sdk')) ? 'app/node_modules is missing or broken (MCP SDK not found) — run npm install in app/'
+    : 'cause unknown (Electron binary and MCP deps exist) — check the mcp-server.js log';
+  return `board MCP server ${status}: ${why}`;
+}
 
 // Per-run pidfiles (t_3f830e64): each run records .squad/run-pids/<pid> under the store dir (one
 // file per run — parallel runs never share one) so a crashed/killed app leaves a trail the next
@@ -857,6 +864,16 @@ class Orchestrator extends EventEmitter {
       const a = this.agents[t.assignee];
       const live = a && a.taskId === t.id && this.procs.has(t.assignee);
       if (live) continue;
+      // Re-dispatch cap (t_7509d1b0): counted from the task's own reset comments, like the crash cap.
+      const resets = (t.comments || []).filter((c) => c.author === 'orchestrator' && /^No live session/.test(c.text)).length;
+      if (resets >= 3) {
+        this.store.updateTask(t.id, { status: 'review', parkedForHuman: true });
+        this.store.commentTask(t.id, 'orchestrator', `Orphaned ${resets + 1} times (no live session each time) — parked for a human instead of re-queuing.`);
+        const node = this.store.getTeam().nodes.find((n) => n.id === t.assignee) || { id: t.assignee };
+        this.alertCrashPark(node, t, resets + 1, 'no live session (orphaned run)');
+        changed = true;
+        continue;
+      }
       this.store.updateTask(t.id, { status: 'todo' });
       this.store.commentTask(t.id, 'orchestrator', 'No live session for this task (its agent has no running process); reset to todo for re-dispatch.');
       this.log(t.assignee, 'system', `↺ "${t.title}" had no live session; reset to todo`);
@@ -1836,14 +1853,15 @@ class Orchestrator extends EventEmitter {
   // failedTaskId (t_829d0220, option B): the streak counts tasks, not runs — re-crashes of the SAME
   // task (the crash→todo re-queue, however interleaved) never advance it, so one bad task must be
   // able to retry-and-park without pausing the runtime for everyone.
-  noteRuntimeFailure(nodeId, rt, r, failedTaskId) {
+  // forcedKind (t_7509d1b0): a caller that already knows the cause (board MCP failed) trips at once.
+  noteRuntimeFailure(nodeId, rt, r, failedTaskId, forcedKind) {
     if (!rt || rt === 'unknown' || r.stalled) return;
     const a = this.agents[nodeId];
     if (a && (a.stopRequested || this.drainCutNodes.has(nodeId))) return;
     const raw = [r.stderr, r.result].filter(Boolean).join('\n').trim();
     const text = FQ.redactError(raw) || `exit ${r.code}`;
     this.log(nodeId, 'error', `runtime ${rt} run failed (exit ${r.code}): ${text.slice(0, 500)}`);
-    const kind = FQ.classifyFailure(raw);
+    const kind = forcedKind || FQ.classifyFailure(raw);
     const dur = r.usage && r.usage.durationMs;
     const f = this._rtFailures.get(rt) || { signature: null, count: 0, taskIds: new Set() };
     this._rtFailures.set(rt, f);
@@ -2137,6 +2155,10 @@ class Orchestrator extends EventEmitter {
       }
     } else if (ev.type === 'system' && ev.subtype === 'init') {
       const mcpStatus = (ev.mcp_servers || []).map((s) => `${s.name}:${s.status}`).join(',');
+      // Board MCP down (t_7509d1b0): the agent can't touch the board, so every run just loops.
+      // Trip the runtime breaker now (pause + ONE askHuman per episode) with the real cause.
+      const board = (ev.mcp_servers || []).find((s) => s.name === 'board');
+      if (board && board.status !== 'connected') this.noteRuntimeFailure(node.id, runtime, { stderr: boardMcpCause(board.status) }, null, 'board MCP failed');
       if (run && ev.session_id) run.sessionId = ev.session_id;
       if (run && run.usage) U.applyEvent(run.usage, ev);
       const rl0 = U.parseRateLimits(ev);
@@ -2171,4 +2193,4 @@ class Orchestrator extends EventEmitter {
     }
   }
 }
-module.exports = { Orchestrator, buildPrompt, humanPrompt, wakePrompt, stallPrompt, attachedFilesLines, WAKE, WATCH, STALL, SCHED, RESTART, autoCompactEnv, runPidsDir, reapRunPids, interruptedFromReap };
+module.exports = { Orchestrator, boardMcpCause, buildPrompt, humanPrompt, wakePrompt, stallPrompt, attachedFilesLines, WAKE, WATCH, STALL, SCHED, RESTART, autoCompactEnv, runPidsDir, reapRunPids, interruptedFromReap };
