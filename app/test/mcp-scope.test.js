@@ -103,3 +103,21 @@ test('list_tasks sorts by assignee then priority; read_messages defaults to unre
   assert.equal(d.read_messages().length, 0);
   assert.equal(d.read_messages({ unreadOnly: false }).length, 3);
 });
+
+test('ask_human: a closed MCP connection marks the pending question stale (t_aa42e7f3)', async () => {
+  const { Client } = require('@modelcontextprotocol/sdk/client/index.js');
+  const { StdioClientTransport } = require('@modelcontextprotocol/sdk/client/stdio.js');
+  const { s, pm, dev } = setup();
+  const t = makeTools(s, pm.id).create_task({ title: 'x', assignee: dev.id });
+  s.updateTask(t.id, { status: 'in_progress' });
+  const c = new Client({ name: 't', version: '1' });
+  await c.connect(new StdioClientTransport({ command: process.execPath, args: [path.join(__dirname, '../src/mcp-server.js'), '--project', s.dir, '--node', dev.id] }));
+  c.callTool({ name: 'ask_human', arguments: { question: 'Q?', taskId: t.id } }).catch(() => {});
+  let q; for (let i = 0; i < 100 && !q; i++) { await new Promise((r) => setTimeout(r, 50)); q = s.listInbox({ status: 'open' })[0]; }
+  assert.ok(q, 'question opened');
+  await c.close();
+  let it; for (let i = 0; i < 100; i++) { await new Promise((r) => setTimeout(r, 50)); it = s.getInboxItem(q.id); if (it.status !== 'open') break; }
+  assert.equal(it.status, 'stale');
+  assert.equal(s.listInbox({ status: 'open' }).length, 0);
+  assert.equal(s.getTask(t.id).status, 'in_progress');
+});

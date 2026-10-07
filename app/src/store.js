@@ -1147,6 +1147,14 @@ class Store {
   // One-shot team-change approvals: once the core has used an answer (applied or declined) the item
   // is marked consumed so the same request can never replay a stale answer.
   consumeInbox(iid) { this.update('inbox', { items: [] }, (d) => { for (const i of d.items) if (i.id === iid) i.consumed = true; }); }
+  // The ask_human call died (MCP connection closed) before an answer: mark the question stale so it
+  // leaves the Inbox / Your-turn bar instead of waiting forever, and un-park its task (t_aa42e7f3).
+  staleInbox(iid) {
+    let it = null; this.update('inbox', { items: [] }, (d) => { for (const i of d.items) if (i.id === iid && i.status === 'open') { Object.assign(i, { status: 'stale', staleAt: new Date().toISOString() }); it = i; } });
+    const t = it && it.taskId && this.getTask(it.taskId);
+    if (t && t.status === 'waiting_for_human') this.updateTask(t.id, { status: 'in_progress' });
+    return it;
+  }
   // ask_human: store the question and park the task in waiting_for_human.
   askHuman({ taskId, nodeId, question, choices, change, reason }) {
     const item = this.addInbox({ kind: 'question', taskId, nodeId, question, choices, change, reason });
