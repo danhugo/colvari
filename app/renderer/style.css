@@ -955,6 +955,10 @@ button, .pchip, .tag, .badge, .pill, .avatar, .cchip summary, .lvchip, .asswitch
 .avatar.sys { color:var(--fg-secondary); box-shadow:inset 0 0 0 1px var(--border, var(--bg-active)); }
 .cgroup .bubble code { font-family:var(--font-mono); font-size:.9em; background:var(--bg-code); color:var(--fg-primary); padding:0 4px; border-radius:var(--radius-xs, 3px); white-space:pre-wrap; }
 .cgroup .bubble pre.cmd-pre { font-family:var(--font-mono); font-size:var(--text-xs, 12px); background:var(--bg-code); color:var(--fg-primary); border:1px solid var(--border); border-radius:var(--radius-sm); padding:var(--space-2) var(--space-3); margin:4px 0; white-space:pre; overflow-x:auto; max-width:100%; }
+.cgroup .bubble .md-table { overflow-x:auto; max-width:100%; margin:4px 0; }
+.cgroup .bubble .md-table table { border-collapse:collapse; white-space:normal; font-size:var(--text-sm, 13px); }
+.cgroup .bubble .md-table th, .cgroup .bubble .md-table td { border:1px solid var(--border); padding:4px 8px; text-align:left; vertical-align:top; }
+.cgroup .bubble .md-table th { background:var(--bg-code); font-weight:600; }
 .cgroup .bubble img.chat-svg { display:block; max-width:100%; max-height:320px; margin:4px 0; border-radius:var(--radius-sm); }
 .cgroup .bubble a { color:var(--accent-text); }
 /* t_e4c53cc2 — real-data stress: nothing in Chat may paint over other text.
