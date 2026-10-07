@@ -897,7 +897,7 @@ class Store {
       }
       return t;
     };
-    const pass = this._taskWritePass(body);
+    const pass = this._taskWritePass(body, patch.blockedBy === undefined && patch.status !== 'done' ? [tid + '.json'] : undefined);
     if (this.cache && !this.cache.closed) this.cache.prewarm();
     this._ensureBoard();
     let out, done = false;
@@ -1172,7 +1172,7 @@ class Store {
       const atts = sanitizeAttachments(attachments);
       if (atts) c.attachments = atts;
       t.comments.push(c); t.updatedAt = c.at; return c;
-    });
+    }, [tid + '.json']);
   }
 
   // ---- attachments (main-process save; renderer gets {path,name,mime,size}|{error}) ----
