@@ -59,6 +59,7 @@ function saveAgentAttachments(store, refs) {
 }
 
 function makeTools(store, nodeId) {
+  const openAsks = new Set(); // ask_human items this process is still waiting on
   const team = () => store.getTeam();
   const nodeName = (t, id) => (t.nodes.find((n) => n.id === id) || {}).name || id;
   // Trim heavy fields (full description, comment history) from list results; comment_task/update_task_status
@@ -283,9 +284,11 @@ function makeTools(store, nodeId) {
       const tk = taskId ? store.getTask(taskId) : store.listTasks().find((x) => x.assignee === nodeId && x.status === 'in_progress');
       if (taskId && (!tk || !visibleTask(t, nodeId, tk))) throw new Error('no visible task ' + taskId);
       const item = store.askHuman({ taskId: tk ? tk.id : null, nodeId, question, choices });
+      openAsks.add(item.id);
       for (;;) {
         const it = store.getInboxItem(item.id);
-        if (it && it.status === 'answered') return { answer: it.answer };
+        if (it && it.status === 'answered') { openAsks.delete(item.id); return { answer: it.answer }; }
+        if (!it || it.status !== 'open') { openAsks.delete(item.id); throw new Error('question was closed without an answer'); }
         await new Promise((r) => setTimeout(r, pollMs));
       }
     },
@@ -409,6 +412,8 @@ function makeTools(store, nodeId) {
       return impl[name](args);
     };
   }
+  // Not a tool: the MCP transport closed under a blocked ask_human — mark its questions stale.
+  Object.defineProperty(tools, 'abandonAsks', { value: () => { for (const iid of openAsks) { try { store.staleInbox(iid); } catch {} } openAsks.clear(); } });
   return tools;
 }
 module.exports = { makeTools, enabledTools };

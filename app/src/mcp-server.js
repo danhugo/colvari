@@ -54,4 +54,9 @@ if (coreNow) {
   reg('update_agent', 'Core agent only: change role/prompt/runtime/model/effort of an agent you recruited (patch whitelist; any other field is refused).', { nodeId: z.string(), patch: z.record(z.string(), z.unknown()), reason: z.string().describe('why the team change is needed') });
 }
 
+// A dead MCP connection ("Connection closed") must not leave an ask_human question pending forever.
+// ponytail: SIGKILL skips this; a pid-liveness sweep in main would cover that if it shows up.
+const abandon = () => tools.abandonAsks();
+process.stdin.on('close', () => { abandon(); process.exit(0); });
+for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(sig, () => { abandon(); process.exit(0); });
 server.connect(new StdioServerTransport());

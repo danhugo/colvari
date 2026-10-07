@@ -486,6 +486,9 @@ async function guiE2E() {
     const room = await ex(`return { groups: document.querySelectorAll('#chat-room .cgroup').length, avatars: document.querySelectorAll('#chat-room .avatar').length, chips: document.querySelectorAll('#chat-room .cchip').length, question: !!document.querySelector('#chat-room .bubble.question .ch-choice'), roles: document.querySelectorAll('#chat-room .role').length, defaultTab: !!$('#tabs button[data-tab=chat]') && TABS[0] === 'chat' }`);
     expect('chat: room with bubbles, avatars, role badges, tool chips, inline question', room.groups >= 2 && room.chips >= 2 && room.question && room.roles >= 2 && room.defaultTab, room);
     await ex(`await refresh(); chatSched.force(); document.querySelector('#chat-room .cchip').open = true; await w(200);`); await shot('17-chat-room');
+    // t_aa42e7f3: the question is shown once — inline card only, not again in the Your-turn bar.
+    const once = await ex(`return { inline: document.querySelectorAll('#chat-room .bubble.question').length, bar: document.querySelectorAll('#chat-yourturn .yt-item').length, hidden: $('#chat-yourturn').classList.contains('hidden') }`);
+    expect('chat: inline question is not repeated in the Your-turn bar', once.inline === 1 && once.bar === 0 && once.hidden, once);
     await ex(`document.documentElement.dataset.theme = 'dark'; await w(200);`); await shot('17b-chat-room-dark'); await ex(`document.documentElement.dataset.theme = 'light'; await w(100);`);
     await ex(`document.querySelector('#chat-room [data-thread="${t.id}"]').click(); await w(300);`);
     const th = await ex(`return { open: !$('#chat-thread').classList.contains('hidden'), title: $('#chat-thread .chat-head').textContent, items: document.querySelectorAll('#chat-threadroom .bubble, #chat-threadroom .cchip').length }`);
