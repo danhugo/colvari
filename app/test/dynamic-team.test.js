@@ -152,7 +152,7 @@ test('recruit permission mode is capped at the core\'s (never more permissive)',
 });
 
 test('ask mode (default): returns pending at once, waiting_for_human, nothing changes until approved', () => {
-  const { s, core, tools } = setup({ approval: 'ask' });
+  const { s, core, tools } = setup({ approval: 'ask', maxAgents: 4 });
   const task = s.createTask({ title: 'core work', assignee: core.id });
   s.updateTask(task.id, { status: 'in_progress' });
   const before = s.forTeam('a').getTeam().nodes.length;
@@ -177,7 +177,7 @@ test('ask mode (default): returns pending at once, waiting_for_human, nothing ch
 });
 
 test('ask mode: a declined request changes nothing and is announced', () => {
-  const { s, core, tools } = setup({ approval: 'ask' });
+  const { s, core, tools } = setup({ approval: 'ask', maxAgents: 4 });
   const task = s.createTask({ title: 'core work', assignee: core.id });
   s.updateTask(task.id, { status: 'in_progress' });
   const req = { name: 'Nope', role: 'Dev', reason: 'r' };
@@ -191,7 +191,7 @@ test('ask mode: a declined request changes nothing and is announced', () => {
 });
 
 test('ask mode: an answer is one-shot — used up on apply and on decline, so the same request re-asks', () => {
-  const { s, tools } = setup({ approval: 'ask' });
+  const { s, tools } = setup({ approval: 'ask', maxAgents: 4 });
   const req = { name: 'Once', role: 'Dev', reason: 'r' };
   tools.recruit_agent(req);
   const first = s.listInbox()[0];
@@ -217,6 +217,15 @@ test('ask mode: maxAgents is re-checked after the human approves', () => {
   s.answerInbox(s.listInbox({ status: 'open' })[0].id, 'approve');
   assert.throws(() => tools.recruit_agent(req), /maxAgents 4/);
   assert.equal(s.forTeam('a').getTeam().nodes.length, 4, 'still nothing applied');
+});
+
+test('ask mode: recruit under the cap proceeds with no inbox item; near the cap it still asks', () => {
+  const { s, tools } = setup({ approval: 'ask', maxAgents: 6 }); // 3 nodes
+  assert.ok(tools.recruit_agent({ name: 'Free', role: 'Dev', reason: 'r' }).id, 'under cap: applied');
+  assert.equal(s.listInbox().length, 0);
+  assert.ok(tools.recruit_agent({ name: 'Free2', role: 'Dev', reason: 'r' }).id); // 4 -> 5
+  assert.equal(tools.recruit_agent({ name: 'Last', role: 'Dev', reason: 'r' }).pending, true, '5 of 6: last slot asks');
+  assert.equal(s.listInbox().length, 1);
 });
 
 test('auto mode: change applied immediately, no inbox item', () => {
@@ -279,7 +288,7 @@ test('recruit refused at >=80% of either project budget over the orchestrator\'s
 });
 
 test('ask mode: the budget gate is re-checked after the human approves', () => {
-  const { s, tools } = setup({ approval: 'ask' });
+  const { s, tools } = setup({ approval: 'ask', maxAgents: 4 });
   s.saveSettings({ budgetUsd: 1 });
   s.appendLog({ nodeId: null, kind: 'system', text: 'Orchestrator started', at: 1000 });
   s.addRun({ kind: 'agent', startedAt: new Date(2000).toISOString(), reportedCostUsd: 0.5, inputTokens: 1, outputTokens: 1 });
@@ -312,7 +321,7 @@ const stubOrch = () => ({
 });
 
 test('answer handler: approve applies the stored change directly — node exists with no tool re-call', () => {
-  const { s, core, tools } = setup({ approval: 'ask' });
+  const { s, core, tools } = setup({ approval: 'ask', maxAgents: 4 });
   const task = s.createTask({ title: 'core work', assignee: core.id });
   s.updateTask(task.id, { status: 'in_progress' });
   const before = s.forTeam('a').getTeam().nodes.length;
@@ -336,7 +345,7 @@ test('answer handler: approve applies the stored change directly — node exists
 });
 
 test('answer handler: decline consumes the item, applies nothing, messages the core', () => {
-  const { s, tools } = setup({ approval: 'ask' });
+  const { s, tools } = setup({ approval: 'ask', maxAgents: 4 });
   const before = s.forTeam('a').getTeam().nodes.length;
   assert.equal(tools.recruit_agent({ name: 'Nope', role: 'Dev', reason: 'r' }).pending, true);
   const item = s.listInbox({ status: 'open' })[0];
@@ -350,7 +359,7 @@ test('answer handler: decline consumes the item, applies nothing, messages the c
 });
 
 test('answer handler: double answer is idempotent — second answer throws, stale re-apply is a no-op', () => {
-  const { s, tools } = setup({ approval: 'ask' });
+  const { s, tools } = setup({ approval: 'ask', maxAgents: 4 });
   const before = s.forTeam('a').getTeam().nodes.length;
   assert.equal(tools.recruit_agent({ name: 'Once', role: 'Dev', reason: 'r' }).pending, true);
   const item = s.listInbox({ status: 'open' })[0];
@@ -381,7 +390,7 @@ test('answer handler: approve that fails the re-checks is caught — "approved b
 });
 
 test('answer handler: update_agent applies via the stored payload (nested patch survives the JSON round-trip)', () => {
-  const { s, recruited, tools } = setup({ approval: 'ask' });
+  const { s, recruited, tools } = setup({ approval: 'ask', maxAgents: 4 });
   assert.equal(tools.update_agent({ nodeId: recruited.id, patch: { role: 'QA' }, reason: 'r' }).pending, true);
   const item = s.listInbox({ status: 'open' })[0];
   const orch = stubOrch();
@@ -392,7 +401,7 @@ test('answer handler: update_agent applies via the stored payload (nested patch 
 });
 
 test('answer handler: approve whose stored ask no longer matches (fp drift) reports "request not found", not success', () => {
-  const { s, tools } = setup({ approval: 'ask' });
+  const { s, tools } = setup({ approval: 'ask', maxAgents: 4 });
   const before = s.forTeam('a').getTeam().nodes.length;
   assert.equal(tools.recruit_agent({ name: 'Ghost', role: 'Dev', reason: 'r' }).pending, true);
   const item = s.listInbox({ status: 'open' })[0];
@@ -456,7 +465,7 @@ test('answer handler: asker IS the core — no duplicate core notice', () => {
 });
 
 test('answer handler: approved team change also wakes the idle core with its notice', () => {
-  const { s, core, tools } = setup({ approval: 'ask' });
+  const { s, core, tools } = setup({ approval: 'ask', maxAgents: 4 });
   assert.equal(tools.recruit_agent({ name: 'Rookie', role: 'QA', reason: 'r' }).pending, true);
   const item = s.listInbox({ status: 'open' })[0];
   const orch = stubOrch();
