@@ -824,14 +824,16 @@ class Store {
     if (this.cache && !this.cache.closed) return this.cache.getTask(tid);
     this._ensureBoard(); return this._readTaskFile(tid + '.json') || undefined;
   }
-  createTask({ title, description = '', assignee = null, createdBy = 'human', parentId = null, blockedBy = [], priority, attachments = null }) {
+  // Main-process (IPC) twin: waits for a busy lock by yielding, not sleepSync-spinning (t_c02b7d0b).
+  async createTaskAsync(t) { return this.createTask(t, (fn) => this._withTasksAsync(fn)); }
+  createTask({ title, description = '', assignee = null, createdBy = 'human', parentId = null, blockedBy = [], priority, attachments = null }, withTasks = (fn) => this._withTasks(fn)) {
     if (!title) throw new Error('title required');
     const now = new Date().toISOString();
     const task = { id: id('t'), title, description, assignee, status: 'todo', priority: C.normalizePriority(priority), createdBy, parentId, blockedBy: [], comments: [], createdAt: now, updatedAt: now };
     const atts = sanitizeAttachments(attachments);
     if (atts) task.attachments = atts;
-    this._withTasks((tasks) => { task.blockedBy = C.validateDeps(task.id, blockedBy, tasks); tasks.push(task); });
-    return task;
+    const r = withTasks((tasks) => { task.blockedBy = C.validateDeps(task.id, blockedBy, tasks); tasks.push(task); });
+    return r && r.then ? r.then(() => task) : task;
   }
   updateTask(tid, patch, opts) {
     let t = this._updateTask(tid, patch);

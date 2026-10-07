@@ -75,3 +75,22 @@ test('updateTaskSoon: uncontended writes are inline; contended ones defer and st
   await new Promise((r) => setTimeout(r, 60)); // the deferred write lands via the yielding lock
   assert.equal(new Store(dir).getTask(t.id).iterations, 7, 'deferred write landed');
 });
+
+// t_c02b7d0b: the IPC createTask spun the main thread in sleepSync while an agent held the lock.
+test('createTaskAsync: waits by yielding, then writes the task', async () => {
+  const dir = mktemp('squad-alock-ct-');
+  const s = new Store(dir);
+  s.listTasks(); // board baseline outside the lock
+  fs.mkdirSync(path.join(dir, '.lock'));
+  fs.writeFileSync(path.join(dir, '.lock', 'pid'), String(process.pid));
+  let ticks = 0;
+  const timer = setInterval(() => ticks++, 5);
+  const p = s.createTaskAsync({ title: 'async one' });
+  await new Promise((r) => setTimeout(r, 150));
+  assert.ok(ticks >= 3, `event loop starved: only ${ticks} ticks`);
+  fs.rmSync(path.join(dir, '.lock'), { recursive: true, force: true });
+  const t = await p;
+  clearInterval(timer);
+  assert.equal(new Store(dir).getTask(t.id).title, 'async one');
+  fs.rmSync(dir, { recursive: true, force: true });
+});

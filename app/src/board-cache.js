@@ -100,7 +100,7 @@ class BoardCache extends EventEmitter {
     for (const f of this.store._taskFiles()) {
       const id = f.replace(/\.json$/, '');
       known.delete(id);
-      this._revalidateTask(f);
+      this._revalidateTask(f, { statSkip: true });
     }
     for (const id of known) this._dropTask(id, { verify: true });
     this._reloadWikiIndex();
@@ -159,17 +159,20 @@ class BoardCache extends EventEmitter {
   }
 
   // ---- revalidation: disk vs cache, per file ----
-  _revalidateTask(file, { quiet = false } = {}) {
+  // statSkip (reconcile only): same mtime+size as cached => skip the read. Watch hints always
+  // re-read, since a fast rewrite can keep both.
+  _revalidateTask(file, { quiet = false, statSkip = false } = {}) {
     const p = this.store.taskFile(file.replace(/\.json$/, ''));
     let st; try { st = fs.statSync(p); } catch {
       const id = path.basename(file).replace(/\.json$/, '');
       if (this.tasks.has(id)) this._dropTask(id); // really gone (ENOENT): evict + delete event
       return;
     }
-    let buf; try { buf = fs.readFileSync(p); } catch { return; }
-    const hash = sha256(buf);
     const id = path.basename(file).replace(/\.json$/, '');
     const cur = this.tasks.get(id);
+    if (statSkip && cur && cur.mtimeMs === st.mtimeMs && cur.size === st.size) return;
+    let buf; try { buf = fs.readFileSync(p); } catch { return; }
+    const hash = sha256(buf);
     if (cur && cur.hash === hash) { Object.assign(cur, { mtimeMs: st.mtimeMs, size: st.size }); return; } // own-write echo or no-op event
     let data = null; try { data = JSON.parse(buf.toString('utf8')); } catch { data = null; }
     if (!data || data.id !== id) {

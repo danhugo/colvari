@@ -7,8 +7,13 @@
 // ---- dependencies ----
 const depIds = (v) => [...new Set((Array.isArray(v) ? v : String(v || '').split(/[,\s]+/)).map((x) => String(x).trim()).filter(Boolean))];
 // Ids of unfinished tasks this task waits for. Unknown ids (deleted tasks) do not block.
+// byId is memoized per tasks array: the orchestrator tick calls this once per task with the same
+// list, which rebuilt the map every time (O(n²), 175 ms self-time in t_155e7859). Callers must not
+// mutate a list after passing it (they all pass fresh listTasks() snapshots).
+const byIdCache = new WeakMap();
 function openBlockers(task, tasks) {
-  const byId = new Map(tasks.map((t) => [t.id, t]));
+  let byId = byIdCache.get(tasks);
+  if (!byId) byIdCache.set(tasks, (byId = new Map(tasks.map((t) => [t.id, t]))));
   return depIds(task.blockedBy).filter((id) => byId.has(id) && byId.get(id).status !== 'done');
 }
 const isBlocked = (task, tasks) => openBlockers(task, tasks).length > 0;
