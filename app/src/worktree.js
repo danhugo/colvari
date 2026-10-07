@@ -15,15 +15,13 @@ async function git(cwd, args) { return CP.runThrow('git', args, { cwd, timeoutMs
 // free (ensureWorktree would CREATE a missing branch).
 async function branchExists(repoDir, branch) { try { await git(repoDir, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`]); return true; } catch { return false; } }
 
-// node_modules is shared with the main checkout, not copied: a relative symlink (created lazily;
-// an existing dir or symlink is never touched, so a deliberate local copy survives). Keeps new
-// worktrees hundreds of MB smaller, and the merge gate's ensureDeps already tolerates a symlink
-// (lstat). Falls back to a copy only when the symlink cannot be created (e.g. cross-device).
-// One exception (t_0fd83668): a worktree whose package.json / package-lock.json differs from the
-// main checkout (its branch adds or changes deps) must NOT share node_modules — `npm install` in
-// the worktree would write through the link into the live app's tree. Leave node_modules absent:
-// installs then land in a real local dir (the agent's own npm install, or the merge gate's
-// ensureDeps, which installs locally when the package files differ).
+// node_modules is never shared by symlink (t_09a2c1e0): an `npm ci` in a worktree wiped the main
+// checkout's tree through the link. Each worktree gets its own APFS copy-on-write clone
+// (`cp -cR`: ~7s for 347MB, near-zero extra disk). Where cloning fails (not APFS, not macOS)
+// node_modules stays absent and the agent's own npm install / the merge gate's ensureDeps
+// installs locally. An old share-link is replaced; an existing real dir is never touched.
+// A worktree whose package.json / package-lock.json differs from main (t_0fd83668) gets no clone:
+// its deps differ, so it installs its own.
 function pkgDiffers(wtFile, mainFile) {
   let a, b;
   try { a = fs.readFileSync(wtFile); } catch { a = null; }
@@ -33,17 +31,25 @@ function pkgDiffers(wtFile, mainFile) {
   return !a.equals(b);
 }
 
-function linkNodeModules(repoDir, root, dir) {
+// The one place node_modules gets into a worktree. True when dst is a real dir afterwards.
+async function cloneNodeModules(src, dst) {
+  try { const st = fs.lstatSync(dst); if (!st.isSymbolicLink()) return st.isDirectory(); fs.unlinkSync(dst); } catch {}
+  let from; try { from = fs.realpathSync(src); } catch { return false; } // main has none: nothing to clone
+  const r = await CP.run('cp', ['-cR', from, dst], { timeoutMs: 120_000 });
+  if (r.status === 0) return true;
+  try { fs.rmSync(dst, { recursive: true, force: true }); } catch {} // half clone: leave it absent, never a link
+  return false;
+}
+
+async function linkNodeModules(repoDir, root, dir) {
   const rel = path.relative(root, repoDir);
   const pkgDir = rel ? path.join(dir, rel) : dir;
-  const link = path.join(pkgDir, 'node_modules');
-  let st; try { st = fs.lstatSync(link); if (st) return; } catch {}
-  const src = path.join(repoDir, 'node_modules');
-  let dst; try { dst = fs.realpathSync(src); } catch { return; } // main checkout has none: nothing to share
   if (pkgDiffers(path.join(pkgDir, 'package.json'), path.join(repoDir, 'package.json'))
-    || pkgDiffers(path.join(pkgDir, 'package-lock.json'), path.join(repoDir, 'package-lock.json'))) return;
-  try { fs.symlinkSync(path.relative(pkgDir, dst), link, 'dir'); }
-  catch (e) { if (e.code === 'EXDEV') { try { fs.cpSync(src, link, { recursive: true }); } catch {} } }
+    || pkgDiffers(path.join(pkgDir, 'package-lock.json'), path.join(repoDir, 'package-lock.json'))) {
+    try { if (fs.lstatSync(path.join(pkgDir, 'node_modules')).isSymbolicLink()) fs.unlinkSync(path.join(pkgDir, 'node_modules')); } catch {}
+    return;
+  }
+  await cloneNodeModules(path.join(repoDir, 'node_modules'), path.join(pkgDir, 'node_modules'));
 }
 
 // Returns { cwd, worktreePath, worktreeBranch } or { cwd, warning } on fallback to the shared repo.
@@ -55,11 +61,11 @@ async function ensureWorktree(repoDir, taskId) {
   const branch = `squad/${taskId}`;
   const dir = path.join(root, '.squad', 'worktrees', taskId);
   try {
-    if (fs.existsSync(path.join(dir, '.git'))) { linkNodeModules(repoDir, root, dir); return { cwd: dir, worktreePath: dir, worktreeBranch: branch }; }
+    if (fs.existsSync(path.join(dir, '.git'))) { await linkNodeModules(repoDir, root, dir); return { cwd: dir, worktreePath: dir, worktreeBranch: branch }; }
     fs.mkdirSync(path.dirname(dir), { recursive: true });
     const exists = await branchExists(root, branch);
     await git(root, exists ? ['worktree', 'add', dir, branch] : ['worktree', 'add', '-b', branch, dir]);
-    linkNodeModules(repoDir, root, dir);
+    await linkNodeModules(repoDir, root, dir);
     return { cwd: dir, worktreePath: dir, worktreeBranch: branch };
   } catch (e) { return { cwd: repoDir, warning: `worktree creation failed (${String(e.stderr || e.message).trim()}), using shared dir` }; }
 }
@@ -331,4 +337,4 @@ async function diskUsage(repoDir, opts = {}) {
   return val;
 }
 
-module.exports = { ensureWorktree, branchExists, linkNodeModules, worktreeDiff, worktreeMerge, worktreeDiscard, unmergedSquadBranches, branchMergeState, dirtyMergeMessage, dirtyMainFiles, headSha, commitsBehind, removeWorktree, sweepWorktrees, pruneWorktrees, diskUsage, worktreeDirty, listWorktrees };
+module.exports = { ensureWorktree, branchExists, linkNodeModules, cloneNodeModules, worktreeDiff, worktreeMerge, worktreeDiscard, unmergedSquadBranches, branchMergeState, dirtyMergeMessage, dirtyMainFiles, headSha, commitsBehind, removeWorktree, sweepWorktrees, pruneWorktrees, diskUsage, worktreeDirty, listWorktrees };

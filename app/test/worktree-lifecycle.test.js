@@ -1,6 +1,6 @@
 // Worktree lifecycle (t_9b662983): remove on done/merge (branch kept), orphan sweep + prune,
-// shared node_modules via symlink, disk usage. Covers Cato's plan-review checklist: dirty
-// retained, unmerged retained, in-flight skipped, reopen recreates, symlink not a copy, prune.
+// node_modules as an own clone (never a symlink, t_09a2c1e0), disk usage. Covers Cato's plan-review checklist: dirty
+// retained, unmerged retained, in-flight skipped, reopen recreates, prune.
 const test = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
@@ -60,19 +60,33 @@ function done(s, id) {
 
 // ---- node_modules sharing ----
 
-test('new worktrees link node_modules (symlink, gitignored), never a copy', async () => {
+test('new worktrees get their own node_modules clone (gitignored), never a symlink', async () => {
   const { repo, wt } = await setup('t_lc1');
-  const link = path.join(wt, 'node_modules');
-  const st = fs.lstatSync(link);
-  assert.ok(st.isSymbolicLink(), 'lstat says symlink');
-  assert.strictEqual(fs.realpathSync(link), fs.realpathSync(path.join(repo, 'node_modules')), 'resolves to the shared dir');
-  assert.strictEqual(g(wt, 'status', '--porcelain'), '', 'symlink is gitignored: porcelain clean');
-  assert.deepStrictEqual(await WT.ensureWorktree(repo, 't_lc1'), { cwd: wt, worktreePath: wt, worktreeBranch: 'squad/t_lc1' }, 'reuse path keeps the link');
+  const nm = path.join(wt, 'node_modules');
+  assert.ok(fs.lstatSync(nm).isDirectory() && !fs.lstatSync(nm).isSymbolicLink(), 'a real dir');
+  assert.strictEqual(fs.statSync(path.join(nm, 'blob.bin')).size, 300 * 1024, 'contents cloned from main');
+  assert.strictEqual(g(wt, 'status', '--porcelain'), '', 'gitignored: porcelain clean');
+  assert.deepStrictEqual(await WT.ensureWorktree(repo, 't_lc1'), { cwd: wt, worktreePath: wt, worktreeBranch: 'squad/t_lc1' }, 'reuse path keeps the clone');
+});
+
+// t_09a2c1e0: `npm ci` in a worktree wiped main's node_modules through the old share-link.
+test('npm ci (reify empties node_modules) in a worktree leaves main untouched; an old link is replaced', async () => {
+  const { repo, wt } = await setup('t_lc17');
+  const reify = () => { fs.rmSync(path.join(wt, 'node_modules'), { recursive: true, force: true }); fs.mkdirSync(path.join(wt, 'node_modules')); };
+  reify();
+  assert.ok(fs.existsSync(path.join(repo, 'node_modules', 'blob.bin')), 'main node_modules untouched');
+  // a worktree made before this fix still carries the share-link: reuse swaps it for a clone
+  fs.rmSync(path.join(wt, 'node_modules'), { recursive: true, force: true });
+  fs.symlinkSync(path.join(repo, 'node_modules'), path.join(wt, 'node_modules'), 'dir');
+  await WT.ensureWorktree(repo, 't_lc17');
+  assert.strictEqual(fs.lstatSync(path.join(wt, 'node_modules')).isSymbolicLink(), false, 'old link replaced');
+  reify();
+  assert.ok(fs.existsSync(path.join(repo, 'node_modules', 'blob.bin')), 'main still untouched');
 });
 
 test('an existing real node_modules copy in a worktree is never replaced', async () => {
   const { repo, wt } = await setup('t_lc11');
-  fs.rmSync(path.join(wt, 'node_modules'), { force: true, recursive: true }); // drop the auto-created symlink (lstat: link only, target untouched)
+  fs.rmSync(path.join(wt, 'node_modules'), { force: true, recursive: true }); // drop the auto-created clone
   fs.mkdirSync(path.join(wt, 'node_modules'));
   fs.writeFileSync(path.join(wt, 'node_modules', 'local.txt'), 'real\n');
   await WT.ensureWorktree(repo, 't_lc11'); // reuse path must not touch it
@@ -102,7 +116,7 @@ test('reopen after cleanup recreates the worktree from the kept branch', async (
   const w2 = await WT.ensureWorktree(repo, taskId);
   assert.strictEqual(w2.worktreePath, wt, 'same dir comes back');
   assert.match(g(w2.cwd, 'log', '--oneline', 'squad/' + taskId), /work/, 'prior commits present on the kept branch');
-  assert.ok(fs.lstatSync(path.join(wt, 'node_modules')).isSymbolicLink(), 'link re-created too');
+  assert.ok(fs.existsSync(path.join(wt, 'node_modules', 'blob.bin')), 'node_modules re-cloned too');
 });
 
 test('nothing-merged done flip: dir removed, fields kept so re-flips still comment', async () => {
@@ -217,12 +231,11 @@ test('a board read error is not proof of orphans: the sweep no-ops', async () =>
 
 // ---- disk usage ----
 
-test('diskUsage: worktree count + bytes, symlinked node_modules not counted as a copy', async () => {
+test('diskUsage: worktree count + bytes, with a cloned node_modules', async () => {
   const { repo } = await setup('t_lc9');
   const u = await WT.diskUsage(repo, { force: true });
   assert.strictEqual(u.count, 1);
   assert.ok(u.bytes > 0);
-  assert.ok(u.bytes < 128 * 1024, `bytes=${u.bytes} — a copied 300KB node_modules would blow past this`);
   assert.deepStrictEqual(await WT.diskUsage(repo), u, 'served from the TTL cache');
 });
 
@@ -241,8 +254,12 @@ test('diskUsage: within the TTL the worktree listing is not recomputed', async (
 
 // ---- t_1ff80eba: our own node_modules link is not "uncommitted changes" ----
 
-// A branch cut before the `node_modules` ignore landed: the auto-created symlink shows as
-// untracked, which used to keep done worktrees alive forever.
+// A branch cut before the `node_modules` ignore landed: a share-link made before t_09a2c1e0 shows
+// as untracked, which used to keep done worktrees alive forever. oldLink() recreates such a link.
+function oldLink(pkg, mainPkg) {
+  fs.rmSync(path.join(pkg, 'node_modules'), { recursive: true, force: true });
+  fs.symlinkSync(path.join(mainPkg, 'node_modules'), path.join(pkg, 'node_modules'), 'dir');
+}
 function oldBranchRepo(withAppDir) {
   const repo = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'wlc-old-')));
   g(repo, 'init', '-q', '-b', 'main');
@@ -264,6 +281,7 @@ function oldBranchRepo(withAppDir) {
 test('symlink-only worktree on a pre-ignore branch is clean and removed; a real copy still refuses', async () => {
   const repo = oldBranchRepo(false);
   const w = await WT.ensureWorktree(repo, 't_lc14');
+  oldLink(w.worktreePath, repo);
   assert.ok(fs.lstatSync(path.join(w.worktreePath, 'node_modules')).isSymbolicLink());
   assert.strictEqual(g(w.worktreePath, 'status', '--porcelain'), '?? node_modules', 'the evidence from t_1ff80eba');
   assert.strictEqual(await WT.worktreeDirty(w.worktreePath), false, 'our own link is not user work');
@@ -273,7 +291,7 @@ test('symlink-only worktree on a pre-ignore branch is clean and removed; a real 
 
   // A real node_modules dir (a deliberate local copy) is still uncommitted work: refuse.
   const w2 = await WT.ensureWorktree(repo, 't_lc15');
-  fs.rmSync(path.join(w2.worktreePath, 'node_modules'), { force: true, recursive: true }); // unlink the link, never the shared target
+  fs.rmSync(path.join(w2.worktreePath, 'node_modules'), { force: true, recursive: true }); // drop the clone
   fs.mkdirSync(path.join(w2.worktreePath, 'node_modules'));
   fs.writeFileSync(path.join(w2.worktreePath, 'node_modules', 'local.txt'), 'real\n');
   assert.strictEqual(await WT.worktreeDirty(w2.worktreePath), true);
@@ -283,6 +301,7 @@ test('symlink-only worktree on a pre-ignore branch is clean and removed; a real 
 test('same for the app/ layout: wt/app/node_modules link does not block removal', async () => {
   const repo = oldBranchRepo(true);
   const w = await WT.ensureWorktree(path.join(repo, 'app'), 't_lc16');
+  oldLink(path.join(w.worktreePath, 'app'), path.join(repo, 'app'));
   assert.ok(fs.lstatSync(path.join(w.worktreePath, 'app', 'node_modules')).isSymbolicLink());
   assert.strictEqual(g(w.worktreePath, 'status', '--porcelain'), '?? app/node_modules', 'exactly the evidence comment');
   assert.strictEqual(await WT.worktreeDirty(w.worktreePath), false);
