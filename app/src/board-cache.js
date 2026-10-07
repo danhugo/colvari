@@ -30,6 +30,11 @@ class BoardCache extends EventEmitter {
     this.dir = store.dir;
     this.debounceMs = opts.debounceMs ?? 40;   // macOS coalescing window for watch hints
     this.reconcileMs = opts.reconcileMs ?? 5000; // dropped-event backstop: full dir diff
+    // Rolling full re-read (t_42816253): stat-skip misses a same-size edit inside the mtime
+    // granularity when its watch hint was dropped, so each round also re-reads 1/fullEvery of the
+    // files regardless of stat — every file is content-checked once per fullEvery rounds (~60s).
+    this.fullEvery = Math.max(1, opts.fullEvery ?? 12);
+    this._round = 0;
     this.maxBodyBytes = opts.maxBodyBytes ?? 512 * 1024; // wiki pages above: metadata only, body lazy
     this.seq = 0;
     this.closed = false;
@@ -97,11 +102,11 @@ class BoardCache extends EventEmitter {
     if (this.closed) return;
     this._ensureLoaded();
     const known = new Set(this.tasks.keys());
-    for (const f of this.store._taskFiles()) {
-      const id = f.replace(/\.json$/, '');
-      known.delete(id);
-      this._revalidateTask(f, { statSkip: true });
-    }
+    const round = ++this._round;
+    this.store._taskFiles().forEach((f, i) => {
+      known.delete(f.replace(/\.json$/, ''));
+      this._revalidateTask(f, { statSkip: (i + round) % this.fullEvery !== 0 });
+    });
     for (const id of known) this._dropTask(id, { verify: true });
     this._reloadWikiIndex();
     // Try-lock: a busy lock (an agent's MCP process mid-write-burst) must not spin-block the main
@@ -225,7 +230,7 @@ class BoardCache extends EventEmitter {
     if (this.closed) return;
     const p = this.store.taskFile(t.id);
     let st = null; try { st = fs.statSync(p); } catch {}
-    this._putTask(t, { mtimeMs: st ? st.mtimeMs : 0, size: st ? st.size : (dataStr || '').length, hash: sha256(Buffer.from(dataStr || '')) });
+    this._putTask(t, { mtimeMs: st ? st.mtimeMs : 0, size: st ? st.size : Buffer.byteLength(dataStr || ''), hash: sha256(Buffer.from(dataStr || '')) });
   }
   noteTaskDelete(tid) {
     this._ensureLoaded();

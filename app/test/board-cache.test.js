@@ -225,3 +225,30 @@ test('reconcile: unchanged task files are not re-read', () => {
   s.cache.close();
   fs.rmSync(d, { recursive: true, force: true });
 });
+
+// t_42816253: stat-skip misses a same-size edit inside the mtime granularity when the watch hint
+// is dropped. The rolling full re-read (a slice of files per round, ignoring stat) catches it.
+test('reconcile: a same-size, same-mtime edit is caught by the rolling full re-read', () => {
+  const d = mktemp('bc-recon2-');
+  const s = cachedStore(d, { fullEvery: 2 });
+  const t = s.createTask({ title: 'aaaa' });
+  s.listTasks(); // load
+  const p = s.taskFile(t.id); const st = fs.statSync(p);
+  const raw = fs.readFileSync(p, 'utf8').replace('"aaaa"', '"bbbb"');
+  fs.writeFileSync(p, raw); fs.utimesSync(p, st.atime, st.mtime); // same size, same mtime
+  s.cache.tasks.get(t.id).mtimeMs = fs.statSync(p).mtimeMs; // utimes drops sub-ms: pin the cached stat to disk
+  for (let i = 0; i < 2; i++) s.cache.reconcile();
+  assert.equal(s.getTask(t.id).title, 'bbbb');
+  s.cache.close();
+  fs.rmSync(d, { recursive: true, force: true });
+});
+
+test('noteTaskPut: cached size is the byte length, not the string length', () => {
+  const d = mktemp('bc-bytes-');
+  const s = cachedStore(d);
+  s.listTasks();
+  s.cache.noteTaskPut({ id: 't_x', title: 'ü' }, '{"id":"t_x","title":"ü"}'); // file absent: size from data
+  assert.equal(s.cache.tasks.get('t_x').size, Buffer.byteLength('{"id":"t_x","title":"ü"}'));
+  s.cache.close();
+  fs.rmSync(d, { recursive: true, force: true });
+});

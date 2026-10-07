@@ -11,6 +11,8 @@ const { ProjectManager, TEMPLATES, isolateTestRoot } = require('./projects');
 const { BoardCache } = require('./board-cache');
 const { DeltaPump } = require('./delta-pump');
 const { pickChanged } = require('./store');
+// Main process: sync store writers never sleepSync-spin on an agent-held lock (t_42816253, Store._soon).
+require('./store').Store.noSpin = true;
 const AC = require('./agent-config');
 const WT = require('./worktree');
 const U = require('./usage');
@@ -41,7 +43,11 @@ if (DEV_MODE) process.env.AGENTS_SQUAD_DEV = '1';
 let runtimesPromise = null; // detected once per app start (binary + version) — one shared promise (t_5a78aa95):
 // the old sync detectRuntimes froze boot ~10s/runtime, and an async detection must never be seen
 // as an empty list (Cato t_f7c42eef #3): every consumer awaits this same promise.
-const runtimes = (settings) => (runtimesPromise ||= RT.detectRuntimes(settings, { ...process.env, PATH: [process.env.PATH, require('os').homedir() + '/.local/bin', '/opt/homebrew/bin', '/usr/local/bin'].join(':') }));
+const runtimes = (settings) => (runtimesPromise ||= RT.detectRuntimes(settings, { ...process.env, PATH: [process.env.PATH, require('os').homedir() + '/.local/bin', '/opt/homebrew/bin', '/usr/local/bin'].join(':') }).then((r) => (runtimesReady = r)));
+// getAll must not await detection (t_42816253: it spawns every CLI, 1.5 s of boot getAll wall).
+// Until it lands getAll ships config.runtimes = null and a '|rt' settings version, so the poll
+// re-fetches config once it resolves — never an empty list mistaken for "nothing installed".
+let runtimesReady = null;
 
 // Test instances (gui-e2e / smoke) must never touch real data and never linger: an inherited
 // AGENTS_SQUAD_HOME (the live app's root) loses to an explicit AGENTS_SQUAD_PROJECT, with neither
@@ -2789,7 +2795,7 @@ function send(ch, data) { if (win && !win.isDestroyed()) win.webContents.send(ch
   const TS = (c) => { const ts = pm.get(c.p).teams; return pm.store(c.p, (ts.find((t) => t.id === c.t) || ts[0]).id); }; // the selected team graph
   // Cheap change fingerprint for the renderer's polling (t_9d92c3d3): file signatures + the
   // orchestrator's in-memory sig. `team` folds in settings because getAll decorates team nodes withPF.
-  const stateVersion = (c) => { const s = ST(c); const t = TS(c); const v = s.versions(); v.team = t.sigFile(t.teamFile()) + '|' + v.settings; v.teams = v.teams + '|' + v.settings; v.orch = orchFor(c.p).versionSig(); return v; };
+  const stateVersion = (c) => { const s = ST(c); const t = TS(c); const v = s.versions(); v.team = t.sigFile(t.teamFile()) + '|' + v.settings; v.teams = v.teams + '|' + v.settings; if (!runtimesReady) { runtimes(s.getSettings()).catch(() => {}); v.settings += '|rt'; } v.orch = orchFor(c.p).versionSig(); return v; };
 const withPF = (nodes, settings) => nodes.map((n) => ({ ...n, preflightStatus: PF.preflightStatus(n, settings) }));
 // Test one agent with its exact config and save the result on the node (in whichever team owns it).
 async function testAgent(c, nodeId) {
@@ -2851,7 +2857,7 @@ const api = {
     const s = ST(c); mark('store'); const t = TS(c); mark('team'); probeUnprobedAgents(c.p); mark('probe');
     const v = stateVersion(c); mark('ver');
     const all = { project: s.meta(), team: { ...t.getTeam(), nodes: withPF(t.getTeam().nodes, s.getSettings()) }, allNodes: withPF(s.getTeam().nodes, s.getSettings()), tasks: s.listTasks(), wiki: s.listWiki(), settings: s.getSettings(), messages: s.listMessages().slice(-200), orch: orchFor(c.p).snapshotSlim(),
-      config: { runtimes: await runtimes(s.getSettings()), billingModes: U.BILLING_MODES, permissionModes: AC.PERMISSION_MODES, edgeTypes: AC.EDGE_TYPES, boardTools: AC.BOARD_TOOLS, roles: AC.roleSuggestions(s.getSettings().rolePresets, s.getTeam().nodes) } };
+      config: { runtimes: runtimesReady, billingModes: U.BILLING_MODES, permissionModes: AC.PERMISSION_MODES, edgeTypes: AC.EDGE_TYPES, boardTools: AC.BOARD_TOOLS, roles: AC.roleSuggestions(s.getSettings().rolePresets, s.getTeam().nodes) } };
     mark('body');
     const sectionOf = { project: 'project', team: 'team', teams: 'allNodes', board: 'tasks', wiki: 'wiki', settings: 'settings', messages: 'messages', orch: 'orch' };
     const out = { v, teamId: t.teamId, dir: s.dir };
@@ -2877,7 +2883,8 @@ const api = {
   setNodeProtected: (c, id, v) => TS(c).setNodeProtected(id, v),
   addEdge: (c, a, b, type) => TS(c).addEdge(a, b, type), updateEdge: (c, id, p) => TS(c).updateEdge(id, p),
   savePreset: (c, p) => ST(c).savePreset(p), deletePreset: (c, name) => ST(c).deletePreset(name), removeEdge: (c, id) => TS(c).removeEdge(id),
-  createTask: (c, t) => ST(c).createTaskAsync(t), updateTask: (c, id, p) => ST(c).updateTaskSoon(id, p), deleteTask: (c, id) => ST(c).deleteTask(id),
+    // Writes from IPC await settled(): a deferred (lock-busy, Store.noSpin) write that fails still rejects to the renderer.
+  createTask: (c, t) => ST(c).createTaskAsync(t), updateTask: async (c, id, p) => { const s = ST(c); const t = s.updateTask(id, p); await s.settled(); return t; }, deleteTask: async (c, id) => { const s = ST(c); s.deleteTask(id); await s.settled(); },
   // Paste/upload: bytes land on disk under <store>/attachments and only {path,name,mime,size} comes
   // back ({error} on rejection) — messages.json never holds base64.
   saveAttachment: (c, input) => ST(c).saveAttachment(input || {}),

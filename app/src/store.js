@@ -25,6 +25,7 @@ const { BoardCache } = require('./board-cache');
 const blockPayload = (r) => `${(r.names || []).length ? (r.names || []).map((n) => '- ' + n).join('\n') : '- (test names unavailable)'}\n\ntail of the test output:\n\`\`\`\n${r.output || '(none)'}\n\`\`\``;
 
 const ROLES = SUGGESTED_ROLES; // suggestions only: roles are free text
+const soonQ = new Map(); // dir -> tail promise of this process's queued deferred writes (Store._soon)
 const STATUSES = ['todo', 'in_progress', 'review', 'done', 'waiting_for_human', 'merge_conflict'];
 
 // Version-map keys whose getAll section changed since the client's last fetch (all keys when `since`
@@ -343,8 +344,34 @@ class Store {
     }
   }
   update(name, dflt, fn) {
-    return this.withLock(() => { const d = this.read(name, dflt); const r = fn(d); this.write(name, d); return r; });
+    return this._soon(() => { const d = this.read(name, structuredClone(dflt)); const r = fn(d); this.write(name, d); return r; },
+      () => fn(this.read(name, structuredClone(dflt))));
   }
+  // Main-process write path (t_42816253). With Store.noSpin (set by main.js only) a sync writer
+  // never sleepSync-spins on a lock an agent's MCP process holds: a free lock runs `real` inline
+  // (exact old behavior); a busy one returns `dry()` — the same fn on a fresh unlocked read, so
+  // validation errors still throw sync — and queues `real` behind the yielding async lock.
+  // Deferred writes run FIFO per dir, and while any is queued new writes queue too (order kept).
+  // Reads in this process may lag a queued write by one lock hold. settled() is the last write's
+  // promise: IPC callers await it so a failing deferred write still reaches them.
+  // Without noSpin (MCP servers, tests) this is plain withLock.
+  _soon(real, dry) {
+    if (!Store.noSpin || this._lockDepth) { const r = this.withLock(real); this._last = Promise.resolve(r); return r; }
+    const dir = this.dir;
+    if (!soonQ.has(dir)) {
+      let out; let done;
+      try { done = this.withLockTry(() => { out = real(); }); } catch (e) { this._last = Promise.reject(e); this._last.catch(() => {}); throw e; }
+      if (done) { this._last = Promise.resolve(out); return out; }
+    }
+    const r = dry();
+    const p = (soonQ.get(dir) || Promise.resolve()).then(() => this.withLockAsync(real));
+    const tail = p.catch((e) => { try { this._logStore('deferred write failed: ' + (e && e.message || e)); } catch {} });
+    soonQ.set(dir, tail);
+    tail.then(() => { if (soonQ.get(dir) === tail) soonQ.delete(dir); });
+    this._last = p; p.catch(() => {});
+    return r;
+  }
+  settled() { return this._last || Promise.resolve(); }
 
   // ---- scheduled restarts (plan t_42f310cf item 1) ----
   // Merges only bump the pending counter; a restart happens solely through an armed schedule
@@ -516,7 +543,7 @@ class Store {
   _withTasks(fn) {
     if (this.cache && !this.cache.closed) this.cache.prewarm();
     this._ensureBoard();
-    return this.withLock(this._taskWritePass(fn));
+    return this._soon(this._taskWritePass(fn), () => fn(this._taskFiles().map((f) => this._readTaskFile(f)).filter(Boolean).map((t) => structuredClone(t))));
   }
   // Async twin of _withTasks (see withLockAsync): same read/diff/write pass under the async lock.
   async _withTasksAsync(fn) {
@@ -650,7 +677,7 @@ class Store {
     }
     return this.read(this.teamFile(), { nodes: [], edges: [] });
   }
-  saveTeam(team) { this.withLock(() => this.write(this.teamFile(), team)); return team; }
+  saveTeam(team) { this._soon(() => this.write(this.teamFile(), team), () => {}); return team; }
   addNode(n) {
     const presets = this.getSettings().rolePresets;
     const node = { id: n.id || id('n'), ...normalizeNode(applyPreset(n, presets)), x: n.x, y: n.y };
@@ -1680,4 +1707,5 @@ class Store {
   deletePreset(name) { return this.saveSettings({ rolePresets: this.getSettings().rolePresets.filter((x) => x.name !== name) }).rolePresets; }
 }
 
+Store.noSpin = false; // main.js sets true: see _soon
 module.exports = { Store, ROLES, STATUSES, PRIORITIES: C.PRIORITIES, defaultProjectDir, pickChanged, LOCK, lockHolderDead, LOG_LIMITS };
