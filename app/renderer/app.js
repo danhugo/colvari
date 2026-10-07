@@ -1909,7 +1909,9 @@ function renderIdle() {
 const PRIORITIES = ['P0', 'P1', 'P2', 'P3'];
 const priorityOf = (t) => PRIORITIES.includes(t.priority) ? t.priority : 'P2';
 const priorityBadge = (t) => `<span class="tag prio prio-${priorityOf(t)}" title="Priority ${priorityOf(t)}">${priorityOf(t)}</span>`;
-const byPriorityThenTitle = (a, b) => PRIORITIES.indexOf(priorityOf(a)) - PRIORITIES.indexOf(priorityOf(b)) || a.title.localeCompare(b.title);
+// Titles ride through String() so a corrupted task file without one cannot throw inside
+// localeCompare and kill the whole board render (t_e25151db).
+const byPriorityThenTitle = (a, b) => PRIORITIES.indexOf(priorityOf(a)) - PRIORITIES.indexOf(priorityOf(b)) || String(a.title ?? '').localeCompare(String(b.title ?? ''));
 // Relative age for card meta ("2h", "3d") — a card's freshness is part of scanning a board.
 const ago = (ts) => { if (!ts) return ''; const ms = new Date(ts).getTime(); if (Number.isNaN(ms)) return ''; const sec = (Date.now() - ms) / 1000;
   return sec < 60 ? 'now' : sec < 3600 ? `${Math.floor(sec / 60)}m` : sec < 86400 ? `${Math.floor(sec / 3600)}h` : `${Math.floor(sec / 86400)}d`; };
@@ -2119,7 +2121,7 @@ $('#nt-add').onclick = async () => {
 // Thread-linked bubble titles ride the shared taskById index (t_94b8df1f) instead of a private
 // per-S.tasks memo.
 const taskTitle = (id) => { const t = id ? taskById(id) : null; return (t && t.title) || id; };
-function openBlockers(t) { return (t.blockedBy || []).filter((id) => { const x = S.tasks.find((y) => y.id === id); return x && x.status !== 'done'; }); }
+function openBlockers(t) { return (Array.isArray(t.blockedBy) ? t.blockedBy : []).filter((id) => { const x = S.tasks.find((y) => y.id === id); return x && x.status !== 'done'; }); } // a non-array blockedBy (corrupted file) must not throw out of the card render (t_e25151db)
 // Per-task live view: the last log lines of the agent working on the selected task.
 function renderLive() {
   const box = $('#td-live'); const t = S.tasks.find((x) => x.id === sel.task); if (!box || !t) return;
@@ -2140,7 +2142,13 @@ function md(src) {
     .replace(/\n{2,}/g, '<br><br>'))).join('');
 }
 let wkSig = null;
+// Wiki editor instrumentation (t_e5036ad3): state polls reach renderWiki on every tick, so the
+// perf board needs to see how much the signature guard absorbs between real edits and what a
+// rebuild/preview draw costs. Counters live on wkStats; a full rebuild >= 50 ms warns with the
+// absorb count so list growth stays visible (same discipline as the ledger's slow-rebuild log).
+const wkStats = { calls: 0, sigSkips: 0, renders: 0, shows: 0, lastMs: 0, maxMs: 0 };
 function renderWiki() {
+  wkStats.calls = (wkStats.calls || 0) + 1;
   // Signature like obsSig (see TAB_RESIG note): every state poll ran through here and rebuilt the
   // page list + re-wired its handlers even with nothing changed. updatedAt changes on any write, so
   // keying on titles+updatedAt+author+search+selection can't miss a real edit (including another
@@ -2148,7 +2156,8 @@ function renderWiki() {
   const q = ($('#wk-search').value || '').trim().toLowerCase();
   const pages = Object.keys(S.wiki).sort().map((t) => `${t}|${S.wiki[t].updatedAt || ''}|${S.wiki[t].author || ''}`).join(';');
   const key = [ctx.p, pages, q, sel.page || '', wikiEdit].join('|');
-  if (key === wkSig) return; wkSig = key;
+  if (key === wkSig) { wkStats.sigSkips = (wkStats.sigSkips || 0) + 1; return; } wkSig = key;
+  const t0 = performance.now();
   const titles = Object.keys(S.wiki).sort().filter((t) => !q || t.toLowerCase().includes(q) || (S.wiki[t].content || '').toLowerCase().includes(q));
   const all = Object.keys(S.wiki).length;
   $('#wikipages').innerHTML = titles.length
@@ -2159,6 +2168,10 @@ function renderWiki() {
   const empty = !sel.page && !wikiEdit;
   $('#wk-empty').classList.toggle('hidden', !empty); $('#wk-editor').classList.toggle('hidden', empty);
   $('#wk-empty h3').textContent = all ? 'No page selected' : 'No wiki pages yet';
+  const ms = performance.now() - t0;
+  wkStats.renders = (wkStats.renders || 0) + 1; wkStats.lastMs = ms;
+  if (ms > wkStats.maxMs) wkStats.maxMs = ms;
+  if (ms >= 50) console.warn(`wiki page list rebuilt in ${Math.round(ms)} ms over ${titles.length} page(s); ${wkStats.sigSkips} sig-skip(s) absorbed since boot`);
 }
 // Dirty-editor guard (t_2a87ef9a): leaving a modified editor used to silently wipe the draft.
 function wikiDirty() {
@@ -2182,10 +2195,14 @@ function loadPage() { const p = S.wiki[sel.page]; if (!p) return; $('#wk-title')
 // Cheap backlinks: tasks whose title or description mention this page's title.
 function wikiBacklinks(title) { const q = title.trim().toLowerCase(); if (!q) return []; return S.tasks.filter((t) => (t.title || '').toLowerCase().includes(q) || (t.description || '').toLowerCase().includes(q)); }
 function showWiki() {
+  const t0 = performance.now();
   $('#wk-content').classList.toggle('hidden', !wikiEdit); $('#wk-view').classList.toggle('hidden', wikiEdit);
   const bl = wikiEdit ? [] : wikiBacklinks($('#wk-title').value);
   $('#wk-view').innerHTML = md($('#wk-content').value) + (bl.length ? `<div class="wk-backlinks"><b>Linked from tasks</b><ul>${bl.map((t) => `<li data-task="${esc(t.id)}">${esc(t.title)}</li>`).join('')}</ul></div>` : '');
   $('#wk-view').querySelectorAll('.wk-backlinks li').forEach((d) => d.onclick = () => { sel.task = d.dataset.task; showTab('board'); renderBoard(); });
+  const ms = performance.now() - t0; // preview/backlink draw cost, same wkStats as the list rebuild
+  wkStats.shows = (wkStats.shows || 0) + 1;
+  if (ms > wkStats.maxMs) wkStats.maxMs = ms;
 }
 $('#wk-edit').onclick = () => { const on = !wikiEdit; if (on) wkBaseUpdated = (sel.page && S.wiki[sel.page]) ? (S.wiki[sel.page].updatedAt || null) : null; wikiEdit = on; showWiki(); };
 $('#wk-save').onclick = async () => {
