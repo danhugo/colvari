@@ -40,6 +40,10 @@ const MAIN = path.join(APP, 'src/main.js');
 const HCPATH = process.env.PERF_HCPATH || '/Users/d/.local/bin/helpycode';
 const MODEL = process.env.PERF_HC_MODEL || 'elice/z-ai/glm-5.3-flash';
 const LOAD_START = os.loadavg();
+// Load validity (Critic t_155e7859): track the 1 m peak across the whole run — start/end samples
+// alone can miss a burst in the middle. Peak >= 5 marks the run NOT valid in the summary.
+const LOAD_PEAK = { max: LOAD_START[0] };
+{ const t = setInterval(() => { const l = os.loadavg()[0]; if (l > LOAD_PEAK.max) LOAD_PEAK.max = l; }, 10000); t.unref(); }
 const OUT = process.env.PERF_OUT || path.join(os.tmpdir(), `agents-squad-realperf-${Date.now()}`);
 const AGENTS = Math.max(1, Number(process.env.PERF_AGENTS || 2));
 const TASKS_PER_AGENT = Math.max(1, Number(process.env.PERF_TASKS_PER_AGENT || 3));
@@ -78,7 +82,7 @@ if (!process.env.AGENTS_SQUAD_PROJECT.startsWith(os.tmpdir())) throw new Error('
 // data root — never in a shared non-repo cwd (which once let real helpycode agents wander into
 // the developer's real repo and land seed commits on its master). The startup gate below
 // hard-fails the run unless every node's workdir and git root resolve inside the data root.
-const SB = require(path.join(APP, 'test', 'harness', 'sandbox'));
+const SB = require(path.join(APP, 'src', 'sandbox')); // moved here by t_8f7605c4 (was test/harness/sandbox)
 const AGENT_WS = Array.from({ length: AGENTS }, (_, i) => SB.agentWorkspace(process.env.AGENTS_SQUAD_PROJECT, i));
 function assertAgentSandbox(seeded) {
   const { Store } = require(path.join(APP, 'src/store.js'));
@@ -119,6 +123,35 @@ app.on('web-contents-created', (_e, contents) => {
 // Main-thread log I/O probe (same as cpu-baseline.js): this process IS the app's main thread.
 const { monitorEventLoopDelay, performance } = require('perf_hooks');
 const IO = { calls: 0, totalMs: 0, maxMs: 0, over5: 0, over20: 0, slowest: [], winCalls: 0, winTotalMs: 0 };
+// withLock wait/hold split (t_155e7859): wrap before main.js loads. hold = time inside fn; the
+// gap to the total is the spin — sleepSync(10) iterations while some other holder (agent MCP
+// writes, harness seeding) owns the lock dir. wait>=20ms keeps a stack so RESULTS can say WHICH
+// call sat behind the lock, not just that the spin happened.
+const LOCK = {
+  calls: 0, waitMs: 0, holdMs: 0, waitMax: 0, holdMax: 0, over10: 0, over50: 0, stacks: [], win: null,
+  // One record per lock call, tagged by path (withLock / withLockAsync / withLockTry). Long waits
+  // capture their stack: the caller waiting behind the spin is the visible half of the block.
+  // atP (performance.now at release) lets the block-cause pass bridge each stack to wall time.
+  done({ name, waitMs, holdMs }) {
+    const w = +waitMs, h = +holdMs, atP = performance.now();
+    LOCK.calls++; LOCK.waitMs += w; LOCK.holdMs += h;
+    if (w > LOCK.waitMax) LOCK.waitMax = w;
+    if (h > LOCK.holdMax) LOCK.holdMax = h;
+    if (w > 10) LOCK.over10++;
+    if (w > 50) LOCK.over50++;
+    if (w >= 20 && LOCK.stacks.length < 400) {
+      let stack = '';
+      try { stack = new Error().stack.split('\n').slice(2, 7).join(' | '); } catch {}
+      LOCK.stacks.push({ lock: name, waitMs: w, holdMs: h, atP, stack });
+    }
+    if (LOCK.win) {
+      LOCK.win.calls++; LOCK.win.waitMs += w; LOCK.win.holdMs += h;
+      if (w > LOCK.win.waitMax) LOCK.win.waitMax = w;
+      if (w > 50) LOCK.win.over50++;
+      if (w >= 20 && LOCK.win.stacks.length < 400) LOCK.win.stacks.push({ lock: name, waitMs: w, holdMs: h, atP, stack });
+    }
+  },
+};
 {
   const { Store } = require(path.join(APP, 'src/store.js'));
   const orig = Store.prototype.appendLog;
@@ -134,6 +167,32 @@ const IO = { calls: 0, totalMs: 0, maxMs: 0, over5: 0, over20: 0, slowest: [], w
       if (d > 10) { IO.slowest.push(+d.toFixed(1)); if (IO.slowest.length > 60) IO.slowest.shift(); }
     }
   };
+  // LOCK instrumentation (t_155e7859): wait/hold split for all three lock paths around the
+  // sleepSync(10) spin (store.js withLock) — WAIT is measured DIRECTLY as fn-start − call-start
+  // (Critic: total−hold goes wrong when fn throws), hold as time inside fn. A nested withLock
+  // (fn calls withLock again) wraps its own fn and reports its own wait/hold separately; the
+  // outer's wait math still holds. wait>=20ms keeps a stack so RESULTS can name WHICH call sat
+  // behind the lock, not just that the spin happened.
+  const wrapLock = (name) => {
+    const orig = Store.prototype[name];
+    if (typeof orig !== 'function') return;
+    Store.prototype[name] = function (fn, ...rest) {
+      let hold = 0, enteredAt = 0;
+      const tCall = performance.now();
+      const wrapped = (...fa) => { enteredAt = performance.now(); const th = enteredAt; try { return fn.apply(this, fa); } finally { hold += performance.now() - th; } };
+      const report = (extra) => {
+        const waitMs = +(Math.max(0, (enteredAt || performance.now()) - tCall)).toFixed(2);
+        LOCK.done({ name, waitMs, holdMs: +hold.toFixed(2), ...extra });
+      };
+      try {
+        const r = orig.call(this, wrapped, ...rest);
+        if (r && typeof r.then === 'function') return r.finally(() => report());
+        report();
+        return r;
+      } catch (e) { report({ threw: true }); throw e; }
+    };
+  };
+  ['withLock', 'withLockAsync', 'withLockTry'].forEach(wrapLock);
 }
 const EL = monitorEventLoopDelay({ resolution: 10 });
 
@@ -443,12 +502,17 @@ async function startTrace(minMs) {
 
 // ---- scenarios ---------------------------------------------------------------------------
 async function seed() {
+  // AGENT_WS is baked to a page-side array string — the page-side for loop owns `i`, and a
+  // harness-side ${jsq(AGENT_WS[i])} would throw ReferenceError (i is not defined) before the
+  // string is ever handed to the page (5-agent run died at seed() on the first attempt).
+  const wsJs = JSON.stringify(AGENT_WS);
   const res = await ex(`
     const p = await call('createProject', 'Real-agent jank baseline');
     switchTo({ p: p.id }); await w(600); await refresh();
     await call('saveSettings', { helpycodePath: ${jsq(HCPATH)}, useWorktrees: false, maxConcurrency: ${AGENTS}, maxRuns: ${AGENTS * TASKS_PER_AGENT + 2}, requireApproval: false, stallTimeoutMin: ${STALL_MIN} });
     const nodes = [];
-    for (let i = 0; i < ${AGENTS}; i++) nodes.push(await call('addNode', { name: 'Real-' + (i + 1), role: 'Dev', x: 90 + (i % 3) * 240, y: 110 + Math.floor(i / 3) * 190, runtime: 'helpycode', model: ${jsq(MODEL)}, workdir: ${jsq(AGENT_WS[i])} }));
+    const agentWs = ${wsJs};
+    for (let i = 0; i < ${AGENTS}; i++) nodes.push(await call('addNode', { name: 'Real-' + (i + 1), role: 'Dev', x: 90 + (i % 3) * 240, y: 110 + Math.floor(i / 3) * 190, runtime: 'helpycode', model: ${jsq(MODEL)}, workdir: agentWs[i] }));
     for (const n of nodes.slice(1)) await call('addEdge', nodes[0].id, n.id, 'assign');
     await refresh();
     return { project: ctx.p, dir: S.dir, nodes: nodes.map((n) => n.id) };
@@ -590,6 +654,7 @@ async function main() {
 
   const working = await waitForAgents(seeded);
   const WARM_PERF = performance.now(); // steady-window boundary: excludes boot/seed cold reads
+  LOCK.win = { calls: 0, waitMs: 0, holdMs: 0, waitMax: 0, over50: 0, stacks: [] }; // steady lock window (t_155e7859)
   console.log(`[realperf] ${working}/${AGENTS} real helpycode agents working`);
   await WAIT(WARM_MS);
 
@@ -620,11 +685,12 @@ async function main() {
   EL.enable();
   const EL_T0 = Date.now();
   let elOver50 = 0, elWatchMax = 0, elWatchNext = Date.now();
+  const elBlocks = []; // t_155e7859: every >50 ms late firing, correlated with IPC/lock causes below
   const elWatcher = setInterval(() => { // 20 ms drift watch: fires late by ~the longest block
     const now = Date.now();
     const late = now - elWatchNext;
     if (late > elWatchMax) elWatchMax = late;
-    if (late > 50) elOver50++;
+    if (late > 50) { elOver50++; if (elBlocks.length < 500) elBlocks.push({ at: now, lateMs: +late.toFixed(0) }); }
     elWatchNext = now + 20;
   }, 20);
   const probeRecs = await chatOpenCampaign(REPS);
@@ -708,6 +774,10 @@ async function main() {
   for (const c of steady) { (sby[c.name] = sby[c.name] || { n: 0, ms: [] }); sby[c.name].n++; sby[c.name].ms.push(+c.ms.toFixed(2)); }
   const sga = sby.getAll || { n: 0, ms: [] };
   summary.ipc.steady = { n: steady.length, getAll: { n: sga.n, msP50: q(sga.ms, 0.5), msP95: q(sga.ms, 0.95), msMax: sga.ms.length ? Math.max(...sga.ms) : 0 } };
+  // Boot getAll (t_155e7859): the cold first getAll(s) before any agent works — pays every
+  // list*() on a just-written store (~1.5 s class, one call per process in prior runs).
+  const bootGA = PERF_IPC.filter((c) => c.name === 'getAll' && c.at < WARM_PERF);
+  summary.ipc.bootGetAll = { n: bootGA.length, maxMs: bootGA.length ? +Math.max(...bootGA.map((c) => +c.ms.toFixed(2))).toFixed(2) : 0, allMs: bootGA.map((c) => +c.ms.toFixed(2)) };
   summary.streamSubs = streamSubs;
   summary.screenshots = fs.readdirSync(OUT).filter((f) => f.endsWith('.png'));
   // Real helpycode runs update the feed via state-push deltas + refresh pulls, not per-line
@@ -735,15 +805,49 @@ async function main() {
     roomDrawsPerSec: +(liveFrames.draws / liveSecs).toFixed(2), roomDrawMsPerSec: +(liveFrames.drawMs / liveSecs).toFixed(1),
   };
   summary.io = { streamWindow: ioWin, eventLoopMs: { p50: elMs(EL.percentile(50)), p95: elMs(EL.percentile(95)), p99: elMs(EL.percentile(99)), max: elMs(EL.max), watchMaxMs: +elWatchMax.toFixed(1), over50: elOver50, windowSecs: elWindowSecs }, slowestCallsMs: [...IO.slowest], maxMsPerCall: +IO.maxMs.toFixed(2) };
+  // t_155e7859 — named causes for main-thread blocks > 50 ms: every drift-watch late firing is
+  // intersected with the PERF_IPC table (which api call was running) and the LOCK table (which
+  // caller sat behind the sleepSync spin). PERF_IPC/LOCK `at` are performance.now()-based; the
+  // drift watch is Date.now()-based — bridged via the delta of the two clocks at read time.
+  {
+    const perfNowAtRead = performance.now();
+    const wallNowAtRead = Date.now();
+    const bridge = (perfAt) => wallNowAtRead - (perfNowAtRead - perfAt); // performance.now → wall clock
+    for (const l of LOCK.stacks) { l._we = bridge(l.atP); l._ws = l._we - l.waitMs - l.holdMs; }
+    const causes = elBlocks.map((b) => {
+      const s0 = b.at - b.lateMs, s1 = b.at;
+      const ipc = PERF_IPC.map((c) => ({ c, ws: bridge(c.at), we: bridge(c.at) + c.ms }))
+        .filter((x) => x.ws < s1 && x.we > s0)
+        .sort((x, y) => Math.min(y.c.ms, y.we - y.ws) - Math.min(x.c.ms, x.we - x.ws))
+        .slice(0, 2).map((x) => `${x.c.name} ${+x.c.ms.toFixed(0)}ms`);
+      const locks = LOCK.stacks.filter((l) => l._ws < s1 && l._we > s0)
+        .sort((x, y) => y.waitMs - x.waitMs)
+        .slice(0, 2).map((l) => `${l.lock} wait ${l.waitMs}ms: ${String(l.stack).split(' | ')[0]}`);
+      return { at: b.at, lateMs: b.lateMs, ipc: ipc.length ? ipc : null, locks: locks.length ? locks : null };
+    }).sort((a, b) => b.lateMs - a.lateMs).slice(0, 24);
+    for (const c of causes) if (!c.ipc && !c.locks) c.cause = 'unknown';
+    summary.mainBlocks = { over50: elOver50, windowSecs: elWindowSecs, top: causes };
+  }
+  // withLock wait/hold split (t_155e7859): the sleepSync(10) spin at store.js:310-323. LOCK.win
+  // is the steady window (armed when the agents are confirmed working).
+  summary.locks = {
+    session: { calls: LOCK.calls, waitMs: +LOCK.waitMs.toFixed(1), waitMax: +LOCK.waitMax.toFixed(1), holdMs: +LOCK.holdMs.toFixed(1), holdMax: +LOCK.holdMax.toFixed(1), over10: LOCK.over10, over50: LOCK.over50 },
+    byLock: (() => { const m = {}; for (const s of LOCK.stacks) { const k = s.lock; (m[k] = m[k] || { longWaits: 0, worst: 0 }); m[k].longWaits++; if (s.waitMs > m[k].worst) m[k].worst = s.waitMs; } return m; })(),
+    steady: LOCK.win ? { calls: LOCK.win.calls, waitMs: +LOCK.win.waitMs.toFixed(1), waitMax: +LOCK.win.waitMax.toFixed(1), holdMs: +LOCK.win.holdMs.toFixed(1), over50: LOCK.win.over50 } : null,
+    slowWaits: [...LOCK.stacks].sort((a, b) => b.waitMs - a.waitMs).slice(0, 20),
+  };
   summary.env = {
     agents: AGENTS, tasksPerAgent: TASKS_PER_AGENT, reps: REPS, scrollReps: SCROLL_REPS, traceMs: trace.windowMs || TRACE_MS,
     staggerMs: STAGGER_MS, stallMin: STALL_MIN,
     seeds: { tasks: SEED_TASKS, logs: SEED_LOGS, runs: SEED_RUNS }, cli: HCPATH, model: MODEL,
     platform: `${os.platform()} ${os.arch()} cpus=${os.cpus().length}`,
-    load: { start1m: +LOAD_START[0].toFixed(2), end1m: +os.loadavg()[0].toFixed(2), end5m: +os.loadavg()[1].toFixed(2) },
+    load: { start1m: +LOAD_START[0].toFixed(2), end1m: +os.loadavg()[0].toFixed(2), end5m: +os.loadavg()[1].toFixed(2), max1m: +LOAD_PEAK.max.toFixed(2) },
     electron: process.versions.electron,
     commit: (() => { try { return require('child_process').execFileSync('git', ['rev-parse', 'HEAD'], { cwd: APP, encoding: 'utf8' }).trim(); } catch { return 'unknown'; } })(),
   };
+  // Critic (t_155e7859): a 5-agent run is only valid on a quiet machine — load1m must stay < 5.
+  summary.env.loadValid = summary.env.load.max1m < 5;
+  if (!summary.env.loadValid) console.error(`[realperf] WARNING: load1m peaked at ${summary.env.load.max1m} (>=5) — run marked NOT valid, re-run on a quiet machine`);
   fs.writeFileSync(path.join(OUT, 'ipc-raw.json'), JSON.stringify(PERF_IPC));
   fs.writeFileSync(path.join(OUT, 'real-agents-jank.json'), JSON.stringify(summary, null, 2));
   fs.writeFileSync(path.join(OUT, 'real-agents-jank.md'), markdown(summary));
@@ -794,6 +898,18 @@ ${['warm', 'chatopen', 'scroll', 'stream'].map(cpuRow).join('\n')}
 
 Main-thread appendLog (stream window): ${s.io.streamWindow.calls} calls Σ ${s.io.streamWindow.totalMs} ms · max single ${s.io.maxMsPerCall} ms · main event loop over the ${s.io.eventLoopMs.windowSecs} s measured window (post-profiler-start): p95 ${s.io.eventLoopMs.p95} / p99 ${s.io.eventLoopMs.p99} / max ${s.io.eventLoopMs.max} ms (histogram, ~10 ms idle floor on macOS) · 20 ms drift-watch: max ${s.io.eventLoopMs.watchMaxMs} ms late, firings >50 ms late: ${s.io.eventLoopMs.over50}
 
+## (c2) Main-thread blocks > 50 ms — named causes (t_155e7859)
+
+${s.env.load && s.env.load.max1m >= 5 ? `⚠ load1m peaked ${s.env.load.max1m} (>= 5) — run NOT valid, re-run on a quiet machine\n\n` : ''}
+${(s.mainBlocks && s.mainBlocks.top || []).length ? s.mainBlocks.top.map((b) => `- ${b.lateMs} ms @ ${new Date(b.at).toISOString().slice(11, 19)} — ${b.locks ? b.locks.join(' | ') : ''}${b.ipc ? (b.locks ? ' · IPC during: ' : 'IPC during: ') + b.ipc.join(', ') : ''}${(!b.ipc && !b.locks) ? 'unknown (no IPC/lock overlap; see trace-main.cpuprofile)' : ''}`).join('\n') : `none (${s.mainBlocks.over50} late firings over ${s.mainBlocks.windowSecs} s)`}
+
+## (c3) Store lock waits (withLock / withLockAsync / withLockTry — sleepSync spin, store.js:310)
+
+Session: ${s.locks.session.calls} calls · wait Σ ${s.locks.session.waitMs} ms (max ${s.locks.session.waitMax}) · hold Σ ${s.locks.session.holdMs} ms (max ${s.locks.session.holdMax}) · waits >10 ms: ${s.locks.session.over10} · >50 ms: ${s.locks.session.over50}
+Steady window (post agent-start): ${s.locks.steady ? `${s.locks.steady.calls} calls · wait Σ ${s.locks.steady.waitMs} ms (max ${s.locks.steady.waitMax}) · hold Σ ${s.locks.steady.holdMs} ms · waits >50 ms: ${s.locks.steady.over50}` : '—'}
+${Object.keys(s.locks.byLock || {}).length ? `Long waits by lock path: ${Object.entries(s.locks.byLock).map(([k, v]) => `${k} ×${v.longWaits} (worst ${v.worst} ms)`).join(' · ')}` : ''}
+${(s.locks.slowWaits || []).length ? `Top waits:\n${s.locks.slowWaits.slice(0, 8).map((l) => `- ${l.waitMs} ms ${l.lock} (held ${l.holdMs} ms): ${l.stack.split(' | ').slice(0, 3).join(' | ')}`).join('\n')}` : ''}
+
 ## Trace — self time by function (${s.env.traceMs} ms window)
 
 Renderer: ${(tr.renderer ? tr.renderer.top.slice(0, 12) : []).map((x) => `${x.name} ${x.selfMs}`).join(' · ') || '—'}
@@ -806,6 +922,7 @@ ${(tr.longTaskAttribution || []).map((a) => `- ${a.durMs} ms: ${a.during.join(' 
 ## IPC round-trips (${s.ipc.perSec}/s)
 
 Steady window (post agent-start, n=${s.ipc.steady.n}): **getAll p50 ${s.ipc.steady.getAll.msP50} / p95 ${s.ipc.steady.getAll.msP95} / max ${s.ipc.steady.getAll.msMax} ms** (n=${s.ipc.steady.getAll.n})
+Boot getAll (pre agent-start, n=${s.ipc.bootGetAll.n}): max ${s.ipc.bootGetAll.maxMs} ms${s.ipc.bootGetAll.allMs.length > 1 ? ` (all: ${s.ipc.bootGetAll.allMs.join(', ')})` : ''}
 
 | call | n | /s | p50 ms | p95 ms | max ms |
 |---|---:|---:|---:|---:|---:|

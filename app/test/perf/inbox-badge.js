@@ -13,7 +13,7 @@
  * Seeded content comes from an LCG keyed on seed 479, so runs are reproducible.
  *
  * Run from app/: npx electron test/perf/inbox-badge.js [50] [500] [5000]   (cumulative scales)
- * Writes RESULTS.md + raw.json to test/perf/results/inbox-badge-479/.
+ * Writes RESULTS.md + raw.json to test/perf/results/inbox-badge-<SEED>/ (INBOX_BADGE_SEED, default 479).
  */
 const { app } = require('electron');
 const fs = require('fs');
@@ -22,9 +22,9 @@ const path = require('path');
 
 const APP = path.resolve(path.join(__dirname, '../..'));
 const MAIN = path.join(APP, 'src/main.js');
-const OUT = path.join(APP, 'test/perf/results/inbox-badge-479');
+const SEED = +(process.env.INBOX_BADGE_SEED || 479);
+const OUT = path.join(APP, `test/perf/results/inbox-badge-${SEED}`);
 const SCALES = (process.argv.slice(2).length ? process.argv.slice(2) : ['50', '500', '5000']).map(Number);
-const SEED = 479;
 const WAIT = (ms) => new Promise((r) => setTimeout(r, ms));
 const jsq = (v) => JSON.stringify(v);
 const ex = (js) => wc.executeJavaScript(`(async () => { const w = (ms) => new Promise((r) => setTimeout(r, ms)); const $ = (s) => document.querySelector(s); ${js} })()`);

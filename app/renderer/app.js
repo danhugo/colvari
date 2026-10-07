@@ -370,7 +370,7 @@ function wireDraftForm() {
     const list = loadCustomRuntimes().filter((r) => r.id !== profile.id);
     list.push(profile); saveCustomRuntimes(list); rtDraft = null; refresh();
   };
-  $('#rd-cancel').onclick = () => { rtDraft = null; renderSettings(); };
+  $('#rd-cancel').onclick = () => { rtDraft = null; renderSettings(true); };
 }
 function wireRuntimesSection() {
   $('#rt-detect').onclick = act(async () => {
@@ -2709,7 +2709,18 @@ $('#us-exportall').onclick = act(async () => download('usage-all-projects.csv', 
 $('#us-clear').onclick = act(async () => { if (!confirm('Clear the usage history of this project?')) return; await call('clearRuns'); refresh(); });
 
 // ---------- settings ----------
-function renderSettings() {
+// The settings tab has no render signature, so while agents stream every renderAll tick (~200ms
+// apart, renderSched) rebuilt the whole form via innerHTML — and each rebuild wiped focus and any
+// unsaved input mid-keystroke. Debounce the rebuild around editing instead: skip while a form
+// field holds focus or a keystroke landed within the grace window; the next idle tick (or the
+// save button's own refresh) re-renders with the stored values.
+const SET_EDIT_GRACE_MS = 800;
+let setEditAt = 0;
+const setField = (el) => !!el && !!el.matches && el.matches('#settingsform input, #settingsform textarea, #settingsform select');
+document.addEventListener('focusin', (e) => { if (setField(e.target)) setEditAt = Date.now(); });
+document.addEventListener('input', (e) => { if (setField(e.target)) setEditAt = Date.now(); });
+function renderSettings(force) {
+  if (!force && (setField(document.activeElement) || Date.now() - setEditAt < SET_EDIT_GRACE_MS)) return;
   const s = S.settings;
   const tplCur = $('#tpl-select') ? $('#tpl-select').value : '';
   $('#settingsform').innerHTML = `<h3 class="set-pagetitle">Settings</h3>
