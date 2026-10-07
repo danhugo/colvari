@@ -27,6 +27,7 @@ const blockPayload = (r) => `${(r.names || []).length ? (r.names || []).map((n) 
 const ROLES = SUGGESTED_ROLES; // suggestions only: roles are free text
 const soonQ = new Map(); // dir -> tail promise of this process's queued deferred writes (Store._soon)
 const STATUSES = ['todo', 'in_progress', 'review', 'done', 'waiting_for_human', 'merge_conflict'];
+const SETTINGS_DEFAULTS = { claudePath: 'claude', maxConcurrency: 8, maxRuns: 30, permissionMode: 'bypassPermissions', rolePresets: [], budgetUsd: 0, budgetTokens: 0, requireApproval: false, useWorktrees: true, usageLimits: {}, autoCompactPct: 40, stallTimeoutMin: 10, watchIntervalMin: 10, autoRestart: false, maxAgents: 6, teamChangeApproval: 'ask' };
 
 // Version-map keys whose getAll section changed since the client's last fetch (all keys when `since`
 // is null = first load / project switch). Pure so the delta contract is testable without Electron.
@@ -522,9 +523,10 @@ class Store {
   // The before-image reuses the per-file cache's compact form (t_7e53747c): the old code
   // stringified every task twice per write, all inside the lock — every agent MCP call paid it,
   // and main-process writers queued behind those holds.
-  _taskWritePass(fn) {
+  // `only` (file names) narrows the pass to those files — for patches that cannot touch any other task.
+  _taskWritePass(fn, only) {
     return () => {
-      const tasks = this._taskFiles().map((f) => this._readTaskFile(f)).filter(Boolean);
+      const tasks = (only || this._taskFiles()).map((f) => this._readTaskFile(f)).filter(Boolean);
       const beforeIds = new Set(tasks.map((t) => t.id));
       const beforeStr = new Map();
       for (const t of tasks) {
@@ -540,10 +542,10 @@ class Store {
       return r;
     };
   }
-  _withTasks(fn) {
+  _withTasks(fn, only) {
     if (this.cache && !this.cache.closed) this.cache.prewarm();
     this._ensureBoard();
-    return this._soon(this._taskWritePass(fn), () => fn(this._taskFiles().map((f) => this._readTaskFile(f)).filter(Boolean).map((t) => structuredClone(t))));
+    return this._soon(this._taskWritePass(fn, only), () => fn((only || this._taskFiles()).map((f) => this._readTaskFile(f)).filter(Boolean).map((t) => structuredClone(t))));
   }
   // Async twin of _withTasks (see withLockAsync): same read/diff/write pass under the async lock.
   async _withTasksAsync(fn) {
@@ -1096,6 +1098,10 @@ class Store {
     return out;
   }
   _updateTask(tid, patch) {
+    // Single-file fast path (t_42816253): only blockedBy (dep validation) and done (parent
+    // auto-complete) read other tasks; every other patch skips the stat of the whole board,
+    // which was the main-thread hold of every dispatch write.
+    const only = patch.blockedBy === undefined && patch.status !== 'done' ? [tid + '.json'] : undefined;
     return this._withTasks((tasks) => {
       const t = tasks.find((x) => x.id === tid); if (!t) throw new Error('no task ' + tid);
       if (patch.status && !STATUSES.includes(patch.status)) throw new Error('bad status ' + patch.status);
@@ -1111,7 +1117,7 @@ class Store {
         parent.status = 'done'; parent.awaitingApproval = false; parent.updatedAt = t.updatedAt; c = parent;
       }
       return t;
-    });
+    }, only);
   }
   deleteTask(tid) { this._withTasks((tasks) => { const i = tasks.findIndex((t) => t.id === tid); if (i >= 0) tasks.splice(i, 1); for (const t of tasks) if (t.blockedBy) t.blockedBy = t.blockedBy.filter((x) => x !== tid); }); }
   // Human approval gate: approve -> done, reject -> todo (with the note as a comment, so the agent reworks it).
@@ -1689,7 +1695,16 @@ class Store {
   }
 
   // ---- settings ----
-  getSettings() { return { claudePath: 'claude', maxConcurrency: 8, maxRuns: 30, permissionMode: 'bypassPermissions', rolePresets: [], budgetUsd: 0, budgetTokens: 0, requireApproval: false, useWorktrees: true, usageLimits: {}, autoCompactPct: 40, stallTimeoutMin: 10, watchIntervalMin: 10, autoRestart: false, maxAgents: 6, teamChangeApproval: 'ask', ...this.read('settings', {}) }; }
+  // Settings are polled hard by periodic main-thread timers (the stall sweep every 5s, the nudge
+  // and review watchdogs, renderer getAll) — a stat-sig memo (same pattern as the board/runs
+  // memos) makes the warm read one stat instead of readFileSync + JSON.parse. Writes invalidate
+  // for free: saveSettings goes through write(), so the sig changes and the next call re-reads
+  // (own-process and out-of-process writers alike).
+  getSettings() {
+    const sig = this.sigFile('settings');
+    if (!this._settingsMemo || this._settingsMemo.sig !== sig) this._settingsMemo = { sig, raw: this.read('settings', {}) };
+    return { ...SETTINGS_DEFAULTS, ...this._settingsMemo.raw };
+  }
   saveSettings(s) {
     const next = { ...this.getSettings(), ...s };
     if (s.rolePresets) {

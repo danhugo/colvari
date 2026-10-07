@@ -252,3 +252,22 @@ test('noteTaskPut: cached size is the byte length, not the string length', () =>
   s.cache.close();
   fs.rmSync(d, { recursive: true, force: true });
 });
+
+// t_42816253: the timer pass stats/reads off the main thread; it must still adopt edits.
+test('reconcileAsync: adopts a changed file and a same-size same-mtime edit, no sync stats', async () => {
+  const d = mktemp('bc-recon3-');
+  const s = cachedStore(d, { fullEvery: 2 });
+  const a = s.createTask({ title: 'aaaa' }); const b = s.createTask({ title: 'bb' });
+  s.listTasks();
+  atomicWrite(s.taskFile(b.id), mkTask(b.id, { title: 'changed out of band' }));
+  const p = s.taskFile(a.id); const raw = fs.readFileSync(p, 'utf8').replace('"aaaa"', '"cccc"');
+  fs.writeFileSync(p, raw); s.cache.tasks.get(a.id).mtimeMs = fs.statSync(p).mtimeMs;
+  const orig = fs.statSync; let stats = 0;
+  fs.statSync = (q, ...r) => { if (String(q).includes(path.join('board', 'tasks'))) stats++; return orig(q, ...r); };
+  try { await s.cache.reconcileAsync(); await s.cache.reconcileAsync(); } finally { fs.statSync = orig; }
+  assert.ok(stats <= 4, `only moved files take the sync path (${stats} sync stats)`);
+  assert.equal(s.getTask(b.id).title, 'changed out of band');
+  assert.equal(s.getTask(a.id).title, 'cccc');
+  s.cache.close();
+  fs.rmSync(d, { recursive: true, force: true });
+});
