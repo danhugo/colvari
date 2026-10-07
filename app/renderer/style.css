@@ -711,10 +711,14 @@ header > strong.brand { display:flex; align-items:center; gap:6px; font-weight:7
 .composer.dragover { outline:2px dashed var(--accent); outline-offset:-4px; }
 .composer button:disabled { opacity:.45; cursor:not-allowed; }
 #chat-attach { align-self:stretch; margin:0 !important; }
-.att-row { display:inline-flex; flex-wrap:wrap; gap:6px; vertical-align:middle; margin-left:8px; }
+.att-row { display:flex; flex-wrap:wrap; gap:6px; margin:6px 0 2px; white-space:normal; }
 .att-block { display:block; max-width:480px; margin:6px 0; border:1px solid var(--border); border-radius:var(--radius-md); overflow:hidden; cursor:zoom-in; }
 .att-block img { display:block; width:100%; height:auto; }
-.bubble .att-thumb { width:64px; height:64px; object-fit:cover; border-radius:var(--radius-xs); display:block; }
+.att-row .att-thumb { display:block; border:1px solid var(--border); border-radius:var(--radius-sm); background:var(--bg-raised); cursor:zoom-in; }
+.att-row.one .att-thumb { max-width:min(100%, 480px); max-height:360px; width:auto; height:auto; object-fit:contain; }
+.att-row.grid .att-thumb { width:200px; height:200px; max-width:100%; object-fit:cover; }
+.att-lightbox { position:fixed; inset:0; z-index:9999; background:rgba(0,0,0,.85); display:flex; align-items:center; justify-content:center; cursor:zoom-out; }
+.att-lightbox img { max-width:95vw; max-height:95vh; object-fit:contain; box-shadow:0 4px 24px rgba(0,0,0,.5); }
 .bubble .att-file, .att-chip .att-file { font-size:var(--text-xs); border:1px solid var(--border); border-radius:var(--radius-xs); padding:2px 6px; align-self:center; }
 /* t_db029901 (regressions of t_e31f5663): the borderless default was a global override that stripped every
    button in the app — scope it to the Board. The boundary stays ≥3:1 (WCAG 1.4.11): --fg-muted passes on

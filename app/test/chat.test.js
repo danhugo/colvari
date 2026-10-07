@@ -58,6 +58,13 @@ test('attachments: attThumbs HTML — lazy file:// img for images, name chip oth
   assert.doesNotMatch(C.attThumbs([{ path: '/p/x.png', name: 'x.png', mime: '', size: 1 }]), /<img/); // empty mime → file chip, not img
 });
 
+test('attachments: own block below text — one image large, 2+ images grid (t_604b5c1a)', () => {
+  const img = (n) => ({ path: `/s/${n}.png`, name: `${n}.png`, mime: 'image/png', size: 1 });
+  assert.match(C.attThumbs([img('a')]), /^<div class="att-row one">/);
+  assert.match(C.attThumbs([img('a'), img('b')]), /^<div class="att-row grid">/);
+  assert.match(C.attThumbs([{ path: '/x.md', name: 'x.md', mime: 'text/plain', size: 1 }]), /^<div class="att-row grid">/);
+});
+
 test('attachments: identical consecutive messages collapse, but only when neither carries attachments', () => {
   const a = { path: '/p/1.png', name: '1.png', mime: 'image/png', size: 1 };
   const plain = [{ from: 'human', to: 'n1', text: 'ping', at: 1 }, { from: 'human', to: 'n1', text: 'ping', at: 2 }];

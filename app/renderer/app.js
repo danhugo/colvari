@@ -3023,7 +3023,7 @@ function bubble(e) {
     // attachments feature and silently dropped their thumbs (t_6628894d) — '' when none, so
     // plain rows are unchanged.
     const toHuman = e.type === 'message' && e.to === 'human';
-    return `<div class="bubble evrow ${e.type}${link ? ' linked' : ''}"${link}>${ico(IC[e.type])}<span>${esc(t)}${toHuman ? '' : Chat.attThumbs(e.atts)}</span>${e._tb ? teamBadge(e._tb) : ''}${tl}${rep}</div>${toHuman ? Chat.attBlock(e.atts) : ''}`; }
+    return `<div class="bubble evrow ${e.type}${link ? ' linked' : ''}"${link}>${ico(IC[e.type])}<span>${esc(t)}</span>${e._tb ? teamBadge(e._tb) : ''}${tl}${rep}</div>${toHuman ? Chat.attBlock(e.atts) : Chat.attThumbs(e.atts)}`; }
   const text = e.text;
   const attsHtml = Chat.attThumbs(e.atts);
   return `<div class="bubble ${e.type}${link ? ' linked' : ''}"${link}>${chatMd(text)}${attsHtml}${tl}${e._tb ? teamBadge(e._tb) : ''}${rep}</div>`;
@@ -3456,6 +3456,14 @@ $('#chat-send').onclick = act(chatSend);
 document.querySelector('#tab-chat .chat-head .spacer').insertAdjacentHTML('beforebegin', '<select id="chatteam" title="Scope #company to one team, or show all teams"></select>');
 $('#chatteam').onchange = () => { sel.chatTeam = $('#chatteam').value; chatSched.force(); };
 
+// Message image lightbox (t_604b5c1a): click a bubble thumb → full size overlay; click or Esc closes.
+document.addEventListener('click', (ev) => {
+  const img = ev.target.closest && ev.target.closest('.att-row .att-thumb'); if (!img || img.closest('.att-chip')) return;
+  const box = document.createElement('div'); box.className = 'att-lightbox'; box.innerHTML = `<img src="${esc(img.src)}" alt="${esc(img.alt)}">`;
+  const close = () => { box.remove(); document.removeEventListener('keydown', onKey, true); };
+  const onKey = (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } };
+  box.onclick = close; document.addEventListener('keydown', onKey, true); document.body.appendChild(box);
+});
 // ---------- composer attachments (t_993822cf): paste / drop / attach button, chips, lazy thumbs ----------
 // A chip is added optimistically (local object-URL preview for images), saved in the background via
 // squad.saveAttachment, then swaps to the saved file:// thumbnail (object URL revoked on swap, remove, send).
