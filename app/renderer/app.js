@@ -3060,9 +3060,10 @@ const groupHeadHtml = (g) => { const w = who(g.who);
 // path slides the window from the front in whole groups and needs the count to keep the books.
 const renderGroups = (events, working) => { const ask = needsYou(); return mergeGroups(Chat.group(events)).map((g) => { const w = who(g.who); const cnt = g.items.reduce((a, it) => a + (it.count || 1), 0);
   return `<div class="cgroup${w.human ? ' self' : ''}" data-cnt="${cnt}" data-who="${esc(g.who)}">${avatarHtml(g.who, working, ask)}<div class="cbody">${groupHeadHtml(g)}${bubbleRuns(g.items)}</div></div>`; }).join(''); };
-// Sticky "Your turn" bar above the composer: every pending ask_human question/approval.
+// Sticky "Your turn" bar above the composer: pending ask_human questions/approvals that are NOT
+// already shown as an inline question card in the rendered chat page (t_aa42e7f3 — no duplicates).
 function renderYourTurn(ev) {
-  const seen = new Set((S.inbox || []).map((i) => i.id)); const items = [...(S.inbox || []), ...ev.filter((e) => e.type === 'question' && !seen.has(e.inboxId)).map((e) => ({ id: e.inboxId, nodeId: e.who, question: e.text, choices: e.choices, kind: 'question' }))]; const bar = $('#chat-yourturn'); bar.classList.toggle('hidden', !items.length);
+  const inline = new Set(Chat.pageOf(ev, CH.win || Chat.PAGE).items.filter((e) => e.type === 'question').map((e) => e.inboxId)); const items = (S.inbox || []).filter((i) => !inline.has(i.id)); const bar = $('#chat-yourturn'); bar.classList.toggle('hidden', !items.length);
   const key = items.map((i) => `${i.id}:${i.question}:${(i.choices || []).join()}`).join('|');
   if (key === CH.ytKey) return; // unchanged: keep the bound DOM (t_1fb02462 — this rebuilt every draw)
   CH.ytKey = key;
