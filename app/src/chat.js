@@ -17,11 +17,13 @@
   // Attachments (t_993822cf): size label + file:// URL for lazy <img> thumbnails (renderer + tests share).
   const fmtSize = (n) => n == null || isNaN(n) ? '' : n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`;
   const fileUrl = (p) => encodeURI('file://' + p);
-  // One bubble's attachment row: images render as 64px lazy file:// thumbnails, other files as name chips.
+  // One bubble's attachment block, below the text (t_604b5c1a): a lone image shows large ("one"),
+  // 2+ items form a grid of medium thumbs; other files are name chips. Click opens the lightbox.
   const attThumbs = (atts) => {
     if (!atts || !atts.length) return '';
     const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-    return `<span class="att-row">${atts.map((a) => String(a.mime || '').startsWith('image/') ? `<img class="att-thumb" src="${esc(fileUrl(a.path))}" loading="lazy" alt="${esc(a.name)}" title="${esc(a.name)} · ${fmtSize(a.size)}">` : `<span class="att-file" title="${esc(a.name)} · ${fmtSize(a.size)}">📄 ${esc(a.name)}</span>`).join('')}</span>`;
+    const one = atts.length === 1 && String(atts[0].mime || '').startsWith('image/');
+    return `<div class="att-row ${one ? 'one' : 'grid'}">${atts.map((a) => String(a.mime || '').startsWith('image/') ? `<img class="att-thumb" src="${esc(fileUrl(a.path))}" loading="lazy" alt="${esc(a.name)}" title="${esc(a.name)} · ${fmtSize(a.size)}">` : `<span class="att-file" title="${esc(a.name)} · ${fmtSize(a.size)}">📄 ${esc(a.name)}</span>`).join('')}</div>`;
   };
   // Agent -> human images (t_91bb6abe): one full-width block per image under the bubble; click opens full size.
   const attBlock = (atts) => {
