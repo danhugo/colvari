@@ -72,7 +72,10 @@ test('single run per agent: killing the live run releases the lock and the queue
   const woken = trackWakes(o);
   s.createTask({ title: 'long task', assignee: b.id });
   o.start();
-  await waitFor(() => o.procs.size === 1, 'task run live');
+  try {
+  // wait for the real child: under load the slot holds the no-op {kill(){}} placeholder for a while,
+  // and killing that does nothing — the run never ends and the queued wake never fires
+  await waitFor(() => o.procs.size === 1 && o.procs.get(b.id).pid, 'task run live (real child)');
   makeTools(s, a.id).send_message({ to: 'B', text: 'wake me when free' });
   await sleep(120);
   assert.equal(o.procs.size, 1, 'no parallel wake while busy');
@@ -84,7 +87,7 @@ test('single run per agent: killing the live run releases the lock and the queue
   const runs = s.listRuns({ nodeId: b.id });
   assert.equal(runs.length, 1, 'the killed task run persisted; the wake run is still live');
   assert.equal(o.procs.size, 1, 'the wake run is the one live run');
-  o.stop();
+  } finally { o.stop(); } // kills the children even when an assertion fails
 });
 
 test('single run per agent: a hung wake run is stopped by the stall watchdog (lock released on timeout)', async () => {
