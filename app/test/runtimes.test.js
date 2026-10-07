@@ -258,9 +258,9 @@ test('empty-version (binary missing) profile is not cached', async () => {
   const first = n; await RT.deriveRuntimeProfile('/fake/hc-gone', { exec: ex, probe: false });
   assert.ok(n > first);
 });
-test('send_message to "human" says how to reply', () => {
+test('send_message to "human" lands in the human chat (t_91bb6abe)', () => {
   const src = fs.readFileSync(path.join(__dirname, '../src/board-tools.js'), 'utf8');
-  assert.match(src, /To reply to the human, put the reply in your final answer, or use ask_human/);
+  assert.match(src, /if \(to === 'human'\) return store\.sendMessage\(\{ from: nodeId, to: 'human'/);
 });
 
 test('helpycode parseEvent with env finds the binary under a Finder-like PATH', async () => {
