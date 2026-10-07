@@ -13,6 +13,7 @@
 // time-window suppression that could swallow an agent's write landing inside the window.
 
 const fs = require('fs');
+const fsp = fs.promises;
 const path = require('path');
 const crypto = require('crypto');
 const { EventEmitter } = require('events');
@@ -30,6 +31,11 @@ class BoardCache extends EventEmitter {
     this.dir = store.dir;
     this.debounceMs = opts.debounceMs ?? 40;   // macOS coalescing window for watch hints
     this.reconcileMs = opts.reconcileMs ?? 5000; // dropped-event backstop: full dir diff
+    // Rolling full re-read (t_42816253): stat-skip misses a same-size edit inside the mtime
+    // granularity when its watch hint was dropped, so each round also re-reads 1/fullEvery of the
+    // files regardless of stat — every file is content-checked once per fullEvery rounds (~60s).
+    this.fullEvery = Math.max(1, opts.fullEvery ?? 12);
+    this._round = 0;
     this.maxBodyBytes = opts.maxBodyBytes ?? 512 * 1024; // wiki pages above: metadata only, body lazy
     this.seq = 0;
     this.closed = false;
@@ -72,7 +78,7 @@ class BoardCache extends EventEmitter {
     if (!this.store._lockDepth) { this.store._ensureBoard(); this.store._ensureWiki(); }
     this.loadAll();
     this._watch();
-    this._timer = setInterval(() => { try { this.reconcile(); } catch {} }, this.reconcileMs);
+    this._timer = setInterval(() => { this.reconcileAsync().catch(() => {}); }, this.reconcileMs);
     if (this._timer.unref) this._timer.unref();
   }
 
@@ -97,11 +103,41 @@ class BoardCache extends EventEmitter {
     if (this.closed) return;
     this._ensureLoaded();
     const known = new Set(this.tasks.keys());
-    for (const f of this.store._taskFiles()) {
-      const id = f.replace(/\.json$/, '');
-      known.delete(id);
-      this._revalidateTask(f, { statSkip: true });
-    }
+    const round = ++this._round;
+    this.store._taskFiles().forEach((f, i) => {
+      known.delete(f.replace(/\.json$/, ''));
+      this._revalidateTask(f, { statSkip: (i + round) % this.fullEvery !== 0 });
+    });
+    this._reconcileRest(known);
+  }
+  // Timer twin of reconcile (t_42816253): ~550 statSync + the rolling slice reads every 5 s were
+  // 60-230 ms main-thread blocks under 5 agents. Stats and slice reads go through the threadpool;
+  // only files that really moved take the sync _revalidateTask path. One pass at a time.
+  async reconcileAsync() {
+    if (this.closed || this._reconciling) return;
+    this._reconciling = true;
+    try {
+      this._ensureLoaded();
+      const files = this.store._taskFiles();
+      const round = ++this._round;
+      const sts = await Promise.all(files.map((f) => fsp.stat(path.join(this.store.tasksDir(), f)).catch(() => null)));
+      const known = new Set(this.tasks.keys());
+      for (let i = 0; i < files.length; i++) {
+        const f = files[i]; const id = f.replace(/\.json$/, '');
+        known.delete(id);
+        const cur = this.tasks.get(id); const st = sts[i];
+        if (cur && st && cur.mtimeMs === st.mtimeMs && cur.size === st.size) {
+          if ((i + round) % this.fullEvery !== 0) continue;
+          const buf = await fsp.readFile(path.join(this.store.tasksDir(), f)).catch(() => null);
+          if (buf && sha256(buf) === cur.hash) continue;
+        }
+        if (this.closed) return;
+        this._revalidateTask(f);
+      }
+      if (!this.closed) this._reconcileRest(known);
+    } finally { this._reconciling = false; }
+  }
+  _reconcileRest(known) {
     for (const id of known) this._dropTask(id, { verify: true });
     this._reloadWikiIndex();
     // Try-lock: a busy lock (an agent's MCP process mid-write-burst) must not spin-block the main
@@ -225,7 +261,7 @@ class BoardCache extends EventEmitter {
     if (this.closed) return;
     const p = this.store.taskFile(t.id);
     let st = null; try { st = fs.statSync(p); } catch {}
-    this._putTask(t, { mtimeMs: st ? st.mtimeMs : 0, size: st ? st.size : (dataStr || '').length, hash: sha256(Buffer.from(dataStr || '')) });
+    this._putTask(t, { mtimeMs: st ? st.mtimeMs : 0, size: st ? st.size : Buffer.byteLength(dataStr || ''), hash: sha256(Buffer.from(dataStr || '')) });
   }
   noteTaskDelete(tid) {
     this._ensureLoaded();

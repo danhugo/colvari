@@ -221,6 +221,34 @@ test('a protected silent run is probed at most once per LIVE_RECHECK_MS; a cap-e
   }
 });
 
+test('a sweep still in flight debounces the next tick — no overlapping probes (seed 488)', async () => {
+  // Overlap debounce: the 5s interval fires a new sweep while the previous pass is still awaiting
+  // its proc table (ps up to its 4s timeout under load) — the two passes would fork ps
+  // concurrently and probe the same runs twice, defeating the one-snapshot-per-sweep design.
+  const { node, orch } = setup();
+  orch.running = true; // sweepStalls only runs while the orchestrator is up
+  let probes = 0; let release;
+  const gate = new Promise((r) => { release = r; });
+  orch.procTable = async () => [{ pid: 123456, ppid: 1, state: 'S', cpuMs: null, command: 'cli' }];
+  orch.runAlive = async () => { probes++; await gate; return true; }; // parks mid-probe until released
+  const a = orch.agent(node.id);
+  a.status = 'working'; a.taskId = 't1'; a.activity = { trigger: 'task', startedAt: Date.now() };
+  const run = { done: false }; a.currentRun = run;
+  orch.procs.set(node.id, { pid: 123456, kill() {} });
+  a.lastActivityAt = Date.now() - 3500; // past the 3s cap: the kill path always probes fresh
+  const inFlight = orch.sweepStalls(); // reaches runAlive and parks on the (stubbed) slow ps
+  await new Promise((r) => setImmediate(r)); // microtasks first: the in-flight sweep is parked in runAlive
+  assert.equal(probes, 1, 'the first sweep is parked in its probe');
+  await orch.sweepStalls(); // the next tick while the pass is mid-probe
+  assert.equal(probes, 1, 'the overlapping tick is dropped, not a second concurrent probe');
+  release(); // the slow ps returns
+  await inFlight;
+  assert.equal(run.stalled, true, 'the busy sweep still completes its claim and kill');
+  await orch.sweepStalls(); // a later tick sweeps again — the claimed run is skipped without probing
+  assert.equal(probes, 1);
+  disarm(orch);
+});
+
 test('nudge with interrupt:false never SIGTERMs a live run; a human message still does', async () => {
   const { store, node, orch } = setup({ hangCmd: 'sleep 257' });
   store.createTask({ title: 'live run', assignee: node.id });

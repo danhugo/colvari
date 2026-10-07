@@ -94,3 +94,62 @@ test('createTaskAsync: waits by yielding, then writes the task', async () => {
   assert.equal(new Store(dir).getTask(t.id).title, 'async one');
   fs.rmSync(dir, { recursive: true, force: true });
 });
+
+// t_42816253: in the app's main process (Store.noSpin) every sync writer — update(), _withTasks,
+// updateNode, saveTeam, messages/inbox — must never sleepSync-spin on a lock an agent holds.
+test('noSpin: contended sync writers return at once, keep order, and land', async () => {
+  const dir = mktemp('squad-nospin-');
+  const s = new Store(dir);
+  s.saveTeam({ nodes: [{ id: 'n1', name: 'a' }], edges: [] });
+  const t = s.createTask({ title: 'a' });
+  Store.noSpin = true;
+  try {
+    fs.mkdirSync(path.join(dir, '.lock'));
+    fs.writeFileSync(path.join(dir, '.lock', 'pid'), String(process.pid));
+    const t0 = Date.now();
+    const n = s.updateNode('n1', { name: 'b' });
+    s.updateNode('n1', { name: 'c' }); // queued behind the first: last write wins
+    const u = s.updateTask(t.id, { status: 'in_progress' });
+    s.sendMessage({ from: 'a', to: 'b', text: 'hi' });
+    assert.ok(Date.now() - t0 < 1000, 'contended writes returned without blocking'); // a spin would never return: the holder pid is ours
+    assert.equal(n.name, 'b', 'sync return value still computed');
+    assert.equal(u.status, 'in_progress');
+    assert.throws(() => s.updateTask('t_missing', { status: 'todo' }), /no task/, 'validation errors still throw sync');
+    const settled = s.settled();
+    fs.rmSync(path.join(dir, '.lock'), { recursive: true, force: true });
+    await settled;
+    const f = new Store(dir);
+    assert.equal(f.getTeam().nodes[0].name, 'c');
+    assert.equal(f.getTask(t.id).status, 'in_progress');
+    assert.equal(f.listMessages().length, 1);
+  } finally { Store.noSpin = false; }
+});
+
+test('noSpin: a deferred write that fails rejects settled() for the IPC caller', async () => {
+  const dir = mktemp('squad-nospin2-');
+  const s = new Store(dir);
+  const t = s.createTask({ title: 'a' });
+  Store.noSpin = true;
+  try {
+    fs.mkdirSync(path.join(dir, '.lock'));
+    fs.writeFileSync(path.join(dir, '.lock', 'pid'), String(process.pid));
+    s.updateTask(t.id, { status: 'review' });
+    const settled = s.settled();
+    fs.rmSync(s.taskFile(t.id)); // task vanishes before the deferred write runs
+    fs.rmSync(path.join(dir, '.lock'), { recursive: true, force: true });
+    await assert.rejects(settled, /no task/);
+  } finally { Store.noSpin = false; }
+});
+
+test('updateTask: a plain patch reads only its own task file; done still cascades to the parent', () => {
+  const dir = mktemp('squad-one-');
+  const s = new Store(dir);
+  const par = s.createTask({ title: 'p' }); const kid = s.createTask({ title: 'k', parentId: par.id });
+  for (let i = 0; i < 5; i++) s.createTask({ title: 'x' + i });
+  const orig = fs.statSync; let stats = 0;
+  fs.statSync = (q, ...r) => { if (String(q).includes(path.join('board', 'tasks', 't_'))) stats++; return orig(q, ...r); };
+  try { s.updateTask(kid.id, { status: 'in_progress' }); } finally { fs.statSync = orig; }
+  assert.ok(stats <= 4, `plain patch stat'ed ${stats} task files`);
+  s.updateTask(kid.id, { status: 'done' });
+  assert.equal(new Store(dir).getTask(par.id).status, 'done');
+});
