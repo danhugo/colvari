@@ -2877,7 +2877,7 @@ const api = {
   setNodeProtected: (c, id, v) => TS(c).setNodeProtected(id, v),
   addEdge: (c, a, b, type) => TS(c).addEdge(a, b, type), updateEdge: (c, id, p) => TS(c).updateEdge(id, p),
   savePreset: (c, p) => ST(c).savePreset(p), deletePreset: (c, name) => ST(c).deletePreset(name), removeEdge: (c, id) => TS(c).removeEdge(id),
-  createTask: (c, t) => ST(c).createTask(t), updateTask: (c, id, p) => ST(c).updateTask(id, p), deleteTask: (c, id) => ST(c).deleteTask(id),
+  createTask: (c, t) => ST(c).createTaskAsync(t), updateTask: (c, id, p) => ST(c).updateTaskSoon(id, p), deleteTask: (c, id) => ST(c).deleteTask(id),
   // Paste/upload: bytes land on disk under <store>/attachments and only {path,name,mime,size} comes
   // back ({error} on rejection) — messages.json never holds base64.
   saveAttachment: (c, input) => ST(c).saveAttachment(input || {}),
@@ -3029,6 +3029,9 @@ app.whenReady().then(() => {
   // identity-checked (start time + marker) and never by name, so live processes are untouched.
   try { HS.sweep({ log: (m) => console.log(m) }).catch((e) => console.error('[agents-squad] harness sweep failed:', e.message)); } catch (e) { console.error('[agents-squad] harness sweep failed:', e.message); }
   createWindow();
+  // Prewarm (t_c02b7d0b): the first getAll paid the board-cache load + runtime detection (1082 ms
+  // cold). Do both now, while the renderer is still loading, so its first getAll hits warm caches.
+  setImmediate(() => { for (const p of pm.list()) { try { const s = pm.store(p.id); s.listTasks(); s.listWiki(); runtimes(s.getSettings()).catch(() => {}); } catch {} } });
   probeUnprobedAgents();
   for (const p of pm.list()) pumpFor(p.id); // delta pumps stream every project's changes (t_39bf39ac)
   pollInbox(true); setInterval(() => pollInbox(false), 1500);

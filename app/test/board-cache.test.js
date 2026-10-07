@@ -203,3 +203,25 @@ test('uncached Stores (MCP shape) keep reading disk and share nothing', async ()
   s.cache.close();
   fs.rmSync(d, { recursive: true, force: true });
 });
+
+// t_c02b7d0b: the 5s reconcile re-read + hashed EVERY task file (3.2s of main-thread `open` with
+// 5 agents, 362 tasks). Unchanged stat => no content read; a changed file is still adopted.
+test('reconcile: unchanged task files are not re-read', () => {
+  const d = mktemp('bc-recon-');
+  const s = cachedStore(d);
+  for (let i = 0; i < 5; i++) s.createTask({ title: 'r' + i });
+  s.listTasks(); // load
+  const victim = s.listTasks()[0];
+  const orig = fs.readFileSync; let reads = 0;
+  fs.readFileSync = (p, ...a) => { if (String(p).includes(path.join('board', 'tasks'))) reads++; return orig(p, ...a); };
+  try {
+    s.cache.reconcile();
+    assert.equal(reads, 0, 'unchanged files must not be read by reconcile');
+    atomicWrite(s.taskFile(victim.id), mkTask(victim.id, { title: 'changed out of band, longer' }));
+    s.cache.reconcile();
+    assert.equal(reads, 1, 'only the changed file is read');
+  } finally { fs.readFileSync = orig; }
+  assert.equal(s.getTask(victim.id).title, 'changed out of band, longer');
+  s.cache.close();
+  fs.rmSync(d, { recursive: true, force: true });
+});
