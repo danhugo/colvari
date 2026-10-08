@@ -258,3 +258,43 @@ test('prepend: the drain yields per group under budget, books mirroring the DOM 
   assert.deepEqual(env.CH.evFp, fps(feed));
   assert.equal(env.CH.domWin, 10, 'domWin advanced only when the drain landed');
 });
+
+test('an append superseding a mid-drain heals via a full render; the drain tick clears the latch', () => {
+  const feed = [ev(1, 'a'), ev(2, 'b'), ev(3, 'c'), ev(4, 'd'), ev(5, 'a'), ev(6, 'b'), ev(7, 'c'), ev(8, 'd'), ev(9, 'a'), ev(10, 'b')];
+  const groups = [makeGroup('a', 1), makeGroup('b', 1), makeGroup('c', 1), makeGroup('d', 1), makeGroup('a', 1), makeGroup('b', 1)]; // events 5..10, win 6
+  const env = envFor(feed.slice(4), groups, 6, true);
+  const R = buildRenderer(env);
+  env.CH._olderBudgetMs = -1; // one group per frame
+  env.CH.win = 10;
+  env.els['#chat-older'].nextSibling = env.room.children[0];
+  assert.equal(R.applyChatPrepend(feed, new Set(), 0, 100), true);
+  assert.ok(env.CH._drainGen, 'drain owns the head');
+  frameRaf(env); // one group in: books = [ev1, ev5..ev10] — non-contiguous mid-drain
+  assert.equal(env.CH.evFp.length, 7);
+  // a streaming append lands mid-drain: mid-drain books are not a suffix window of the feed,
+  // so no append plan exists — the caller falls back to the full render, which re-plans books
+  // from the feed and clears the drain latch itself
+  const feed2 = feed.concat([ev(11, 'c')]);
+  const plan = Chat.tailPlan(env.CH.evFp, feed2, 10);
+  assert.equal(plan, null, 'mid-drain books cannot plan an append: full-render heal');
+  env.CH.renderGen++; // the full render bumps gen: the drain is superseded
+  frameRaf(env); // the drain's pending tick: superseded — the latch must clear here too
+  assert.equal(env.CH._drainGen, null, 'latch cleared on the tick — chatGrow unblocked');
+  assert.ok(!env.CH._growPending, 'no parked grow');
+});
+
+test('a superseder that only bumps renderGen cannot wedge chatGrow: the tick clears the latch', () => {
+  const feed = [ev(1, 'a'), ev(2, 'b'), ev(3, 'c'), ev(4, 'd'), ev(5, 'a'), ev(6, 'b'), ev(7, 'c'), ev(8, 'd'), ev(9, 'a'), ev(10, 'b')];
+  const groups = [makeGroup('a', 1), makeGroup('b', 1), makeGroup('c', 1), makeGroup('d', 1), makeGroup('a', 1), makeGroup('b', 1)];
+  const env = envFor(feed.slice(4), groups, 6, true);
+  const R = buildRenderer(env);
+  env.CH._olderBudgetMs = -1;
+  env.CH.win = 10;
+  env.els['#chat-older'].nextSibling = env.room.children[0];
+  assert.equal(R.applyChatPrepend(feed, new Set(), 0, 100), true);
+  assert.ok(env.CH._drainGen);
+  env.CH.renderGen++; // a superseder that forgot its bookkeeping
+  frameRaf(env); // the pending tick hits the supersession check
+  assert.equal(env.CH._drainGen, null, 'latch cleared on the tick — chatGrow unblocked');
+  assert.ok(!env.CH._growPending, 'no parked grow');
+});

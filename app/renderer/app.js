@@ -3282,7 +3282,7 @@ function renderChatBody() {
     // The older half goes in across frames via the shared budgeted drain (t_031d789b): one big
     // rAF still measured 60ms and the old adaptive-chunk stepper overshot to 220-330ms per tick
     // under load — a long task wherever it runs. The drain builds+inserts group by group within
-    // ~24ms frames, grows the books by exactly what it inserts, and re-anchors per frame; a
+    // ~12ms frames, grows the books by exactly what it inserts, and re-anchors per frame; a
     // superseded generation stops early — the next draw heals the remaining books.
     const endTop = room.scrollTop, endH = room.scrollHeight; // phase-A end state for the re-anchor
     const perGroupFps = split.headGroups.map((grp) => grp.items.map((e) => Chat.eventFp(e, subRecOf)));
@@ -3340,6 +3340,7 @@ function applyChatAppend(ev, plan, workingT) {
   if (cut < 0) { // nothing to re-render: books unchanged (a no-op or eviction-only draw)
     if (evicted) CH.evFp = CH.evFp.slice(evicted);
     CH.renderGen = (CH.renderGen || 0) + 1; // owns the room: pending split chunks must stop
+    CH._drainGen = null; CH._growPending = false; // superseded drain: the next draw re-plans its missing older events from books
     patchChatAvatars(room, workingT);
     finishAppend(room, ev, win, ob, workingT);
     return true;
@@ -3359,6 +3360,7 @@ function applyChatAppend(ev, plan, workingT) {
   room.appendChild(t.content);
   CH.evFp = keptFps.concat(rebuild.map((e) => Chat.eventFp(e, subRecOf)));
   CH.renderGen = (CH.renderGen || 0) + 1; // owns the room: pending split chunks must stop
+  CH._drainGen = null; CH._growPending = false; // superseded drain: the next draw re-plans its missing older events from books
   patchChatAvatars(room, workingT);
   finishAppend(room, ev, win, ob, workingT);
   return true;
@@ -3380,7 +3382,7 @@ function finishAppend(room, ev, win, ob, workingT) {
 // of synchronous whole-page inserts (a 100-event prepend measured 87ms idle and 300ms+ under
 // 5-agent load, and the old adaptive-chunk stepper overshot its budget to 220-330ms per tick:
 // the 866ms worst frame). Groups drain newest-first — each insert lands above the previous one
-// at the older-bar anchor — a few per frame with a ~24ms budget, and CH.evFp grows after every
+// at the older-bar anchor — a few per frame with a ~12ms budget (Argo, t_031d789b: a large group plus the tick-end layout must fit the budget — 24ms let one fat group + forced layout run past it), and CH.evFp grows after every
 // single insert, so books mirror the DOM at every yield and appends/ring patches stay exact
 // while a drain runs. One drain at a time: CH._drainGen marks ownership (chatGrow and the
 // prepend path defer to it), CH.renderGen supersedes a drain when a full render or a newer
@@ -3391,7 +3393,7 @@ function startOlderDrain(groups, perGroupFps, opts) {
   CH.renderGen = (CH.renderGen || 0) + 1;
   const myGen = CH.renderGen;
   CH._drainGen = myGen;
-  const budget = CH._olderBudgetMs != null ? CH._olderBudgetMs : 24;
+  const budget = CH._olderBudgetMs != null ? CH._olderBudgetMs : 12;
   let i = groups.length - 1; // newest group first
   let topRef = null; // the topmost node the drain inserted: older groups go above it
   const finish = () => {
@@ -3401,7 +3403,13 @@ function startOlderDrain(groups, perGroupFps, opts) {
   };
   if (i < 0) { finish(); return; }
   const tick = () => {
-    if (CH.renderGen !== myGen) return; // a newer draw owns the room; it set its own books
+    if (CH.renderGen !== myGen) { // a newer draw owns the room; it set its own books
+      // Belt and braces (Argo, t_031d789b): any superseder must leave the latch clear — an
+      // append that bumps renderGen without its own bookkeeping would otherwise wedge chatGrow
+      // forever. The next draw re-plans the drain's missing older events from books.
+      if (CH._drainGen === myGen) { CH._drainGen = null; if (CH._growPending) { CH._growPending = false; chatSched.force(); } }
+      return;
+    }
     const t0 = performance.now();
     while (i >= 0) {
       const t = document.createElement('template');
