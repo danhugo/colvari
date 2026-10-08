@@ -930,27 +930,22 @@ async function renderLimitMeter(st) {
 }
 function showTab(name) { if (name === 'overview') name = 'team'; // legacy id: Overview merged into Team (wiki decision-one-team-view)
   document.querySelector(`button[data-tab="${name}"]`)?.click(); }
-// New goal composer (t_db67859d): the goal box lives in a popover off the "New goal" button, so the
-// header holds context + actions only and nothing in it can truncate. Run keeps its id — the chat
-// flow and the first-run guide set #goal and click #run programmatically (also gui-e2e autorun).
-function openGoalPop() { $('#goalpop').classList.remove('hidden'); $('#goal').focus(); }
-$('#newgoal').onclick = () => { const p = $('#goalpop'); if (p.classList.contains('hidden')) openGoalPop(); else { p.classList.add('hidden'); $('#newgoal').focus(); } };
-document.addEventListener('mousedown', (e) => { const p = $('#goalpop'); if (!p.classList.contains('hidden') && !p.contains(e.target) && !$('#newgoal').contains(e.target)) p.classList.add('hidden'); });
-$('#run').onclick = async (runAtts) => {
-  runAtts = Array.isArray(runAtts) ? runAtts : null; // chatSend passes saved attachments; real clicks pass an Event
-  const goal = $('#goal').value.trim();
-  if (!S.team.nodes.length) { alert('Add at least one agent in the Team tab first.'); return showTab('team'); }
-  if (goal) {
-    const hasIn = new Set(S.team.edges.map((e) => e.to));
-    const lead = S.team.nodes.find((n) => n.id === sel.node) || S.team.nodes.find((n) => !hasIn.has(n.id)) || S.team.nodes[0];
-    await call('createTask', { title: goal.slice(0, 80), description: goal, assignee: lead.id, ...(runAtts ? { attachments: runAtts } : {}) }); $('#goal').value = '';
-  } else if (!S.tasks.some((t) => t.status === 'todo')) { alert('Type a goal next to Run (or create a todo task in Board) first.'); return openGoalPop(); }
+// One way to start work (t_1efad5d8): chat to the Lead is the only goal entry. Run starts the
+// waiting todo tasks; with none, it points you at the chat composer.
+function focusComposer() { showTab('chat'); $('#chat-input').focus(); }
+function preflightOk() { // true when every agent passed, or the human chose to start anyway
   const bad = S.allNodes.filter((n) => ['fail', 'untested', 'stale'].includes(pfState(n)));
-  if (bad.length && !confirm(`Preflight not passed for ${bad.length} agent(s):\n${bad.map((n) => `- ${n.name}: ${n.preflightStatus === 'fail' ? 'FAILED' + (n.preflight && n.preflight.error ? ' (' + n.preflight.error.slice(0, 120) + ')' : '') : n.preflightStatus === 'stale' ? 'config changed since test' : 'untested'}`).join('\n')}\n\nRun anyway? (Use "Test team" in the Team tab to check them.)`)) return showTab('team');
-  if (!$('#tab-chat.active')) showTab('obs'); await call('run'); refresh(); $('#goalpop').classList.add('hidden');
-};
+  if (!bad.length || confirm(`Preflight not passed for ${bad.length} agent(s):\n${bad.map((n) => `- ${n.name}: ${n.preflightStatus === 'fail' ? 'FAILED' + (n.preflight && n.preflight.error ? ' (' + n.preflight.error.slice(0, 120) + ')' : '') : n.preflightStatus === 'stale' ? 'config changed since test' : 'untested'}`).join('\n')}\n\nRun anyway? (Use "Test team" in the Team tab to check them.)`)) return true;
+  showTab('team'); return false;
+}
+async function startRun() {
+  if (!S.team.nodes.length) { alert('Add at least one agent in the Team tab first.'); return showTab('team'); }
+  if (!S.tasks.some((t) => t.status === 'todo')) return focusComposer();
+  if (!preflightOk()) return;
+  if (!$('#tab-chat.active')) showTab('obs'); await call('run'); refresh();
+}
 $('#stop').onclick = async () => { await call('stop'); refresh(); };
-$('#runbtn').onclick = () => $('#run').click(); // header Run shares the popover's start flow — the same path ⌘⏎ takes
+$('#runbtn').onclick = act(startRun); // ⌘⏎ takes the same path
 
 // ---------- team graph (design-tool editor: pan/zoom, drag-to-connect, minimap, auto-layout, context menu) ----------
 const W = 184, H = 80, SVGNS = 'http://www.w3.org/2000/svg';
@@ -1590,6 +1585,7 @@ function renderNodeForm() {
     <label>Model <span class="muted">(alias or any model ID, e.g. a proxy/provider model; empty = claude CLI default)</span></label><input id="nf-model" list="modellist" value="${esc(n.model || '')}" placeholder="default (claude CLI default)" spellcheck="false"><datalist id="modellist">${(isCustomRuntime(n.runtime) && findCustomRuntime(n.runtime) ? findCustomRuntime(n.runtime).models : MODELS).map((m) => `<option value="${esc(m)}">`).join('')}</datalist>
     <label>Working directory</label><input id="nf-workdir" value="${esc(n.workdir)}" placeholder="${esc(S.dir)}">
     <label>System prompt</label><textarea id="nf-prompt" rows="6">${esc(n.systemPrompt)}</textarea>
+    <details id="nf-adv"><summary>Advanced</summary>
     <fieldset id="nf-modebox"><legend>Run mode</legend>
       <select id="nf-mode">${RUN_MODES.map(([v, l]) => `<option value="${v}" ${v === (n.mode || 'single') ? 'selected' : ''}>${l}</option>`).join('')}</select>
       <div class="mode-goal"><label>Completion condition <span class="muted">(judged by a cheap check run after each iteration)</span></label><textarea id="nf-goalcond" rows="2" placeholder="npm test passes and hello.txt exists">${esc(n.goalCondition || '')}</textarea>
@@ -1598,7 +1594,8 @@ function renderNodeForm() {
       <div class="mode-loop"><label>Repeat count <span class="muted">(runs exactly N passes; only the last pass marks the task done)</span></label><input id="nf-loopcount" type="number" min="1" max="50" value="${n.loopCount || 3}"></div>
       <div class="mode-workflow"><label>Slash command / skill <span class="muted">(the task text is passed as its arguments; team context goes in the system prompt)</span></label><input id="nf-slash" list="slashlist" value="${esc(n.slashCommand || '')}" placeholder="/review"><datalist id="slashlist">${['/review', '/security-review', '/simplify', '/init'].map((c) => `<option value="${c}">`).join('')}</datalist></div>
       <label class="inline"><input type="checkbox" id="nf-continue" ${n.continueSession ? 'checked' : ''}> Continue conversation (resume this agent's last session for its next task)</label>
-    </fieldset>
+      <p id="nf-goalnote" class="muted hidden">Goal mode needs a runtime that can resume sessions.</p>
+    </fieldset></details>
     <fieldset id="nf-billbox"><legend>Billing</legend>
       <select id="nf-billing">${(C.billingModes || ['auto']).map((m) => `<option value="${m}" ${m === (n.billingMode || 'auto') ? 'selected' : ''}>${{ auto: 'Auto-detect (whatever the claude CLI uses)', subscription: 'Subscription (Pro/Max login)', api: 'API key (ANTHROPIC_API_KEY)', proxy: 'Proxy / provider (base URL)' }[m] || m}</option>`).join('')}</select>
       <div class="bill-proxy-url"><label>Proxy base URL <span class="muted">(sets ANTHROPIC_BASE_URL)</span></label><input id="nf-billurl" value="${esc(n.billingBaseUrl || '')}" placeholder="http://localhost:4000"></div>
@@ -1634,6 +1631,7 @@ function renderNodeForm() {
   const showCaps = () => {
     const rid = $('#nf-runtime').value; const r = allRuntimeOptions().find((x) => x.id === rid);
     $('#nf-caps').innerHTML = r ? ['tokens', 'cost', 'mcp', 'resume'].map((k) => `<span class="cap ${r.capabilities[k] ? 'on' : 'off'}">${r.capabilities[k] ? '✓' : '✗'} ${k}</span>`).join(' ') : '';
+    if (r) { $('#nf-mode option[value=goal]').disabled = !r.capabilities.resume; $('#nf-goalnote').classList.toggle('hidden', !!r.capabilities.resume); }
     const custom = findCustomRuntime(rid); $('#modellist').innerHTML = (custom ? custom.models : MODELS).map((m) => `<option value="${esc(m)}">`).join('');
   };
   $('#nf-runtime').onchange = showCaps; showCaps();
@@ -3518,6 +3516,7 @@ async function chatSend() {
   const head = () => (S.team.nodes.find((n) => isLeadRole(n.role)) || S.team.nodes[0] || {}).id; // composer's core agent
   const draft = i.value; i.value = ''; chatPreview(); // clear on press, not after the bridge answers (t_ada3fae8)
   try {
+    if (p.kind === 'task' && !S.orch.running && !preflightOk()) { i.value = draft; return chatPreview(); }
     if (p.kind === 'task') { await call('createTask', { title: p.text.slice(0, 80), description: p.text, assignee: p.nodeId || head(), ...(atts ? { attachments: atts } : {}) }); if (!S.orch.running) await call('run'); }
     else if (p.kind === 'message') await call('sendToAgent', p.nodeId || head(), p.text, ...(atts ? [null, { attachments: atts }] : []));
   } catch (err) { i.value = draft; chatPreview(); throw err; } // send failed: hand the draft back
@@ -3744,20 +3743,20 @@ squad.on('notify', (n) => {
   $('#toasts').appendChild(d); setTimeout(() => d.remove(), 8000);
 });
 // Keyboard shortcuts: Ctrl/Cmd+1..7 tabs, ⌘, settings, ⌘I inbox, Ctrl/Cmd+Enter Run, Ctrl/Cmd+. Stop,
-// / goal composer, Esc clear selection / close, ? help.
+// / chat composer, Esc clear selection / close, ? help.
 const TABS = ['chat', 'team', 'board', 'wiki', 'obs', 'usage'];
 document.addEventListener('keydown', (e) => {
   const mod = e.metaKey || e.ctrlKey; const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName);
   if (mod && e.key >= '1' && e.key <= '9') { e.preventDefault(); const t = TABS[+e.key - 1]; if (t) showTab(t); }
   else if (mod && e.key === ',') { e.preventDefault(); showTab('settings'); }
   else if (mod && (e.key === 'i' || e.key === 'I')) { e.preventDefault(); showTab('inbox'); }
-  else if (mod && e.key === 'Enter') { e.preventDefault(); $('#run').click(); }
+  else if (mod && e.key === 'Enter') { e.preventDefault(); act(startRun)(); }
   else if (mod && e.key === '.') { e.preventDefault(); $('#stop').click(); }
-  else if (e.key === 'Escape' && !$('#askdlg').open) { if ($('#helpdlg').open) return; if (alertsOpen) return closeAlerts(); if (!$('#goalpop').classList.contains('hidden')) return $('#goalpop').classList.add('hidden'); if (typing) return document.activeElement.blur(); sel = { ...sel, node: null, edge: null, task: null }; connectMode = false; connectFrom = null; $('#connect').classList.remove('on'); renderGraph(); renderNodeForm(); renderBoard(); }
+  else if (e.key === 'Escape' && !$('#askdlg').open) { if ($('#helpdlg').open) return; if (alertsOpen) return closeAlerts(); if (typing) return document.activeElement.blur(); sel = { ...sel, node: null, edge: null, task: null }; connectMode = false; connectFrom = null; $('#connect').classList.remove('on'); renderGraph(); renderNodeForm(); renderBoard(); }
   else if (!typing && !mod && e.key === '?') $('#helpdlg').showModal();
   else if (!typing && !mod && e.key === 'n' && document.querySelector('#tab-board.active')) { e.preventDefault(); $('#nt-title').focus(); }
   else if (!typing && !mod && (e.key === 'e' || e.key === 'E') && document.querySelector('#tab-team.active')) { e.preventDefault(); setTeamMode(teamMode() === 'edit' ? 'watch' : 'edit'); }
-  else if (!typing && !mod && e.key === '/') { e.preventDefault(); openGoalPop(); }
+  else if (!typing && !mod && e.key === '/') { e.preventDefault(); focusComposer(); }
 });
 // IPC deltas (t_39bf39ac, track 2): the main process pushes {type,id,patch} batches — one send per
 // tick, seq-chained — covering tasks/wiki (board-cache change events), the orch snapshot (state
@@ -3856,7 +3855,7 @@ function renderGuide() {
     await call('addEdge', ids[0], ids[1], 'assign'); await call('addEdge', ids[1], ids[2], 'review');
     await refresh(); testAgents(ids);
   };
-  if ($('#g-start')) $('#g-start').onclick = () => { const v = $('#g-goal').value.trim(); if (!v) return $('#g-goal').focus(); $('#goal').value = v; G.forced = false; $('#run').click(); };
+  if ($('#g-start')) $('#g-start').onclick = () => { const v = $('#g-goal').value.trim(); if (!v) return $('#g-goal').focus(); $('#chat-input').value = v; G.forced = false; act(chatSend)(); };
 }
 $('#reopenguide').onclick = () => { G.hidden = false; G.forced = true; localStorage.removeItem('guideHidden'); renderGuide(); };
 
