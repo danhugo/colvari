@@ -923,6 +923,29 @@ $('#runbtn').onclick = () => $('#run').click(); // header Run shares the popover
 
 // ---------- team graph (design-tool editor: pan/zoom, drag-to-connect, minimap, auto-layout, context menu) ----------
 const W = 184, H = 80, SVGNS = 'http://www.w3.org/2000/svg';
+// Keyed morph (t_360abb85): copy a freshly drawn SVG tree onto the live one, keeping every element
+// whose tag + data-id still match. A redraw then changes only attributes/text, so the working
+// ring (.avring ringpulse) stays the same DOM node and its blink never restarts. `map` gets new→kept.
+const MORPH_ON = ['onclick', 'onmousedown', 'onmouseenter', 'onmouseleave', 'oncontextmenu'];
+function morphEl(o, n, map) {
+  map.set(n, o);
+  for (const a of [...o.attributes]) if (!n.hasAttribute(a.name)) o.removeAttribute(a.name);
+  for (const a of n.attributes) if (o.getAttribute(a.name) !== a.value) o.setAttribute(a.name, a.value);
+  for (const p of MORPH_ON) if (o[p] !== n[p]) o[p] = n[p];
+  if (n.firstElementChild) morphKids(o, n, map); else if (o.firstElementChild || o.textContent !== n.textContent) o.textContent = n.textContent;
+}
+function morphKids(o, n, map) {
+  if (!o.firstElementChild && o.textContent) o.textContent = '';
+  const keys = new Set([...n.children].map((c) => c.getAttribute('data-id')).filter(Boolean));
+  let cur = o.firstElementChild;
+  const drop = () => { const nx = cur.nextElementSibling; cur.remove(); cur = nx; };
+  for (const c of [...n.children]) {
+    while (cur && cur.hasAttribute('data-id') && !keys.has(cur.getAttribute('data-id'))) drop();
+    if (cur && cur.tagName === c.tagName && cur.getAttribute('data-id') === c.getAttribute('data-id')) { morphEl(cur, c, map); cur = cur.nextElementSibling; }
+    else o.insertBefore(c, cur);
+  }
+  while (cur) drop();
+}
 function el(tag, attrs, parent) { const e = document.createElementNS(SVGNS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); parent && parent.appendChild(e); return e; }
 let VP = { x: 20, y: 20, zoom: 1 }, vpTeam = null, vpSave = null, lastEdgeType = 'assign', linkDrag = null;
 // Team-tied colour system (t_b590b876 regression): the colour belongs to the TEAM (its index
@@ -1207,7 +1230,7 @@ $('#mode-edit').onclick = () => setTeamMode('edit');
 function renderGraph() {
   if (!$('#tab-team').classList.contains('active')) return; // hidden tab: redrawn on activation (renderAll / TAB_RESIG)
   const tc = teamCan(); applyTeamModeChrome();
-  const svg = $('#graph'); svg.innerHTML = ''; buildView();
+  const live = $('#graph'), svg = document.createElementNS(SVGNS, 'svg'), kept = new Map(), K = (x) => kept.get(x) || x; buildView(); // drawn detached, morphed onto #graph below
   if (vpTeam !== ctx.t) { vpTeam = ctx.t; vpCount = 0; } // first open always re-fits (once visible, see below) — a persisted viewport can be stale (tiny/panned away)
   const defs = el('defs', {}, svg);
   for (const t of ['assign', 'message', 'review', 'sel']) { const m = el('marker', { id: 'arr-' + t, viewBox: '0 0 10 10', refX: 9, refY: 5, markerWidth: 8, markerHeight: 8, markerUnits: 'userSpaceOnUse', orient: 'auto-start-reverse' }, defs); el('path', { d: 'M0,1 L9,5 L0,9 z', class: 'arrow arrow-' + t }, m); }
@@ -1330,17 +1353,18 @@ function renderGraph() {
       });
     }
     if (tc.connect) { const h = el('circle', { class: 'handle', cx: W, cy: H / 2, r: 6 }, g); el('title', {}, h).textContent = 'Drag to connect'; h.onmousedown = (ev) => startLink(ev, n); }
-    const hl = (on) => { svg.classList.toggle('focusing', on); for (const it of edgeLayout.per) if (it.a === n || it.b === n) it.path.classList.toggle('hl', on); g.classList.toggle('hl', on); };
+    const hl = (on) => { live.classList.toggle('focusing', on); for (const it of edgeLayout.per) if (it.a === n || it.b === n) it.path.classList.toggle('hl', on); K(g).classList.toggle('hl', on); };
     g.onmouseenter = () => hl(true); g.onmouseleave = () => hl(false);
-    g.onmousedown = (ev) => { if (ev.button === 0) { if (tc.drag) startDrag(ev, n, g); else { ev.stopPropagation(); startWatchDrag(ev, n); } } else if (ev.button === 2) { ev.stopPropagation(); selectNode(n.id); nodeMenu(ev, n); } };
+    g.onmousedown = (ev) => { if (ev.button === 0) { if (tc.drag) startDrag(ev, n, K(g)); else { ev.stopPropagation(); startWatchDrag(ev, n); } } else if (ev.button === 2) { ev.stopPropagation(); selectNode(n.id); nodeMenu(ev, n); } };
     g.oncontextmenu = (ev) => { ev.preventDefault(); ev.stopPropagation(); if (tc.menu && $('#ctxmenu').classList.contains('hidden')) { selectNode(n.id); nodeMenu(ev, n); } };
   }
+  morphKids(live, svg, kept); for (const it of edgeLayout.per) { it.hit = K(it.hit); it.path = K(it.path); it.pill = it.pill && K(it.pill); }
   // First open of a team, or new nodes landing outside the view (e.g. added in bulk) -> fit/refit so nothing is cut off.
-  if (nodes.length > vpCount && svg.getBoundingClientRect().width) { (vpCount ? fitIfClipped : fitView)(); vpCount = nodes.length; } // only once visible (hidden tab has 0 width)
+  if (nodes.length > vpCount && live.getBoundingClientRect().width) { (vpCount ? fitIfClipped : fitView)(); vpCount = nodes.length; } // only once visible (hidden tab has 0 width)
   applyVP();
-  svg.onmousedown = (ev) => { if (ev.button === 0) startPan(ev); };
-  svg.oncontextmenu = (ev) => { ev.preventDefault(); if (tc.menu) canvasMenu(ev); };
-  svg.onwheel = (ev) => { ev.preventDefault(); if (ev.ctrlKey || ev.metaKey || Math.abs(ev.deltaY) > 40 && !ev.deltaX) zoomAt(Math.exp(-ev.deltaY * (ev.ctrlKey ? 0.01 : 0.002)), ev.clientX, ev.clientY); else { VP.x -= ev.deltaX; VP.y -= ev.deltaY; applyVP(); saveVP(); } };
+  live.onmousedown = (ev) => { if (ev.button === 0) startPan(ev); };
+  live.oncontextmenu = (ev) => { ev.preventDefault(); if (tc.menu) canvasMenu(ev); };
+  live.onwheel = (ev) => { ev.preventDefault(); if (ev.ctrlKey || ev.metaKey || Math.abs(ev.deltaY) > 40 && !ev.deltaX) zoomAt(Math.exp(-ev.deltaY * (ev.ctrlKey ? 0.01 : 0.002)), ev.clientX, ev.clientY); else { VP.x -= ev.deltaX; VP.y -= ev.deltaY; applyVP(); saveVP(); } };
 }
 function renderMinimap() {
   const mm = $('#minimap'); if (!mm) return; mm.innerHTML = ''; const nodes = allGraphNodes(); const r = $('#graph').getBoundingClientRect(); if (!r.width) return;
