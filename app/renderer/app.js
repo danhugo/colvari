@@ -1090,11 +1090,16 @@ function drawClusterCard(g, n, onExpand) {
 // Cache (t_38aa0017): buildView re-runs the layout on every render while graphAuto is on, but it
 // is a pure function of the visible ids (core flag included), the assign edges and the canvas
 // aspect — an unchanged signature reuses the last position map instead of re-placing every node.
-let tlCache = { sig: '', pos: null };
+// Instrumentation (seed 468): each uncached pass is timed like the shared wrapper in
+// src/graph-view.js — a non-enumerable `stats` prop {ms, nodes, edges, placed} rides on the
+// returned map, a 'graph.treeLayout' performance measure lands on the DevTools timeline, and
+// tlStats keeps the running tally (passes, cache hits, last/max ms) for the jank baseline.
+let tlCache = { sig: '', pos: null }, tlStats = { passes: 0, sigHits: 0, lastMs: 0, maxMs: 0 };
 function treeLayout(nodes, edges) {
   const cr = ($('#graph') || {}).getBoundingClientRect ? $('#graph').getBoundingClientRect() : { width: 0 }, asp = cr.width && cr.height ? cr.width / cr.height : 1.6;
   const sig = nodes.map((n) => n.id + (n.core ? '*' : '')).join() + '|' + edges.filter((e) => (e.type || 'assign') === 'assign').map((e) => e.from + '>' + e.to).join() + '|' + asp.toFixed(3);
-  if (tlCache.sig === sig) return tlCache.pos;
+  if (tlCache.sig === sig) { tlStats.sigHits++; return tlCache.pos; }
+  const t0 = performance.now();
   const ids = new Set(nodes.map((n) => n.id)), kids = {}, hasParent = new Set(); const GX = W + 36, GY = H + 64, pos = {};
   for (const e of edges) if ((e.type || 'assign') === 'assign' && ids.has(e.from) && ids.has(e.to) && e.from !== e.to && !hasParent.has(e.to)) { (kids[e.from] ||= []).push(e.to); hasParent.add(e.to); }
   const seen = new Set();
@@ -1115,6 +1120,10 @@ function treeLayout(nodes, edges) {
   const rest = loners.concat(nodes.filter((n) => !pos[n.id] && !loners.includes(n))).filter((n) => !pos[n.id]);
   let cols = rest.length > 4 ? Math.max(3, Math.ceil(Math.sqrt(rest.length * asp * 0.55))) : rest.length; if (rest.length > 4) cols = Math.ceil(rest.length / Math.ceil(rest.length / cols)); // balanced rows (12 -> 4x3)
   rest.forEach((n, i) => { pos[n.id] = { x: x + (i % cols) * GX, y: 40 + Math.floor(i / cols) * (H + 40) }; });
+  const ms = performance.now() - t0; // wall time incl. the #graph rect read above
+  tlStats.passes++; tlStats.lastMs = ms; if (ms > tlStats.maxMs) tlStats.maxMs = ms;
+  Object.defineProperty(pos, 'stats', { value: { ms: +ms.toFixed(3), nodes: nodes.length, edges: (edges || []).length, placed: Object.keys(pos).length }, enumerable: false });
+  try { performance.measure('graph.treeLayout', { start: t0, duration: ms }); } catch (_) { /* timeline API unavailable */ }
   tlCache = { sig, pos };
   return pos;
 }
