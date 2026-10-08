@@ -317,3 +317,23 @@ test('append mid-drain: append eviction may eat the drain\'s inserted groups —
   assert.deepEqual(env.CH.evFp, fps([feed[0], feed[1], ...feed2.slice(4)])); // ev1, ev2 + the new window
   assert.deepEqual(env.CH.evFp, domFps, 'books == DOM fps after the append evicted drain groups');
 });
+
+// A superseder that bumps CH.renderGen (a full render or a newer prepend) must never strand the
+// latch: the drain's pending tick clears it and flushes a parked grow through endDrain — the
+// one latch owner. (t_738710f9: tail appends no longer bump renderGen at all, so this guards
+// only the genuine supersessers.)
+test('a superseder that only bumps renderGen cannot wedge chatGrow: the tick clears the latch', () => {
+  const feed = [ev(1, 'a'), ev(2, 'b'), ev(3, 'c'), ev(4, 'd'), ev(5, 'a'), ev(6, 'b'), ev(7, 'c'), ev(8, 'd'), ev(9, 'a'), ev(10, 'b')];
+  const groups = [makeGroup('a', 1), makeGroup('b', 1), makeGroup('c', 1), makeGroup('d', 1), makeGroup('a', 1), makeGroup('b', 1)];
+  const env = envFor(feed.slice(4), groups, 6, true);
+  const R = buildRenderer(env);
+  env.CH._olderBudgetMs = -1;
+  env.CH.win = 10;
+  env.els['#chat-older'].nextSibling = env.room.children[0];
+  assert.equal(R.applyChatPrepend(feed, new Set(), 0, 100), true);
+  assert.ok(env.CH._drainGen);
+  env.CH.renderGen++; // a superseder that forgot its bookkeeping
+  frameRaf(env); // the pending tick hits the supersession check
+  assert.equal(env.CH._drainGen, null, 'latch cleared on the tick — chatGrow unblocked');
+  assert.ok(!env.CH._growPending, 'no parked grow');
+});

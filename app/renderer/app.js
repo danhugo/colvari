@@ -3418,7 +3418,13 @@ function startOlderDrain(groups, perGroupFps, opts) {
   };
   if (i < 0) { finish(); return; }
   const tick = () => {
-    if (CH.renderGen !== myGen) return; // a newer draw owns the room; it set its own books
+    if (CH.renderGen !== myGen) { // a newer draw owns the room; it set its own books
+      // Belt and braces (Argo, t_031d789b): any superseder must leave the latch clear — an
+      // append that bumps renderGen without its own bookkeeping would otherwise wedge chatGrow
+      // forever. The next draw re-plans the drain's missing older events from books.
+      if (CH._drainGen === myGen) endDrain(true);
+      return;
+    }
     const t0 = performance.now();
     while (i >= 0) {
       const t = document.createElement('template');
