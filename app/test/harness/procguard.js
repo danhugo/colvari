@@ -63,11 +63,31 @@ function isAlive(pid) {
   return !isZombie(pid);
 }
 
-// True when the pid's process age matches the age a child recorded `ageSec` ago would have —
-// i.e. it is plausibly the very process we recorded, not a recycled pid (which must never be killed).
-function sameProc(pid, ageSec) {
-  const el = elapsedSec(pid);
-  return el !== null && Math.abs(el - ageSec) <= 120;
+// Sweep decision for ONE pidfile, positive-evidence only: every read that would decide a kill
+// must SUCCEED first. Returns the children to kill (possibly none), or null = keep the pidfile
+// (a live run owns it — its own exit hook removes it, and it must survive a later hard death —
+// or the owner is alive but its start time is unreadable). A starved ps read (EAGAIN/timeout
+// under load) proves nothing about a LIVE target, and treating it as "not the recorded process"
+// used to authorize killing another LIVE test-file process's mid-test children (sweepStale runs
+// in every concurrent file process, so under parallel gates the starved read was routine — the
+// t_1ee3f3f6 harness-reap flake: the fixture driver and its detached stub were massacred, the
+// stub's pid recycled, and the boot sweep then rightly refused to reap the recycled pid).
+// A dead owner needs no ps evidence at all: kill(0) is cheap and exact.
+function sweepDecision(entry, ageSec, alive = isAlive, elapsed = elapsedSec) {
+  const reapable = () => {
+    const kills = [];
+    for (const c of entry.children || []) {
+      const el = elapsed(c.pid);
+      if (el === null) continue; // child start time unreadable: never signal it
+      if (alive(c.pid) && Math.abs(el - ageSec) <= 120) kills.push(c);
+    }
+    return kills;
+  };
+  if (!alive(entry.ownerPid)) return reapable(); // owner pid gone: provably stale record
+  const ownerElapsed = elapsed(entry.ownerPid);
+  if (ownerElapsed === null) return null; // alive but unidentifiable: no kill is provable, touch nothing
+  if (Math.abs(ownerElapsed - ageSec) <= 120) return null; // a live run owns it
+  return reapable(); // owner pid recycled (age mismatch): the original owner is gone
 }
 
 function killEntry(c) {
@@ -146,7 +166,8 @@ async function assertNoLeaks(graceMs = LEAK_GRACE_MS) {
 }
 
 // Reap children listed in pidfiles whose owner died without cleanup (crash, SIGKILL, force exit).
-// Live sibling runs are skipped; recycled pids are never signalled (sameProc start-time check).
+// Positive evidence only: live sibling runs and unresolvable reads keep their pidfile (retried by
+// the next install); recycled pids are never signalled (start-time checks, fail closed).
 function sweepStale() {
   let files = [];
   try { files = fs.readdirSync(DIR); } catch { return; }
@@ -156,10 +177,9 @@ function sweepStale() {
     let entry;
     try { entry = JSON.parse(fs.readFileSync(full, 'utf8')); } catch { try { fs.unlinkSync(full); } catch { /* raced */ } continue; }
     const ageSec = (Date.now() - entry.recordedAt) / 1000;
-    if (isAlive(entry.ownerPid) && sameProc(entry.ownerPid, ageSec)) continue; // a live run owns it
-    for (const c of entry.children || []) {
-      if (isAlive(c.pid) && sameProc(c.pid, ageSec)) killEntry(c);
-    }
+    const kills = sweepDecision(entry, ageSec);
+    if (kills === null) continue; // live owner or unreadable start time: keep the pidfile
+    for (const c of kills) killEntry(c);
     try { fs.unlinkSync(full); } catch { /* raced */ }
   }
 }
@@ -204,4 +224,4 @@ function install() {
   return module.exports;
 }
 
-module.exports = { install, track, trackPid, reapAll, assertNoLeaks, sweepStale, writePidfile, isAlive, pidfile: PIDFILE, dir: DIR, children: () => [...children.values()] };
+module.exports = { install, track, trackPid, reapAll, assertNoLeaks, sweepStale, sweepDecision, writePidfile, isAlive, pidfile: PIDFILE, dir: DIR, children: () => [...children.values()] };

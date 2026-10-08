@@ -49,6 +49,12 @@ tree. Never by process name.
    module sweeps it**: pidfiles whose owner is gone (or whose owner pid was recycled — detected by
    comparing process ages via `ps etime`, so a recycled pid is never signalled) have their listed
    children reaped and their file removed. Live sibling runs are never touched.
+   The sweep **fails closed** (t_1ee3f3f6): a start-time read that comes back empty (a `ps`
+   starved under load) proves nothing, so an alive-but-unidentifiable owner keeps its pidfile
+   for the next install to retry, and a child whose age cannot be read is never signalled —
+   under parallel gates the starved read used to authorize killing another live file process's
+   mid-test fixture tree. Only a dead owner pid (cheap, exact `kill(0)`) or a readable,
+   mismatched owner age reaps.
 4. **Electron**: `app.exit()` bypasses node's exit hooks, so the gui-e2e/smoke force-exit
    watchdog and both normal exit points call `reapAll()` explicitly; the pidfile covers anything
    SIGKILLed in between.
@@ -148,5 +154,10 @@ gui-e2e/smoke instances — belongs to its run, not to the desktop:
   matches, recorded marker present in argv or env). Recycled pids, marker mismatches, malformed
   records: pidfile deleted, nothing signalled. Processes are never matched by name; the sweep
   skips its own pid and ancestors and logs every decision.
+- **Test isolation (t_1ee3f3f6)**: `test/harness-reap.test.js` and `test/harness-sweep.test.js`
+  point `AGENTS_SQUAD_REAL_TMP` at a fresh per-run `mkdtemp` dir (never a shared `os.tmpdir()`
+  path) before importing the sweep module, so their planted records are judged only by their own
+  sweeps — peer test files, mid-suite app boots and concurrent gate suites can never reap or
+  delete them in flight. Each file rm's its dir in an `after` hook.
 
 Unit coverage (including the negative cases) is in `test/harness-sweep.test.js`.
