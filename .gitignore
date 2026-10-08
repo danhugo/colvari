@@ -7,3 +7,10 @@ helpycode.json
 scratchpad/
 app/.sizes
 app/dist/
+
+# Generated output / scratch (not for the repo)
+app/brand-shots/
+app/design/screenshots/
+app/test/perf/results/
+test/perf/results/
+notes/
