@@ -1260,7 +1260,7 @@ function renderGraph() {
     const g = el('g', { class: 'node' + (sel.node === n.id || connectFrom === n.id ? ' sel' : '') + ' st-' + live + (live === 'working' ? ' working' : '') + (rtuFor(n.id) ? ' rtpaused' : ''), transform: `translate(${n.x},${n.y})`, 'data-id': n.id }, nL);
     el('rect', { class: 'card', width: W, height: H, rx: 12 }, g);
     el('rect', { class: 'stripe', width: 4, height: H - 20, x: 0, y: 10, rx: 2, style: `fill:${agentVar(n.id)}` }, g);
-    // Working ring (t_edaa52ea): HTML in foreignObject so the spin stays on the compositor (SVG transforms repaint).
+    // Working ring (t_edaa52ea): HTML in foreignObject so the blink stays on the compositor (SVG animations repaint).
     if (live === 'working') el('foreignObject', { class: 'avring', x: 8, y: 4, width: 44, height: 44 }, g).appendChild(document.createElementNS('http://www.w3.org/1999/xhtml', 'div'));
     el('circle', { class: 'avatar', cx: 30, cy: 26, r: 14, style: `fill:${agentVar(n.id)};--av:${agentVar(n.id)}` }, g);
     if (isLeadRole(n.role)) el('text', { x: 40, y: 37, class: 'leadstar', 'text-anchor': 'middle' }, g).textContent = '★';

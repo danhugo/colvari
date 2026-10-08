@@ -17,7 +17,7 @@ test('style.css infinite animations are compositor-only, paused when hidden, off
     const props = [...kf[1].matchAll(/([\w-]+)\s*:/g)].map((m) => m[1]);
     assert.deepEqual(props.filter((p) => p !== 'transform' && p !== 'opacity'), [], `@keyframes ${n} repaints every frame — animate only transform/opacity`);
   }
-  assert.deepEqual([...new Set(names)], ['ringspin'], 'only the working ring may loop');
+  assert.deepEqual([...new Set(names)], ['ringblink'], 'only the working ring may loop');
   assert.match(css, /\.anim-paused [^{]*\{[^}]*animation-play-state:\s*paused/, 'ring must pause when the window is hidden/blurred');
   assert.match(css, /prefers-reduced-motion: reduce\)\s*\{[^@]*\.avatar\.working::after[^}]*animation:\s*none/, 'ring must stop for reduced motion');
   assert.match(read('renderer/app.js'), /anim-paused/, 'renderer toggles .anim-paused on hide/blur');
