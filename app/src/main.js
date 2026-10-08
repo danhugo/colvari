@@ -639,6 +639,10 @@ async function guiE2E() {
     await ex(`$('#tabs button[data-tab=chat]').click(); await w(300); const i = $('#chat-input'); i.value = 'hi'; i.dispatchEvent(new Event('input')); await w(100);`);
     // The regression itself: the click handler's sync prefix must already have cleared the box —
     // before the fix the clear ran only after `await call(...)` answered.
+    // t_3fb6875e: Send is a round icon inside the composer box, accent only when there is content.
+    const cmp = await ex(`const i = $('#chat-input'), b = $('#chat-send'), ri = i.getBoundingClientRect(), rb = b.getBoundingClientRect(); await w(300); const typed = getComputedStyle(b).backgroundColor; const v = i.value; i.value = ''; await w(300); const empty = getComputedStyle(b).backgroundColor; i.value = v; await w(300); return { inside: rb.left >= ri.left && rb.right <= ri.right && rb.top >= ri.top && rb.bottom <= ri.bottom, aria: b.getAttribute('aria-label'), typed, empty }`);
+    expect('composer: Send icon sits inside the box, labelled, muted when empty', cmp.inside && cmp.aria === 'Send (Enter)' && cmp.typed !== cmp.empty, cmp);
+    await shot('composer-typed');
     const cleared = await ex(`$('#chat-send').click(); return $('#chat-input').value`);
     expect('composerclear: input cleared the moment Send is pressed (not after the bridge answers)', cleared === '', cleared);
     await new Promise((r) => setTimeout(r, 400));

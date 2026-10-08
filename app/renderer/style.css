@@ -815,8 +815,13 @@ details.evrun > summary { cursor:pointer; list-style:none; } details.evrun > sum
 details.evrun > summary::after { content:'▸'; margin-left:4px; } details.evrun[open] > summary::after { content:'▾'; }
 details.evrun .evrow { padding-left:0; }
 .avatar.human { border-width:1.5px; } .avatar.human::before { width:8px; height:8px; }
-.composer .row { position:relative; } .composer textarea { padding-right:36px; }
-.composer #chat-attach { position:absolute; right:88px; bottom:4px; border:0; background:none; margin:0; min-width:0; padding:4px; }
+.composer .row { position:relative; } .composer textarea { padding-right:72px; field-sizing:content; min-height:40px; max-height:200px; overflow-y:auto; }
+.composer textarea:focus { outline:none; border-color:var(--accent); box-shadow:0 0 0 2px color-mix(in srgb, var(--accent) 30%, transparent); }
+.composer #chat-attach { position:absolute; right:40px; bottom:6px; border:0; background:none; margin:0; min-width:0; padding:4px; }
+/* t_3fb6875e: Send = round icon button inside the box; muted while the box is empty (no text, no attachments) */
+.composer #chat-send { position:absolute; right:6px; bottom:6px; margin:0; width:28px; height:28px; min-width:0; padding:0; border-radius:50%; display:grid; place-items:center; }
+.composer #chat-send .navicon { width:16px; height:16px; }
+.composer:has(#chat-input:placeholder-shown):has(#chat-att.hidden) #chat-send { background:var(--bg-raised); color:var(--fg-secondary); border-color:var(--border-strong); }
 
 
 .wk-meta { display:block; font-size:12px; line-height:16px; color:var(--fg-secondary); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
