@@ -448,7 +448,14 @@ function buildGateLab(projectRoot) {
   fs.mkdirSync(appDir, { recursive: true });
   fs.cpSync(APP, appDir, { recursive: true, filter: (s) => !/(^|\/)(node_modules|e2e-shots|results)(\/|$)/.test(s) });
   fs.cpSync(path.join(APP, 'node_modules'), path.join(appDir, 'node_modules'), { recursive: true });
-  fs.writeFileSync(path.join(root, '.gitignore'), 'node_modules\ne2e-shots\n*.log\n');
+  // Copy the repo's REAL root .gitignore (tests assert its exact content, e.g. sizes-ignore's
+  // "app/.sizes" line — overwriting it made the scratch base spuriously red in the 5-agent arm);
+  // only append the lab-specific entries the repo's file may lack.
+  const giSrc = path.join(APP, '..', '.gitignore');
+  let gi = '';
+  try { gi = fs.readFileSync(giSrc, 'utf8'); } catch {}
+  for (const line of ['node_modules', 'e2e-shots', '*.log']) if (!new RegExp('^' + line + '$', 'm').test(gi)) gi += (gi && !gi.endsWith('\n') ? '\n' : '') + line + '\n';
+  fs.writeFileSync(path.join(root, '.gitignore'), gi);
   if (GATE_SUITE_MS > 0) { // smoke runs only: fake suite that emits the gate's own summary shape
     const pkg = JSON.parse(fs.readFileSync(path.join(appDir, 'package.json'), 'utf8'));
     pkg.scripts.test = `node -e "setTimeout(()=>console.log('\\u2139 tests 1\\n\\u2139 pass 1\\n\\u2139 fail 0'),${GATE_SUITE_MS})"`;
@@ -942,6 +949,9 @@ async function main() {
       rendererFrame: { barMs: 50, maxFrameMs: +maxFrame.toFixed(1), over50, pass: maxFrame <= 50 },
       clickLatency: { n: clickMs.length, p50: cq(0.5), p95: cq(0.95), max: clickMs.length ? Math.max(...clickMs) : 0 },
     };
+    // Gate CPU integrated from the pcpu series: the tree's pids churn (suite workers, pidfile
+    // reaps between tracked runs), so max-cumulative-time undercounts — Σ(pcpu·1s) does not.
+    if (summary.gate && summary.gate.proc) summary.gate.proc.cpuFromPcpuS = +(PS.samples.reduce((s, x) => s + ((x.gate && x.gate.pcpu) || 0), 0) / 100).toFixed(1);
   }
 
   const bucketsFor = (procs) => {

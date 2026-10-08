@@ -10,17 +10,23 @@ const fs = require('fs');
 const path = require('path');
 
 const src = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'app.js'), 'utf8');
-const aStart = src.indexOf('let tlCache = { sig: \'\', pos: null };');
+const aStart = src.indexOf('let tlCache = { sig: \'\', pos: null }, tlStats =');
 const aEnd = src.indexOf('function buildView() {');
 assert.ok(aStart > 0 && aEnd > aStart, 'treeLayout + cache block found in renderer/app.js');
 const block = src.slice(aStart, aEnd);
 // The cache check must sit before the placement work and the result must be stored back.
-assert.ok(block.indexOf('if (tlCache.sig === sig) return tlCache.pos;') < block.indexOf('const place ='), 'cache hit short-circuits before placement');
+assert.ok(block.indexOf('if (tlCache.sig === sig) { tlStats.sigHits++; return tlCache.pos; }') < block.indexOf('const place ='), 'cache hit short-circuits before placement');
 assert.ok(block.includes('tlCache = { sig, pos };'), 'computed layout is stored in the cache');
+// Instrumentation (seed 468): the uncached pass must be timed and surfaced like the shared
+// wrapper in src/graph-view.js — stats prop on the map, DevTools measure, running tlStats tally.
+assert.ok(block.includes('performance.measure(\'graph.treeLayout\''), 'uncached pass emits a graph.treeLayout measure');
+assert.ok(block.includes('Object.defineProperty(pos, \'stats\''), 'returned map carries the stats prop');
+assert.ok(block.includes('tlStats.passes++') && block.includes('tlStats.sigHits++'), 'tlStats counts passes and cache hits');
 
 const makeTreeLayout = (rect) => {
-  const fn = new Function('$', 'W', 'H', block + '\nreturn treeLayout;');
-  return fn(() => ({ getBoundingClientRect: () => rect }), 184, 80);
+  const fn = new Function('$', 'W', 'H', block + '\nreturn { treeLayout, tlStats };');
+  const { treeLayout, tlStats } = fn(() => ({ getBoundingClientRect: () => rect }), 184, 80);
+  return Object.assign((...a) => treeLayout(...a), { tlStats });
 };
 const N = (id, core) => ({ id, core: !!core });
 const E = (from, to) => ({ id: from + '-' + to, from, to, type: 'assign' });
@@ -52,4 +58,18 @@ test('non-assign edges stay a cache hit — the layout ignores them', () => {
   const nodes = [N('a', true), N('b')], edges = [E('a', 'b')];
   const p1 = tl(nodes, edges);
   assert.strictEqual(tl(nodes, [E('a', 'b'), { id: 'w', from: 'b', to: 'a', type: 'watch' }]), p1, 'watch edge does not invalidate');
+});
+
+test('instrumentation (seed 468): stats prop + tlStats tally distinguish passes from cache hits', () => {
+  const tl = makeTreeLayout(rect);
+  const nodes = [N('a', true), N('b'), N('c')], edges = [E('a', 'b'), E('a', 'c')];
+  const p1 = tl(nodes, edges);
+  assert.ok(Number.isFinite(p1.stats.ms) && p1.stats.nodes === 3 && p1.stats.edges === 2 && p1.stats.placed === 3, 'fresh pass carries {ms, nodes, edges, placed}');
+  assert.strictEqual(Object.propertyIsEnumerable.call(p1, 'stats'), false, 'stats prop is non-enumerable (plain id -> {x,y} map to callers)');
+  assert.strictEqual(tl.tlStats.passes, 1, 'fresh compute counted as a pass');
+  assert.strictEqual(tl.tlStats.sigHits, 0, 'no cache hit counted yet');
+  tl(nodes, edges); // cache hit
+  assert.strictEqual(tl.tlStats.passes, 1, 'cache hit is not a pass');
+  assert.strictEqual(tl.tlStats.sigHits, 1, 'cache hit counted');
+  assert.ok(tl.tlStats.lastMs >= 0 && tl.tlStats.maxMs >= tl.tlStats.lastMs, 'last/max ms tracked');
 });
