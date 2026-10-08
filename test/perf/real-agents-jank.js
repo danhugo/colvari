@@ -876,8 +876,15 @@ async function main() {
         at: Date.now(), out: OUT, env: { agents: AGENTS, tasksPerAgent: TASKS_PER_AGENT, gate: GATE_ENABLED, arm: GATE_ARM },
         results: RESULTS, gateInfo: GATE.info, gatePhases: GATE.phases,
         ps: { perAgent: PS.perAgent, gate: PS.gate, samples: PS.samples.slice(-1800) },
+        elBlocks: elBlocks.slice(-300),
       }));
     } catch {}
+    // The 50 ms verdict itself lives page-side (frames, longtask samples, room draws) — a
+    // guard-kill during gatetail lost exactly that in clean arm 1 (t_031d789b) with every
+    // campaign already done. Mirror it out with the same cadence.
+    ex('return JSON.stringify({ at: Date.now(), phase: window.__jank.phaseName, frames: window.__jank.frames, lt: window.__jank.lt, splits: window.__jank.splitCounts, roomDraws: window.__jank.roomDraws.slice(-300), rebuildMs: +window.__jank.rebuildMs.toFixed(1) })')
+      .then((s) => { try { fs.writeFileSync(path.join(OUT, 'crash-page.json'), String(s)); } catch {} })
+      .catch(() => {});
   }, 60000).unref();
 
   const WINDOW_T0 = Date.now();
