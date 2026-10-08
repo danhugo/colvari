@@ -2258,6 +2258,25 @@ $('#wk-save').onclick = async () => {
 $('#wk-del').onclick = async () => { $('#wk-more').open = false; if (sel.page && confirm(`Delete page "${sel.page}"? This can't be undone.`)) { try { await call('deleteWiki', sel.page); sel.page = null; wikiEdit = false; wkBaseUpdated = null; $('#wk-title').value = ''; $('#wk-content').value = ''; refresh(); } catch (e) { alert(String(e.message || e).replace(/^Error invoking remote method 'api': (Error: )?/, '')); } } };
 
 // ---------- observability ----------
+// Patch a keyed row list (data-id / data-idle) in place instead of innerHTML: a kept row keeps its
+// leading .avatar element, so the working ring (ringpulse) is not restarted on every log line (t_0a1f16e4).
+const rowKey = (r) => r.dataset && (r.dataset.id ?? r.dataset.idle);
+function patchRows(box, html) {
+  const t = document.createElement('template'); t.innerHTML = html;
+  const old = new Map([...box.children].map((r) => [rowKey(r), r]));
+  const next = [...t.content.children].map((n) => { const k = rowKey(n), o = k == null ? null : old.get(k); if (!o) return n; old.delete(k);
+    if (o.outerHTML === n.outerHTML) return o;
+    o.className = n.className;
+    const oa = o.firstElementChild, na = n.firstElementChild;
+    if (oa && na && oa.classList.contains('avatar') && na.classList.contains('avatar')) {
+      for (const a of ['class', 'style', 'title']) if (oa.getAttribute(a) !== na.getAttribute(a)) oa.setAttribute(a, na.getAttribute(a) || '');
+      if (oa.innerHTML !== na.innerHTML) oa.innerHTML = na.innerHTML;
+      na.remove(); while (oa.nextSibling) oa.nextSibling.remove(); oa.after(...n.childNodes);
+    } else o.replaceChildren(...n.childNodes);
+    return o; });
+  for (const r of [...box.children]) if (!next.includes(r)) r.remove();
+  next.forEach((n, i) => { if (box.children[i] !== n) box.insertBefore(n, box.children[i] || null); });
+}
 const logTeamNodes = () => S.allNodes.filter((n) => teamScoped(sel.logTeam, n.id));
 const obsIdleOpen = new Set();
 function renderObs() {
@@ -2285,8 +2304,8 @@ function renderObs() {
       ttl ? `<span class="lttl">${esc(ttl)}</span>` : ''].filter(Boolean).join(' · ');
     const model = `${runtimeLabel(n.runtime || 'claude')} · ${n.model || 'default'}`;
     return `<div class="logagent-row ${cur === n.id ? 'sel' : ''}" data-id="${n.id}"><span class="avatar sm ${a.status === 'working' ? 'working' : ''}" style="background:${avatarBg(w)}" title="${esc(w.name)}">${avatarBody(n.id, w)}</span><span class="lameta"><b>${esc(n.name)}</b><small class="lastat">${stat}</small><small class="lamodel" title="${esc(model)}">${esc(model)}</small></span><span class="lacount" title="${counts[n.id] || 0} log lines">${counts[n.id] || 0}</span><span class="lactions">${orphanedTasks().filter((t) => t.assignee === n.id).slice(0, 1).map((t) => stuckBtn(t.id)).join('')}${a.status === 'working' ? `<button data-stopagent="${n.id}" title="Stop">⏹</button>` : ''}<button data-msgagent="${n.id}" title="Message">✉</button></span></div>`; }).join('');
-  $('#logagents').innerHTML = `<div class="logagent-row ${!cur ? 'sel' : ''}" data-id=""><span class="avatar sm" style="background:#3a3f4b">∀</span><span class="lameta"><b>All agents</b><small class="lastat">every session</small></span><span class="lacount" title="${total} log lines">${total}</span></div>` +
-    (rows || '<p class="muted logempty">No agents in this team.</p>');
+  patchRows($('#logagents'), `<div class="logagent-row ${!cur ? 'sel' : ''}" data-id=""><span class="avatar sm" style="background:#3a3f4b">∀</span><span class="lameta"><b>All agents</b><small class="lastat">every session</small></span><span class="lacount" title="${total} log lines">${total}</span></div>` +
+    (rows || '<p class="muted logempty">No agents in this team.</p>'));
   document.querySelectorAll('#logagents [data-idle]').forEach((d) => d.onclick = () => { obsIdleOpen.add(d.dataset.idle); obsSig = ''; renderObs(); });
   document.querySelectorAll('#logagents .logagent-row[data-id]').forEach((d) => d.onclick = (e) => { if (e.target.closest('.lactions')) return; $('#logfilter').value = d.dataset.id; renderLog(); renderObs(); });
   wireStuckBtns();
