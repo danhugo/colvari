@@ -30,3 +30,7 @@ test('run control: Stop only while Running, Run only while Stopped; one size for
   assert.match(css, /--topbar-h:\s*28px/, 'one control height');
   assert.match(header, /id="newgoal" class="primary topbtn"/, 'New goal is the compact primary');
 });
+
+test('bell, settings, help reuse the nav tab button style (t_53cd3fd7)', () => {
+  assert.match(header, /<nav class="hdricons"><button id="alertbell"[^]*id="settingsbtn"[^]*id="help"[^]*<\/nav>/);
+});
