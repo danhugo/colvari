@@ -3111,7 +3111,17 @@ function renderChat() {
   if (!$('#tab-chat.active')) return;
   chatSched.drawIfCurrent();
 }
+// Per-chat composer drafts (t_bc5d19c7): the one #chat-input textarea is shared by every chat, so
+// its text used to follow you to another project/team/thread. Park it under the old key, load the new.
+const chatDrafts = new Map();
+function swapDraft(prevKey, key, value) {
+  if (prevKey === key) return value;
+  if (prevKey != null) chatDrafts.set(prevKey, value);
+  return chatDrafts.get(key) || '';
+}
 function renderChatBody() {
+  const dk = [ctx.p || '', sel.chatTeam || '', CH.thread || ''].join('|');
+  if (CH.draftKey !== dk) { const i = $('#chat-input'); const v = swapDraft(CH.draftKey, dk, i.value); CH.draftKey = dk; if (i.value !== v) { i.value = v; chatPreview(); } }
   fillTeamSelect($('#chatteam'), sel.chatTeam, (S.project && S.project.teams) || []);
   const working = new Set(Object.keys(S.orch.agents || {}).filter((id) => S.orch.agents[id].status === 'working'));
   const L = projLogs();
