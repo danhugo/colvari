@@ -571,7 +571,7 @@ function renderHeader() {
     setText(pill, `● Running ${par || 1}`); // short status chip (t_db67859d): full wording in the tooltip
     setTitle(pill, `running · ${par > 1 ? `${par} in parallel` : `${par || 1} agent`} · ${o.runs || 0} runs`);
   } else if (rs.state === 'idle') {
-    setText(pill, 'Idle');
+    setText(pill, '● Idle');
     setTitle(pill, `idle · ${rs.reason || 'waiting for todo tasks'} · ${o.runs || 0} runs`);
   } else {
     setText(pill, todos ? `Stopped (${todos} todo)` : 'Stopped');
@@ -579,7 +579,7 @@ function renderHeader() {
   }
   pill.classList.toggle('on', rs.state === 'running');
   pill.classList.toggle('halt', rs.state === 'stopped' && todos > 0);
-  $('#stop').classList.toggle('hidden', rs.state === 'stopped'); // Stop stays in the bar while the run is on — running or idle (⌘. always works)
+  $('#stop').classList.toggle('hidden', rs.state !== 'running'); // Stop only while agents work; Idle shows no Stop (t_53cd3fd7) — ⌘. still works
   $('#runbtn').classList.toggle('hidden', rs.state !== 'stopped'); // the visible way back while the scheduler is off
   setText($('#runbtn'), rs.state === 'stopped' && todos ? `${todos} task${todos === 1 ? '' : 's'} waiting — Run` : 'Run'); // the waiting count rides the button (t_bd295f0e)
   // Money pill: the app's single cost total — API-eq over ALL recorded runs, the same per-run ledger
