@@ -78,6 +78,9 @@ const AGENT_START_TIMEOUT_MS = Number(process.env.PERF_AGENT_START_TIMEOUT_MS ||
 // thinking pause under 5-way CPU contention is not mistaken for a stall and churn-recovered.
 const STAGGER_MS = Math.max(0, Number(process.env.PERF_STAGGER_MS ?? (AGENTS > 2 ? 8000 : 0)));
 const STALL_MIN = Number(process.env.PERF_STALL_MIN || (AGENTS >= 5 ? 5 : 2));
+// Concurrency-cap override (t_a9864978, Flux): PERF_MAX_CONCURRENCY=5 with PERF_AGENTS=10 seeds 10
+// agents but lets only 5 run at once — the cap's own arm. Default stays = AGENTS (Quinn's arms unchanged).
+const MAXCONC = Math.max(1, Number(process.env.PERF_MAX_CONCURRENCY || AGENTS));
 const QUEUE_MS = AGENTS * TASKS_PER_AGENT * STAGGER_MS;
 const WAIT = (ms) => new Promise((r) => setTimeout(r, ms));
 // Real-load arm (t_5fb1b9cf): gate knobs. GATE_ENABLED builds + triggers the real merge gate.
@@ -691,7 +694,7 @@ async function seed() {
   const res = await ex(`
     const p = await call('createProject', 'Real-agent jank baseline');
     switchTo({ p: p.id }); await w(600); await refresh();
-    await call('saveSettings', { helpycodePath: ${jsq(HCPATH)}, useWorktrees: false, maxConcurrency: ${AGENTS}, maxRuns: ${AGENTS * TASKS_PER_AGENT + 2}, requireApproval: false, stallTimeoutMin: ${STALL_MIN} });
+    await call('saveSettings', { helpycodePath: ${jsq(HCPATH)}, useWorktrees: false, maxConcurrency: ${MAXCONC}, maxRuns: ${AGENTS * TASKS_PER_AGENT + 2}, requireApproval: false, stallTimeoutMin: ${STALL_MIN} });
     const nodes = [];
     const agentWs = ${wsJs};
     for (let i = 0; i < ${AGENTS}; i++) nodes.push(await call('addNode', { name: 'Real-' + (i + 1), role: 'Dev', x: 90 + (i % 3) * 240, y: 110 + Math.floor(i / 3) * 190, runtime: 'helpycode', model: ${jsq(MODEL)}, workdir: agentWs[i] }));
