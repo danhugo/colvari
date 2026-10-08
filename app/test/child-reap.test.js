@@ -83,3 +83,22 @@ test('leak check fails when a leak is injected', async () => {
   assert.equal(failed.length, 0, 'reap must be able to kill the leak');
   assert.ok(await until(() => dead(leak.pid)), 'injected leak survived cleanup');
 });
+
+test('stale sweep fails closed: unreadable start times never authorize a kill (t_1ee3f3f6)', () => {
+  // A live file process's pidfile as a concurrent sweeper sees it mid-test: owner + child alive.
+  const entry = { ownerPid: 111, children: [{ pid: 222, pgid: 222, detached: true, recordedAt: Date.now() }] };
+  const ageSec = 5;
+  const bothAlive = () => true;
+  // ps starved under load (elapsed unreadable): proves nothing — keep the pidfile, signal nothing.
+  assert.equal(pg.sweepDecision(entry, ageSec, bothAlive, () => null), null,
+    'a starved ps read must not authorize killing a live run\'s recorded children');
+  // Readable and matching the recorded age: a live run owns the children.
+  assert.equal(pg.sweepDecision(entry, ageSec, bothAlive, () => ageSec), null,
+    'a live owner with a matching start time keeps its pidfile');
+  // Owner provably dead/recycled: its live, age-matching child is legitimately reaped.
+  assert.deepEqual(pg.sweepDecision(entry, ageSec, (pid) => pid === 222, () => ageSec).map((c) => c.pid), [222],
+    'a provably dead owner must still yield its live child for reaping');
+  // Dead owner (no etime exists for it) with an unreadable child read: nothing is signalled.
+  assert.deepEqual(pg.sweepDecision(entry, ageSec, (pid) => pid === 222, () => null), [],
+    'an unreadable child start time must never be signalled');
+});

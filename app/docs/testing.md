@@ -49,6 +49,12 @@ tree. Never by process name.
    module sweeps it**: pidfiles whose owner is gone (or whose owner pid was recycled — detected by
    comparing process ages via `ps etime`, so a recycled pid is never signalled) have their listed
    children reaped and their file removed. Live sibling runs are never touched.
+   The sweep **fails closed** (t_1ee3f3f6): a start-time read that comes back empty (a `ps`
+   starved under load) proves nothing, so an alive-but-unidentifiable owner keeps its pidfile
+   for the next install to retry, and a child whose age cannot be read is never signalled —
+   under parallel gates the starved read used to authorize killing another live file process's
+   mid-test fixture tree. Only a dead owner pid (cheap, exact `kill(0)`) or a readable,
+   mismatched owner age reaps.
 4. **Electron**: `app.exit()` bypasses node's exit hooks, so the gui-e2e/smoke force-exit
    watchdog and both normal exit points call `reapAll()` explicitly; the pidfile covers anything
    SIGKILLed in between.
@@ -148,5 +154,40 @@ gui-e2e/smoke instances — belongs to its run, not to the desktop:
   matches, recorded marker present in argv or env). Recycled pids, marker mismatches, malformed
   records: pidfile deleted, nothing signalled. Processes are never matched by name; the sweep
   skips its own pid and ancestors and logs every decision.
+- **Test isolation (t_1ee3f3f6)**: `test/harness-reap.test.js` and `test/harness-sweep.test.js`
+  point `AGENTS_SQUAD_REAL_TMP` at a fresh per-run `mkdtemp` dir (never a shared `os.tmpdir()`
+  path) before importing the sweep module, so their planted records are judged only by their own
+  sweeps — peer test files, mid-suite app boots and concurrent gate suites can never reap or
+  delete them in flight. Each file rm's its dir in an `after` hook.
 
 Unit coverage (including the negative cases) is in `test/harness-sweep.test.js`.
+
+## The machine-wide heavy slot covers every heavy harness (t_dc59a89e)
+
+`test/harness/heavy-slot.js` serializes heavy work machine-wide (one suite at a time, low
+priority, not while load is far above the core count). It was `npm test`-only; now every heavy
+Electron harness takes it too, so a screenshot sweep or perf driver never competes with a
+merge-gate suite or the live app:
+
+- gui-e2e installs it in `src/main.js` beside procguard, at the very top of the TEST_MODE branch
+  (`AGENTS_SQUAD_GUI_E2E` only — smoke stays light). The instance waits for the slot before its
+  window opens, exactly like the gate's suite child.
+- Standalone Electron-harness drivers (`test/perf/ab-gate.js`, `cli/profile-renderer.js`) get it
+  from a module-load `install()` in `test/harness/harness-electron.js`.
+- Under `npm test` nothing changes: the run root holds the slot and descendants inherit
+  `AGENTS_SQUAD_HEAVY_SLOT`, so nested installs skip. `AGENTS_SQUAD_HEAVY_SLOT=off` still bypasses.
+
+The gate's live-state read (`merge-gate.live.json` phase `waiting`) already watches the same lock
+dir, so a gate queued behind a gui-e2e run now reports that honestly.
+
+## Gate-suite trend stats (t_dc59a89e)
+
+Every finished merge-gate suite run (each CAS round that runs tests) appends one entry to
+`.squad/merge-gate-stats.json` at the repo root: timestamp, task, branch, state
+(`green`/`red`/`infra`), attempts, wall-time (`durationMs`), test count and `flaky` — flaky means
+the run ended green only after an infra-classified rerun (a completed red stays terminal, so it
+is never counted flaky). The window is capped at 200 runs; writes are atomic tmp+rename and a
+stats failure can never fail a green gate. `redMasterSnapshot` exposes the summary
+(`runs`, `p95Ms`, `medianMs`, `greenP95Ms`, `flakeRate`, …) so the board can show trends, and
+`src/gate-stats.js` `summarize(root)` reads it directly. Unit + wire coverage (including a real
+infra-then-green flake through the default runner) is in `test/gate-stats.test.js`.

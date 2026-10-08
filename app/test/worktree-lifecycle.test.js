@@ -145,7 +145,7 @@ test('repeated done-flip and human mergeTask after cleanup are clean no-ops', as
 
 // ---- sweep: retained vs removed ----
 
-test('dirty worktree is retained and flagged (sweep and done-flip)', async () => {
+test('dirty worktree is retained by the sweep; the done-flip refuses and reopens (t_9b8f6195)', async () => {
   const { s, task, wt } = await setup('t_lc3');
   fs.writeFileSync(path.join(wt, 'b.txt'), 'new\n'); g(wt, 'add', '.'); g(wt, 'commit', '-q', '-m', 'work');
   s._updateTask(task.id, { status: 'done' }); // raw done: clean tree, unmerged branch
@@ -155,12 +155,13 @@ test('dirty worktree is retained and flagged (sweep and done-flip)', async () =>
   assert.ok(r.retained.some((x) => x.dir === 't_lc3' && /uncommitted changes/.test(x.reason)), JSON.stringify(r.retained));
   assert.strictEqual(fs.existsSync(wt), true);
   assert.ok(s.getTask(task.id).comments.some((c) => /worktree retained/.test(c.text)), 'flagged on the task');
-  // The done-flip merge itself succeeds (untracked file), but cleanup must still refuse.
+  // t_9b8f6195: the done-flip no longer merges past uncommitted worktree files (the tested tree
+  // would not be the landed tree) — the gate refuses and the task reopens to the assignee.
   const t2 = await done(s, task.id);
-  assert.strictEqual(t2.status, 'done');
-  assert.strictEqual(fs.existsSync(wt), true, 'dirty worktree survives even a landed merge');
-  assert.strictEqual(t2.worktreePath, wt, 'fields kept when retained');
-  assert.ok(t2.comments.some((c) => /worktree retained: worktree has uncommitted changes/.test(c.text)));
+  assert.strictEqual(t2.status, 'todo', 'dirty worktree: refused, task reopened');
+  assert.strictEqual(fs.existsSync(wt), true, 'worktree untouched by the refusal');
+  assert.strictEqual(t2.worktreePath, wt, 'fields kept');
+  assert.ok(t2.comments.some((c) => /commit or clean your worktree/i.test(c.text) && /c\.txt/.test(c.text)), JSON.stringify(t2.comments.map((c) => c.text).slice(-2)));
 });
 
 test('unmerged branch is retained', async () => {

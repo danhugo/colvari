@@ -23,14 +23,17 @@ const pg = require('./harness/procguard');
 
 pg.install();
 
-// Private harness-pids dir for THIS file only: pidsDir() reads AGENTS_SQUAD_REAL_TMP at call
-// time, so pointing it at a throwaway dir inside the run's private tmp isolates our records from
-// every other sweeper that shares the real system tmpdir — peer test files, and any app instance
-// that boots mid-suite (app-kill-relaunch boots two, and the live app reboots too). A peer sweep
-// reaping our orphan between "owner dead" and "my sweep" used to fail the report asserts (the
-// t_ea6c2c33 gate flakes); with a private dir my sweeps are the only sweeps that can judge them.
-// The run dir is removed with the whole suite run, records and all (fixtures want no survival).
-process.env.AGENTS_SQUAD_REAL_TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'squad-hpids-'));
+// Private harness-pids dir for THIS FILE ONLY, fresh per run (t_1ee3f3f6): pidsDir() reads
+// AGENTS_SQUAD_REAL_TMP at call time, so pointing it at a per-run throwaway dir (mkdtemp, never a
+// shared os.tmpdir path) isolates our records from every other sweeper — peer test files, app
+// instances booted mid-suite (app-kill-relaunch boots two, and the live app reboots too), and
+// concurrent suite runs in parallel gates. A peer sweep reaping our orphan between "owner dead"
+// and "my sweep" used to fail the report asserts (the t_ea6c2c33 gate flakes); with a private dir
+// my sweeps are the only sweeps that can judge them. The dir is rm'd in an after-hook (plus the
+// suite-wide teardown), records and all — fixtures want no survival.
+const hpidsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'squad-hpids-'));
+process.env.AGENTS_SQUAD_REAL_TMP = hpidsDir;
+test.after(() => { try { fs.rmSync(hpidsDir, { recursive: true, force: true }); } catch { /* already gone */ } });
 
 const SWEEP = path.join(__dirname, '..', 'src', 'harness-sweep.js');
 const HAS_SWEEP = fs.existsSync(SWEEP);

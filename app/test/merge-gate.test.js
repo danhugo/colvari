@@ -119,6 +119,80 @@ test('merge gate: dirty main checkout refuses before the suite runs', { skip: SK
   assert.strictEqual(ran, 0, 'refusal is cheap: no suite run for a refused merge');
 });
 
+// t_9b8f6195: the gate tests the worktree's working files but lands the committed branch —
+// uncommitted files must refuse the merge (the tested tree is not the landed tree), while
+// exact-path junk (.DS_Store) passes through. Store path: the task reopens with the message.
+test('merge gate: dirty worktree refuses before the suite runs; junk denylist passes; clean path lands (t_9b8f6195)', { skip: SKIP }, async () => {
+  const { d, wts } = await repoWithTasks('t_mg10');
+  const w = wts.t_mg10;
+  commitWork(w, 'b.txt', 'work\n');
+  fs.writeFileSync(path.join(w.worktreePath, 'stray.txt'), 'uncommitted\n');
+  const branchTip = g(d, 'rev-parse', 'squad/t_mg10');
+  let ran = 0;
+  const r = await MG.gateMerge(T(w), { runTests: () => { ran++; return { ok: true, output: '' }; } });
+  assert.strictEqual(r.merged, false);
+  assert.strictEqual(r.refused, true);
+  assert.strictEqual(r.reason, 'worktree-dirty');
+  assert.ok(r.dirty.includes('stray.txt'), JSON.stringify(r.dirty));
+  assert.strictEqual(ran, 0, 'refusal is cheap: no suite run, no heavy-slot wait for a dirty worktree');
+  assert.strictEqual(g(d, 'rev-parse', 'squad/t_mg10'), branchTip, 'the branch was not committed to by the refusal');
+
+  // store path: the task reopens to the assignee with "commit or clean your worktree"
+  const { s, tid } = storeWithTask(w, 'dirty worktree task');
+  s.updateTask(tid, { status: 'done' }, { runTests: () => ({ ok: true, output: '' }) });
+  await s._mergeQueue;
+  const t = s.getTask(tid);
+  assert.strictEqual(t.status, 'todo', 'task reopened to the assignee');
+  const cm = t.comments.map((c) => c.text).find((x) => /commit or clean your worktree/i.test(x));
+  assert.ok(cm, 'reopen comment present');
+  assert.ok(cm.includes('stray.txt'), `comment names the file: ${cm}`);
+
+  // denylist pass-through: only junk dirt left — the gate runs and the clean path lands
+  fs.rmSync(path.join(w.worktreePath, 'stray.txt'));
+  fs.writeFileSync(path.join(w.worktreePath, '.DS_Store'), 'junk\n');
+  const r2 = await MG.gateMerge(T(w), { runTests: () => { ran++; return { ok: true, output: '' }; } });
+  assert.strictEqual(r2.merged, true, JSON.stringify(r2));
+  assert.strictEqual(ran, 1, 'junk-only dirt does not block the merge (both earlier refusals ran no suite)');
+  assert.strictEqual(fs.readFileSync(path.join(d, 'b.txt'), 'utf8'), 'work\n', 'clean path lands the work');
+  assert.ok(!fs.existsSync(path.join(d, '.DS_Store')), 'uncommitted junk stays out of base');
+});
+
+// t_9b8f6195 / Cato #3: a commit made while the gate tests must not land blind — the tested
+// sha re-check catches the moved branch and takes the CAS continue path (re-absorb, re-test,
+// rounds counted by MAX_CAS_ROUNDS), then lands both commits.
+test('merge gate: branch sha changed between test and land re-tests and is re-tested (t_9b8f6195)', { skip: SKIP }, async () => {
+  const { d, wts } = await repoWithTasks('t_mg11');
+  const w = wts.t_mg11;
+  commitWork(w, 'b.txt', 'first\n');
+  let ran = 0;
+  const r = await MG.gateMerge(T(w), {
+    runTests: () => {
+      ran++;
+      if (ran === 1) commitWork(w, 'c.txt', 'second\n'); // the agent commits mid-gate
+      return { ok: true, output: '' };
+    },
+  });
+  assert.strictEqual(r.merged, true, JSON.stringify(r));
+  assert.strictEqual(ran, 2, 'the moved branch was re-tested, not landed blind');
+  assert.strictEqual(fs.readFileSync(path.join(d, 'b.txt'), 'utf8'), 'first\n');
+  assert.strictEqual(fs.readFileSync(path.join(d, 'c.txt'), 'utf8'), 'second\n', 'the mid-gate commit landed too');
+});
+
+// t_9b8f6195 / Cato #3: when the TEST RUN itself dirties the worktree, refuse as
+// worktree-dirty-after-tests (a test bug, not the agent's fault) instead of landing a tree
+// nobody tested.
+test('merge gate: a test run that dirties the worktree is refused, not landed (t_9b8f6195)', { skip: SKIP }, async () => {
+  const { d, wts } = await repoWithTasks('t_mg12');
+  const w = wts.t_mg12;
+  commitWork(w, 'b.txt', 'work\n');
+  const r = await MG.gateMerge(T(w), { runTests: () => { fs.writeFileSync(path.join(w.worktreePath, 'test-artifact.txt'), 'leaked\n'); return { ok: true, output: '' }; } });
+  assert.strictEqual(r.merged, false);
+  assert.strictEqual(r.refused, true);
+  assert.strictEqual(r.reason, 'worktree-dirty-after-tests');
+  assert.ok(r.dirty.includes('test-artifact.txt'), JSON.stringify(r.dirty));
+  assert.ok(!fs.existsSync(path.join(d, 'b.txt')), 'nothing landed from the dirtied run');
+});
+
 test('merge gate: concurrent merges serialize across processes — second suite tests a tree containing the first merge', { skip: SKIP }, async () => {
   const { d, wts } = await repoWithTasks('t_mg4a', 't_mg4b');
   commitWork(wts.t_mg4a, 'b.txt', 'from A\n');

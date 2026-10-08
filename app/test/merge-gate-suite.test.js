@@ -2,7 +2,8 @@
 // app/, driven through the same entry points production uses (store.updateTask(done) and
 // MG.gateMerge directly). The CONTRACT pins (sync API, injected runners, shapes) live in
 // test/merge-gate.test.js (t_12a92368); this file exercises the default runner end to end:
-// real npm suites, flaky rerun, infra-vs-red split, red-master attribution + P0 lifecycle,
+// real npm suites, the terminal-red rule (a completed red run is never rescued by a rerun,
+// t_9b8f6195), infra-vs-red split, red-master attribution + P0 lifecycle,
 // serialization with combined-tree proof (t_485c97c5 #7).
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -159,18 +160,24 @@ test('base fixed: next gate run merges, logs master.green and auto-closes the P0
   assert.match(commentText(store, p0.id), /master verified green/);
 });
 
-test('flaky suite: pass on the rerun merges green and says so', async () => {
-  const { root, store, t, tk } = await fixture('t_gate_flaky');
+// Pia scope (t_9b8f6195, wiki "Colvari vs Paperclip: conclusions" §5.1): a red full-suite run
+// blocks the flip — the old flaky rerun-once policy let a green rerun rescue a red run into a
+// landing, so a run that completed red can never be followed by a merge. Infra retries stay
+// (an infra failure is not a completed red run).
+test('red full-suite run blocks the flip: a green rerun cannot rescue it (t_9b8f6195)', async () => {
+  const { root, store, t, tk, g } = await fixture('t_gate_flaky');
   const marker = path.join(os.tmpdir(), 'squad-gate-flaky-' + t.id);
   try { fs.unlinkSync(marker); } catch {}
   commit(t.worktreePath, {
     'app/test/flaky.test.js': `const t=require('node:test');const fs=require('fs');t.test('flaky',()=>{if(!fs.existsSync(${JSON.stringify(marker)})){fs.writeFileSync(${JSON.stringify(marker)},'x');throw new Error('flake on first run');}});\n`,
   }, 'flaky work');
+  const baseSha = g(root, 'rev-parse', 'main');
   const r = await MG.gateMerge(tk, {});
-  assert.equal(r.merged, true);
-  assert.equal(r.gate.state, 'green');
-  assert.ok(r.gate.flaky.length >= 1, 'flaky names recorded');
-  assert.match(r.gate.flaky.join(','), /flaky/);
+  assert.equal(r.merged, false, JSON.stringify(r));
+  assert.equal(r.reason, 'tests-failed');
+  assert.equal(r.gate.state, 'red');
+  assert.equal(r.gate.flaky, undefined, 'no flaky rescue: the completed red run is terminal');
+  assert.equal(g(root, 'rev-parse', 'main'), baseSha, 'nothing landed on the red run');
   fs.unlinkSync(marker);
 });
 
