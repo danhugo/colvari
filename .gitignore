@@ -14,3 +14,8 @@ app/design/screenshots/
 app/test/perf/results/
 test/perf/results/
 notes/
+design/shots/
+design/screenshots/
+design/palettes/shots/
+.claude/
+docs/images/readme-preview.png

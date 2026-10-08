@@ -29,7 +29,7 @@ Also in the app (see [`app/README.md`](app/README.md) for details):
 
 - Shared **wiki** for the team (markdown pages).
 - **Logs, Overview and Usage** tabs: tokens per model, cost, usage limits.
-- **Run modes** per agent: single, goal (loop until a condition is met), loop, workflow.
+- **Run modes** per agent: single, goal (loop until a condition is met), loop, workflow. Found under *Advanced* in agent settings; goal mode needs a runtime that can resume a session.
 - **Stall watchdog:** a hung agent is stopped and its session is resumed.
 - Per-agent **permissions**: allowed tools, permission mode, working directory.
 - Light and dark theme.
@@ -45,7 +45,7 @@ npm install
 npm start
 ```
 
-Then in the app: pick a template (Startup = PM → Dev → Reviewer), type a goal in the header, and press **Run**.
+Then in the app: pick a template (Startup = PM → Dev → Reviewer), then tell the Lead what you want in **Chat**. Your message becomes a task for the Lead, and a stopped team starts on its own.
 
 Check your setup (uses a fake `claude`, no cost):
 
