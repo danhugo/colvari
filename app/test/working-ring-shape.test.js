@@ -9,3 +9,10 @@ test('working ring follows avatar shape (round lead, squircle others)', () => {
   assert.ok(rule, 'working ring rule exists');
   assert.match(rule[1], /border-radius:\s*inherit/);
 });
+
+test('no round lead avatar: every agent avatar is a squircle', () => {
+  const css = fs.readFileSync(path.join(__dirname, '../renderer/style.css'), 'utf8');
+  const js = fs.readFileSync(path.join(__dirname, '../renderer/app.js'), 'utf8');
+  assert.doesNotMatch(css + js, /is-lead/);
+  assert.doesNotMatch(js, /el\('circle', \{ class: 'av(atar|ring)'/);
+});

@@ -72,11 +72,11 @@ test('source: agent-colouring call sites use the team helper; roleBg and mix ste
   assert.ok(!src.includes('roleBg(n.role)'), 'no roleBg call site may remain');
   assert.ok(!src.includes('agentStep'), 'per-member mix steps must be gone');
   // graph node avatar disc (the surface from the human report)
-  assert.match(src, /class: 'avatar', cx: 30, cy: 26, r: 14, style: `fill:\$\{agentVar\(n\.id\)\};--av:\$\{agentVar\(n\.id\)\}`/);
+  assert.match(src, /class: 'avatar', x: 16, y: 12, width: 28, height: 28, rx: 8.4, style: `fill:\$\{agentVar\(n\.id\)\};--av:\$\{agentVar\(n\.id\)\}`/);
   // live card face backdrop, editor face backdrop, chat mentions
   assert.match(src, /class="lc-face" src="\$\{faceUri\(n\.id\)\}" alt="" style="background:\$\{agentVar\(n\.id\)\}"/);
   assert.match(src, /id="nf-face"[^>]+style="background:\$\{agentVar\(n\.id\)\}/);
-  assert.match(src, /is-lead' : ''}" style="background:\$\{agentVar\(n\.id\)\}"/);
+  assert.match(src, /class="avatar" style="background:\$\{agentVar\(n\.id\)\}"/);
   // stripe + minimap keep the team token too
   assert.match(src, /class: 'stripe'[^;]+fill:\$\{agentVar\(n\.id\)\}`/);
   assert.match(src, /class: n\.ghost \? 'mghost' : 'mnode', style: n\.ghost \? '' : `fill:\$\{agentVar\(n\.id\)\}`/);
