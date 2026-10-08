@@ -2540,8 +2540,8 @@ async function guiE2E() {
       const big = await set('long line\n'.repeat(80)); await shot('composer-max');
       await ex(`document.documentElement.dataset.theme = 'dark'; await w(150);`); await shot('composer-max-dark'); await ex(`document.documentElement.dataset.theme = 'light';`);
       const back = await set('');
-      const g = { min, two, big, back, ...(await ex(`const i = $('#chat-input'), pane = i.closest('.composer').parentElement.clientHeight; return { pane, cap: Math.min(320, Math.max(160, pane * 0.4)), bw: getComputedStyle(i).borderTopWidth };`)) };
-      expect('composergrow: grows with lines, capped at clamp(160, 40% pane, 320), back to min when cleared, 1px border',
+      const g = { min, two, big, back, ...(await ex(`const i = $('#chat-input'), pane = i.closest('.composer').parentElement.clientHeight; return { pane, cap: Math.min(240, Math.max(120, pane * 0.3)), bw: getComputedStyle(i).borderTopWidth };`)) };
+      expect('composergrow: grows with lines, capped at clamp(120, 30% pane, 240), back to min when cleared, 1px border',
         g.two > g.min && Math.abs(g.big - g.cap) <= 2 && g.back === g.min && g.bw === '1px', g);
       throw null;
     }
