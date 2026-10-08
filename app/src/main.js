@@ -2532,6 +2532,19 @@ async function guiE2E() {
       await ex(`$('#tabs button[data-tab=team]').click(); sel.node = S.team.nodes[0].id; renderNodeForm(); await w(300); $('#nf-adv').open = true; $('#nf-adv').scrollIntoView(); await w(200);`); await shot('onestart-agent-advanced');
       throw null;
     }
+    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'composergrow') { // t_8a006333: composer grows with text up to a cap, shrinks back
+      // a full room is the real case: before the fix the room squeezed the composer (flex-shrink) so it never grew
+      await ex(`$('#tabs button[data-tab=chat]').click(); await w(300); const r = $('#chat-room'); for (let k = 0; k < 60; k++) { const d = document.createElement('div'); d.className = 'msg'; d.textContent = 'filler message ' + k; d.style.height = '40px'; r.appendChild(d); } await w(200);`);
+      const set = (v) => ex(`const i = $('#chat-input'); i.value = ${JSON.stringify(v)}; i.dispatchEvent(new Event('input')); await w(150); return i.offsetHeight;`);
+      const min = await set(''); const two = await set('a\nb\nc\nd'); await shot('composer-short');
+      const big = await set('long line\n'.repeat(80)); await shot('composer-max');
+      await ex(`document.documentElement.dataset.theme = 'dark'; await w(150);`); await shot('composer-max-dark'); await ex(`document.documentElement.dataset.theme = 'light';`);
+      const back = await set('');
+      const g = { min, two, big, back, ...(await ex(`const i = $('#chat-input'), pane = i.closest('.composer').parentElement.clientHeight; return { pane, cap: Math.min(320, Math.max(160, pane * 0.4)), bw: getComputedStyle(i).borderTopWidth };`)) };
+      expect('composergrow: grows with lines, capped at clamp(160, 40% pane, 320), back to min when cleared, 1px border',
+        g.two > g.min && Math.abs(g.big - g.cap) <= 2 && g.back === g.min && g.bw === '1px', g);
+      throw null;
+    }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'helpycode') { await helpycodeShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'wikilogs') { await wikiLogsShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'board') { await boardShots(); throw null; }

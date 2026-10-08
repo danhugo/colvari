@@ -3490,6 +3490,7 @@ function syncThreadPanel(ev, workingT) {
 let chatComposing = false;
 function chatPreview() {
   const i = $('#chat-input'); const v = i.value; const p = Chat.parseComposer(v, S.team.nodes); const pv = $('#chat-preview');
+  growComposer();
   // Guarded writes: chatPreview runs on every keystroke AND mid-composition — same-value
   // textContent/className assignments still dirty the composer's layout each keystroke, and a
   // mentions-box rebuild the user can't see is churn on top (same finding as the header pills).
@@ -3506,6 +3507,13 @@ function chatPreview() {
     }
   }
 }
+// t_8a006333: grow with the text up to clamp(160px, 40% of the chat pane, 320px), then scroll.
+function growComposer() {
+  const i = $('#chat-input'); const max = Math.min(320, Math.max(160, i.closest('.chat-main').clientHeight * 0.4));
+  i.style.height = 'auto'; const h = Math.min(i.scrollHeight + i.offsetHeight - i.clientHeight, max);
+  i.style.height = h + 'px'; i.style.overflowY = h >= max ? 'auto' : 'hidden';
+}
+window.addEventListener('resize', growComposer);
 function pickMention(name) { const i = $('#chat-input'); i.value = i.value.replace(/@(\w*)$/, '@' + name + ' '); i.focus(); CH.mi = 0; chatPreview(); }
 async function chatSend() {
   const i = $('#chat-input'); if (chatComposing) return; // the Send button can click mid-composition too — same stray-message risk as Enter
