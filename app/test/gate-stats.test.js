@@ -1,6 +1,6 @@
 'use strict';
 // Gate-suite trend stats (t_dc59a89e): the stats file records every finished merge-gate suite
-// run (duration, attempts, outcome) and summarizes it as p95/median time and a flake rate
+// run (duration, attempts, outcome) and summarizes it as p95/median time and green-after-retry rate — the infra retry rate, not flaky tests
 // (green only after a second attempt). Unit coverage for the module, plus wire-through proofs:
 // runGateTests records what it ran (injected runner AND the real default runner, including the
 // flake path — infra first attempt, green rerun), and redMasterSnapshot exposes the summary.
@@ -21,26 +21,26 @@ test('percentile: empty is null; p95/median pick inside the sorted window', () =
   assert.deepEqual(GS.percentile([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 0.5), 5);
 });
 
-test('record/summarize: p95, median, green p95 and flake rate over the window', () => {
+test('record/summarize: p95, median, green p95 and infra retry rate over the window', () => {
   const root = tmpRoot('sum');
   const runs = [
-    { state: 'green', durationMs: 1000, attempts: 1, flaky: false },
-    { state: 'green', durationMs: 2000, attempts: 1, flaky: false },
-    { state: 'green', durationMs: 3000, attempts: 2, flaky: true },
-    { state: 'red', durationMs: 4000, attempts: 1, flaky: false },
-    { state: 'green', durationMs: 5000, attempts: 1, flaky: false },
-    { state: 'infra', durationMs: 6000, attempts: 1, flaky: false },
-    { state: 'green', durationMs: 7000, attempts: 1, flaky: false },
-    { state: 'green', durationMs: 8000, attempts: 1, flaky: false },
-    { state: 'green', durationMs: 9000, attempts: 1, flaky: false },
-    { state: 'green', durationMs: 10000, attempts: 1, flaky: false },
+    { state: 'green', durationMs: 1000, attempts: 1, infraRetry: false },
+    { state: 'green', durationMs: 2000, attempts: 1, infraRetry: false },
+    { state: 'green', durationMs: 3000, attempts: 2, infraRetry: true },
+    { state: 'red', durationMs: 4000, attempts: 1, infraRetry: false },
+    { state: 'green', durationMs: 5000, attempts: 1, infraRetry: false },
+    { state: 'infra', durationMs: 6000, attempts: 1, infraRetry: false },
+    { state: 'green', durationMs: 7000, attempts: 1, infraRetry: false },
+    { state: 'green', durationMs: 8000, attempts: 1, infraRetry: false },
+    { state: 'green', durationMs: 9000, attempts: 1, infraRetry: false },
+    { state: 'green', durationMs: 10000, attempts: 1, infraRetry: false },
   ];
   for (const r of runs) assert.ok(GS.record(root, { task: 't_1', branch: 'squad/t_1', ...r }), 'record failed');
   const s = GS.summarize(root);
   assert.equal(s.runs, 10);
   assert.equal(s.greenRuns, 8);
-  assert.equal(s.flakyRuns, 1);
-  assert.equal(s.flakeRate, 0.1);
+  assert.equal(s.infraRetryRuns, 1);
+  assert.equal(s.infraRetryRate, 0.1);
   assert.equal(s.p95Ms, 10000); // ceil(0.95*10)-1 = index 9
   assert.equal(s.medianMs, 5000);
   assert.equal(s.greenP95Ms, 10000); // greens: 1,2,3,5,7,8,9,10k → ceil(0.95*8)th = the max
@@ -74,15 +74,15 @@ test('runGateTests (injected runner): the suite run is recorded with duration an
   const s = GS.summarize(root);
   assert.equal(s.runs, 1);
   assert.equal(s.greenRuns, 1);
-  assert.equal(s.flakyRuns, 0);
+  assert.equal(s.infraRetryRuns, 0);
   const j = JSON.parse(fs.readFileSync(GS.statsFile(root), 'utf8'));
   assert.equal(j.runs[0].task, 't_wire');
   assert.equal(j.runs[0].state, 'green');
 });
 
-// The real flake signal end to end: the default runner sees an infra-classified first attempt
-// ("Cannot find module 'boom'") and a green rerun — flakyRun true, stats entry flaky.
-test('runGateTests (default runner): infra first attempt + green rerun records a flake', async () => {
+// The real infra-retry signal end to end: the default runner sees an infra-classified first attempt
+// ("Cannot find module 'boom'") and a green rerun — infraRetryRun true, stats entry infraRetry.
+test('runGateTests (default runner): infra first attempt + green rerun records an infra retry', async () => {
   const root = tmpRoot('flake');
   fs.mkdirSync(path.join(root, 'app', 'test'), { recursive: true });
   fs.writeFileSync(path.join(root, 'app', 'package.json'), JSON.stringify({ name: 'fx', version: '1.0.0', scripts: { test: 'node --test test/*.test.js' } }, null, 2) + '\n');
@@ -98,11 +98,11 @@ test('runGateTests (default runner): infra first attempt + green rerun records a
   const g = await MG.runGateTests(t, root, 'main', {});
   assert.equal(g.state, 'green');
   assert.equal(g.attempts, 2);
-  assert.equal(g.flakyRun, true);
+  assert.equal(g.infraRetryRun, true);
   const s = GS.summarize(root);
   assert.equal(s.runs, 1);
-  assert.equal(s.flakyRuns, 1);
-  assert.equal(s.flakeRate, 1);
+  assert.equal(s.infraRetryRuns, 1);
+  assert.equal(s.infraRetryRate, 1);
 }, { timeout: 120000 });
 
 test('redMasterSnapshot exposes gateStats for the board', async () => {
