@@ -3505,9 +3505,9 @@ function chatPreview() {
     }
   }
 }
-// t_8a006333: grow with the text up to clamp(160px, 40% of the chat pane, 320px), then scroll.
+// t_8a006333: grow with the text up to clamp(120px, 30% of the chat pane, 240px), then scroll.
 function growComposer() {
-  const i = $('#chat-input'); const max = Math.min(320, Math.max(160, i.closest('.chat-main').clientHeight * 0.4));
+  const i = $('#chat-input'); const max = Math.min(240, Math.max(120, i.closest('.chat-main').clientHeight * 0.3));
   i.style.height = 'auto'; const h = Math.min(i.scrollHeight + i.offsetHeight - i.clientHeight, max);
   i.style.height = h + 'px'; i.style.overflowY = h >= max ? 'auto' : 'hidden';
 }

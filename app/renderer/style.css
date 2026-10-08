@@ -806,7 +806,7 @@ details.evrun > summary { cursor:pointer; list-style:none; } details.evrun > sum
 details.evrun > summary::after { content:'▸'; margin-left:4px; } details.evrun[open] > summary::after { content:'▾'; }
 details.evrun .evrow { padding-left:0; }
 .avatar.human { border-width:1.5px; } .avatar.human::before { width:8px; height:8px; }
-.composer .row { position:relative; } /* t_8a006333: 1px hairline; height is set by growComposer() in app.js (grows to clamp(160px, 40% pane, 320px)) */
+.composer .row { position:relative; } /* t_8a006333: 1px hairline; height is set by growComposer() in app.js (grows to clamp(120px, 30% pane, 240px)) */
 .composer textarea { padding-right:72px; min-height:40px; overflow-y:hidden; border:1px solid var(--line); }
 .composer textarea:focus { outline:none; border-color:var(--accent); box-shadow:none; }
 .composer #chat-attach { position:absolute; right:40px; bottom:6px; border:0; background:none; margin:0; min-width:0; padding:4px; }
