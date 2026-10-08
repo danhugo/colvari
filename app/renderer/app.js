@@ -1260,8 +1260,8 @@ function renderGraph() {
     const g = el('g', { class: 'node' + (sel.node === n.id || connectFrom === n.id ? ' sel' : '') + ' st-' + live + (live === 'working' ? ' working' : '') + (rtuFor(n.id) ? ' rtpaused' : ''), transform: `translate(${n.x},${n.y})`, 'data-id': n.id }, nL);
     el('rect', { class: 'card', width: W, height: H, rx: 12 }, g);
     el('rect', { class: 'stripe', width: 4, height: H - 20, x: 0, y: 10, rx: 2, style: `fill:${agentVar(n.id)}` }, g);
-    // Working ring (t_edaa52ea): HTML in foreignObject so the spin stays on the compositor (SVG transforms repaint).
-    if (live === 'working') el('foreignObject', { class: 'avring', x: 8, y: 4, width: 44, height: 44 }, g).appendChild(document.createElementNS('http://www.w3.org/1999/xhtml', 'div'));
+    // Working ring (t_3e975251): plain SVG circle, slow opacity blink.
+    if (live === 'working') el('circle', { class: 'avring', cx: 30, cy: 26, r: 19 }, g);
     el('circle', { class: 'avatar', cx: 30, cy: 26, r: 14, style: `fill:${agentVar(n.id)};--av:${agentVar(n.id)}` }, g);
     if (isLeadRole(n.role)) el('text', { x: 40, y: 37, class: 'leadstar', 'text-anchor': 'middle' }, g).textContent = '★';
     el('image', { class: 'avface', href: faceUri(n.id), x: 16, y: 12, width: 28, height: 28, 'clip-path': 'url(#avclip-team)' }, g);
@@ -3743,7 +3743,7 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden') { chatSched.hide(); renderSched.hide(); return; }
   chatBump(); renderSched.bump(); refresh();
 });
-// Working ring (t_edaa52ea): freeze it while the window is hidden or blurred.
+// Working ring blink (t_3e975251): freeze it while the window is hidden or blurred.
 const animPause = () => document.documentElement.classList.toggle('anim-paused', document.hidden || !document.hasFocus());
 document.addEventListener('visibilitychange', animPause); addEventListener('blur', animPause); addEventListener('focus', animPause);
 setInterval(() => { if (S.orch.running && !document.hidden) refresh(); }, 2000); // backstop for the sections deltas do not carry (team/nodes/nstat); version-gated inside refresh, paused while hidden

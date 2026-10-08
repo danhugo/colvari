@@ -300,12 +300,12 @@ button:focus-visible, input:focus, select:focus, textarea:focus { outline:none; 
 .avatar.human { background:transparent !important; border:2px solid var(--human); border-radius:50%; }
 .avatar.human::before { content:''; width:10px; height:10px; border-radius:50%; background:var(--human); }
 .cgroup.self .cname { color:var(--fg-primary); }
-/* Presence by shape: working = moving ring, needs-you = "!" badge. Ring is compositor-only (t_edaa52ea): a static
-   conic arc on its own layer, spun with transform — no per-frame repaint. Paused when hidden/blurred and for reduced motion. */
-.avatar.working::after { content:''; position:absolute; inset:-4px; width:auto; height:auto; border-radius:50%; padding:2px; background:conic-gradient(transparent 0 55%, var(--success)); -webkit-mask:linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite:xor; mask-composite:exclude; border:0; will-change:transform; animation:ringspin 1.4s linear infinite; }
-@keyframes ringspin { to { transform:rotate(360deg); } }
-.anim-paused .avatar.working::after, .anim-paused #graph .avring div { animation-play-state:paused; }
-@media (prefers-reduced-motion: reduce) { .avatar.working::after, #graph .avring div { animation:none; } .avatar.working::after { background:var(--success); opacity:.55; } }
+/* Presence by shape: working = slow-blinking ring, needs-you = "!" badge. Blink animates opacity only (t_3e975251),
+   so it stays on the compositor. Paused when hidden/blurred and off for reduced motion. */
+.avatar.working::after { content:''; position:absolute; inset:-4px; width:auto; height:auto; border-radius:50%; border:2px solid var(--success); box-sizing:border-box; will-change:opacity; animation:ringpulse 1.8s ease-in-out infinite alternate; }
+@keyframes ringpulse { from { opacity:.25; } to { opacity:.8; } }
+.anim-paused .avatar.working::after, .anim-paused #graph .avring { animation-play-state:paused; }
+@media (prefers-reduced-motion: reduce) { .avatar.working::after { animation:none; opacity:.55; } }
 .avatar.ask::before { content:'!'; position:absolute; top:-5px; right:-5px; width:14px; height:14px; border-radius:50%; background:var(--warning); color:var(--fg-primary); font:700 10px/14px var(--font-sans); text-align:center; border:2px solid var(--bg-app); }
 .typing { display:inline-flex; align-items:center; gap:5px; } .typing .spin { width:10px; height:10px; border-radius:50%; border:2px solid var(--success); border-right-color:transparent; }
 /* Sticky "Your turn" bar above the composer. */
@@ -885,7 +885,8 @@ button, .pchip, .tag, .badge, .pill, .avatar, .cchip summary, .lvchip, .asswitch
 #graph .node.st-idle:not(.stuck) .avtext { fill: var(--fg-secondary); opacity: 1; }
 #graph .node.stuck .avatar { opacity: 1; stroke: var(--warning); stroke-width: 2.5; }
 #graph .node.working .avatar { stroke: var(--success); stroke-width: 2.5; }
-#graph .avring div { width:100%; height:100%; border-radius:50%; padding:3px; box-sizing:border-box; background:conic-gradient(transparent 0 55%, var(--success)); -webkit-mask:linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite:xor; mask-composite:exclude; will-change:transform; animation:ringspin 1.4s linear infinite; }
+#graph .avring { fill:none; stroke:var(--success); stroke-width:3; will-change:opacity; animation:ringpulse 1.8s ease-in-out infinite alternate; }
+@media (prefers-reduced-motion: reduce) { #graph .avring { animation:none; opacity:.55; } }
 /* Sidebar team rows wear their team hue so the avatar palette is legible at a glance. */
 #teamlist > div { display: flex; align-items: center; gap: 7px; }
 .teamdot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
