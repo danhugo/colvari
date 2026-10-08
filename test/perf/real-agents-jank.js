@@ -867,8 +867,23 @@ async function main() {
   })();
   PS_RUN = true;
   const psamp = extSampler(seeded);
+  setInterval(() => { // unref'd: never holds the process; overwritten in place every 60 s
+    try {
+      fs.writeFileSync(path.join(OUT, 'crash-snapshot.json'), JSON.stringify({
+        at: Date.now(), out: OUT, env: { agents: AGENTS, tasksPerAgent: TASKS_PER_AGENT, gate: GATE_ENABLED, arm: GATE_ARM },
+        results: RESULTS, gateInfo: GATE.info, gatePhases: GATE.phases,
+        ps: { perAgent: PS.perAgent, gate: PS.gate, samples: PS.samples.slice(-1800) },
+      }));
+    } catch {}
+  }, 60000).unref();
 
   const WINDOW_T0 = Date.now();
+  // Crash insurance (t_5fb1b9cf): the previous 5-agent arm was SIGKILLed (external, ~jetsam on
+  // this 8 GB box) AFTER every campaign but before the summary — a whole arm's data lost. The
+  // snapshot interval below dumps everything externally observable so a repeat costs at most
+  // 60 s of samples; RESULTS is filled in as each stage lands (declared here: the elWatcher's
+  // first 20 ms tick reads it and a TDZ there would take the arm down).
+  const RESULTS = {};
   await phase('chatopen');
   const stopTrace = await startTrace(TRACE_MS);
   // Main-process event-loop delay is armed HERE — after the profiler starts, so the histogram
@@ -887,12 +902,15 @@ async function main() {
     const late = now - elWatchNext;
     if (late > elWatchMax) elWatchMax = late;
     if (late > 50) { elOver50++; if (late > 200) elOver200++; if (elBlocks.length < 500) elBlocks.push({ at: now, lateMs: +late.toFixed(0) }); }
+    RESULTS.el = { watchMaxMs: elWatchMax, over50: elOver50, over200: elOver200 };
     elWatchNext = now + 20;
   }, 20);
   const probeRecs = await chatOpenCampaign(REPS);
+  RESULTS.probes = probeRecs;
   console.log(`[realperf] chat-open campaign done: ${probeRecs.length} samples`);
 
   const scrollRecs = await scrollCampaign(SCROLL_REPS);
+  RESULTS.scroll = scrollRecs;
   console.log(`[realperf] scroll campaign done: ${JSON.stringify(scrollRecs)}`);
 
   await phase('stream');
@@ -917,6 +935,7 @@ async function main() {
     }
   }
   const streamPushes = PERF_PUSH.slice(pushesAtStreamStart);
+  RESULTS.streamSubs = streamSubs;
   const streamWindowSecs = streamSubs.reduce((s, w) => s + w.wallMs, 0) / 1000;
   const ioWin = { calls: IO.winCalls, totalMs: +IO.winTotalMs.toFixed(1) };
   IO.winCalls = 0; IO.winTotalMs = 0;
@@ -927,6 +946,7 @@ async function main() {
     await phase('gatetail');
     console.log('[realperf] waiting for gate verdict (campaigns done; suite may still be running)...');
     gateRec = await gateResult(seeded, GATE_WAIT_MS);
+    RESULTS.gateRec = gateRec;
     console.log('[realperf] gate settled: ' + JSON.stringify({ finalComment: gateRec.finalComment, timedOut: !!gateRec.timedOut, wallSecs: gateRec.endedAt ? Math.round((gateRec.endedAt - gateRec.startedAt) / 1000) : null }));
   }
   EL.disable();
