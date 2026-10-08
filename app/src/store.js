@@ -27,7 +27,16 @@ const blockPayload = (r) => `${(r.names || []).length ? (r.names || []).map((n) 
 const ROLES = SUGGESTED_ROLES; // suggestions only: roles are free text
 const soonQ = new Map(); // dir -> tail promise of this process's queued deferred writes (Store._soon)
 const STATUSES = ['todo', 'in_progress', 'review', 'done', 'waiting_for_human', 'merge_conflict'];
-const SETTINGS_DEFAULTS = { claudePath: 'claude', maxConcurrency: 8, maxRuns: 30, permissionMode: 'bypassPermissions', rolePresets: [], budgetUsd: 0, budgetTokens: 0, requireApproval: false, useWorktrees: true, usageLimits: {}, autoCompactPct: 40, stallTimeoutMin: 10, watchIntervalMin: 10, autoRestart: false, maxAgents: 6, teamChangeApproval: 'ask' };
+// maxConcurrency default 5 (t_a9864978): the constraint is RAM, not CPU — per-agent CLI peak RSS is
+// 0.4–1.2 GB (Quinn's ps series, t_5fb1b9cf), so 5 agents peak at ~2–6 GB + the app (~0.4 GB) +
+// system/merge-gate headroom ≈ this 8 GB machine's ceiling. 6+ concurrent peaks overlap → swap and
+// jetsam (the first 10-agent arm died to an external SIGKILL). Still user-configurable in Settings.
+// memGuardDeferAt (t_a9864978): defer NEW dispatch while macOS memory pressure
+// (kern.memorystatus_vm_pressure_level) is at/above this level — 'warning' (default, level 2),
+// 'critical' (3), or 'off'. NOT os.freemem(): it excludes the reclaimable file cache and sat at
+// ~70 MB while the system was fine on this box, so the original freemem guard would never
+// dispatch. Non-mac platforms fall back to the literal freemem < 1.5 GB rule (src/mem-guard.js).
+const SETTINGS_DEFAULTS = { claudePath: 'claude', maxConcurrency: 5, maxRuns: 30, permissionMode: 'bypassPermissions', rolePresets: [], budgetUsd: 0, budgetTokens: 0, requireApproval: false, useWorktrees: true, usageLimits: {}, autoCompactPct: 40, stallTimeoutMin: 10, watchIntervalMin: 10, autoRestart: false, maxAgents: 6, teamChangeApproval: 'ask', memGuardDeferAt: 'warning' };
 
 // Version-map keys whose getAll section changed since the client's last fetch (all keys when `since`
 // is null = first load / project switch). Pure so the delta contract is testable without Electron.
@@ -1732,6 +1741,7 @@ class Store {
     // Core-agent team limits (see the dynamic-team plan): team size cap and approval mode.
     if (s.maxAgents !== undefined) { const n = Number(s.maxAgents); if (!Number.isInteger(n) || n < 1) throw new Error('maxAgents must be an integer >= 1'); next.maxAgents = n; }
     if (s.teamChangeApproval !== undefined && !['ask', 'auto'].includes(s.teamChangeApproval)) throw new Error('teamChangeApproval must be "ask" or "auto"');
+    if (s.memGuardDeferAt !== undefined && !['warning', 'critical', 'off'].includes(s.memGuardDeferAt)) throw new Error('memGuardDeferAt must be "warning", "critical" or "off"');
     this.withLock(() => this.write('settings', next)); return this.getSettings();
   }
   // Role presets are per project (stored in settings.json).

@@ -588,6 +588,8 @@ header { gap:4px; } header #tabs .navicon { display:inline-block; } header #tabs
 /* core "Core watching" indicator (t_5a1661d5) */
 header .pill.watchst { cursor:pointer; }
 .tag.rstwait { background:var(--warning-soft); color:var(--warning-text); padding:0 var(--space-2); }
+/* queued run (t_a9864978): ready but held by the cap or memory guard — same amber family as rstwait */
+.tag.queued { background:var(--warning-soft); color:var(--warning-text); padding:0 var(--space-2); }
 /* watch digests: green like ok-results but bold, so the periodic core digest is scannable in the feed */
 .logrow.lv-watch, .loglevel.lv-watch { color:var(--term-green); } .logrow.lv-watch .logtext { font-weight:600; }
 .updhist { width:100%; margin:6px 0; } .updhist td, .updhist th { padding:3px 6px; font-size:12px; }
