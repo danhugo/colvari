@@ -5,6 +5,8 @@
 <link rel="stylesheet" href="tokens.css">
 <style>
 *{box-sizing:border-box;margin:0}
+/* local derived token — PROPOSED for tokens.css as --danger-text (danger has no AA text variant; success/warning do) */
+:root{--danger-mix:color-mix(in srgb,var(--danger) 72%,var(--fg-primary))}
 body{font:var(--fw-regular) var(--text-md)/var(--lh-body) var(--font-sans);color:var(--fg-primary);background:var(--bg-app);height:100vh;display:grid;grid-template-columns:248px 1fr;overflow:hidden;-webkit-font-smoothing:antialiased}
 button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
 /* sidebar */
@@ -12,7 +14,7 @@ button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
 .brand{display:flex;align-items:center;gap:var(--space-2);font-family:var(--font-display);font-weight:var(--fw-bold);font-size:var(--text-lg);letter-spacing:-.02em;padding:0 var(--space-2)}
 .logo{width:24px;height:24px;flex:none}.logo .bm-arc{color:var(--accent)}.logo .bm-dots{color:var(--fg-primary)}
 .sec h6{font-family:var(--font-display);font-size:var(--text-xs);text-transform:uppercase;letter-spacing:var(--track-caps);color:var(--fg-muted);font-weight:var(--fw-semibold);padding:0 var(--space-2) var(--space-2)}
-.item{display:flex;align-items:center;gap:var(--space-2);width:100%;padding:6px var(--space-2);border-radius:var(--radius-sm);color:var(--fg-secondary);font-size:var(--text-md);transition:background var(--dur-fast) var(--ease-out)}
+.item{display:flex;align-items:center;gap:var(--space-2);width:100%;padding:6px var(--space-2);border-radius:var(--radius-sm);color:var(--fg-secondary);font-size:var(--text-md);transition:background var(--dur-fast) var(--ease-out);text-align:left}
 .item:hover{background:var(--bg-hover)}
 .item.on{background:var(--bg-active);color:var(--fg-primary);font-weight:var(--fw-semibold)}
 .item .hash{color:var(--fg-muted);width:18px;text-align:center}
@@ -28,20 +30,31 @@ button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
 .dot.idle{background:var(--bg-sidebar);box-shadow:inset 0 0 0 2px var(--fg-muted)}
 .dot.waiting{width:16px;height:16px;right:-6px;bottom:-6px;background:var(--warning-strong);color:var(--fg-on-accent);font-size:10px;font-weight:800;line-height:12px;text-align:center;animation:none}.dot.waiting::after{content:'!'}
 .item.needs{color:var(--fg-primary);font-weight:var(--fw-semibold)}.item.needs .sub{color:var(--warning-text);font-weight:var(--fw-bold)}
+.item.needs .hash{color:var(--warning-text)}
 @keyframes spin{to{transform:rotate(1turn)}}
 @media (prefers-reduced-motion:reduce){.dot.working{animation:none}}
 .side .foot{margin-top:auto;display:flex;gap:var(--space-2)}
 .chip-btn{flex:1;border:1px solid var(--border);background:var(--bg-surface);border-radius:var(--radius-sm);padding:6px;font-size:var(--text-sm);color:var(--fg-secondary)}
 /* main */
-main{display:grid;height:100vh;min-height:0;grid-template-rows:auto 1fr auto;min-width:0;position:relative}
-.top{display:flex;align-items:center;gap:var(--space-3);padding:var(--space-2) var(--space-5);border-bottom:1px solid var(--border);background:var(--bg-surface);box-shadow:var(--shadow-sm)}
+main{display:grid;height:100vh;min-height:0;grid-template-rows:auto 1fr auto;min-width:0;position:relative;overflow:clip}
+.top{display:flex;align-items:center;gap:var(--space-3);padding:var(--space-2) var(--space-5);border-bottom:1px solid var(--border);background:var(--bg-surface);box-shadow:var(--shadow-sm);position:relative;z-index:40}
 .top h1{font-family:var(--font-display);font-size:var(--text-lg);font-weight:var(--fw-bold);letter-spacing:-.01em}
 .top p{color:var(--fg-muted);font-size:var(--text-sm);display:inline;margin-left:var(--space-2)}
 .stack{display:flex;margin-left:auto}.stack .av{margin-left:-6px;border:2px solid var(--bg-surface)}
+.viewsw{display:inline-flex;border:1px solid var(--border);border-radius:var(--radius-sm);overflow:hidden}
+.viewsw button{padding:4px 12px;font-size:var(--text-sm);color:var(--fg-secondary)}
+.viewsw button+button{border-left:1px solid var(--border)}
+.viewsw button.on{background:var(--bg-active);color:var(--fg-primary);font-weight:var(--fw-semibold)}
+/* "Only you can unblock" — top-bar entry, distinct from the alerts bell and the inbox */
+.unblock{display:inline-flex;align-items:center;gap:6px;border:1px solid color-mix(in srgb,var(--warning) 45%,transparent);background:var(--warning-soft);color:var(--warning-text);font-weight:var(--fw-semibold);font-size:var(--text-sm);border-radius:var(--radius-full);padding:4px 12px;box-shadow:var(--shadow-sm);transition:box-shadow var(--dur-fast)}
+.unblock:hover{box-shadow:var(--ring-warn)}
+.unblock .flag{font-size:var(--text-md);line-height:1}
+.unblock .n{background:var(--warning-strong);color:var(--fg-on-accent);border-radius:var(--radius-full);min-width:18px;text-align:center;font-size:var(--text-xs);font-weight:var(--fw-bold);padding:0 5px;line-height:18px}
+.theme{border:1px solid var(--border);border-radius:var(--radius-sm);padding:4px 10px;font-size:var(--text-sm);color:var(--fg-secondary)}
+/* feed */
 .feed{overflow:auto;min-height:0;padding:var(--space-3) var(--space-5);display:flex;flex-direction:column;gap:0}
 .day{align-self:center;font-size:var(--text-xs);color:var(--fg-muted);background:var(--bg-surface);border:1px solid var(--border);border-radius:var(--radius-full);padding:2px 10px}
-.msg{display:flex;gap:var(--space-3);padding:6px var(--space-2) 2px;margin:0 calc(-1 * var(--space-2));border-radius:var(--radius-sm);animation:in var(--dur-in) var(--ease-out) both}
-@keyframes in{from{opacity:0;transform:translateY(5px)}}
+.msg{display:flex;gap:var(--space-3);padding:6px var(--space-2) 2px;margin:0 calc(-1 * var(--space-2));border-radius:var(--radius-sm)}
 .msg:hover{background:var(--bg-hover)}.msg>div{min-width:0;max-width:72ch}.msg+.msg:not(.cont){margin-top:var(--space-2)}
 .msg.cont{padding-top:1px}.msg.cont>.av{visibility:hidden;height:0}.msg.cont .meta{display:none}
 .msg .meta{display:flex;align-items:baseline;gap:var(--space-2);line-height:1.3}
@@ -58,48 +71,149 @@ main{display:grid;height:100vh;min-height:0;grid-template-rows:auto 1fr auto;min
 .tools{display:flex;flex-wrap:wrap;gap:4px;margin-top:3px}
 .tool{display:inline-flex;align-items:center;gap:5px;font:var(--text-xs) var(--font-mono);color:var(--fg-secondary);background:var(--bg-code);border:1px solid var(--border);border-radius:var(--radius-full);padding:1px 8px}
 .tool i{font-style:normal;color:var(--success-text)}
+/* system gate events in the feed */
+.sys{display:flex;align-items:baseline;gap:8px;margin-top:var(--space-2);padding:3px var(--space-2);font:var(--text-xs) var(--font-mono);color:var(--fg-muted)}
+.sys .gi{align-self:center;flex:none;width:16px;height:16px;border-radius:50%;display:grid;place-items:center;font-size:9.5px;font-weight:var(--fw-bold)}
+.sys.run .gi{background:var(--accent-soft);color:var(--accent-text)}
+.sys.ok .gi{background:var(--success-soft);color:var(--success-text)}
+.sys.bad .gi{background:var(--danger-soft);color:var(--danger-mix)}
+.sys b{color:var(--fg-secondary);font-weight:var(--fw-semibold)}
+/* ---- merge-gate chip family: never colour alone (icon + text), both themes AA ---- */
+.gate{display:inline-flex;align-items:center;gap:5px;font-size:var(--text-xs);font-weight:var(--fw-semibold);border-radius:var(--radius-full);padding:1px 8px;border:1px solid transparent;white-space:nowrap}
+.g-run{background:var(--accent-soft);color:var(--accent-text);border-color:color-mix(in srgb,var(--accent) 28%,transparent)}
+.g-run .gi{width:8px;height:8px;border-radius:50%;border:2px solid var(--accent);border-top-color:transparent;animation:spin 1s linear infinite}
+.g-green{background:var(--success-soft);color:var(--success-text)}
+.g-red{background:var(--danger-soft);color:var(--danger-mix)}
+.g-landed{background:var(--bg-code);color:var(--fg-secondary);border-color:var(--border)}
+.g-landed .sha{padding:0;border:0;background:none}
+.g-wait{background:var(--bg-hover);color:var(--fg-muted)}
+.g-wait::before{content:'⚑';color:var(--warning-text);font-size:10px}
+@keyframes spin{to{transform:rotate(1turn)}}
+@media (prefers-reduced-motion:reduce){.g-run .gi{animation:none;border-top-color:var(--accent)}}
+.sha{font-family:var(--font-mono);font-size:var(--text-xs);background:var(--bg-code);border:1px solid var(--border);border-radius:var(--radius-xs);padding:0 6px;color:var(--fg-secondary)}
+/* landed merge card in chat: trust record + one-click revert */
+.landed{margin-top:6px;max-width:560px;border:1px solid var(--border);border-left:3px solid var(--success);background:var(--bg-surface);border-radius:var(--radius-md);box-shadow:var(--hl),var(--shadow-md);padding:var(--space-2) var(--space-3);display:grid;gap:6px}
+.landed .t{display:flex;align-items:center;gap:var(--space-2);font-weight:var(--fw-semibold)}
+.trust{display:flex;align-items:center;flex-wrap:wrap;gap:6px;font-size:var(--text-xs);color:var(--fg-muted)}
+.trust b{color:var(--success-text);font-weight:var(--fw-semibold)}
+.trust .sep{color:var(--border-strong)}
+.lactions{display:flex;gap:6px;align-items:center}
+.flaky{font-size:var(--text-xs);color:var(--fg-muted)}
+/* red gate card: failing tests, named */
+.gatered{margin-top:6px;max-width:560px;border:1px solid color-mix(in srgb,var(--danger) 35%,transparent);border-left:3px solid var(--danger);background:var(--bg-surface);border-radius:var(--radius-md);box-shadow:var(--hl),var(--shadow-md);padding:var(--space-2) var(--space-3);display:grid;gap:6px}
+.gatered .t{display:flex;align-items:center;gap:var(--space-2);font-weight:var(--fw-semibold)}
+.fails{display:grid;gap:4px;margin:2px 0}
+.fail{font:var(--text-xs) var(--font-mono);color:var(--fg-secondary);background:var(--bg-code);border-radius:var(--radius-xs);padding:3px 8px;display:flex;gap:6px;align-items:baseline}
+.fail i{font-style:normal;color:var(--danger-mix);font-weight:var(--fw-bold)}
+.rednote{font-size:var(--text-xs);color:var(--fg-muted)}
+.rednote b{color:var(--success-text)}
+/* buttons */
+.btn{border:1px solid var(--border-strong);background:var(--bg-surface);border-radius:var(--radius-sm);padding:3px 12px;font-size:var(--text-sm);font-weight:var(--fw-medium);color:var(--fg-secondary);transition:border-color var(--dur-fast),background var(--dur-fast)}
+.btn:hover{border-color:var(--fg-muted);color:var(--fg-primary)}
+.btn.primary{background:var(--accent);border-color:var(--accent-deep);color:var(--fg-on-accent)}
+.btn.danger{border-color:color-mix(in srgb,var(--danger) 45%,transparent);color:var(--danger-mix);background:var(--danger-soft)}
+.btn.armed{background:var(--danger);border-color:var(--danger);color:#fff;font-weight:var(--fw-semibold)}
+[data-theme="dark"] .btn.armed{color:var(--fg-on-accent)}
+.btn[disabled]{opacity:.55;cursor:default}
+/* task cards (chat + board specimens) */
 .card{margin-top:4px;max-width:520px;padding:var(--space-2) var(--space-3);border:1px solid var(--border);border-left:3px solid var(--ct,var(--c));background:var(--bg-surface);border-radius:var(--radius-md);box-shadow:var(--hl),var(--shadow-md);display:grid;gap:6px;cursor:pointer;transition:transform var(--dur-base) var(--ease-out),box-shadow var(--dur-base)}
 .card:hover{transform:translateY(-1px);box-shadow:var(--hl),var(--shadow-lg)}
-.card .t{font-weight:var(--fw-semibold);display:flex;gap:var(--space-2);align-items:center}
+.card .t{font-weight:var(--fw-semibold);display:flex;gap:var(--space-2);align-items:center;flex-wrap:wrap}
 .status{font-size:var(--text-xs);font-weight:var(--fw-semibold);border-radius:var(--radius-full);padding:1px 8px}
 .s-prog{background:var(--accent-soft);color:var(--accent-text)}.s-done{background:var(--success-soft);color:var(--success-text)}.s-wait{background:var(--warning-soft);color:var(--warning-text)}
 .bar{height:4px;border-radius:var(--radius-full);background:var(--bg-hover);overflow:hidden}.bar b{display:block;height:100%;background:var(--ct,var(--c));border-radius:inherit}
 .card .foot{display:flex;align-items:center;gap:var(--space-2);font-size:var(--text-xs);color:var(--fg-muted)}
 .ask{margin-top:6px;border:1px solid color-mix(in srgb,var(--warning) 40%,transparent);background:var(--warning-soft);border-radius:var(--radius-md);padding:var(--space-3)}
+.ask-ref{display:inline-flex;gap:6px;align-items:center;margin-top:3px;font-size:var(--text-sm);color:var(--warning-text);font-weight:var(--fw-medium)}
 .typing{margin-top:var(--space-2);display:flex;align-items:center;gap:var(--space-2);color:var(--fg-muted);font-size:var(--text-sm)}
 .dots{display:inline-flex;gap:3px;padding:0 4px}
 .dots span{width:6px;height:6px;border-radius:50%;background:var(--fg-muted);animation:b 1.2s infinite}.dots span:nth-child(2){animation-delay:.15s}.dots span:nth-child(3){animation-delay:.3s}
 @keyframes b{0%,60%,100%{transform:none;opacity:.4}30%{transform:translateY(-4px);opacity:1}}
 /* composer */
 .composer{padding:0 var(--space-5) var(--space-3);position:relative}
-/* sticky "Your turn" bar */
+/* sticky "Your turn" bar — the Chat door into the unblock queue */
 .turn{margin:0 0 var(--space-2);border:1px solid color-mix(in srgb,var(--warning) 45%,transparent);background:var(--warning-soft);border-radius:var(--radius-md);box-shadow:var(--shadow-md);overflow:hidden}
 .turn h5{display:flex;align-items:center;gap:var(--space-2);font-family:var(--font-display);font-size:var(--text-xs);text-transform:uppercase;letter-spacing:var(--track-caps);color:var(--warning-text);padding:6px var(--space-3);border-bottom:1px solid color-mix(in srgb,var(--warning) 25%,transparent)}
 .turn h5 .n{background:var(--warning-strong);color:var(--fg-on-accent);border-radius:var(--radius-full);padding:0 6px;letter-spacing:0}
-.turn h5 .skip{margin-left:auto;text-transform:none;letter-spacing:0;color:var(--warning-text);font-weight:var(--fw-medium)}
+.openq{margin-left:auto;text-transform:none;letter-spacing:0;color:var(--warning-text);font-weight:var(--fw-semibold);text-decoration:underline;text-underline-offset:2px}
 .tq{display:flex;align-items:center;gap:var(--space-3);padding:6px var(--space-3)}.tq+.tq{border-top:1px solid color-mix(in srgb,var(--warning) 20%,transparent)}
 .tq .q{flex:1;min-width:0;font-weight:var(--fw-medium)}.tq .q small{display:block;font-weight:400;color:var(--fg-secondary);font-size:var(--text-xs)}
 .tq.answered{opacity:.55}
-.ask-ref{display:inline-flex;gap:6px;align-items:center;margin-top:3px;font-size:var(--text-sm);color:var(--warning-text);font-weight:var(--fw-medium)}
+.opt{border:1px solid var(--border-strong);background:var(--bg-surface);border-radius:var(--radius-sm);padding:4px 12px;font-size:var(--text-sm)}
 .box{display:flex;align-items:flex-end;gap:var(--space-2);background:var(--bg-surface);border:1px solid var(--border-strong);border-radius:var(--radius-lg);padding:var(--space-2) var(--space-2) var(--space-2) var(--space-4);box-shadow:var(--hl),var(--shadow-md);transition:box-shadow var(--dur-fast),border-color var(--dur-fast)}
 .box:focus-within{box-shadow:var(--ring),var(--shadow-md);border-color:var(--accent)}
 .box textarea{flex:1;border:0;outline:0;resize:none;background:none;color:var(--fg-primary);font:inherit;padding:6px 0;height:34px}
 .send{background:linear-gradient(180deg,color-mix(in srgb,var(--accent) 92%,white),var(--accent));color:var(--fg-on-accent);border:1px solid var(--accent-deep);border-radius:var(--radius-md);width:36px;height:34px;font-size:16px;box-shadow:var(--hl),var(--shadow-sm)}
 .hint{font-size:var(--text-xs);color:var(--fg-muted);margin-top:4px}
-.pop{position:absolute;bottom:72px;left:var(--space-6);width:280px;background:var(--bg-raised);border:1px solid var(--border);border-radius:var(--radius-md);box-shadow:var(--shadow-lg);padding:var(--space-1);display:none}
-.pop.show{display:block;animation:in var(--dur-base) var(--ease-out)}
+.pop{position:absolute;bottom:72px;left:var(--space-6);width:280px;background:var(--bg-raised);border:1px solid var(--border);border-radius:var(--radius-md);box-shadow:var(--shadow-lg);padding:var(--space-1);display:none;z-index:45}
+.pop.show{display:block}
 .pop .item{font-size:var(--text-sm)}
-/* thread drawer */
-.thread{position:absolute;top:0;right:0;bottom:0;width:380px;background:var(--bg-surface);border-left:1px solid var(--border);box-shadow:var(--shadow-lg);transform:translateX(100%);transition:transform var(--dur-slow) var(--ease-out);display:flex;flex-direction:column}
+/* task thread drawer */
+.thread{position:absolute;top:0;right:0;bottom:0;width:380px;background:var(--bg-surface);border-left:1px solid var(--border);box-shadow:var(--shadow-lg);transform:translateX(100%);transition:transform var(--dur-slow) var(--ease-out);display:flex;flex-direction:column;z-index:30}
 .thread.open{transform:none}
 .thread header{padding:var(--space-4);border-bottom:1px solid var(--border);display:grid;gap:6px}
 .thread header strong{font-family:var(--font-display);letter-spacing:-.01em}
 .thread .x{position:absolute;right:12px;top:12px;color:var(--fg-muted);font-size:18px}
 .thread .body{padding:var(--space-4);display:flex;flex-direction:column;gap:var(--space-3);overflow:auto}
 .sub-t{display:flex;align-items:center;gap:var(--space-2);font-size:var(--text-sm);padding:6px var(--space-2);border-radius:var(--radius-sm);background:var(--bg-app)}
-.theme{margin-left:var(--space-3);border:1px solid var(--border);border-radius:var(--radius-sm);padding:4px 10px;font-size:var(--text-sm);color:var(--fg-secondary)}
-.team-h{display:flex;align-items:center;gap:6px;font-family:var(--font-display);font-size:var(--text-xs);text-transform:uppercase;letter-spacing:var(--track-caps);color:var(--fg-muted);font-weight:var(--fw-semibold);padding:4px var(--space-2) 2px}
-.team-h i{font-style:normal;width:8px;height:8px;border-radius:50%;flex:none}
+.sub-t .gate{margin-left:auto}
+/* per-merge trust record + gate trail inside the thread */
+.trail{border:1px solid var(--border);border-radius:var(--radius-md);background:var(--bg-app);padding:var(--space-3);display:grid;gap:6px}
+.trail h6{font-family:var(--font-display);font-size:var(--text-xs);text-transform:uppercase;letter-spacing:var(--track-caps);color:var(--fg-muted);font-weight:var(--fw-semibold)}
+.trail ol{list-style:none;display:grid;gap:4px;font:var(--text-xs) var(--font-mono);color:var(--fg-secondary)}
+.trail li{display:flex;gap:8px;align-items:baseline}
+.trail li i{font-style:normal;color:var(--fg-muted);flex:none;width:34px}
+.trail li.ok i{color:var(--success-text)}
+/* ---- "Only you can unblock" queue (ask_human + waiting_for_human, never the inbox) ---- */
+.scrim{position:absolute;inset:0;background:color-mix(in srgb,var(--fg-primary) 16%,transparent);opacity:0;pointer-events:none;transition:opacity var(--dur-base) var(--ease-out);z-index:28}
+.scrim.show{opacity:1;pointer-events:auto}
+.queue{position:absolute;top:0;right:0;bottom:0;width:410px;background:var(--bg-surface);border-left:1px solid var(--border);box-shadow:var(--shadow-lg);transform:translateX(103%);transition:transform var(--dur-slow) var(--ease-out);display:flex;flex-direction:column;z-index:30}
+.queue.open{transform:none}
+.queue header{padding:var(--space-4);border-bottom:1px solid var(--border);display:grid;gap:4px}
+.queue header .row{display:flex;align-items:center;gap:var(--space-2)}
+.queue h2{font-family:var(--font-display);font-size:var(--text-lg);font-weight:var(--fw-bold);letter-spacing:-.01em;display:flex;align-items:center;gap:8px}
+.queue .n{background:var(--warning-strong);color:var(--fg-on-accent);border-radius:var(--radius-full);min-width:22px;text-align:center;font-size:var(--text-sm);font-weight:var(--fw-bold);line-height:22px;padding:0 6px}
+.queue .sub{font-size:var(--text-sm);color:var(--fg-muted)}
+.queue .x{margin-left:auto;color:var(--fg-muted);font-size:18px}
+.qbody{padding:var(--space-3) var(--space-4);overflow:auto;display:flex;flex-direction:column;gap:var(--space-2)}
+.qsec{font-family:var(--font-display);font-size:var(--text-xs);text-transform:uppercase;letter-spacing:var(--track-caps);color:var(--fg-muted);font-weight:var(--fw-semibold);padding:var(--space-2) 0 2px}
+.qi{border:1px solid var(--border);border-radius:var(--radius-md);background:var(--bg-raised);box-shadow:var(--hl),var(--shadow-sm);padding:var(--space-3);display:grid;gap:6px}
+.qi .who{display:flex;gap:8px;align-items:center;min-width:0}
+.qi .who .name{font-weight:var(--fw-semibold)}
+.kind{font-size:10px;font-weight:var(--fw-bold);border-radius:var(--radius-xs);padding:1px 6px;text-transform:uppercase;letter-spacing:var(--track-caps)}
+.k-q{background:var(--accent-soft);color:var(--accent-text)}
+.k-a{background:var(--warning-soft);color:var(--warning-text)}
+.k-t{background:var(--bg-hover);color:var(--fg-muted)}
+.qi .age{margin-left:auto;font-size:var(--text-xs);color:var(--fg-muted);flex:none}
+.qi .txt{font-size:var(--text-md)}
+.qi .ctx{font-size:var(--text-xs);color:var(--fg-muted)}
+.qi .acts{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.qi .open{margin-left:auto;font-size:var(--text-xs);color:var(--fg-muted);text-decoration:underline;text-underline-offset:2px}
+.qi.done{opacity:.6}
+.qi.done .txt::after{content:' — ✓ answered';color:var(--success-text);font-weight:var(--fw-semibold)}
+.qfoot{margin-top:auto;border-top:1px solid var(--border);padding:var(--space-3) var(--space-4);font-size:var(--text-xs);color:var(--fg-muted);display:grid;gap:2px}
+/* board-card specimens view */
+.ovl{position:absolute;top:53px;left:0;right:0;bottom:0;background:var(--bg-app);overflow:auto;padding:var(--space-5);display:none;z-index:5}
+.ovl.on{display:block}
+.legend{display:flex;flex-wrap:wrap;gap:var(--space-4);align-items:center;padding:var(--space-3) var(--space-4);border:1px solid var(--border);border-radius:var(--radius-md);background:var(--bg-sidebar);margin-bottom:var(--space-5);font-size:var(--text-sm);color:var(--fg-secondary)}
+.legend b{font-family:var(--font-display);font-size:var(--text-xs);text-transform:uppercase;letter-spacing:var(--track-caps);color:var(--fg-muted)}
+.collabel{font:var(--text-xs) var(--font-mono);color:var(--fg-muted);margin:0 0 var(--space-2)}
+.cgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(310px,1fr));gap:var(--space-4);margin-bottom:var(--space-6)}
+.bcard{border:1px solid var(--border);background:var(--bg-surface);border-radius:var(--radius-md);box-shadow:var(--hl),var(--shadow-sm);padding:var(--space-3);display:grid;gap:8px;align-content:start}
+.bcard:hover{box-shadow:var(--hl),var(--shadow-md)}
+.bcard b{font-size:var(--text-md);line-height:1.35}
+.cdesc{font-size:var(--text-xs);color:var(--fg-muted)}
+.ctags{display:flex;flex-wrap:wrap;gap:4px}
+.tag{font-size:var(--text-xs);font-weight:var(--fw-semibold);border-radius:var(--radius-full);padding:1px 8px;background:var(--bg-hover);color:var(--fg-secondary)}
+.tag.live{background:var(--accent-soft);color:var(--accent-text)}
+.tag.p0{background:var(--danger-soft);color:var(--danger-mix)}
+.cmeta{display:flex;align-items:center;gap:8px;font-size:var(--text-xs);color:var(--fg-muted)}
+.cmeta .spacer{flex:1}
+.bcard .lactions{margin-top:2px}
+.reverted{opacity:.55}
+/* toast */
+.toast{position:absolute;bottom:92px;left:50%;transform:translate(-50%,8px);background:var(--fg-primary);color:var(--bg-app);border-radius:var(--radius-md);padding:8px 14px;font-size:var(--text-sm);box-shadow:var(--shadow-lg);opacity:0;transition:all var(--dur-base) var(--ease-out);pointer-events:none;z-index:60;max-width:70ch}
+.toast.show{opacity:1;transform:translate(-50%,0)}
 </style>
 </head>
 <body>
@@ -109,51 +223,65 @@ main{display:grid;height:100vh;min-height:0;grid-template-rows:auto 1fr auto;min
     <button class="item on"><span class="hash">#</span>company<span class="badge">3</span></button>
     <button class="item"><span class="hash">#</span>ui-research</button>
     <button class="item"><span class="hash">#</span>platform</button>
-    <button class="item"><span class="hash">✉</span>Human inbox<span class="badge" style="background:var(--warning-strong)">1</span></button>
+  </div>
+  <div class="sec"><h6>Blocking you</h6>
+    <button class="item needs" id="sb-unblock" title="Only you can unblock: questions, approvals, paused tasks"><span class="hash">⚑</span>Needs you<span class="badge" id="sb-n" style="background:var(--warning-strong)">3</span></button>
+    <button class="item" title="Messages and FYIs — never blocks an agent"><span class="hash">✉</span>Inbox<span class="sub">1 FYI</span></button>
   </div>
   <div class="sec"><h6>Teams · 5 working</h6>
-    <div class="team-h"><i style="background:var(--agent-1)"></i>UI research</div>
+    <div class="team-h" style="display:flex;align-items:center;gap:6px;font-family:var(--font-display);font-size:var(--text-xs);text-transform:uppercase;letter-spacing:var(--track-caps);color:var(--fg-muted);font-weight:var(--fw-semibold);padding:4px var(--space-2) 2px"><i style="font-style:normal;width:8px;height:8px;border-radius:50%;background:var(--agent-1);flex:none"></i>UI research</div>
     <button class="item"><span class="av sm lead" style="--c:var(--agent-1)">M<span class="dot working"></span></span>Mira<span class="sub">working</span></button>
     <button class="item"><span class="av sm" style="--c:color-mix(in srgb,var(--agent-1) 80%,var(--agent-mix))">N<span class="dot working"></span></span>Nova<span class="sub">working</span></button>
     <button class="item needs"><span class="av sm" style="--c:color-mix(in srgb,var(--agent-1) 62%,var(--agent-mix))">L<span class="dot waiting"></span></span>Leo<span class="sub">needs you</span></button>
     <button class="item"><span class="av sm" style="--c:var(--agent-1)">V<span class="dot working"></span></span>Vex<span class="sub">working</span></button>
-    <div class="team-h"><i style="background:var(--agent-2)"></i>Platform</div>
+    <div class="team-h" style="display:flex;align-items:center;gap:6px;font-family:var(--font-display);font-size:var(--text-xs);text-transform:uppercase;letter-spacing:var(--track-caps);color:var(--fg-muted);font-weight:var(--fw-semibold);padding:4px var(--space-2) 2px"><i style="font-style:normal;width:8px;height:8px;border-radius:50%;background:var(--agent-2);flex:none"></i>Platform</div>
     <button class="item"><span class="av sm lead" style="--c:var(--agent-2)">K<span class="dot working"></span></span>Kai<span class="sub">working</span></button>
     <button class="item"><span class="av sm" style="--c:color-mix(in srgb,var(--agent-2) 80%,var(--agent-mix))">I<span class="dot idle"></span></span>Iris<span class="sub">idle</span></button>
-    <button class="item"><span class="av sm" style="--c:color-mix(in srgb,var(--agent-2) 62%,var(--agent-mix))">R<span class="dot working"></span></span>Rex<span class="sub">working</span></button>
-    <div class="team-h"><i style="background:var(--agent-3)"></i>Web</div>
-    <button class="item"><span class="av sm" style="--c:var(--agent-3)">S<span class="dot working"></span></span>Sol<span class="sub">working</span></button>
-    <button class="item"><span class="av sm" style="--c:color-mix(in srgb,var(--agent-3) 80%,var(--agent-mix))">U<span class="dot idle"></span></span>Una<span class="sub">idle</span></button>
-    <button class="item"><span class="av sm" style="--c:color-mix(in srgb,var(--agent-3) 62%,var(--agent-mix))">P<span class="dot working"></span></span>Pip<span class="sub">working</span></button>
-    <button class="item"><span class="av sm" style="--c:var(--agent-3)">A<span class="dot idle"></span></span>Ash<span class="sub">idle</span></button>
-    <button class="item"><span class="av sm" style="--c:color-mix(in srgb,var(--agent-3) 80%,var(--agent-mix))">X<span class="dot idle"></span></span>Nox<span class="sub">idle</span></button>
   </div>
   <div class="foot"><button class="chip-btn">＋ Agent</button><button class="chip-btn">⚙ Settings</button></div>
 </aside>
 <main>
   <div class="top"><div><h1># company</h1><p>Everyone · Goal: ship the chat redesign</p></div>
+    <div class="viewsw" role="group" aria-label="Prototype views"><button id="v-chat" class="on" aria-pressed="true">Chat</button><button id="v-cards" aria-pressed="false">Task cards</button></div>
     <div class="stack"><span class="av sm" style="--c:var(--agent-1)">M</span><span class="av sm" style="--c:color-mix(in srgb,var(--agent-1) 80%,var(--agent-mix))">N</span><span class="av sm" style="--c:color-mix(in srgb,var(--agent-1) 62%,var(--agent-mix))">L</span><span class="av sm" style="--c:var(--agent-1)">V</span></div>
+    <button class="unblock" id="ub-btn" aria-haspopup="dialog" aria-label="Open the Unblock queue — 3 agents are waiting for you"><span class="flag">⚑</span>Unblock<span class="n" id="ub-n">3</span></button>
     <button class="theme" id="theme">◐ Theme</button></div>
-  <section class="feed">
+
+  <!-- ============ CHAT ============ -->
+  <section class="feed" id="feed" aria-label="Chat feed">
 <span class="day">Today</span>
-<div class="msg human"><span class="av human">D</span><div><div class="meta"><span class="name">Dan</span><span class="you-tag">YOU</span><span class="time">09:12</span></div><div class="bubble"><span class="mention">@Mira</span> let's make the main chat screen feel alive — catchy but calm.</div></div></div>
-<div class="msg" style="--c:var(--agent-1);--ct:var(--agent-1-text)"><span class="av lead" style="--c:var(--agent-1)">M</span><div><div class="meta"><span class="name">Mira</span><span class="role">Design Lead</span><span class="time">09:13</span></div><div class="bubble">On it. Splitting into research, prototype and critique.</div><div class="tools"><span class="tool"><i>✓</i>create_task ×3</span><span class="tool"><i>✓</i>read_wiki</span></div></div></div>
-<div class="msg cont" style="--c:var(--agent-1);--ct:var(--agent-1-text)"><span class="av" style="--c:var(--agent-1)">M</span><div><div class="meta"><span class="name">Mira</span><span class="role"></span><span class="time">09:13</span></div><div class="bubble"><span class="mention">@Nova</span> takes the prototype, <span class="mention">@Leo</span> benchmarks Slack/Linear/Cursor, <span class="mention">@Vex</span> critiques.</div><div class="card" style="--c:var(--agent-1)" data-open><div class="t">Chat redesign <span class="status s-prog">in progress</span></div><div class="bar"><b style="width:66%"></b></div><div class="foot"><span class="av sm" style="--c:color-mix(in srgb,var(--agent-1) 80%,var(--agent-mix))">N</span><span class="av sm" style="--c:color-mix(in srgb,var(--agent-1) 62%,var(--agent-mix))">L</span><span class="av sm" style="--c:var(--agent-1)">V</span>2 of 3 subtasks · 4 replies →</div></div></div></div>
-<div class="msg" style="--c:color-mix(in srgb,var(--agent-1) 62%,var(--agent-mix));--ct:var(--agent-1-text)"><span class="av" style="--c:color-mix(in srgb,var(--agent-1) 62%,var(--agent-mix))">L</span><div><div class="meta"><span class="name">Leo</span><span class="role">UX Researcher</span><span class="time">09:20</span></div><div class="bubble">Benchmark is in the wiki — 7 products, 12 patterns. Strongest signal: nobody shows cross-agent live state.</div><div class="tools"><span class="tool"><i>✓</i>web_search ×9</span><span class="tool"><i>✓</i>write_wiki</span></div></div></div>
-<div class="msg" style="--c:color-mix(in srgb,var(--agent-1) 80%,var(--agent-mix));--ct:var(--agent-1-text)"><span class="av" style="--c:color-mix(in srgb,var(--agent-1) 80%,var(--agent-mix))">N</span><div><div class="meta"><span class="name">Nova</span><span class="role">Visual Designer</span><span class="time">09:40</span></div><div class="bubble">Tokens v2 + prototype are up. Teal over warm paper; deep forest after dark.</div><div class="tools"><span class="tool"><i>✓</i>write design/tokens.css</span><span class="tool"><i>✓</i>screenshot ×4</span></div></div></div>
-<div class="msg cont" style="--c:color-mix(in srgb,var(--agent-1) 80%,var(--agent-mix));--ct:var(--agent-1-text)"><span class="av" style="--c:color-mix(in srgb,var(--agent-1) 80%,var(--agent-mix))">N</span><div><div class="meta"><span class="name">Nova</span><span class="role"></span><span class="time">09:41</span></div><div class="bubble">Colour is tied to the <b>team</b>: UI research is teal, platform indigo, web rose. Members step lighter/darker inside the hue.</div></div></div>
-<div class="msg" style="--c:var(--agent-1);--ct:var(--agent-1-text)"><span class="av" style="--c:var(--agent-1)">V</span><div><div class="meta"><span class="name">Vex</span><span class="role">Design Critic</span><span class="time">09:48</span></div><div class="bubble">Critique posted: contrast passes AA in both themes now, density ~10 msgs/screen, ask_human card stays pinned.</div><div class="tools"><span class="tool"><i>✓</i>read design/</span><span class="tool"><i>✓</i>write design/critique.md</span></div></div></div>
-<div class="msg human"><span class="av human">D</span><div><div class="meta"><span class="name">Dan</span><span class="you-tag">YOU</span><span class="time">09:50</span></div><div class="bubble">The pebble avatars are lovely. Density looks right.</div></div></div>
-<div class="msg" style="--c:color-mix(in srgb,var(--agent-1) 62%,var(--agent-mix));--ct:var(--agent-1-text)"><span class="av" style="--c:color-mix(in srgb,var(--agent-1) 62%,var(--agent-mix))">L</span><div><div class="meta"><span class="name">Leo</span><span class="role">UX Researcher</span><span class="time">09:52</span></div><div class="bubble">Quick check before I finish the interview synthesis:</div><div class="ask-ref">⚑ Question pinned in “Your turn” ↓</div></div></div>
-<div class="msg" style="--c:color-mix(in srgb,var(--agent-1) 80%,var(--agent-mix));--ct:var(--agent-1-text)"><span class="av" style="--c:color-mix(in srgb,var(--agent-1) 80%,var(--agent-mix))">N</span><div><div class="meta"><span class="name">Nova</span><span class="role">Visual Designer</span><span class="time">10:05</span></div><div class="bubble">Display type (Space Grotesk) carries the wordmark, section headers and stat numbers. UI text stays Inter.</div><div class="tools"><span class="tool"><i>✓</i>edit prototype.html</span><span class="tool"><i>✓</i>screenshot ×3</span></div></div></div>
-<div class="msg cont" style="--c:color-mix(in srgb,var(--agent-1) 80%,var(--agent-mix));--ct:var(--agent-1-text)"><span class="av" style="--c:color-mix(in srgb,var(--agent-1) 80%,var(--agent-mix))">N</span><div><div class="meta"><span class="name">Nova</span><span class="role"></span><span class="time">10:06</span></div><div class="bubble">Human messages stay left-aligned with the accent rail — no messenger look.</div></div></div>
-<div class="msg" style="--c:var(--agent-1);--ct:var(--agent-1-text)"><span class="av lead" style="--c:var(--agent-1)">M</span><div><div class="meta"><span class="name">Mira</span><span class="role">Design Lead</span><span class="time">10:08</span></div><div class="bubble">Nice. <span class="mention">@Vex</span> can you re-run the contrast check on the new avatar steps?</div></div></div>
+<div class="msg human"><span class="av human">D</span><div><div class="meta"><span class="name">Dan</span><span class="you-tag">YOU</span><span class="time">13:58</span></div><div class="bubble"><span class="mention">@Mira</span> Rio's item 1: make the gate the demo. I want to watch a merge go red, then green, then land — and trust it.</div></div></div>
+<div class="msg" style="--c:var(--agent-1);--ct:var(--agent-1-text)"><span class="av lead" style="--c:var(--agent-1)">M</span><div><div class="meta"><span class="name">Mira</span><span class="role">Design Lead</span><span class="time">13:59</span></div><div class="bubble">On it. <span class="mention">@Nova</span> prototypes the gate + the unblock queue; Vex critiques before anything is built.</div><div class="card" data-open style="--c:var(--agent-1)"><div class="t">Visible merge gate + unblock queue <span class="status s-prog">in progress</span><span class="gate g-run"><span class="gi"></span>gate · npm test 1m48s</span></div><div class="bar"><b style="width:80%"></b></div><div class="foot"><span class="av sm" style="--c:color-mix(in srgb,var(--agent-1) 80%,var(--agent-mix))">N</span>spec written · shots next · 6 comments →</div></div></div></div>
+<div class="msg" style="--c:color-mix(in srgb,var(--agent-1) 80%,var(--agent-mix));--ct:var(--agent-1-text)"><span class="av" style="--c:color-mix(in srgb,var(--agent-1) 80%,var(--agent-mix))">N</span><div><div class="meta"><span class="name">Nova</span><span class="role">Visual Designer</span><span class="time">14:01</span></div><div class="bubble">Spec's up, flipping the task to review. Watch the card — the gate chip runs the real states: running → green → landed.</div><div class="tools"><span class="tool"><i>✓</i>write design/specs/merge-gate-visibility.md</span><span class="tool"><i>✓</i>update_task_status review</span></div></div></div>
+<div class="sys run"><span class="gi">⧗</span><span><b>merge gate</b> — running npm test on squad/t_2f8a11c9 before merging into base · started 14:02</span></div>
+<div class="msg cont" style="--c:color-mix(in srgb,var(--agent-1) 80%,var(--agent-mix));--ct:var(--agent-1-text)"><span class="av" style="--c:color-mix(in srgb,var(--agent-1) 80%,var(--agent-mix))">N</span><div><div class="meta"><span class="name">Nova</span><span class="time">14:03</span></div><div class="bubble">While it runs, the chip stays <span class="gate g-run"><span class="gi"></span>gate · running</span> on the card and in every thread row. Nobody has to ask “did it land?”.</div></div></div>
+<div class="sys ok"><span class="gi">✓</span><span><b>merge gate</b> — npm test green · 761 tests · 1 flaky rerun · tree = landed tree</span></div>
+<div class="sys ok"><span class="gi">⇥</span><span><b>merge gate</b> — auto-merged squad/t_2f8a11c9 into master as <b>4f2a1c9</b></span></div>
+<div class="msg" style="--c:color-mix(in srgb,var(--agent-1) 80%,var(--agent-mix));--ct:var(--agent-1-text)"><span class="av" style="--c:color-mix(in srgb,var(--agent-1) 80%,var(--agent-mix))">N</span><div><div class="meta"><span class="name">Nova</span><span class="role">Visual Designer</span><span class="time">14:06</span></div><div class="bubble">Landed. The trust record is on the card — what was tested is what landed:</div>
+  <div class="landed" style="--c:var(--agent-1)">
+    <div class="t">Visible merge gate + unblock queue <span class="status s-done">landed</span><span class="gate g-landed"><span class="sha">⇥ 4f2a1c9</span></span></div>
+    <div class="trust"><b>✓ 761 tests passed</b><span class="sep">·</span><span>tree = landed tree</span><span class="sep">·</span><span class="flaky">1 flaky rerun</span><span class="sep">·</span><span>14:06 by the merge gate</span></div>
+    <div class="lactions"><button class="btn danger" data-revert data-sha="4f2a1c9">Revert</button><button class="btn" data-noop="Opens the diff in a new window (prototype)">Open diff</button><button class="btn" data-noop="Shows the full gate log (prototype)">Gate log</button></div>
+  </div></div></div>
+<div class="msg" style="--c:var(--agent-2);--ct:var(--agent-2-text)"><span class="av lead" style="--c:var(--agent-2)">K</span><div><div class="meta"><span class="name">Kai</span><span class="role">Platform Lead</span><span class="time">14:11</span></div><div class="bubble">And here's the gate earning its keep — my runner-split went red on the suite. Refused before it touched master:</div>
+  <div class="gatered">
+    <div class="t">Runner split: async child processes <span class="status s-wait" style="background:var(--danger-soft);color:var(--danger-mix)">gate red</span><span class="gate g-red">✕ 2 failing</span></div>
+    <div class="fails">
+      <div class="fail"><i>✕</i>worktree.test.js › refuses merge when main checkout is dirty</div>
+      <div class="fail"><i>✕</i>merge-gate.test.js › snapshots the tested tree before the suite</div>
+    </div>
+    <div class="rednote">Merge refused — <b>master never went red</b>. Fix task <span class="sha">t_p0runner</span> auto-created for Kai.</div>
+    <div class="lactions"><button class="btn" data-noop="Opens the failing output in Logs (prototype)">Failures in Logs</button><button class="btn" data-noop="Opens the P0 fix task (prototype)">P0 fix task →</button></div>
+  </div></div></div>
+<div class="msg" style="--c:color-mix(in srgb,var(--agent-1) 62%,var(--agent-mix));--ct:var(--agent-1-text)"><span class="av" style="--c:color-mix(in srgb,var(--agent-1) 62%,var(--agent-mix))">L</span><div><div class="meta"><span class="name">Leo</span><span class="role">UX Researcher</span><span class="time">14:14</span></div><div class="bubble">PS — the perf sweep is paused waiting on a call only Dan can make. It's in the queue, not the inbox:</div><div class="ask-ref">⚑ Paused task in “Only you can unblock” — top bar →</div></div></div>
+<div class="msg" style="--c:var(--agent-1);--ct:var(--agent-1-text)"><span class="av" style="--c:var(--agent-1)">V</span><div><div class="meta"><span class="name">Vex</span><span class="role">Design Critic</span><span class="time">14:16</span></div><div class="bubble">Reading the spec now. First read: the revert must confirm in two steps — one mis-click on a landed sha is a bad afternoon.</div></div></div>
 <div class="typing"><span class="av sm" style="--c:var(--agent-1)">V</span><span class="dots"><span></span><span></span><span></span></span>Vex is reviewing the prototype…</div>
 </section>
+
   <div class="composer">
-    <div class="turn" id="turn"><h5>⚑ Your turn <span class="n" id="tn">2</span><button class="skip">Open inbox →</button></h5>
-      <div class="tq"><span class="av sm" style="--c:color-mix(in srgb,var(--agent-1) 62%,var(--agent-mix))">L</span><div class="q">Should agent tool calls be collapsed by default?<small>Leo · Research synthesis · 09:52</small></div><div class="opts" style="display:flex;gap:6px"><button class="opt" style="border:1px solid var(--border-strong);background:var(--bg-surface);border-radius:var(--radius-sm);padding:4px 12px;font-size:var(--text-sm)">Collapsed</button><button class="opt" style="border:1px solid var(--border-strong);background:var(--bg-surface);border-radius:var(--radius-sm);padding:4px 12px;font-size:var(--text-sm)">Expanded</button><button class="opt" style="border:1px solid var(--border-strong);background:var(--bg-surface);border-radius:var(--radius-sm);padding:4px 12px;font-size:var(--text-sm)">Only errors</button></div></div>
-      <div class="tq"><span class="av sm lead" style="--c:var(--agent-1)">M</span><div class="q">Approve: run <code>npm install playwright</code> in design/?<small>Mira · approval · 10:01</small></div><div class="opts" style="display:flex;gap:6px"><button class="opt" style="border:1px solid var(--border-strong);background:var(--bg-surface);border-radius:var(--radius-sm);padding:4px 12px;font-size:var(--text-sm)">Approve</button><button class="opt" style="border:1px solid var(--border-strong);background:var(--bg-surface);border-radius:var(--radius-sm);padding:4px 12px;font-size:var(--text-sm)">Deny</button></div></div>
+    <div class="turn" id="turn"><h5>⚑ Your turn <span class="n" id="tn">2</span><button class="openq" id="yt-openq">Open the queue (<span id="yt-n">3</span>) →</button></h5>
+      <div class="tq" data-qid="leo"><span class="av sm" style="--c:color-mix(in srgb,var(--agent-1) 62%,var(--agent-mix))">L</span><div class="q">Should agent tool calls be collapsed by default?<small>Leo · question · #company · 14:14</small></div><div class="opts" style="display:flex;gap:6px"><button class="opt">Collapsed</button><button class="opt">Expanded</button><button class="opt">Only errors</button></div></div>
+      <div class="tq" data-qid="mira"><span class="av sm lead" style="--c:var(--agent-1)">M</span><div class="q">Approve: run <code>npm install playwright</code> in design/?<small>Mira · approval · 14:12</small></div><div class="opts" style="display:flex;gap:6px"><button class="opt">Approve</button><button class="opt">Deny</button></div></div>
     </div>
     <div class="pop" id="pop">
       <button class="item"><span class="av sm lead" style="--c:var(--agent-1)">M</span>Mira<span class="sub">Design Lead</span></button>
@@ -163,27 +291,125 @@ main{display:grid;height:100vh;min-height:0;grid-template-rows:auto 1fr auto;min
     <div class="box"><textarea id="ta" placeholder="Message #company — type @ to mention an agent"></textarea><button class="send">↑</button></div>
     <div class="hint">Enter to send · Shift+Enter for newline · @ to mention</div>
   </div>
+
+  <!-- ============ TASK-CARD SPECIMENS (board) ============ -->
+  <section class="ovl" id="view-cards" aria-label="Task card specimens">
+    <div class="legend"><b>Gate chips</b>
+      <span class="gate g-run"><span class="gi"></span>gate · npm test 4m12s</span> running
+      <span class="gate g-green">✓ green · 761 tests</span> passed
+      <span class="gate g-red">✕ 2 failing</span> refused
+      <span class="gate g-landed"><span class="sha">⇥ 4f2a1c9</span></span> landed + trust record
+      <span class="gate g-wait">needs you</span> unblock queue
+      <span class="gate g-wait" style="color:var(--fg-secondary)">⚠ merge refused: dirty checkout</span> conflict
+    </div>
+    <div class="collabel">in_progress — working, gate not involved yet</div>
+    <div class="cgrid">
+      <div class="bcard"><b>Runner split: async child processes</b><span class="cdesc">Children spawn detached, tracked by pidfile, reaped by group…</span><div class="ctags"><span class="tag live">● live</span></div><div class="cmeta"><span class="av sm" style="--c:var(--agent-2)">K</span>Kai<span class="spacer"></span>2m ago</div></div>
+    </div>
+    <div class="collabel">review — the merge gate owns the card until it lands</div>
+    <div class="cgrid">
+      <div class="bcard"><b>Event-driven chat wakes</b><span class="cdesc">Idle agents wake on unread messages within one sweep…</span><div class="ctags"><span class="gate g-run"><span class="gi"></span>gate · npm test 4m12s</span></div><div class="cmeta"><span class="av sm" style="--c:var(--agent-2)">I</span>Iris<span class="spacer"></span>just now</div></div>
+      <div class="bcard"><b>Gate refuses dirty main checkout</b><span class="cdesc">status --porcelain on the task worktree before the suite…</span><div class="ctags"><span class="gate g-red">✕ 2 failing</span><span class="tag p0">P0 fix task</span></div><div class="cmeta"><span class="av sm" style="--c:var(--agent-2)">K</span>Kai<span class="spacer"></span>3m ago</div><div class="lactions"><button class="btn" data-noop="Opens the failing output in Logs (prototype)">Failures</button></div></div>
+      <div class="bcard"><b>Design tokens v2 — iridescence</b><span class="cdesc">Starling-teal over warm paper; deep forest after dark…</span><div class="ctags"><span class="gate g-landed"><span class="sha">⇥ 33d210d</span></span></div><div class="cmeta"><span class="av sm" style="--c:color-mix(in srgb,var(--agent-1) 80%,var(--agent-mix))">N</span>Nova<span class="spacer"></span>landed 14:06</div><div class="lactions"><button class="btn danger" data-revert data-sha="33d210d">Revert</button><span class="flaky">✓ 761 tests · tree = landed tree</span></div></div>
+    </div>
+    <div class="collabel">blocked on you — routes to the “Only you can unblock” queue, not the inbox</div>
+    <div class="cgrid">
+      <div class="bcard"><b>Perf sweep: quiet-window strategy</b><span class="cdesc">paused 26m — needs Dan's call on the loadavg threshold…</span><div class="ctags"><span class="gate g-wait">needs you</span></div><div class="cmeta"><span class="av sm" style="--c:var(--agent-2)">P</span>Perry<span class="spacer"></span>waiting 26m</div><div class="lactions"><button class="btn primary" id="card-unblock">Answer in queue</button></div></div>
+      <div class="bcard"><b>Font bundling cleanup</b><span class="cdesc">merge refused: main checkout has uncommitted changes…</span><div class="ctags"><span class="gate g-wait" style="color:var(--fg-secondary)">⚠ merge refused: dirty checkout</span></div><div class="cmeta"><span class="av sm" style="--c:var(--agent-2)">R</span>Rex<span class="spacer"></span>10m ago</div></div>
+    </div>
+  </section>
+
+  <!-- ============ TASK THREAD ============ -->
   <aside class="thread" id="thread">
-    <header style="--c:var(--agent-1);--ct:var(--agent-1-text)"><button class="x" id="close">×</button><span class="time">Task thread</span><strong style="font-size:var(--text-lg)">Chat redesign</strong>
-      <div style="display:flex;gap:6px"><span class="status s-prog">in progress</span><span class="role">owner Mira</span></div><div class="bar"><b style="width:66%"></b></div></header>
+    <header style="--c:var(--agent-1);--ct:var(--agent-1-text)"><button class="x" id="close">×</button><span class="time">Task thread</span><strong style="font-size:var(--text-lg)">Visible merge gate + unblock queue</strong>
+      <div style="display:flex;gap:6px;flex-wrap:wrap"><span class="status s-done">landed</span><span class="gate g-landed"><span class="sha">⇥ 4f2a1c9</span></span><span class="role">owner Mira</span></div><div class="bar"><b style="width:100%"></b></div></header>
     <div class="body">
-      <div class="sub-t"><span class="status s-done">done</span>Research: chat patterns<span class="sub">Leo</span></div>
-      <div class="sub-t"><span class="status s-done">done</span>Prototype main screen<span class="sub">Nova</span></div>
-      <div class="sub-t"><span class="status s-wait">review</span>Critique &amp; polish<span class="sub">Vex</span></div>
-      <div class="msg" style="--c:var(--agent-1);--ct:var(--agent-1-text)"><span class="av sm" style="--c:var(--agent-1)">V</span><div><div class="meta"><span class="name">Vex</span><span class="time">10:02</span></div><div class="bubble">Contrast on muted text passes AA in both themes. Suggest bigger tap target on tool chips.</div></div></div>
-      <div class="msg" style="--c:color-mix(in srgb,var(--agent-1) 80%,var(--agent-mix));--ct:var(--agent-1-text)"><span class="av sm" style="--c:color-mix(in srgb,var(--agent-1) 80%,var(--agent-mix))">N</span><div><div class="meta"><span class="name">Nova</span><span class="time">10:05</span></div><div class="bubble">Bumped chips to 24px height 👍</div></div></div>
+      <div class="sub-t"><span class="status s-done">done</span>Research: gate patterns<span class="sub" style="margin-left:0">Leo</span><span class="gate g-landed"><span class="sha">⇥ 9d21e7b</span></span></div>
+      <div class="sub-t"><span class="status s-done">done</span>Spec + tokens<span class="sub" style="margin-left:0">Nova</span><span class="gate g-landed"><span class="sha">⇥ c4410aa</span></span></div>
+      <div class="sub-t"><span class="status s-wait">review</span>Critique &amp; polish<span class="sub" style="margin-left:0">Vex</span><span class="gate g-run"><span class="gi"></span>gate · 48s</span></div>
+      <div class="trail">
+        <h6>Gate trail — trust record</h6>
+        <ol>
+          <li><i>14:02</i><span>gate started · npm test on squad/t_2f8a11c9</span></li>
+          <li class="ok"><i>14:06</i><span>green · 761 tests · 1 flaky rerun</span></li>
+          <li class="ok"><i>14:06</i><span>landed <span class="sha">4f2a1c9</span> · tree = landed tree</span></li>
+        </ol>
+        <div class="lactions"><button class="btn danger" data-revert data-sha="4f2a1c9">Revert merge</button><button class="btn" data-noop="Opens the diff (prototype)">Open diff</button></div>
+      </div>
+      <div class="msg" style="--c:var(--agent-1);--ct:var(--agent-1-text)"><span class="av sm" style="--c:var(--agent-1)">V</span><div><div class="meta"><span class="name">Vex</span><span class="time">14:08</span></div><div class="bubble">Trail reads well. Pin the flaky rerun on the record — trust needs the warts shown.</div></div></div>
+      <div class="msg" style="--c:color-mix(in srgb,var(--agent-1) 80%,var(--agent-mix));--ct:var(--agent-1-text)"><span class="av sm" style="--c:color-mix(in srgb,var(--agent-1) 80%,var(--agent-mix))">N</span><div><div class="meta"><span class="name">Nova</span><span class="time">14:09</span></div><div class="bubble">Done — flaky count is on the trust line now.</div></div></div>
     </div>
   </aside>
+
+  <!-- ============ ONLY YOU CAN UNBLOCK ============ -->
+  <div class="scrim" id="scrim"></div>
+  <aside class="queue" id="queue" role="dialog" aria-label="Only you can unblock">
+    <header>
+      <div class="row"><h2>⚑ Only you can unblock <span class="n" id="q-n">3</span></h2><button class="x" id="q-close" aria-label="Close">×</button></div>
+      <div class="sub" id="q-sub">3 agents paused · answering here unblocks them at once</div>
+    </header>
+    <div class="qbody">
+      <div class="qsec">Questions &amp; approvals — ask_human</div>
+      <div class="qi" data-qid="leo">
+        <div class="who"><span class="av sm" style="--c:color-mix(in srgb,var(--agent-1) 62%,var(--agent-mix))">L</span><span class="name">Leo</span><span class="kind k-q">question</span><span class="age">22m</span></div>
+        <div class="txt">Should agent tool calls be collapsed by default?</div>
+        <div class="ctx">#company · research synthesis · blocks 1 task</div>
+        <div class="acts"><button class="opt">Collapsed</button><button class="opt">Expanded</button><button class="opt">Only errors</button><button class="open" data-open-chat>Open in Chat →</button></div>
+      </div>
+      <div class="qi" data-qid="mira">
+        <div class="who"><span class="av sm lead" style="--c:var(--agent-1)">M</span><span class="name">Mira</span><span class="kind k-a">approval</span><span class="age">4m</span></div>
+        <div class="txt">Approve: run <code>npm install playwright</code> in design/</div>
+        <div class="ctx">Visible merge gate + unblock queue · installs a dev-only tool</div>
+        <div class="acts"><button class="btn primary" data-ans="Approved">Approve</button><button class="btn" data-ans="Denied">Deny</button><button class="open" data-open-chat>Open in Chat →</button></div>
+      </div>
+      <div class="qsec">Paused tasks — waiting_for_human</div>
+      <div class="qi" data-qid="perry">
+        <div class="who"><span class="av sm" style="--c:var(--agent-2)">P</span><span class="name">Perry</span><span class="kind k-t">paused task</span><span class="age">26m</span></div>
+        <div class="txt">Perf sweep: pick the quiet-window strategy</div>
+        <div class="ctx">task t_759c7498 · paused on loadavg threshold · gate reruns nightly until answered</div>
+        <div class="acts"><button class="btn primary" data-ans="Resumed">Resume</button><button class="btn" data-noop="Opens the task on the board (prototype)">Open task</button><button class="open" data-open-chat>Open in Chat →</button></div>
+      </div>
+    </div>
+    <div class="qfoot"><span><b>Inbox stays for messages and FYIs</b> — only blocking items live here.</span><span>Answering from anywhere (phone push) is planned; the queue is the single surface it feeds.</span></div>
+  </aside>
+
+  <div class="toast" id="toast" role="status"></div>
 </main>
 <script>
-const q=s=>document.querySelector(s),p=new URLSearchParams(location.search);
+const q=s=>document.querySelector(s),qa=s=>[...document.querySelectorAll(s)],p=new URLSearchParams(location.search);
+const feed=q('#feed');
 q('#theme').onclick=()=>document.documentElement.dataset.theme=document.documentElement.dataset.theme==='dark'?'light':'dark';
-document.querySelectorAll('[data-open]').forEach(e=>e.onclick=()=>q('#thread').classList.add('open'));
-q('#close').onclick=()=>q('#thread').classList.remove('open');
+/* thread + queue drawers (mutually exclusive) */
+const openDrawer=el=>{q('#thread').classList.toggle('open',el==='thread');q('#queue').classList.toggle('open',el==='queue');q('#scrim').classList.toggle('show',!!el)};
+qa('[data-open]').forEach(e=>e.onclick=()=>openDrawer('thread'));
+q('#close').onclick=()=>openDrawer(null);
+const openQueue=()=>openDrawer('queue');
+q('#ub-btn').onclick=openQueue;q('#sb-unblock').onclick=openQueue;q('#yt-openq').onclick=openQueue;q('#card-unblock')?.addEventListener('click',openQueue);
+q('#q-close').onclick=()=>openDrawer(null);q('#scrim').onclick=()=>openDrawer(null);
+addEventListener('keydown',e=>{if(e.key==='Escape')openDrawer(null)});
+/* views */
+const setView=v=>{q('#view-cards').classList.toggle('on',v==='cards');q('#v-chat').classList.toggle('on',v!=='cards');q('#v-chat').setAttribute('aria-pressed',v!=='cards');q('#v-cards').classList.toggle('on',v==='cards');q('#v-cards').setAttribute('aria-pressed',v==='cards');feed.parentElement&&(q('#feed').style.visibility=v==='cards'?'hidden':'visible');q('.composer').style.visibility=v==='cards'?'hidden':'visible'};
+q('#v-chat').onclick=()=>setView('chat');q('#v-cards').onclick=()=>setView('cards');
+/* pending-count single source */
+let pending=3;
+const setPending=n=>{pending=n;q('#tn').textContent=qa('.tq:not(.answered)').length;q('#yt-n').textContent=n;q('#ub-n').textContent=n;q('#sb-n').textContent=n;q('#q-n').textContent=n;q('#q-sub').textContent=n?`${n} agent${n>1?'s':''} paused · answering here unblocks them at once`:'Nobody is waiting — the squad is unblocked';const ub=q('#ub-btn');ub.style.opacity=n?'':'0.6';ub.setAttribute('aria-label',n?`Open the Unblock queue — ${n} agents are waiting for you`:'Open the Unblock queue — nothing is waiting for you')};
+const answer=qid=>{qa(`.tq[data-qid="${qid}"]`).forEach(t=>{t.classList.add('answered');const o=t.querySelector('.opts');if(o)o.innerHTML='✓ answered'});qa(`.qi[data-qid="${qid}"]`).forEach(i=>i.classList.add('done'));setPending(qa('.qi:not(.done)').length)};
+qa('.tq .opt').forEach(b=>b.onclick=()=>answer(b.closest('[data-qid]').dataset.qid));
+qa('.qi .opt,.qi [data-ans]').forEach(b=>b.onclick=()=>answer(b.closest('[data-qid]').dataset.qid));
+/* one-click revert, two-step confirm */
+let armT;
+qa('[data-revert]').forEach(b=>b.onclick=()=>{if(b.dataset.arm){clearTimeout(armT);toast(`Revert queued — git revert ${b.dataset.sha} · the gate re-verifies master`);const c=b.closest('.landed,.bcard,.trail');c&&c.classList.add('reverted');b.textContent='Reverted ✓';b.disabled=true}else{b.dataset.arm='1';b.textContent='Confirm revert?';b.classList.add('armed');armT=setTimeout(()=>{delete b.dataset.arm;b.textContent='Revert';b.classList.remove('armed')},2600)}});
+/* toast */
+let toastT;const toast=t=>{const el=q('#toast');el.textContent=t;el.classList.add('show');clearTimeout(toastT);toastT=setTimeout(()=>el.classList.remove('show'),2800)};
+qa('[data-noop]').forEach(b=>b.onclick=()=>toast(b.dataset.noop));
+/* mention popup */
 q('#ta').oninput=e=>q('#pop').classList.toggle('show',/@\w*$/.test(e.target.value));
-document.querySelectorAll('.tq .opt').forEach(b=>b.onclick=()=>{const t=b.closest('.tq');t.classList.add('answered');t.querySelector('.opts').innerHTML='✓ '+b.textContent;const n=document.querySelectorAll('.tq:not(.answered)').length;q('#tn').textContent=n;if(!n)setTimeout(()=>q('#turn').remove(),600)});
+/* deep links + state from the URL */
+feed.scrollTop=feed.scrollHeight;
 if(p.get('theme'))document.documentElement.dataset.theme=p.get('theme');
-if(p.has('thread'))q('#thread').classList.add('open');
+if(p.has('thread'))openDrawer('thread');
+if(p.get('queue'))openQueue();
+if(p.get('view')==='cards')setView('cards');
 if(p.has('mention')){q('#ta').value='Thanks @';q('#pop').classList.add('show')}
 </script>
 </body></html>
