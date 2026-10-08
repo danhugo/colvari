@@ -954,7 +954,8 @@ class Store {
   // exactly that tree, and only a green run lands the base.
   // opts flows into the gate ({runTests} / {testCmd} for tests and the human merge button;
   // production omits it and runs the real suite). On red/infra the task is reopened to its
-  // assignee with the capped failing output. On conflict, abort, mark the task 'merge_conflict'
+  // assignee with the capped failing output — and on a dirty worktree too (t_9b8f6195: the
+  // assignee must commit or clean their worktree before the gate can test what it lands). On conflict, abort, mark the task 'merge_conflict'
   // (not done) and hand the SAME branch to a follow-up conflict-resolution task (never a new
   // branch), so resolving it re-merges the original work instead of stranding it.
   // Human "merge now" (main.js taskMerge IPC): the same gated merge as a done flip, callable
@@ -984,6 +985,14 @@ class Store {
     try { r = await MG.gateMerge(t, opts); }
     catch (e) { return this._onMergeConflict(t, e); }
     if (r.refused) {
+      // Dirty task worktree (t_9b8f6195): uncommitted files there are the assignee's OWN work —
+      // the tested tree would not be the landed tree. Reopen (unlike dirty main, re-dispatching
+      // is right); re-marking done retries the merge.
+      if (r.reason === 'worktree-dirty' || r.reason === 'worktree-dirty-after-tests') {
+        this._updateTask(tid, { status: 'todo', reopenCount: (t.reopenCount || 0) + 1 });
+        this.commentTask(tid, 'system', WT.worktreeDirtyMessage(r.dirty || [], r.reason === 'worktree-dirty-after-tests'));
+        return this.getTask(tid);
+      }
       // Dirty main checkout: park in review (not merge_conflict) so cleaning main and
       // re-marking done retries the same merge instead of spawning a resolve task.
       this._updateTask(tid, { status: 'review' });

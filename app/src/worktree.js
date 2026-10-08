@@ -99,6 +99,17 @@ function dirtyMergeMessage(dirty) {
   return `merge refused: main checkout has uncommitted changes: ${shown}${more}. Commit or clean main, then retry.`;
 }
 
+// t_9b8f6195: the task worktree (the assignee's own checkout) has uncommitted files, so the
+// tested tree is not the tree the gate would land. `after` marks the case where the test run
+// itself left the dirt — a test bug, not the agent's work.
+function worktreeDirtyMessage(dirty, after) {
+  const shown = dirty.slice(0, DIRTY_LIST_CAP).join(', ');
+  const more = dirty.length > DIRTY_LIST_CAP ? ` (+${dirty.length - DIRTY_LIST_CAP} more)` : '';
+  return after
+    ? `merge refused: the test run left uncommitted changes in the worktree (test bug, not your fault): ${shown}${more}. Clean or commit them, then mark done to retry.`
+    : `merge refused: worktree has uncommitted changes: ${shown}${more}. Commit or clean your worktree, then mark done to retry.`;
+}
+
 // Merge branch into base; on conflict abort so nothing is left half-merged. A branch with no
 // commits ahead of base (work landed on a differently-named branch, or a verify-only task) is
 // reported as merged:false instead of running a merge that would be a no-op. A dirty main
@@ -337,4 +348,4 @@ async function diskUsage(repoDir, opts = {}) {
   return val;
 }
 
-module.exports = { ensureWorktree, branchExists, linkNodeModules, cloneNodeModules, worktreeDiff, worktreeMerge, worktreeDiscard, unmergedSquadBranches, branchMergeState, dirtyMergeMessage, dirtyMainFiles, headSha, commitsBehind, removeWorktree, sweepWorktrees, pruneWorktrees, diskUsage, worktreeDirty, listWorktrees };
+module.exports = { ensureWorktree, branchExists, linkNodeModules, cloneNodeModules, worktreeDiff, worktreeMerge, worktreeDiscard, unmergedSquadBranches, branchMergeState, dirtyMergeMessage, worktreeDirtyMessage, dirtyMainFiles, headSha, commitsBehind, removeWorktree, sweepWorktrees, pruneWorktrees, diskUsage, worktreeDirty, listWorktrees };
