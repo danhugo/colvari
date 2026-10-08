@@ -302,7 +302,7 @@ button:focus-visible, input:focus, select:focus, textarea:focus { outline:none; 
 .cgroup.self .cname { color:var(--fg-primary); }
 /* Presence by shape: working = slow-blinking ring, needs-you = "!" badge. Blink animates opacity only (t_3e975251),
    so it stays on the compositor. Paused when hidden/blurred and off for reduced motion. */
-.avatar.working::after { content:''; position:absolute; inset:-4px; width:auto; height:auto; border-radius:50%; border:2px solid var(--success); box-sizing:border-box; will-change:opacity; animation:ringpulse 1.8s ease-in-out infinite alternate; }
+.avatar.working::after { content:''; position:absolute; inset:-4px; width:auto; height:auto; border-radius:inherit; border:2px solid var(--success); box-sizing:border-box; will-change:opacity; animation:ringpulse 1.8s ease-in-out infinite alternate; }
 @keyframes ringpulse { from { opacity:.25; } to { opacity:.8; } }
 .anim-paused .avatar.working::after, .anim-paused #graph .avring { animation-play-state:paused; }
 @media (prefers-reduced-motion: reduce) { .avatar.working::after { animation:none; opacity:.55; } }
