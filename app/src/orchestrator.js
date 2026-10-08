@@ -27,6 +27,7 @@ const FQ = require('./failures');
 const PB = require('./litellm');
 const SW = require('./stall-watchdog');
 const WS = require('./wake-sweep');
+const { MemGuard } = require('./mem-guard');
 
 const MCP_SERVER = path.join(__dirname, 'mcp-server.js');
 // The init event only says "failed" (often a misleading ENOENT posix_spawn): name the real cause.
@@ -236,6 +237,13 @@ class Orchestrator extends EventEmitter {
     // Runtime breaker (t_419062e2): per-runtime unavailability + failure streak state.
     this.runtimeState = {};
     this._rtFailures = new Map(); // runtime -> { signature, count, taskIds }
+    // Memory-pressure dispatch guard (t_a9864978, src/mem-guard.js): defers NEW dispatch while the
+    // machine is under memory pressure; held work stays queued. Injectable for tests.
+    this.memGuard = opts.memGuard || new MemGuard(opts.memGuardOpts);
+    // Tasks ready but held back by a global gate (concurrency cap, memory pressure) or a local one
+    // (single run per agent, restart gate): taskId -> {taskId, nodeId, title, why, since}. Read by
+    // the snapshot's dispatchHolds (the UI's "waiting" display); rebuilt every tick.
+    this.dispatchHolds = new Map();
     this.wakeTimers = new Map(); // nodeId -> { timer, dueAt } — at most one pending wake per agent
     this.wakePairs = new Map(); // 'from>to' -> {count, since}
     this.wakeLastAt = new Map(); // nodeId -> ts of the agent's last agent->agent wake dispatch (nudge throttle anchor)
@@ -382,8 +390,14 @@ class Orchestrator extends EventEmitter {
   }
   // wiki: [{title, body, updatedAt, author}], from the store's {title: {...}} page map.
   wiki() { return this._memoBy('wiki', this.sig('wiki'), () => { let ps = {}; try { ps = this.store.listWiki(); } catch {} return TL.wikiPages(ps); }); }
+  // Queued-run display (t_a9864978): ready-but-held tasks with the reason and since when. Part of
+  // snapshotSlim so the renderer's "waiting" tag rides the normal state push.
+  holdsView() { return [...(this.dispatchHolds || new Map()).values()].map((h) => ({ ...h })); }
+  // Lazy: hand-wired orchestrator views in tests (Object.create(Orchestrator.prototype)) skip the
+  // constructor but still call changed() → snapshotSlim must not crash on a missing guard.
+  memGuardView() { return (this.memGuard ||= new MemGuard()).status(); }
   // Cheap in-memory fingerprint (no I/O): everything volatile the snapshot exposes besides file-backed parts.
-  memSig() { return JSON.stringify([this.running, this.runs, this.runCost, this.runTokens, this.totalCost, this.billedCost, this.subCost, this.budgetStop, this.usagePaused, this.usageStatus || null, this.procs.size, this.agents, this.subscriptionRateLimits, this._idleSince || 0, this._idleReason || '']); }
+  memSig() { return JSON.stringify([this.running, this.runs, this.runCost, this.runTokens, this.totalCost, this.billedCost, this.subCost, this.budgetStop, this.usagePaused, this.usageStatus || null, this.procs.size, this.agents, this.subscriptionRateLimits, this._idleSince || 0, this._idleReason || '', this.holdsView().map((h) => `${h.taskId}|${h.why}|${Math.floor((h.since || 0) / 60000)}`).join(';'), (this.memGuard && this.memGuard.status().defer) || false]); }
   // Combined fingerprint for change-driven polling: in-memory state + every file the snapshot reads.
   versionSig() { return [this.memSig(), this.sig('runs'), this.sig('board'), this.sig('wiki'), this.teamsSigOf(), this.logSig()].join('|'); }
   // IPC-safe agent view. a.currentRun carries the live run record, whose .subs is a SubagentTracker
@@ -456,7 +470,7 @@ class Orchestrator extends EventEmitter {
     // across the between-iteration gaps. The RUN SESSION itself may still be on while idle; that is
     // what runState carries (t_b2273507).
     const rs = this.runState();
-    return { runtimeState: this.runtimeState, redMaster: this.redMasterView(), running: rs.state === 'running', runState: rs, totalCost: this.totalCost, billedCost: this.billedCost || 0, subCost: this.subCost || 0, runs: this.runs, active: [...this.procs.keys()].map((id) => ({ nodeId: id, taskId: this.agent(id).taskId, cwd: this.cwds && this.cwds.get(id) || null })), runCost: this.runCost || 0, budgetStop: this.budgetStop || null, agents: Object.fromEntries(Object.entries(this.agents).map(([k, a]) => [k, this.agentView(a)])), ledger: this.ledger(), usageSince: this.usageSince(), modelStats: this.modelStats(), timeline: this.timeline(), logs: this.logs(), wiki: this.wiki(), nodeTeams: this.nodeTeams() };
+    return { runtimeState: this.runtimeState, redMaster: this.redMasterView(), running: rs.state === 'running', runState: rs, totalCost: this.totalCost, billedCost: this.billedCost || 0, subCost: this.subCost || 0, runs: this.runs, active: [...this.procs.keys()].map((id) => ({ nodeId: id, taskId: this.agent(id).taskId, cwd: this.cwds && this.cwds.get(id) || null })), runCost: this.runCost || 0, budgetStop: this.budgetStop || null, agents: Object.fromEntries(Object.entries(this.agents).map(([k, a]) => [k, this.agentView(a)])), ledger: this.ledger(), usageSince: this.usageSince(), modelStats: this.modelStats(), timeline: this.timeline(), logs: this.logs(), wiki: this.wiki(), nodeTeams: this.nodeTeams(), dispatchHolds: this.holdsView(), memGuard: this.memGuardView() };
   }
   // Renderer-facing snapshot: the UI reads only agents + run scalars, so the file-backed display parts
   // (modelStats/timeline/logs/wiki/nodeTeams) are pure IPC payload — ~1.4MB per change on a large
@@ -466,7 +480,7 @@ class Orchestrator extends EventEmitter {
   // (~100ms of getAll's p50 on the 550-task board, t_8d586961). Build the slim shape directly.
   snapshotSlim() {
     const rs = this.runState(); // renderer `running` mirrors runState, same contract as snapshot()
-    return { runtimeState: this.runtimeState, redMaster: this.redMasterView(), running: rs.state === 'running', runState: rs, totalCost: this.totalCost, billedCost: this.billedCost || 0, subCost: this.subCost || 0, runs: this.runs, active: [...this.procs.keys()].map((id) => ({ nodeId: id, taskId: this.agent(id).taskId, cwd: this.cwds && this.cwds.get(id) || null })), runCost: this.runCost || 0, budgetStop: this.budgetStop || null, agents: Object.fromEntries(Object.entries(this.agents).map(([k, a]) => [k, this.agentView(a)])), ledger: this.ledger(), usageSince: this.usageSince() };
+    return { runtimeState: this.runtimeState, redMaster: this.redMasterView(), running: rs.state === 'running', runState: rs, totalCost: this.totalCost, billedCost: this.billedCost || 0, subCost: this.subCost || 0, runs: this.runs, active: [...this.procs.keys()].map((id) => ({ nodeId: id, taskId: this.agent(id).taskId, cwd: this.cwds && this.cwds.get(id) || null })), runCost: this.runCost || 0, budgetStop: this.budgetStop || null, agents: Object.fromEntries(Object.entries(this.agents).map(([k, a]) => [k, this.agentView(a)])), ledger: this.ledger(), usageSince: this.usageSince(), dispatchHolds: this.holdsView(), memGuard: this.memGuardView() };
   }
   // Account one finished run: agent counters, session totals, persisted history.
   record(rec) {
@@ -610,6 +624,7 @@ class Orchestrator extends EventEmitter {
     if (a.status === 'working' || a.budgetStop) return; // busy (or over budget): stay unread, the next sweep retries
     const settings = this.store.getSettings();
     if (settings.maxConcurrency > 0 && this.procs.size >= settings.maxConcurrency) return;
+    if (this.memGuard?.status().defer) return; // memory pressure: stay unread, the next sweep retries (t_a9864978)
     const msgs = this.wakeUnread(nodeId, team);
     if (!msgs.length) return;
     const now = Date.now();
@@ -654,6 +669,7 @@ class Orchestrator extends EventEmitter {
     if (this.usagePaused && (node.runtime || 'claude') === 'claude') return false; // same pause rule as tick()
     const settings = this.store.getSettings();
     if (settings.maxConcurrency > 0 && this.procs.size >= settings.maxConcurrency) return false;
+    if (this.memGuard?.status().defer) return false; // memory pressure: the wake retries on a later tick (t_a9864978)
     if (settings.maxRuns > 0 && this.runs >= settings.maxRuns) return false; // at the cap the stored message still informs the human via the Board
     this.store.markMessagesRead(list.map((m) => m.id));
     this.emit('woken_by_message', { nodeId, by: [...new Set(list.map((m) => m.from))], messageIds: list.map((m) => m.id) });
@@ -1341,21 +1357,43 @@ class Orchestrator extends EventEmitter {
     try { this.sweepRestart(); } catch (e) { this.log(null, 'error', 'restart sweep: ' + e.message); }
     // Dispatch decisions (t_9e4b4805): a ready task that cannot start logs WHY, once per (task,
     // reason) — the sweep ticks every second, so a repeated identical wait must not churn the log;
-    // the entry clears when the task finally dispatches.
+    // the entry clears when the task finally dispatches. The same reasons feed dispatchHolds, the
+    // snapshot's "waiting" display (t_a9864978).
     const holdLog = (task, node, why) => {
       const m = this._dispatchHoldLog ||= new Map();
-      if (m.get(task.id) === why) return;
-      m.set(task.id, why);
-      this.log(node.id, 'system', `⏳ "${task.title}" ready but not dispatched: ${why}`);
+      const h = this.dispatchHolds ||= new Map();
+      if (m.get(task.id) !== why) {
+        m.set(task.id, why);
+        this.log(node.id, 'system', `⏳ "${task.title}" ready but not dispatched: ${why}`);
+      }
+      const prev = h.get(task.id);
+      h.set(task.id, { taskId: task.id, nodeId: node.id, title: task.title, why, since: (prev && prev.since) || Date.now() });
     };
+    // Memory-pressure guard (t_a9864978): follow the setting and refresh the probe (async,
+    // coalesced inside the guard — at most one fork per cache window); each dispatch decision
+    // below consults the cached status synchronously.
+    this.memGuard?.configure(s.memGuardDeferAt);
+    this.memGuard?.refresh().catch(() => {});
+    const dispatched = new Set();
     for (const { task, node } of ready) {
-      if (s.maxConcurrency > 0 && this.procs.size >= s.maxConcurrency) { holdLog(task, node, `maxConcurrency (${s.maxConcurrency}) slots in use`); break; } // 0 = unlimited
+      if (s.maxConcurrency > 0 && this.procs.size >= s.maxConcurrency) { holdLog(task, node, `maxConcurrency (${s.maxConcurrency}) slots in use — queued`); continue; } // 0 = unlimited
+      if (this.memGuard?.status().defer) { holdLog(task, node, `${this.memGuard.status().why} — dispatch deferred, queued`); continue; }
       if (this.procs.has(node.id)) { holdLog(task, node, `${node.name} already has a live run (single run per agent)`); continue; }
       if (this._restartGate && task.id !== this._restartAfter) { holdLog(task, node, `restart scheduled${this._restartAfter ? ` after ${this._restartAfter}` : ''}: new work waits`); continue; }
       if (this.runs >= s.maxRuns) { this.log(null, 'system', `maxRuns (${s.maxRuns}) reached`); break; }
       this._dispatchHoldLog?.delete(task.id);
+      dispatched.add(task.id);
       this.runTask(node, task, team, s).catch((e) => this.log(node.id, 'error', 'agent run crashed: ' + e.message));
     }
+    // Queued (held) tasks = ready tasks that did not dispatch this tick. The cap/pressure holds
+    // continue past the first task (every queued run is shown as waiting), so prune what dispatched
+    // or left the ready set; the maxRuns break skips holdLog, hence the fallback entry.
+    const readyIds = new Set(ready.map((r) => r.task.id));
+    for (const { task, node } of ready) {
+      if (dispatched.has(task.id) || this.dispatchHolds?.has(task.id)) continue;
+      holdLog(task, node, this.runs >= s.maxRuns ? `maxRuns (${s.maxRuns}) reached` : 'waiting');
+    }
+    for (const id of [...(this.dispatchHolds?.keys() || [])]) if (!readyIds.has(id) || dispatched.has(id)) this.dispatchHolds.delete(id);
     // Tasks held ONLY by a paused runtime never enter `ready`, so say why (same dedupe as above).
     for (const t of todo) {
       const node = team.nodes.find((n) => n.id === t.assignee);
@@ -1406,6 +1444,9 @@ class Orchestrator extends EventEmitter {
         } else if (queued && pauseHeld) {
           reason = 'paused: usage limit or runtime down';
           why = 'Run idle: dispatch is paused (usage limit or a runtime is down) with tasks queued — still on; they auto-start once it clears.';
+        } else if (queued && this.memGuard?.status().defer) {
+          reason = 'paused: memory pressure';
+          why = `Run idle: dispatch is deferred while the machine is under memory pressure (${this.memGuard.status().why}) — still on; queued tasks auto-start when it clears.`;
         } else if (queued) {
           reason = 'todo tasks blocked by dependencies';
           why = `Run idle: ${todo.length} todo task(s) blocked by open dependencies — still on; they auto-start when unblocked.`;
@@ -1970,6 +2011,7 @@ class Orchestrator extends EventEmitter {
     const s = this.store.getSettings();
     if (s.maxRuns > 0 && this.runs >= s.maxRuns) return 0;
     if (s.maxConcurrency > 0 && this.procs.size >= s.maxConcurrency) return 0;
+    if (this.memGuard?.status().defer) return 0; // memory pressure: the stuck task keeps waiting (t_a9864978)
     const team = this.store.getTeam();
     const stuck = this.store.listTasks()
       .filter((t) => t.status === 'in_progress' && !t.autoResumeTried && !t.noAutoResume)

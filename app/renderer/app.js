@@ -561,6 +561,7 @@ function renderHeader() {
   // left used to read "idle" with no start control anywhere outside the New-goal popover.
   const rs = o.runState || (o.running ? { state: 'running' } : { state: 'stopped', reason: 'not started' });
   const todos = S.tasks.filter((t) => t.status === 'todo').length;
+  const holds = o.dispatchHolds || []; // queued runs (t_a9864978): held by the cap or memory pressure
   const pill = $('#runstate');
   // Guarded writes (t_h0a1c2f9): these pills are rewritten on every renderAll tick while agents
   // stream; a same-value textContent assignment still dirties the header's layout, and the
@@ -568,11 +569,11 @@ function renderHeader() {
   const setText = (el, text) => { if (el.textContent !== text) el.textContent = text; };
   const setTitle = (el, text) => { if (el.title !== text) el.title = text; };
   if (rs.state === 'running') {
-    setText(pill, `● Running ${par || 1}`); // short status chip (t_db67859d): full wording in the tooltip
-    setTitle(pill, `running · ${par > 1 ? `${par} in parallel` : `${par || 1} agent`} · ${o.runs || 0} runs`);
+    setText(pill, `● Running ${par || 1}${holds.length ? ` +${holds.length}` : ''}`); // short status chip (t_db67859d): full wording in the tooltip
+    setTitle(pill, `running · ${par > 1 ? `${par} in parallel` : `${par || 1} agent`} · ${o.runs || 0} runs${holds.length ? ` · ${holds.length} queued: ${holds.slice(0, 3).map((h) => `"${h.title}" — ${h.why}`).join('; ')}${holds.length > 3 ? ` +${holds.length - 3} more` : ''}` : ''}`);
   } else if (rs.state === 'idle') {
     setText(pill, '● Idle');
-    setTitle(pill, `idle · ${rs.reason || 'waiting for todo tasks'} · ${o.runs || 0} runs`);
+    setTitle(pill, `idle · ${rs.reason || 'waiting for todo tasks'}${holds.length ? ` · ${holds.length} queued` : ''} · ${o.runs || 0} runs`);
   } else {
     setText(pill, todos ? `Stopped (${todos} todo)` : 'Stopped');
     setTitle(pill, `stopped — ${rs.reason || 'scheduler off'}${todos ? ` · ${todos} todo waiting` : ''} · Run (or ⌘⏎) starts the team`);
@@ -2013,7 +2014,10 @@ const ago = (ts) => { if (!ts) return ''; const ms = new Date(ts).getTime(); if 
 // cheap fingerprint of exactly what its renderer reads; hidden tabs skip entirely and re-render on
 // activation (sig reset in the tab-click handler).
 let boardSig = null, logSig = null, obsSig = null, usageSig = null, usageGroup = 0;
-const agentStamp = () => Object.entries(S.orch.agents || {}).map(([k, a]) => `${k}${a.status}${a.taskId || ''}${a.iteration || 0}${a.stall ? '!' : ''}${a.run && a.run.stall ? '!' : ''}`).join();
+const agentStamp = () => Object.entries(S.orch.agents || {}).map(([k, a]) => `${k}${a.status}${a.taskId || ''}${a.iteration || 0}${a.stall ? '!' : ''}${a.run && a.run.stall ? '!' : ''}`).join() + '|' + (S.orch.dispatchHolds || []).map((h) => `${h.taskId}${h.why}`).join() + ((S.orch.memGuard || {}).defer ? 'M' : '');
+// Queued-run lookup (t_a9864978): a task held back by the dispatch gates (concurrency cap, memory
+// pressure, single run per agent, restart gate). The card tag and run pill read this.
+const holdOf = (taskId) => (S.orch.dispatchHolds || []).find((h) => h.taskId === taskId) || null;
 let showAllDone = false; let doneOpen = true; // open by default: the 20 most recent done tasks show without a click
 // Done column: the 20 most recently updated, but a selected card is never allowed to vanish under the fold (t_db029901).
 const doneCards = (list) => { const all = list.filter((t) => t.status === 'done').slice().sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || ''))); if (showAllDone) return all.slice().sort(byPriorityThenTitle); const top = all.slice(0, 20); const s = all.find((x) => x.id === sel.task); if (s && !top.includes(s)) { top.pop(); top.push(s); } return top; };
@@ -2063,6 +2067,7 @@ function cardHtml(t) {
     noWorker ? `<span class="tag noworker" title="in_progress but no live agent process for ${esc(nodeName(t.assignee))}">No worker</span>` : '',
     stallTag(t),
     (upd.devMode !== false && rstGated(t)) ? `<span class="tag rstwait" title="held back by the restart gate${rst.scheduledAfter ? ` — starts after the core restart (after ${esc(shortTaskId(rst.scheduledAfter))})` : ' — starts after the core restarts'}">waits for restart</span>` : '',
+    holdOf(t.id) ? `<span class="tag queued" title="queued: ${esc(holdOf(t.id).why)} · waiting ${ago(holdOf(t.id).since) || 'just now'}">⏳ waiting</span>` : '',
     bl.length ? `<span class="tag blocked" title="waits for: ${esc(bl.map(taskTitle).join(', '))}">Blocked by ${esc(taskTitle(bl[0]).slice(0, 28))}${bl.length > 1 ? ` +${bl.length - 1}` : ''}</span>` : ready ? '<span class="tag ready" title="Ready">Ready</span>' : '',
     t.awaitingApproval ? '<span class="tag approval" title="needs approval">needs approval</span>' : ''].join('');
   const snippet = String(t.description || '').replace(/\s+/g, ' ').trim();
@@ -2885,7 +2890,8 @@ function renderSettings(force) {
     <div class="set-row"><div class="set-lab"><label for="st-perm">Default permission mode</label><p class="set-hint">Agents can override this per node.</p></div><div class="set-ctl"><select id="st-perm">${['bypassPermissions', 'acceptEdits', 'default', 'plan'].map((m) => `<option ${m === s.permissionMode ? 'selected' : ''}>${m}</option>`).join('')}</select></div></div>
     </div></section>
     <section class="set-sec"><h3>Limits &amp; budgets</h3><div class="set-rows">
-    <div class="set-row"><div class="set-lab"><label for="st-conc">Max concurrent agents</label><p class="set-hint">How many agents may run at the same time.</p></div><div class="set-num"><input id="st-conc" type="number" min="1" max="8" value="${s.maxConcurrency ?? 2}"><span class="set-unit">agents</span></div></div>
+    <div class="set-row"><div class="set-lab"><label for="st-conc">Max concurrent agents</label><p class="set-hint">How many agents may run at the same time. Extra ready tasks queue and start as slots free (shown as waiting).</p></div><div class="set-num"><input id="st-conc" type="number" min="1" max="12" value="${s.maxConcurrency ?? 2}"><span class="set-unit">agents</span></div></div>
+    <div class="set-row"><div class="set-lab"><label for="st-memguard">Memory guard</label><p class="set-hint">Pause new dispatch while macOS reports memory pressure at this level (queued tasks start when it clears). Off disables the guard.</p></div><div class="set-ctl"><select id="st-memguard">${[['warning', 'Defer at pressure warning'], ['critical', 'Defer only at critical'], ['off', 'Off']].map(([v, lab]) => `<option value="${v}" ${v === (s.memGuardDeferAt ?? 'warning') ? 'selected' : ''}>${lab}</option>`).join('')}</select></div></div>
     <div class="set-row"><div class="set-lab"><label for="st-maxagents">Max agents per team</label><p class="set-hint">Core agent recruit limit.</p></div><div class="set-num"><input id="st-maxagents" type="number" min="1" value="${s.maxAgents ?? 6}"><span class="set-unit">agents</span></div></div>
     <div class="set-row"><div class="set-lab"><label for="st-runs">Max agent runs per Run</label><p class="set-hint">Safety cap for the scheduler.</p></div><div class="set-num"><input id="st-runs" type="number" min="1" value="${s.maxRuns ?? 30}"><span class="set-unit">runs</span></div></div>
     <div class="set-row"><div class="set-lab"><label for="st-budgetusd">Project budget per Run</label><p class="set-hint">Stops all agents when reached. 0 = no limit.</p></div><div class="set-num"><span class="set-unit">$</span><input id="st-budgetusd" type="number" min="0" step="0.01" value="${s.budgetUsd || 0}"></div></div>
@@ -2928,7 +2934,7 @@ function renderSettings(force) {
   // input takes the default — `+0 || fb` misread a hand-typed 0 as "empty" and saved the default
   // instead of the min (0 max-runs meant "no cap" to the user but stored 30, 0 concurrency 2).
   const numv = (id, fb, lo, hi) => { const v = $('#' + id).value.trim(); if (v === '' || !Number.isFinite(+v)) return fb; return Math.max(lo, hi === undefined ? +v : Math.min(hi, +v)); };
-  $('#st-save').onclick = act(async () => { await call('saveSettings', { claudePath: $('#st-claude').value.trim() || 'claude', maxConcurrency: numv('st-conc', 2, 1, 8), maxRuns: numv('st-runs', 30, 1), permissionMode: $('#st-perm').value,
+  $('#st-save').onclick = act(async () => { await call('saveSettings', { claudePath: $('#st-claude').value.trim() || 'claude', maxConcurrency: numv('st-conc', 2, 1, 12), maxRuns: numv('st-runs', 30, 1), permissionMode: $('#st-perm').value, memGuardDeferAt: $('#st-memguard').value,
     budgetUsd: Math.max(0, +$('#st-budgetusd').value || 0), budgetTokens: Math.max(0, +$('#st-budgettok').value || 0), requireApproval: $('#st-approval').checked, notifications: $('#st-notify').checked, stuckMinutes: numv('st-stuck', 5, 1),
     stallTimeoutMin: numv('st-stall', 10, 1),
     maxAgents: numv('st-maxagents', 6, 1), teamChangeApproval: $('#st-tcappr').value === 'auto' ? 'auto' : 'ask',

@@ -25,7 +25,7 @@ test('warm getSettings hits no disk', () => {
 test('out-of-process settings write is picked up on the next read', () => {
   const d = mktemp('setcache-ext-');
   const s = new Store(d);
-  assert.equal(s.getSettings().maxConcurrency, 8);
+  assert.equal(s.getSettings().maxConcurrency, 5); // default cap (t_a9864978)
   const tmp = path.join(d, '.settings.json.tmp'); // another process's atomic write shape
   fs.writeFileSync(tmp, JSON.stringify({ maxConcurrency: 3 }));
   fs.renameSync(tmp, path.join(d, 'settings.json'));
