@@ -8,16 +8,18 @@ const fs = require('node:fs');
 const path = require('node:path');
 const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
 
-test('style.css infinite animations are compositor-only, paused when hidden, off for reduced motion (t_edaa52ea)', () => {
+test('style.css infinite animations are opacity-only blink, paused when hidden, off for reduced motion (t_3e975251)', () => {
   const css = read('renderer/style.css');
   const names = [...css.matchAll(/animation[^;{}]*infinite/gi)].map((m) => (m[0].match(/animation\s*:\s*([\w-]+)/) || [])[1]);
   for (const n of names) {
     const kf = css.match(new RegExp(`@keyframes ${n}\\s*\\{((?:[^{}]*\\{[^}]*\\})*)[^{}]*\\}`));
     assert.ok(kf, `missing @keyframes ${n}`);
     const props = [...kf[1].matchAll(/([\w-]+)\s*:/g)].map((m) => m[1]);
-    assert.deepEqual(props.filter((p) => p !== 'transform' && p !== 'opacity'), [], `@keyframes ${n} repaints every frame — animate only transform/opacity`);
+    assert.deepEqual(props.filter((p) => p !== 'opacity'), [], `@keyframes ${n} must animate only opacity (blink, no spin)`);
   }
-  assert.deepEqual([...new Set(names)], ['ringblink'], 'only the working ring may loop');
+  assert.deepEqual([...new Set(names)], ['ringpulse'], 'only the working ring may loop');
+  assert.doesNotMatch(css, /ringspin|conic-gradient/, 'spin ring code removed');
+  assert.doesNotMatch(read('renderer/app.js'), /foreignObject/, 'graph ring is a plain SVG circle');
   assert.match(css, /\.anim-paused [^{]*\{[^}]*animation-play-state:\s*paused/, 'ring must pause when the window is hidden/blurred');
   assert.match(css, /prefers-reduced-motion: reduce\)\s*\{[^@]*\.avatar\.working::after[^}]*animation:\s*none/, 'ring must stop for reduced motion');
   assert.match(read('renderer/app.js'), /anim-paused/, 'renderer toggles .anim-paused on hide/blur');
