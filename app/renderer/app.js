@@ -3171,7 +3171,7 @@ function renderChatBody() {
   const working = new Set(Object.keys(S.orch.agents || {}).filter((id) => S.orch.agents[id].status === 'working'));
   const L = projLogs();
   CH.subIndex = null; // per-draw subagent record index (see subRecOf)
-  let ev = Chat.roomEvents(L, S.tasks, S.messages, S.inbox, Chat.MAX, subRecOf); // capped to the last Chat.MAX (500) events
+  let ev = Chat.roomEvents(L, S.tasks, S.messages, S.inbox, Chat.MAX, subRecOf, S.team && S.team.nodes); // capped to the last Chat.MAX (500) events
   if (sel.chatTeam) { ev = ev.filter(chatInScope); for (const e of ev) e._tb = crossTeamOf(e); } // team scope + cross-team badges (t_1158f757)
   CH.ev = ev;
   CH.asks = ev.filter((e) => e.type === 'question').map((e) => e.who);
