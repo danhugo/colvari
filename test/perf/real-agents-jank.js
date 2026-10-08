@@ -223,13 +223,14 @@ delete process.env.AGENTS_SQUAD_SMOKE;
 
 let wc = null;
 let failed = false;
+let SEEDED = null; // module-level so the failure handler can reap this instance's own groups
 app.on('web-contents-created', (_e, contents) => {
   if (contents.getType() !== 'window') return;
   contents.setBackgroundThrottling(false); // honest rAF even if occluded
   contents.on('did-finish-load', async () => {
     wc = contents;
     try { await main(); } catch (e) { failed = true; console.error('[realperf] failed:', e && e.stack || e); }
-    if (failed) { try { await stopOrchestrator(); } catch {} await WAIT(1000); }
+    if (failed) { try { console.log('[realperf] killed own groups on failure:', killMyChildren(SEEDED)); } catch {} await WAIT(1000); }
     app.exit(failed ? 1 : 0);
     setTimeout(() => { try { app.exit(failed ? 1 : 0); } catch {} process.exit(failed ? 1 : 0); }, 3000).unref();
   });
@@ -250,6 +251,21 @@ async function stopOrchestrator() {
 // Last-resort watchdog: a promise-hang anywhere must not leave an instance lingering. Scales
 // with AGENTS — the 5-agent run legitimately runs longer under load (t_c69c2170).
 setTimeout(() => { console.error('[realperf] WATCHDOG: force exit'); try { app.exit(3); } catch {} }, Number(process.env.PERF_MAX_MS || (20 + 4 * Math.max(0, AGENTS - 2)) * 60000)).unref();
+
+// Teardown (t_5fb1b9cf lesson): call('stop') hangs the app main thread when an agent's final MCP
+// write holds the store lock (sleepSync spin) — even the 3 s exit fallback then never fires and
+// the instance lingers for good (smoke-4 + agents-5 zombies). So after results are written the
+// harness kills its OWN recorded process groups (agent run pidfiles + the gate's pidfile — pids
+// this instance started, never name-matched), waits briefly, and exits without the app-side stop.
+function killMyChildren(seeded) {
+  const kills = new Set();
+  if (seeded && seeded.dir) { try { for (const f of fs.readdirSync(path.join(seeded.dir, '.squad', 'run-pids'))) { const p = Number(f); if (p > 1) kills.add(p); } } catch {} }
+  if (GATE.info && GATE.info.root) {
+    try { for (const l of fs.readFileSync(path.join(GATE.info.root, '.squad', 'merge-gate.pids'), 'utf8').split('\n').filter(Boolean)) { const p = Number(l.split('\t')[0]); if (p > 1) kills.add(p); } } catch {}
+  }
+  for (const p of kills) { try { process.kill(-p, 'SIGKILL'); } catch { try { process.kill(p, 'SIGKILL'); } catch {} } }
+  return kills.size;
+}
 
 // ---- in-page instrumentation -------------------------------------------------------------
 const INSTRUMENT = `
@@ -454,7 +470,7 @@ function buildGateLab(projectRoot) {
   const giSrc = path.join(APP, '..', '.gitignore');
   let gi = '';
   try { gi = fs.readFileSync(giSrc, 'utf8'); } catch {}
-  for (const line of ['node_modules', 'e2e-shots', '*.log']) if (!new RegExp('^' + line + '$', 'm').test(gi)) gi += (gi && !gi.endsWith('\n') ? '\n' : '') + line + '\n';
+  for (const line of ['node_modules', 'e2e-shots', '*.log']) if (!gi.split('\n').includes(line)) gi += (gi && !gi.endsWith('\n') ? '\n' : '') + line + '\n';
   fs.writeFileSync(path.join(root, '.gitignore'), gi);
   if (GATE_SUITE_MS > 0) { // smoke runs only: fake suite that emits the gate's own summary shape
     const pkg = JSON.parse(fs.readFileSync(path.join(appDir, 'package.json'), 'utf8'));
@@ -520,6 +536,7 @@ const PS = { samples: [], perAgent: {}, gate: null, errors: 0 };
 let PS_RUN = false;
 const psTimeMs = (s) => { if (!s) return 0; const m = String(s).trim().match(/^(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+(?:\.\d+)?)$/); if (!m) return 0; return ((((+m[1] || 0) * 24 + (+m[2] || 0)) * 60 + (+m[3] || 0)) * 60 + (+m[4] || 0)) * 1000; };
 let curPhase = 'warm';
+const GATE_CMD_RE = /.*\/(node|npm|sh)\s*/; // module-level: per-row literal regexes burned ~10 s of main CPU over a 5-agent arm (t_5fb1b9cf lesson)
 function parsePsTable(out) {
   const rows = [];
   for (const line of out.split('\n')) {
@@ -546,9 +563,11 @@ function psTick(rows, seeded) {
     const stack = roots.filter((p) => p > 1), seen = new Set(stack), gpids = new Set(stack);
     while (stack.length) { const p = stack.pop(); for (const c of kids[p] || []) if (!seen.has(c)) { seen.add(c); gpids.add(c); stack.push(c); } }
     if (gpids.size) {
-      let gPcpu = 0, gRss = 0, gCpu = 0; const top = [];
-      for (const r of rows) if (gpids.has(r.pid)) { gPcpu += r.pcpu; gRss += r.rss; gCpu += r.tms; top.push({ pid: r.pid, pcpu: r.pcpu, rssKb: r.rss, cmd: String(r.args).replace(/.*\/(node|npm|sh)\s*/, '$1 ').slice(0, 60) }); }
-      g = { n: gpids.size, pcpu: +gPcpu.toFixed(1), rssKb: gRss, cpuMs: gCpu, top: top.sort((x, y) => y.pcpu - x.pcpu).slice(0, 6) };
+      let gPcpu = 0, gRss = 0, gCpu = 0; const raw = [];
+      for (const r of rows) if (gpids.has(r.pid)) { gPcpu += r.pcpu; gRss += r.rss; gCpu += r.tms; raw.push(r); }
+      const top = raw.sort((x, y) => y.pcpu - x.pcpu).slice(0, 6) // cmd formatting only for the 6 hottest: the regex is not free on the app's main thread
+        .map((r) => ({ pid: r.pid, pcpu: r.pcpu, rssKb: r.rss, cmd: String(r.args).replace(GATE_CMD_RE, '$1 ').slice(0, 60) }));
+      g = { n: gpids.size, pcpu: +gPcpu.toFixed(1), rssKb: gRss, cpuMs: gCpu, top };
     }
   }
   return { agents, aPcpu, aRss, gate: g };
@@ -807,6 +826,7 @@ async function main() {
   if (maxLoad > 0 && LOAD_START[0] > maxLoad) throw new Error(`load1m ${LOAD_START[0].toFixed(1)} > PERF_MAX_LOAD ${maxLoad} — rerun on a quiet machine (5-agent passes want load1m under ~6)`);
   await WAIT(1200);
   const seeded = await seed();
+  SEEDED = seeded;
   assertAgentSandbox(seeded); // hard gate: agents only start in a sandboxed git workdir (t_8f7605c4)
   const bulk = bulkSeed(seeded.dir, seeded.nodes);
   console.log('[realperf] seeded', JSON.stringify({ nodes: seeded.nodes.length, tasks: AGENTS * TASKS_PER_AGENT, staggerMs: STAGGER_MS, stallMin: STALL_MIN, ...bulk }));
@@ -1075,8 +1095,9 @@ async function main() {
   fs.writeFileSync(path.join(OUT, 'real-agents-jank.md'), markdown(summary));
   console.log('\n' + markdown(summary));
   console.log(`[realperf] wrote ${path.join(OUT, 'real-agents-jank.json')}`);
-  await stopOrchestrator();
-  await WAIT(1500);
+  const nk = killMyChildren(seeded);
+  console.log(`[realperf] killed ${nk} own agent/gate process groups; exiting without call('stop') (it wedges the main thread behind an agent's final store write)`);
+  await WAIT(800);
 }
 
 function markdown(s) {
