@@ -994,6 +994,6 @@ header .runctl #runstate { height:100%; display:inline-flex; align-items:center;
 header .runctl button { height:100%; border:none; border-left:1px solid var(--border); border-radius:0; padding:0 10px; font-size:var(--text-xs); }
 header .runctl #stop { padding:0 10px; }
 header #newgoal { height:var(--topbar-h); padding:0 12px; font-size:var(--text-xs); border-radius:var(--radius-sm); margin-right:6px; }
-header #alertbell, header #settingsbtn, header #help { width:var(--topbar-h); height:var(--topbar-h); padding:0; border:none; background:none; border-radius:var(--radius-sm); display:inline-flex; align-items:center; justify-content:center; color:var(--fg-secondary); }
-header #alertbell:hover, header #settingsbtn:hover, header #help:hover { background:var(--bg-hover); color:var(--fg-primary); }
-header #alertbell.active, header #settingsbtn.active { background:var(--accent-soft); color:var(--accent-text); }
+/* Icon buttons sit in a <nav> so they reuse the tab button look (no border, hover/active bg); only size them. */
+header .hdricons { display:inline-flex; gap:2px; }
+header .hdricons button { width:var(--topbar-h); height:var(--topbar-h); padding:0; justify-content:center; }
