@@ -2401,7 +2401,7 @@ async function guiE2E() {
     expect('topbar: cost pill populated (tokens pill removed; cost visible)', await ex(`return !$('#totalcost').classList.contains('hidden') && !/no cost yet/.test($('#totalcost').textContent) && !document.querySelector('#totaltokens')`));
     // Regime (t_bc19b2f5, t_57421101 round 3; goal popover in t_db67859d): the meter and the cost
     // pill are FIXED — they may never shrink or clip, at any width. #updst/#runstate ellipsize as
-    // the last valves, and below 1500px the tab labels collapse to icons (brand text hides under 1000px).
+    // the last valves, and the tabs are icon-only at every width (brand text hides under 1000px).
     // The header holds only fixed-size chrome now: the goal composer lives in a popover off the
     // "New goal" button, asserted to open focused and fully on-screen at 1400px below.
     const measure = `(async () => { const h = document.querySelector('header'); const d = document.documentElement; const vis = (s) => { const e = document.querySelector(s); if (!e || e.getClientRects().length === 0) return false; const r = e.getBoundingClientRect(); return r.width > 0 && r.left >= 0 && r.right <= window.innerWidth && r.top >= 0 && r.bottom <= window.innerHeight; };
@@ -2409,17 +2409,20 @@ async function guiE2E() {
       return { sw: Math.max(d.scrollWidth, document.body.scrollWidth), cw: Math.min(d.clientWidth, document.body.clientWidth), edge: Math.round(Math.max(...[...h.children].map((c) => c.getBoundingClientRect().right))), iw: window.innerWidth, hdrSw: h.scrollWidth, hdrCw: h.clientWidth, newgoal: vis('#newgoal'), help: vis('#help'), cost: vis('#totalcost'), clipped: [...h.children].filter((c) => c.id !== 'goalpop' && c.scrollWidth > c.clientWidth + 1).map((c) => c.id || c.className), kids: [...h.children].map((c) => ({ id: c.id || c.className, w: Math.round(c.getBoundingClientRect().width), sw: c.scrollWidth, cw: c.clientWidth })), meterKids: [...document.querySelector('#limitmeter').children].map((c) => ({ cls: c.className, w: Math.round(c.getBoundingClientRect().width), t: c.textContent.trim().slice(0, 24) })), cm: cm ? Math.round(cm.getBoundingClientRect().right) : null, thDisp: !!(th && th.getClientRects().length), thW: th ? Math.round(th.getBoundingClientRect().width) : 0 }; })()`;
     const prevSize = win.getContentSize();
     const sweep = [];
-    for (const cw of [1900, 1600, 1400, 900]) {
+    for (const cw of [1900, 1800, 1600, 1400, 1200, 900]) {
       win.setContentSize(cw, Math.max(600, Math.min(prevSize[1], 800))); await new Promise((r) => setTimeout(r, 350));
       const m = await ex(`return ${measure}`); sweep.push({ cw, ...m });
       expect(`topbar: no horizontal scroll at ${cw}px (page scrollWidth ${m.sw} <= ${m.cw})`, m.sw <= m.cw + 1, m);
       expect(`topbar: no header item cut off at ${cw}px (rightmost edge ${m.edge} <= window ${m.iw})`, m.edge <= m.iw + 1, m);
       expect(`topbar: New goal/Help visible at ${cw}px`, m.newgoal && m.help, m);
+      const tabs = await ex(`return [...document.querySelectorAll('#tabs button')].map((b) => ({ lbl: b.querySelector('.lbl').getClientRects().length, ico: b.querySelector('.navicon').getClientRects().length || getComputedStyle(b).display === 'none', aria: b.getAttribute('aria-label') || '', title: b.title }))`);
+      expect(`topbar: tabs are icon-only at ${cw}px, names kept in title + aria-label (t_2cc8f0de)`, tabs.length === 6 && tabs.every((t) => !t.lbl && t.ico && t.aria && t.title), tabs);
       expect(`topbar: cost pill visible at ${cw}px (no breakpoint: the pill stays at every width)`, m.cost, m);
       if (cw >= 1400) expect(`topbar: nothing clipped at ${cw}px — goal absorbs, the summary chip shows full text`, m.clipped.length === 0, m);
       else expect(`topbar: below 1400px only #updst/#runstate may clip — the chip and the cost pill never do`, m.clipped.every((x) => /updst|runstate|restartst|watchst/.test(String(x))), m);
       if (cw === 1600 || cw === 1400 || cw === 900) expect(`topbar: chat pane reaches the window's right edge at ${cw}px (chat right ${m.cm} vs window ${m.iw}, thread hidden)`, m.cm !== null && m.cm >= m.iw - 1 && !m.thDisp, m);
       await shot(`topbar-${cw}`);
+      if (cw === 1800 || cw === 1200) { await ex(`document.documentElement.dataset.theme = 'dark'; await w(150);`); await shot(`topbar-${cw}-dark`); await ex(`document.documentElement.dataset.theme = 'light'; await w(150);`); }
       if (cw === 1400) { // the composer popover must open focused and sit fully on-screen (t_db67859d)
         await ex(`$('#newgoal').click(); await w(200);`);
         const gp = await ex(`return { open: !$('#goalpop').classList.contains('hidden'), w: Math.round($('#goalpop').getBoundingClientRect().width), r: Math.round($('#goalpop').getBoundingClientRect().right), b: Math.round($('#goalpop').getBoundingClientRect().bottom), ih: window.innerHeight, focused: document.activeElement === $('#goal') }`);
