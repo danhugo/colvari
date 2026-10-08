@@ -30,11 +30,15 @@ jobs:
       - name: npm ci
         working-directory: app
         run: npm ci
-      - name: Fix Electron chrome-sandbox perms (SUID helper on CI runners)
+      - name: Diagnose electron dist
         working-directory: app
+        run: ls -la node_modules/electron/dist/ | head -20
+      - name: Electron sandbox fix for CI runners (SUID helper + Ubuntu 24.04 userns)
         run: |
-          sudo chown root:root node_modules/electron/dist/chrome-sandbox
-          sudo chmod 4755 node_modules/electron/dist/chrome-sandbox
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          sudo chown root:root app/node_modules/electron/dist/chrome-sandbox || true
+          sudo chmod 4755 app/node_modules/electron/dist/chrome-sandbox || true
+          ls -la app/node_modules/electron/dist/chrome-sandbox || true
       - name: Configure git identity (tests commit and merge in temp repos)
         run: |
           git config --global user.email "ci@colvari.local"
