@@ -97,7 +97,7 @@ async function refresh() {
     s.nstat = nstat && cross ? nstat : (S.nstat || {});
     s.cross = nstat && cross ? cross : (S.cross || []);
     ctx.t = s.teamId;
-    if (bootTeam && ctx.t) { bootTeam = false; sel.chatTeam = sel.boardTeam = ctx.t; } // boot: follow the sidebar team (t_ce954427) — boot never goes through switchTo(); empty ctx.t keeps the flag for a later refresh
+    if (bootTeam && ctx.t) { bootTeam = false; sel.logTeam = sel.chatTeam = sel.boardTeam = ctx.t; $('#logfilter').value = ''; } // boot: follow the sidebar team (t_ce954427, Logs too: t_78d98406) — boot never goes through switchTo(); empty ctx.t keeps the flag for a later refresh
     P = p; S = { ...S, ...s };
     lastV = s.v || v; lastVProject = ctx.p;
     runsChanged = !since || since.runs !== v.runs; // (assigns the module flag — a shadowing const here made every refresh reload runs.json)
