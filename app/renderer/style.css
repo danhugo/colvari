@@ -980,3 +980,15 @@ button, .pchip, .tag, .badge, .pill, .avatar, .cchip summary, .lvchip, .asswitch
 .card .ctags .tag { min-width:0; max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .card b { overflow-wrap:anywhere; }
 .stuckbar button { white-space:nowrap; }
+/* Bottom status bar (t_13fabf5a): passive status moved out of the top bar; plain muted text, color on text only for warnings. */
+#statusbar { position:relative; display:flex; align-items:center; gap:14px; height:23px; padding:0 10px; border-top:1px solid var(--line); background:var(--bg-surface); font-size:11px; color:var(--fg-muted); flex-shrink:0; white-space:nowrap; }
+#statusbar .sbitem { cursor:pointer; font-variant-numeric:tabular-nums; } #statusbar .sbitem:hover { color:var(--fg-primary); } #statusbar .hidden { display:none; }
+#statusbar #wtdisk.wtwarn, #statusbar .lm-warn { color:var(--warning-text); } #statusbar .lm-danger, #statusbar .upd-error { color:var(--danger); }
+#statusbar .limitmeter { font-size:11px; } #statusbar .limitmeter .lm-part { background:none; padding:0; color:inherit; }
+.sbpop { position:absolute; bottom:26px; width:310px; max-height:320px; overflow:auto; padding:10px; background:var(--bg-surface); border:1px solid var(--line); border-radius:var(--radius-md, 8px); box-shadow:var(--shadow-md, 0 4px 16px rgba(0,0,0,.2)); color:var(--fg-primary); font-size:12px; white-space:normal; z-index:50; }
+.sbpop.hidden { display:none; } .sbpop table { width:100%; } .sbpop td:last-child { text-align:right; } .sbpop ul { margin:6px 0; padding-left:18px; } .sbpop-foot { text-align:right; margin-top:8px; }
+/* Run control: state + Run/Stop as one group. */
+header .runctl { display:inline-flex; align-items:center; gap:4px; } header #stop { padding:2px 7px; }
+/* macOS: header is the window drag region; every control stays clickable. */
+header { -webkit-app-region:drag; } header button, header .runctl, header .goalpop, #sbpop { -webkit-app-region:no-drag; }
+#statusbar #totalcost.overbudget { color:var(--danger); }

@@ -9,16 +9,9 @@
     <button data-tab="chat" class="active" title="Chat"><svg class="navicon" viewBox="0 0 24 24"><path d="M4 5h16v11H8l-4 4V5Z"/></svg><span class="lbl">Chat</span></button><button data-tab="team" title="Team"><svg class="navicon" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><circle cx="17" cy="9" r="2.4"/><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6M14 14.2c2.9.3 5 2.6 5 5.8"/></svg><span class="lbl">Team</span></button><button data-tab="board" title="Board"><svg class="navicon" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="1.5"/><path d="M9 4v16M15 4v16"/></svg><span class="lbl">Board</span></button><span class="navsep"></span><button data-tab="wiki" class="sec" title="Wiki"><svg class="navicon" viewBox="0 0 24 24"><path d="M4 4.5C4 4 5 3.5 7 3.5s3.5.5 3.5.5v15S9.5 18.5 7 18.5 4 19 4 19.5v-15ZM10.5 4s1.5-.5 3.5-.5 3 .5 3 1v15S15.5 19 13.5 19s-3 .5-3 .5v-15Z"/></svg><span class="lbl">Wiki</span></button><button data-tab="obs" class="sec" title="Observability (logs)"><svg class="navicon" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="1.5"/><path d="m6.5 9 3 3-3 3M12 15h5.5"/></svg><span class="lbl">Logs</span></button><button data-tab="usage" class="sec" title="Usage"><svg class="navicon" viewBox="0 0 24 24"><path d="M4 20V10M11 20V4M18 20v-7"/></svg><span class="lbl">Usage</span></button>
   </nav>
   <span class="spacer"></span>
-  <div id="limitmeter" class="limitmeter hidden" title="Usage limits"></div>
-  <span id="watchst" class="pill hidden" title=""></span>
-  <span id="updst" class="pill hidden"></span>
-  <span id="runstate" class="pill">Stopped</span>
-  <button id="runbtn" class="primary hidden" title="Start the team (⌘⏎)">Run</button>
-  <span id="wtdisk" class="pill hidden" title=""></span>
-  <span id="totalcost" class="pill" title="API-equivalent (reported by Claude CLI). Not what you pay on a Pro/Max subscription.">API-eq $0.0000</span>
-  <button id="stop" class="hidden" title="Stop all agents (⌘.)">Stop</button><button id="newgoal" class="primary" title="New goal for the team (/)">＋ New goal</button>
+  <span class="runctl"><span id="runstate" class="pill">Stopped</span><button id="runbtn" class="primary hidden" title="Start the team (⌘⏎)">Run</button><button id="stop" class="hidden" title="Stop all agents (⌘.)" aria-label="Stop all agents">■</button></span>
+  <button id="newgoal" class="primary" title="New goal for the team (/)">＋ New goal</button>
   <button id="alertbell" title="Alerts" aria-label="Alerts" aria-expanded="false"><svg class="navicon" viewBox="0 0 24 24"><path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15L6 16Z"/><path d="M10 20.5a2 2 0 0 0 4 0"/></svg><span id="alertbell-n" class="abadge hidden"></span></button><!-- alerts center (t_6674705d): spec in wiki alerts-center -->
-  <button id="themebtn" class="iconbtn" title="Toggle light/dark theme" aria-label="Toggle light/dark theme"><svg class="navicon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><g class="icon-sun"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.4M12 19.1v2.4M21.5 12h-2.4M4.9 12H2.5M18.7 5.3 17 7M7 17l-1.7 1.7M18.7 18.7 17 17M7 7 5.3 5.3"/></g><g class="icon-moon"><path d="M20.5 14.5A8.5 8.5 0 0 1 9.5 3.5a8.5 8.5 0 1 0 11 11Z"/></g></svg></button><!-- settings button: was a circle + 8 rays (looked like a 2nd sun next to the theme toggle); now a gear -->
   <button id="settingsbtn" data-tab="settings" class="iconbtn" title="Settings (⌘,)" aria-label="Settings"><svg class="navicon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M10.3 2.5h3.4l.5 2.5 1.7.7 2.1-1.4 2.4 2.4-1.4 2.1.7 1.7 2.5.5v3.4l-2.5.5-.7 1.7 1.4 2.1-2.4 2.4-2.1-1.4-1.7.7-.5 2.5h-3.4l-.5-2.5-1.7-.7-2.1 1.4-2.4-2.4 1.4-2.1-.7-1.7-2.5-.5v-3.4l2.5-.5.7-1.7-1.4-2.1 2.4-2.4 2.1 1.4 1.7-.7z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg></button><button id="help" title="Keyboard shortcuts (?)">?</button>
   <div id="goalpop" class="goalpop hidden" role="dialog" aria-label="New goal for the team">
     <label for="goal">Goal for the team</label>
@@ -95,6 +88,16 @@
   <section id="tab-settings" class="tab"><div class="panel" id="settingsform"></div></section>
 </main>
 </div>
+<footer id="statusbar"><!-- passive status moved out of the top bar (t_13fabf5a); each item opens #sbpop -->
+  <span id="watchst" class="sbitem hidden" title=""></span>
+  <span id="wtdisk" class="sbitem hidden" title=""></span>
+  <span id="totalcost" class="sbitem hidden" title="API-equivalent (reported by Claude CLI). Not what you pay on a Pro/Max subscription."></span>
+  <span class="spacer"></span>
+  <div id="limitmeter" class="limitmeter sbitem hidden" title="Usage limits"></div>
+  <span id="updst" class="sbitem hidden"></span>
+  <span id="appver" class="sbitem muted"></span>
+  <div id="sbpop" class="sbpop hidden" role="dialog"></div>
+</footer>
 <dialog id="askdlg"><form method="dialog"><p id="ask-title"></p><input id="ask-input" style="width:280px"><p><button value="cancel">Cancel</button> <button id="ask-ok" value="ok" class="primary">OK</button></p></form></dialog>
 <dialog id="helpdlg"><form method="dialog"><h3>Keyboard shortcuts</h3><table>
   <tr><td>Ctrl/Cmd + 1…6</td><td>Chat, Team, Board, Wiki, Logs, Usage</td></tr>

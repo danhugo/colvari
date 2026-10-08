@@ -568,10 +568,10 @@ function renderHeader() {
   const setText = (el, text) => { if (el.textContent !== text) el.textContent = text; };
   const setTitle = (el, text) => { if (el.title !== text) el.title = text; };
   if (rs.state === 'running') {
-    setText(pill, `Running (${par || 1})`); // short status chip (t_db67859d): full wording in the tooltip
+    setText(pill, `● Running ${par || 1}`); // short status chip (t_db67859d): full wording in the tooltip
     setTitle(pill, `running · ${par > 1 ? `${par} in parallel` : `${par || 1} agent`} · ${o.runs || 0} runs`);
   } else if (rs.state === 'idle') {
-    setText(pill, 'Idle (nothing to do)');
+    setText(pill, 'Idle');
     setTitle(pill, `idle · ${rs.reason || 'waiting for todo tasks'} · ${o.runs || 0} runs`);
   } else {
     setText(pill, todos ? `Stopped (${todos} todo)` : 'Stopped');
@@ -598,6 +598,7 @@ function renderHeader() {
   // something to say (the meter chips need every pixel at 1400px).
   c.classList.toggle('hidden', !(total > 0));
   c.classList.toggle('quiet', !(billed > 0));
+  c.classList.toggle('overbudget', !!o.budgetStop); // red text in the status bar (t_13fabf5a)
   setTitle(c, total > 0
     ? `API-eq (API-equivalent) $${total.toFixed(4)} — what all recorded usage would cost at API list prices; the same single total the Usage tab's grand total shows. Actually billed per token (API key / proxy / cloud): $${billed.toFixed(4)}. Covered by subscription, not billed per token: $${sub.toFixed(4)}. "est" marks list-price estimates for keys that report no cost themselves.`
     : 'No recorded usage yet.');
@@ -608,7 +609,7 @@ function renderHeader() {
 // 30s cache server-side — so a 30s poll here is as fresh as the number gets). Amber above the cap
 // (>20 worktrees or >2GB, warn only — no auto-delete). A core without the handler leaves the pill
 // hidden instead of showing a wrong "0": bounded-disk visibility must not pretend on old cores.
-const WT_DISK_CAP = { count: 20, bytes: 2 * 1024 ** 3 };
+const WT_DISK_CAP = { count: 20, bytes: 5 * 1024 ** 3 }; // status bar turns amber above 5 GB (t_13fabf5a)
 let wtDisk = null;
 const fmtWtBytes = (n) => !(n > 0) ? '0 B'
   : n < 1048576 ? `${Math.max(1, Math.round(n / 1024))} KB`
@@ -616,14 +617,14 @@ const fmtWtBytes = (n) => !(n > 0) ? '0 B'
   : `${(n / 1073741824).toFixed(1)} GB`;
 function renderWtDisk() {
   const c = $('#wtdisk'); if (!c) return;
-  if (!wtDisk) { c.classList.add('hidden'); return; }
+  if (!wtDisk || !wtDisk.count) { c.classList.add('hidden'); return; } // zero state: no "0 wt · 0 B"
   const over = wtDisk.count > WT_DISK_CAP.count || wtDisk.bytes > WT_DISK_CAP.bytes;
   c.classList.remove('hidden');
   c.classList.toggle('wtwarn', over);
   const text = `${over ? '⚠ ' : ''}${wtDisk.count} wt · ${fmtWtBytes(wtDisk.bytes)}`;
   if (c.textContent !== text) c.textContent = text; // 30s poll: skip the write (and the header reflow) when the number didn't move
   const title = over
-    ? `Worktrees above cap (>20 or >2GB): ${wtDisk.count} worktrees, ${fmtWtBytes(wtDisk.bytes)} in .squad/worktrees. Done+merged tasks are removed on merge; retained ones are flagged on their task.`
+    ? `Worktrees above cap (>20 or >5GB): ${wtDisk.count} worktrees, ${fmtWtBytes(wtDisk.bytes)} in .squad/worktrees. Done+merged tasks are removed on merge; retained ones are flagged on their task.`
     : `.squad/worktrees: ${wtDisk.count} worktree${wtDisk.count === 1 ? '' : 's'}, ${fmtWtBytes(wtDisk.bytes)} of disk.`;
   if (c.title !== title) c.title = title;
 }
@@ -744,9 +745,40 @@ function renderWatchPill() {
   c.title = ['The core agent (PM) receives a periodic status digest: restart backlog, stalled tasks, idle agents, merge failures.',
     watch.digest ? `Last digest: ${watch.digest}` : '', `Every ~${watch.intervalMin} min while work is active.`,
     'Click to see digests in the logs.', watch.stub ? 'backend pending' : ''].filter(Boolean).join(' ');
-  c.onclick = () => showTab('obs');
 }
 setInterval(() => { const c = $('#watchst'); if (c && !c.classList.contains('hidden')) renderWatchPill(); }, 30e3); // keep "last check Xm ago" ticking without a run active
+// ---------- status bar popovers (t_13fabf5a): click an item -> details + one action ----------
+const sbPop = {
+  watchst: () => ({ body: esc($('#watchst').title), act: ['Open logs', () => showTab('obs')] }),
+  limitmeter: () => ({ body: esc($('#limitmeter').title), act: ['Open Usage', () => showTab('usage')] }),
+  updst: () => ({ body: esc($('#updst').title || $('#updst').textContent), act: rst.pendingCount && upd.devMode !== false ? ['Restart now', () => rstAction('now')] : null }),
+  appver: () => ({ body: `Colvari ${esc($('#appver').textContent)}`, act: upd.devMode === false ? null : ['App updates', () => showTab('settings')] }),
+  totalcost: () => { // per-agent split when runs carry the agent, else the total only
+    const by = {}; for (const r of RUNS) for (const e of runLedger(r)) { const k = r.agent || r.nodeId; if (k) by[k] = (by[k] || 0) + (e.costUsd || 0); }
+    const names = Object.fromEntries(S.allNodes.map((n) => [n.id, n.name]));
+    const rows = Object.entries(by).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]);
+    return { body: `<p class="muted">${esc($('#totalcost').title)}</p>` + (rows.length ? `<table>${rows.map(([k, v]) => `<tr><td>${esc(names[k] || k)}</td><td>$${v.toFixed(2)}</td></tr>`).join('')}</table>` : ''), act: ['Open Usage', () => showTab('usage')] };
+  },
+  wtdisk: async () => {
+    let wts = []; try { wts = await call('listTaskWorktrees'); } catch {}
+    return { body: `<p>${esc($('#wtdisk').title)}</p><ul>${wts.map((w) => `<li><code>${esc(w.branch || w.path.split('/').pop())}</code></li>`).join('')}</ul>`,
+      act: ['Clean up', async () => { const r = await call('cleanupWorktrees'); showToast('Worktrees', r && r.error ? r.error : `Removed ${(r && r.removed || []).length}, kept ${(r && r.retained || []).length}`); pollWtDisk(); }] };
+  },
+};
+async function openSbPop(id) {
+  const pop = $('#sbpop'); const { body, act } = await sbPop[id]();
+  pop.innerHTML = `<div class="sbpop-body">${body}</div>${act ? '<div class="sbpop-foot"><button class="primary">' + esc(act[0]) + '</button></div>' : ''}`;
+  if (act) pop.querySelector('button').onclick = () => { pop.classList.add('hidden'); act[1](); };
+  pop.style.left = Math.max(4, Math.min($('#' + id).offsetLeft, innerWidth - 320)) + 'px';
+  pop.classList.remove('hidden'); pop.dataset.for = id;
+}
+document.addEventListener('click', (e) => {
+  const pop = $('#sbpop'); if (!pop || pop.contains(e.target)) return;
+  const it = e.target.closest('#statusbar .sbitem');
+  if (it && sbPop[it.id] && (pop.classList.contains('hidden') || pop.dataset.for !== it.id)) { openSbPop(it.id); return; }
+  pop.classList.add('hidden'); pop.dataset.for = '';
+});
+call('appVersion').then((v) => { if (v) $('#appver').textContent = 'v' + v; }).catch(() => {});
 // ---------- top-bar limits meter (subscription 5h/weekly windows; no $ shown, just % + reset countdown) ----------
 const fmtCountdown = (ms) => {
   if (ms <= 0) return 'now';
@@ -849,7 +881,6 @@ async function renderLimitMeter(st) {
   if (st === undefined) { try { st = await call('usageStatus'); } catch { st = null; } }
   const m = $('#limitmeter');
   m.title = 'Usage limits — one summary chip for the worst provider/window; click for the full per-provider detail in the Usage tab';
-  m.onclick = () => showTab('usage');
   // The summary chip: provider name + the worst window's number (the tiny bar and reset countdown of
   // exactly that window); the full per-window detail stays in the tooltip and the Usage tab.
   const worstChip = (p) => {
@@ -1825,6 +1856,8 @@ async function renderAlerts() {
     nodeNames: Object.fromEntries(S.allNodes.map((n) => [n.id, n.name])),
     rtu: rtu ? { ...rtu, paused, label: runtimeLabel(rtu.runtime) } : null,
   }).filter((a) => a.kind !== 'preflight');
+  if (wtDisk && (wtDisk.count > WT_DISK_CAP.count || wtDisk.bytes > WT_DISK_CAP.bytes)) all.push({ id: 'wtdisk', kind: 'wtdisk', severity: 'warn', at: Date.now(), dismissable: true,
+    text: `Worktrees use ${fmtWtBytes(wtDisk.bytes)} (${wtDisk.count}) — clean up from the status bar`, fingerprint: String(wtDisk.count) });
   if (fakeAlertN > 0) all.push(...fakeAlerts(fakeAlertN));
   const live = Alerts.sortAlerts(all).filter((a) => dismissed.get(a.id) !== a.fingerprint);
   renderAlertBell(live);
@@ -2840,6 +2873,7 @@ function renderSettings(force) {
   const tplCur = $('#tpl-select') ? $('#tpl-select').value : '';
   $('#settingsform').innerHTML = `<h3 class="set-pagetitle">Settings</h3>
     <div class="set-path"><span>Project data</span><code title="${esc(S.dir)}">${esc(S.dir)}</code><button id="st-copydir" title="Copy path">Copy</button></div>
+    <section class="set-sec"><h3>Appearance</h3><div class="set-rows"><div class="set-row"><div class="set-lab"><label for="themebtn">Theme</label><p class="set-hint">Toggle light / dark.</p></div><div class="set-ctl"><button id="themebtn" class="iconbtn" title="Toggle light/dark theme" aria-label="Toggle light/dark theme"><svg class="navicon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><g class="icon-sun"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.4M12 19.1v2.4M21.5 12h-2.4M4.9 12H2.5M18.7 5.3 17 7M7 17l-1.7 1.7M18.7 18.7 17 17M7 7 5.3 5.3"/></g><g class="icon-moon"><path d="M20.5 14.5A8.5 8.5 0 0 1 9.5 3.5a8.5 8.5 0 1 0 11 11Z"/></g></svg></button></div></div></div></section>
     <section class="set-sec"><h3>Runtime</h3><div class="set-rows">
     <div class="set-row stack"><div class="set-lab"><label for="st-claude">Claude CLI path</label><p class="set-hint">Binary used to launch agents. Leave as-is unless your CLI lives outside PATH.</p></div><input id="st-claude" value="${esc(s.claudePath)}"></div>
     <div class="set-row"><div class="set-lab"><label for="tpl-select">Template for new project / team</label></div><div class="set-ctl"><select id="tpl-select">${Object.entries(P.templates).map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join('')}</select></div></div>
@@ -3831,7 +3865,7 @@ $('#reopenguide').onclick = () => { G.hidden = false; G.forced = true; localStor
   const apply = () => document.documentElement.dataset.theme = override() || (mq.matches ? 'dark' : 'light');
   apply(); mq.addEventListener('change', apply);
   squad.on('theme', (t) => { if (!override()) document.documentElement.dataset.theme = t.dark ? 'dark' : 'light'; });
-  $('#themebtn').onclick = () => { const cur = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'; try { localStorage.setItem('themeOverride', cur); } catch {} document.documentElement.dataset.theme = cur; }; }
+  document.addEventListener('click', (e) => { if (!e.target.closest('#themebtn')) return; /* lives in Settings now (t_13fabf5a) */ const cur = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'; try { localStorage.setItem('themeOverride', cur); } catch {} document.documentElement.dataset.theme = cur; }); }
 // macOS draws the hiddenInset traffic lights over the page's top-left; flag the platform so the
 // header can inset its content (brand first) clear of the window controls.
 if (/Mac/i.test(navigator.userAgent)) document.documentElement.dataset.platform = 'mac';
