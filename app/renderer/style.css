@@ -977,7 +977,8 @@ button, .pchip, .tag, .badge, .pill, .avatar, .cchip summary, .lvchip, .asswitch
 /* Run control: state + Run/Stop as one group. */
 header .runctl { display:inline-flex; align-items:center; gap:4px; } header #stop { padding:2px 7px; }
 /* macOS: header is the window drag region; every control stays clickable. */
-header { -webkit-app-region:drag; } header button, header .runctl, header #statusbar #totalcost.overbudget { color:var(--danger); }
+header { -webkit-app-region:drag; } header button, header .runctl, header a, header input, header select, #sbpop { -webkit-app-region:no-drag; }
+#statusbar #totalcost.overbudget { color:var(--danger); }
 /* Top bar right cluster (t_53cd3fd7): one height, one radius. Run control is one segmented shape
    (state | Run/Stop), New goal the single compact primary, icon buttons ghost. */
 header { --topbar-h: 28px; }
