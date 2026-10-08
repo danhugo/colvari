@@ -3571,7 +3571,7 @@ function renderChatAtts() {
   });
   const blocked = chatAtts.some((a) => !a.path);
   $('#chat-send').disabled = blocked;
-  $('#chat-send').title = blocked ? 'Waiting for attachments to finish saving (remove failed ones first)' : '';
+  $('#chat-send').title = blocked ? 'Waiting for attachments to finish saving (remove failed ones first)' : 'Send (Enter) · Shift+Enter for a new line';
 }
 async function addChatFiles(files) {
   if (!files.length) return;
