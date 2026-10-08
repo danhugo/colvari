@@ -62,7 +62,7 @@ jobs:
       - name: npm ci
         working-directory: app
         run: npm ci
-      - name: npm test verbatim (expected to fail: env-prefix script syntax)
+      - name: npm test verbatim (env-prefix script syntax is expected to fail)
         working-directory: app
         continue-on-error: true
         shell: pwsh
