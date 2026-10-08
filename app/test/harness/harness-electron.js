@@ -15,6 +15,11 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const HS = require('../../src/harness-sweep');
+// Standalone Electron-harness drivers (ab-gate, profile-renderer, cli/e2e) are heavy runs: take
+// the machine-wide heavy slot first, exactly like the unit suite (t_dc59a89e), so a perf driver
+// never runs alongside a merge-gate suite or the live app's own work. Under `npm test` the run
+// root already holds the slot and AGENTS_SQUAD_HEAVY_SLOT is inherited — install() skips.
+require('./heavy-slot').install();
 
 const registry = new Map(); // child pid -> { pid }
 let handlersInstalled = false;

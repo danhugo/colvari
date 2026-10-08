@@ -161,3 +161,33 @@ gui-e2e/smoke instances — belongs to its run, not to the desktop:
   delete them in flight. Each file rm's its dir in an `after` hook.
 
 Unit coverage (including the negative cases) is in `test/harness-sweep.test.js`.
+
+## The machine-wide heavy slot covers every heavy harness (t_dc59a89e)
+
+`test/harness/heavy-slot.js` serializes heavy work machine-wide (one suite at a time, low
+priority, not while load is far above the core count). It was `npm test`-only; now every heavy
+Electron harness takes it too, so a screenshot sweep or perf driver never competes with a
+merge-gate suite or the live app:
+
+- gui-e2e installs it in `src/main.js` beside procguard, at the very top of the TEST_MODE branch
+  (`AGENTS_SQUAD_GUI_E2E` only — smoke stays light). The instance waits for the slot before its
+  window opens, exactly like the gate's suite child.
+- Standalone Electron-harness drivers (`test/perf/ab-gate.js`, `cli/profile-renderer.js`) get it
+  from a module-load `install()` in `test/harness/harness-electron.js`.
+- Under `npm test` nothing changes: the run root holds the slot and descendants inherit
+  `AGENTS_SQUAD_HEAVY_SLOT`, so nested installs skip. `AGENTS_SQUAD_HEAVY_SLOT=off` still bypasses.
+
+The gate's live-state read (`merge-gate.live.json` phase `waiting`) already watches the same lock
+dir, so a gate queued behind a gui-e2e run now reports that honestly.
+
+## Gate-suite trend stats (t_dc59a89e)
+
+Every finished merge-gate suite run (each CAS round that runs tests) appends one entry to
+`.squad/merge-gate-stats.json` at the repo root: timestamp, task, branch, state
+(`green`/`red`/`infra`), attempts, wall-time (`durationMs`), test count and `flaky` — flaky means
+the run ended green only after an infra-classified rerun (a completed red stays terminal, so it
+is never counted flaky). The window is capped at 200 runs; writes are atomic tmp+rename and a
+stats failure can never fail a green gate. `redMasterSnapshot` exposes the summary
+(`runs`, `p95Ms`, `medianMs`, `greenP95Ms`, `flakeRate`, …) so the board can show trends, and
+`src/gate-stats.js` `summarize(root)` reads it directly. Unit + wire coverage (including a real
+infra-then-green flake through the default runner) is in `test/gate-stats.test.js`.
