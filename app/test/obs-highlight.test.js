@@ -27,7 +27,7 @@ const S = { v: { project: 1, teams: 1, settings: 1 }, tasks: [], settings: {}, p
   orch: { agents: { a2: { status: 'working' } }, runCost: 0, runTokens: 0, budgetStop: '' } };
 const logs = [{ projectId: 'p1', nodeId: 'a1', at: 1, kind: 'text', text: 'l1' }, { projectId: 'p1', nodeId: 'a2', at: 2, kind: 'text', text: 'l2' }];
 
-const names = ['$','document','S','logs','ctx','sel','obsSig','logTeamNodes','agentStamp','who','avatarBg','avatarBody','esc','shortTaskId','runtimeLabel','orphanedTasks','stuckBtn','fmtTok','wireStuckBtns'];
+const names = ['$','document','S','logs','ctx','sel','obsSig','logTeamNodes','agentStamp','who','avatarBg','avatarBody','esc','shortTaskId','runtimeLabel','orphanedTasks','stuckBtn','fmtTok','wireStuckBtns','patchRows'];
 const args = [
   (x) => els[x],
   { querySelectorAll: () => [] },
@@ -40,6 +40,7 @@ const args = [
   (id) => id, () => 'rt',
   () => [], () => '', () => '',
   () => {},
+  (box, html) => { box.innerHTML = html; },
 ];
 const factory = new Function(...names, `${block}\nreturn { renderObs, sig: () => obsSig };`);
 
