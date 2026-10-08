@@ -81,3 +81,11 @@ test('mdTables renders a GFM table with alignment and escapes cells via the cell
   assert.strictEqual(out, '[hi\n]<div class="md-table"><table><thead><tr><th style="text-align:left">a</th><th style="text-align:right">&lt;b></th></tr></thead><tbody><tr><td style="text-align:left">1</td><td style="text-align:right">x|y</td></tr><tr><td style="text-align:left">2</td><td style="text-align:right"></td></tr></tbody></table></div>[bye]');
   assert.strictEqual(C.mdTables('| a | b |\nno sep', esc, txt), '[| a | b |\nno sep]'); // no separator row -> plain text
 });
+
+test('room events: comment author stored as a display name resolves to the node id and groups with its messages', () => {
+  const nodes = [{ id: 'n4', name: 'Dev D' }];
+  const tasks = [{ id: 't1', title: 'X', comments: [{ author: 'Dev D', text: 'gate flaky', at: 20 }, { author: 'system', text: 'merged', at: 30 }, { author: 'Gone Dev', text: 'bye', at: 40 }] }];
+  const ev = C.roomEvents([{ nodeId: 'n4', kind: 'text', text: 'hi', at: 10 }], tasks, [], [], C.MAX, null, nodes);
+  assert.deepStrictEqual(ev.map((e) => e.who), ['n4', 'n4', 'system', 'Gone Dev']);
+  assert.deepStrictEqual(C.group(ev).map((g) => [g.who, g.items.length]), [['n4', 2], ['system', 1], ['Gone Dev', 1]]);
+});
