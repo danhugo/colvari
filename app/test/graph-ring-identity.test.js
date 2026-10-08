@@ -51,3 +51,11 @@ test('renderGraph no longer wipes #graph', () => {
   assert.doesNotMatch(body, /innerHTML = ''/);
   assert.match(body, /morphKids\(live, svg/);
 });
+
+// t_4746443c: the static top-right dot + presence ring only repeated the Working pill / avatar ring.
+test('Team map node has no top-right status dot or presence ring', () => {
+  const body = src.slice(src.indexOf('function renderGraph'), src.indexOf('function renderMinimap'));
+  assert.doesNotMatch(body, /class: 'status s-'/);
+  assert.doesNotMatch(body, /class: 'pres '/);
+  assert.match(body, /class: 'avring'/);
+});
