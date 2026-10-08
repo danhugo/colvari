@@ -4,6 +4,10 @@ const path = require('path');
 // Test instances (gui-e2e / smoke) must never leave fake-CLI children behind: install procguard
 // before the orchestrator loads so every spawn it makes is tracked and reaped (t_92c31037).
 const procguard = (process.env.AGENTS_SQUAD_GUI_E2E || process.env.AGENTS_SQUAD_SMOKE) ? require('../test/harness/procguard').install() : null;
+// gui-e2e is a heavy Electron harness too (t_dc59a89e): take the machine-wide heavy slot first —
+// the same lock the unit suite and the gate hold — so a screenshot sweep never competes with a
+// merge-gate suite or the live app. Smoke stays light and skips the slot.
+if (process.env.AGENTS_SQUAD_GUI_E2E) require('../test/harness/heavy-slot').install();
 const HS = require('./harness-sweep');
 const { Orchestrator, reapRunPids, interruptedFromReap } = require('./orchestrator');
 const BS = require('./bootstate');
