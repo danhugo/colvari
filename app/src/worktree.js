@@ -16,10 +16,11 @@ async function git(cwd, args) { return CP.runThrow('git', args, { cwd, timeoutMs
 async function branchExists(repoDir, branch) { try { await git(repoDir, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`]); return true; } catch { return false; } }
 
 // node_modules is never shared by symlink (t_09a2c1e0): an `npm ci` in a worktree wiped the main
-// checkout's tree through the link. Each worktree gets its own APFS copy-on-write clone
-// (`cp -cR`: ~7s for 347MB, near-zero extra disk). Where cloning fails (not APFS, not macOS)
-// node_modules stays absent and the agent's own npm install / the merge gate's ensureDeps
-// installs locally. An old share-link is replaced; an existing real dir is never touched.
+// checkout's tree through the link. Each worktree gets its own copy: the APFS clonefile fast path
+// (`cp -cR`: ~7s for 347MB, near-zero extra disk) where it exists, else a plain fs.cpSync copy
+// (Linux/Windows CI, t_c20a5aca). Where even the copy fails node_modules stays absent and the
+// agent's own npm install / the merge gate's ensureDeps installs locally. An old share-link is
+// replaced; an existing real dir is never touched.
 // A worktree whose package.json / package-lock.json differs from main (t_0fd83668) gets no clone:
 // its deps differ, so it installs its own.
 function pkgDiffers(wtFile, mainFile) {
@@ -37,7 +38,9 @@ async function cloneNodeModules(src, dst) {
   let from; try { from = fs.realpathSync(src); } catch { return false; } // main has none: nothing to clone
   const r = await CP.run('cp', ['-cR', from, dst], { timeoutMs: 120_000 });
   if (r.status === 0) return true;
-  try { fs.rmSync(dst, { recursive: true, force: true }); } catch {} // half clone: leave it absent, never a link
+  try { fs.rmSync(dst, { recursive: true, force: true }); } catch {} // half clone: never keep it
+  try { fs.cpSync(from, dst, { recursive: true }); return fs.statSync(dst).isDirectory(); } catch {}
+  try { fs.rmSync(dst, { recursive: true, force: true }); } catch {} // half copy: leave it absent, never a link
   return false;
 }
 

@@ -302,6 +302,17 @@ test('free signals create no timers: no polling, no retries (plan A/C invariant)
   // design (covered in wake.test.js). Mute the wake sweep so the spy measures only the
   // free-signal feature's timers.
   o.wakeUnread = () => [];
+  // Run-spawn infrastructure may legally arm timers inside this window: the watchdog-arming
+  // pidLstart retry sleeps (t_e116438b — a CI runner's first `ps` of a just-exited child pid can
+  // come up empty and retry under CP.sleep) and the exit-handler orphan escalation (t_85041490 —
+  // group-zombie race on Linux). Pin both so the invariant measures the free-signal feature, not
+  // background races (t_c20a5aca Linux CI). The APP pid keeps its real lstart: the spawned
+  // run-watchdog validates it and reaps the run group on mismatch; the child pid lstart is only
+  // recorded in the pidfile, never verified during the run.
+  const MG = require('../src/merge-gate');
+  const realPidLstart = MG.pidLstart, realGroupAlive = MG.groupAlive;
+  MG.pidLstart = async (pid) => (pid === process.pid ? realPidLstart(pid) : 'stub-lstart');
+  MG.groupAlive = () => false;
   const timers = { timeout: 0, interval: 0 };
   const sto = global.setTimeout, sio = global.setInterval;
   global.setTimeout = (...a) => { timers.timeout++; return sto(...a); };
@@ -311,7 +322,10 @@ test('free signals create no timers: no polling, no retries (plan A/C invariant)
     await settle(o);
     assert.equal(o.autoResumeStuck('claude', 'run finished ok'), 0, 'episode used up, nothing left to try');
     assert.ok(!o._tickTimer, 'no dispatch sweep was armed by the feature');
-  } finally { global.setTimeout = sto; global.setInterval = sio; }
+  } finally {
+    global.setTimeout = sto; global.setInterval = sio;
+    MG.pidLstart = realPidLstart; MG.groupAlive = realGroupAlive;
+  }
   assert.equal(timers.interval, 0, 'no polling timers');
   assert.equal(timers.timeout, 0, 'no retry timers');
   assert.equal(readCalls(argsLog).length, 1, 'the single auto try did run');
