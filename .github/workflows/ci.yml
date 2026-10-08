@@ -30,6 +30,55 @@ jobs:
       - name: npm ci
         working-directory: app
         run: npm ci
+      - name: Fix Electron chrome-sandbox perms (SUID helper on CI runners)
+        working-directory: app
+        run: |
+          sudo chown root:root node_modules/electron/dist/chrome-sandbox
+          sudo chmod 4755 node_modules/electron/dist/chrome-sandbox
+      - name: Configure git identity (tests commit and merge in temp repos)
+        run: |
+          git config --global user.email "ci@colvari.local"
+          git config --global user.name "Colvari CI"
       - name: npm test (under xvfb)
         working-directory: app
         run: xvfb-run -a npm test
+
+  # Windows DRY RUN: deliberately not a gate (continue-on-error). Goal is evidence
+  # for what breaks, not a green run. npm test itself cannot even start on Windows
+  # (env-prefix syntax), so the dry run invokes the underlying node command with
+  # env set pwsh-style; node --test expands the test/*.test.js glob itself.
+  windows-dryrun:
+    name: windows dry run (evidence only)
+    runs-on: windows-latest
+    timeout-minutes: 90
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - name: npm ci
+        working-directory: app
+        run: npm ci
+      - name: npm test verbatim (expected to fail: env-prefix script syntax)
+        working-directory: app
+        continue-on-error: true
+        shell: pwsh
+        run: npm test
+      - name: suite via portable syntax
+        working-directory: app
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $env:AGENTS_SQUAD_TEST_ISOLATION='1'
+          node --require ./test/harness/install.js --test --test-timeout=240000 --test-force-exit test/*.test.js 2>&1 | Tee-Object -FilePath suite-output.txt
+          exit 0
+      - name: upload dry-run output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-dryrun-output
+          path: app/suite-output.txt
+          if-no-files-found: ignore
