@@ -21,10 +21,11 @@ const block = src.slice(start, end);
 // ---- minimal DOM stubs ----
 const makeAvatarEl = () => { const a = { classes: new Set(), title: '', getAttribute(k) { return this[k]; }, setAttribute(k, v) { this[k] = v; } };
   a.classList = { contains: (c) => a.classes.has(c), toggle: (c, on) => { if (on) a.classes.add(c); else a.classes.delete(c); } }; return a; };
-const makeGroup = (who, cnt) => ({
-  classes: new Set(['cgroup']), dataset: { cnt: String(cnt), who }, parent: null,
+const makeGroup = (who, cnt, items) => ({
+  classes: new Set(['cgroup']), dataset: { cnt: String(cnt), who }, parent: null, _items: items || null,
+  get parentNode() { return this.parent; },
   children: [makeAvatarEl(), { classes: new Set(['cbody']), innerHTML: '' }],
-  remove() { const p = this.parent; if (p) p.children = p.children.filter((c) => c !== this); },
+  remove() { const p = this.parent; if (p) p.children = p.children.filter((c) => c !== this); this.parent = null; },
   querySelector(sel) { return sel === '.avatar' ? this.children[0] : sel === '.cbody' ? this.children[1] : null; },
 });
 const matches = (n, sel) => n.classes && n.classes.has(sel.slice(1));
@@ -51,12 +52,12 @@ function buildRenderer(env) {
     bubbleRuns: (items) => `runs:${items.length}`,
     mergeGroups: (gs) => gs,
     needsYou: () => env.ask,
-    renderGroups: (events) => { env.__renderCaptured = events; env.__renderedTotal += events.length; env.__rendered = events.map((e) => { const g = makeGroup(e.who, 1); g.parent = room; return g; }); return ''; },
+    renderGroups: (events) => { env.__renderCaptured = events; env.__renderedTotal += events.length; env.__rendered = events.map((e) => { const g = makeGroup(e.who, 1, [e]); g.parent = room; return g; }); return ''; },
     bindChatBubbles: (scope) => { env.__bound.push(scope); for (const n of (scope && scope.children) || []) env.__boundNodes.push(n); },
     repinBottom: () => { env.__repins++; },
     updateNewPill: () => { env.__pills++; },
     subRecOf: () => null,
-    chatSched: { force() {} },
+    chatSched: { force() { env.__forces++; } },
   };
   return new Function(...Object.keys(stubs), `${block}\nreturn { applyChatAppend, applyChatPrepend, patchChatAvatars, syncThreadPanel };`)(...Object.values(stubs));
 }
@@ -82,7 +83,7 @@ function envFor(drawn, groups, win, withOb) {
   const env = { room, CH: { thread: null, win, domWin: win, evFp: fps(drawn), pendingNew: 1, thKey: null },
     S: { tasks: [], orch: { agents: {} }, allNodes: [] }, ask: new Set(),
     els: { '#chat-older': ob, '#chat-thread': { classes: new Set(), classList: { toggle() {} }, innerHTML: '' }, '#ch-close': { onclick: null }, '#chat-newpill': { classes: new Set(['hidden']), querySelector: () => ({ textContent: '' }) } },
-    __rendered: [], __renderCaptured: null, __bound: [], __boundNodes: [], __repins: 0, __pills: 0, __raf: [], __renderedTotal: 0 };
+    __rendered: [], __renderCaptured: null, __bound: [], __boundNodes: [], __repins: 0, __pills: 0, __raf: [], __renderedTotal: 0, __forces: 0 };
   return env;
 }
 
@@ -257,4 +258,62 @@ test('prepend: the drain yields per group under budget, books mirroring the DOM 
   assert.equal(env.CH._drainGen, null, 'drain finished');
   assert.deepEqual(env.CH.evFp, fps(feed));
   assert.equal(env.CH.domWin, 10, 'domWin advanced only when the drain landed');
+});
+
+// t_738710f9 — the append paths must NOT supersede a running drain (they only add at the bottom;
+// books stay exact at every drain insert), and a supersession can never strand the latch: a drain
+// an append used to kill returned early without finish(), leaving CH._drainGen set — chatGrow
+// no-oped and _growPending never flushed, so scroll-up stopped loading older messages.
+test('append mid-drain: the drain completes, the deferred grow flushes, books mirror the DOM (t_738710f9)', () => {
+  const feed = [ev(1, 'a'), ev(2, 'b'), ev(3, 'c'), ev(4, 'd'), ev(5, 'a'), ev(6, 'b'), ev(7, 'c'), ev(8, 'd'), ev(9, 'a'), ev(10, 'b')];
+  const groups = feed.slice(4).map((e) => makeGroup(e.who, 1, [e])); // events 5..10, win 6
+  const env = envFor(feed.slice(4), groups, 6, true);
+  const R = buildRenderer(env);
+  env.CH._olderBudgetMs = -1; // one group per frame
+  env.CH.win = 10; // chatGrow grew the window
+  env.els['#chat-older'].nextSibling = env.room.children[0];
+  assert.equal(R.applyChatPrepend(feed, new Set(), 0, 100), true);
+  assert.ok(env.CH._drainGen, 'a drain owns the head');
+  frameRaf(env); frameRaf(env); // 2 of the 4 older groups are in; the drain is mid-flight
+  // A tail append lands MID-DRAIN: two fresh events join the feed while the drain works.
+  const feed2 = [...feed, ev(11, 'c'), ev(12, 'c')];
+  const plan = Chat.tailPlan(env.CH.evFp, feed2, 10);
+  assert.ok(plan, 'books are exact mid-drain, so the append plans cleanly');
+  assert.equal(R.applyChatAppend(feed2, plan, new Set()), true);
+  assert.ok(env.CH._drainGen, 'the append did not kill the drain');
+  env.CH._growPending = true; // a grow draw parked behind the drain (the defer path)
+  flushRaf(env); // the drain runs to completion
+  assert.equal(env.CH._drainGen, null, 'the drain finished and cleared its latch — chatGrow works again');
+  assert.equal(env.CH._growPending, false, 'the deferred grow flushed through endDrain');
+  assert.equal(env.__forces, 1, 'the flushed grow re-forced a draw');
+  const domFps = env.room.children.flatMap((g) => (g._items || []).map((e) => Chat.eventFp(e)));
+  assert.deepEqual(env.CH.evFp, fps(feed2)); // the drain's leftovers + the append: the whole feed
+  assert.deepEqual(env.CH.evFp, domFps, 'books == DOM fps');
+});
+
+// The eviction case: an append whose window slid PAST the drain's just-inserted groups removes
+// them from the DOM — the drain's anchor node dies mid-drain, and the drain must still complete
+// (re-anchoring under the older bar) with books mirroring the DOM exactly.
+test('append mid-drain: append eviction may eat the drain\'s inserted groups — the drain still completes (t_738710f9)', () => {
+  const feed = [ev(1, 'a'), ev(2, 'b'), ev(3, 'c'), ev(4, 'd'), ev(5, 'a'), ev(6, 'b'), ev(7, 'c'), ev(8, 'd'), ev(9, 'a'), ev(10, 'b')];
+  const groups = feed.slice(4).map((e) => makeGroup(e.who, 1, [e])); // events 5..10, win 6
+  const env = envFor(feed.slice(4), groups, 6, true);
+  const R = buildRenderer(env);
+  env.CH._olderBudgetMs = -1;
+  env.CH.win = 10;
+  env.els['#chat-older'].nextSibling = env.room.children[0];
+  assert.equal(R.applyChatPrepend(feed, new Set(), 0, 100), true);
+  frameRaf(env); frameRaf(env); // ev4 then ev3 are in; books = ev3..ev10
+  // Four fresh events land mid-drain: the window slides to ev5..ev14, so the append EVICTS the
+  // drain's just-inserted head groups (ev3/ev4) — the drain's anchor node is gone from the DOM.
+  const feed2 = [...feed, ev(11, 'c'), ev(12, 'c'), ev(13, 'd'), ev(14, 'a')];
+  const plan = Chat.tailPlan(env.CH.evFp, feed2, 10);
+  assert.deepEqual([plan.slide, plan.alignFrom, plan.alignLen], [2, 0, 6], 'the window slid past the drain\'s head groups');
+  assert.equal(R.applyChatAppend(feed2, plan, new Set()), true);
+  assert.ok(env.CH._drainGen, 'the drain survives the append');
+  flushRaf(env);
+  assert.equal(env.CH._drainGen, null, 'the drain completed');
+  const domFps = env.room.children.flatMap((g) => (g._items || []).map((e) => Chat.eventFp(e)));
+  assert.deepEqual(env.CH.evFp, fps([feed[0], feed[1], ...feed2.slice(4)])); // ev1, ev2 + the new window
+  assert.deepEqual(env.CH.evFp, domFps, 'books == DOM fps after the append evicted drain groups');
 });

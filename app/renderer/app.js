@@ -3263,7 +3263,7 @@ function renderChatBody() {
     }
   }
   CH.stamp = stamp; CH.workKey = workKey;
-  CH._drainGen = null; CH._growPending = false; // the full render owns the room: any drain is superseded
+  endDrain(false); // the full render owns the room: any drain is superseded; a deferred grow is subsumed (win is re-read below)
   // Progressive first paint (t_7e53747c): the cold render of a full page (100 events, fat board)
   // measured 87ms under load — over the 50ms bar. Split at a GROUP boundary (Chat.group is what
   // renderGroups applies anyway, so two half-renders group exactly like one) and prepend the
@@ -3288,8 +3288,9 @@ function renderChatBody() {
     // The older half goes in across frames via the shared budgeted drain (t_031d789b): one big
     // rAF still measured 60ms and the old adaptive-chunk stepper overshot to 220-330ms per tick
     // under load — a long task wherever it runs. The drain builds+inserts group by group within
-    // ~24ms frames, grows the books by exactly what it inserts, and re-anchors per frame; a
-    // superseded generation stops early — the next draw heals the remaining books.
+    // ~12ms frames (end-of-tick forced layout included, t_738710f9), grows the books by exactly
+    // what it inserts, and re-anchors per frame; a superseded generation stops early — the next
+    // draw heals the remaining books.
     const endTop = room.scrollTop, endH = room.scrollHeight; // phase-A end state for the re-anchor
     const perGroupFps = split.headGroups.map((grp) => grp.items.map((e) => Chat.eventFp(e, subRecOf)));
     startOlderDrain(split.headGroups, perGroupFps, { workingT, top: endTop, height: endH, repin: atBottom });
@@ -3345,7 +3346,6 @@ function applyChatAppend(ev, plan, workingT) {
   if (cut < 0 && alignFrom + alignLen < target.length) cut = alignFrom + alignLen; // fresh events past the drawn stretch
   if (cut < 0) { // nothing to re-render: books unchanged (a no-op or eviction-only draw)
     if (evicted) CH.evFp = CH.evFp.slice(evicted);
-    CH.renderGen = (CH.renderGen || 0) + 1; // owns the room: pending split chunks must stop
     patchChatAvatars(room, workingT);
     finishAppend(room, ev, win, ob, workingT);
     return true;
@@ -3364,7 +3364,6 @@ function applyChatAppend(ev, plan, workingT) {
   bindChatBubbles(t.content); // bind BEFORE the insert moves the nodes out — a drained template matches nothing
   room.appendChild(t.content);
   CH.evFp = keptFps.concat(rebuild.map((e) => Chat.eventFp(e, subRecOf)));
-  CH.renderGen = (CH.renderGen || 0) + 1; // owns the room: pending split chunks must stop
   patchChatAvatars(room, workingT);
   finishAppend(room, ev, win, ob, workingT);
   return true;
@@ -3386,24 +3385,36 @@ function finishAppend(room, ev, win, ob, workingT) {
 // of synchronous whole-page inserts (a 100-event prepend measured 87ms idle and 300ms+ under
 // 5-agent load, and the old adaptive-chunk stepper overshot its budget to 220-330ms per tick:
 // the 866ms worst frame). Groups drain newest-first — each insert lands above the previous one
-// at the older-bar anchor — a few per frame with a ~24ms budget, and CH.evFp grows after every
-// single insert, so books mirror the DOM at every yield and appends/ring patches stay exact
-// while a drain runs. One drain at a time: CH._drainGen marks ownership (chatGrow and the
-// prepend path defer to it), CH.renderGen supersedes a drain when a full render or a newer
-// prepend takes the room. repin keeps the room pinned to the bottom (cold render at bottom);
-// otherwise the viewport re-anchors to the content it was reading (scroll-up growth).
+// at the older-bar anchor — a few per frame with a ~12ms budget (the end-of-tick forced layout
+// — the scrollHeight read + scrollTop write — is measured and reserved against the next tick,
+// t_738710f9), and CH.evFp grows after every single insert, so books mirror the DOM at every
+// yield and appends/ring patches stay exact while a drain runs. One drain at a time:
+// CH._drainGen marks ownership (chatGrow and the prepend path defer to it), CH.renderGen
+// supersedes a drain when a full render or a newer prepend takes the room — tail appends do NOT
+// supersede (t_738710f9): they only add at the bottom, books stay exact mid-drain, so a drain
+// killed by an append used to leak the latch (chatGrow dead, _growPending stranded) and now
+// simply runs to completion; its leftover head groups land above the window and the next draw
+// evicts them. repin keeps the room pinned to the bottom (cold render at bottom); otherwise
+// the viewport re-anchors to the content it was reading (scroll-up growth).
+// The one latch owner: endDrain clears _drainGen, and _growPending — a grow a drain deferred —
+// flushes through the same path, so a supersession can never strand either (t_738710f9).
+function endDrain(flush) {
+  CH._drainGen = null;
+  const pending = CH._growPending; CH._growPending = false;
+  if (pending && flush) chatSched.force(); // a natural finish lands the deferred grow draw now
+}
 function startOlderDrain(groups, perGroupFps, opts) {
   const room = $('#chat-room');
   CH.renderGen = (CH.renderGen || 0) + 1;
   const myGen = CH.renderGen;
   CH._drainGen = myGen;
-  const budget = CH._olderBudgetMs != null ? CH._olderBudgetMs : 24;
+  const budget = CH._olderBudgetMs != null ? CH._olderBudgetMs : 12;
   let i = groups.length - 1; // newest group first
   let topRef = null; // the topmost node the drain inserted: older groups go above it
+  let layoutMs = 0; // last tick's forced-layout cost, reserved against this tick's inserts
   const finish = () => {
-    CH._drainGen = null;
-    if (opts.after) opts.after();
-    if (CH._growPending) { CH._growPending = false; chatSched.force(); }
+    if (opts.after) opts.after(); // domWin/thread sync first: the flushed draw must see the landed window
+    endDrain(true);
   };
   if (i < 0) { finish(); return; }
   const tick = () => {
@@ -3414,15 +3425,18 @@ function startOlderDrain(groups, perGroupFps, opts) {
       t.innerHTML = renderGroups(groups[i].items, opts.workingT);
       bindChatBubbles(t.content); // bind while the nodes still live in the fragment (t_c69c2170)
       const first = t.content.firstChild;
+      if (topRef && topRef.parentNode !== room) topRef = null; // an append's eviction ate it mid-drain
       const ob = $('#chat-older');
       room.insertBefore(t.content, topRef || (ob ? ob.nextSibling : room.firstChild));
       topRef = first; // this group's first node is the new top of the drained region
       CH.evFp = perGroupFps[i].concat(CH.evFp);
       i--;
-      if (performance.now() - t0 > budget) break; // over budget: finish this group, yield the rest
+      if (performance.now() - t0 + layoutMs > budget) break; // over budget (layout included): finish this group, yield the rest
     }
+    const tl = performance.now(); // forced layout: scrollHeight read, then scrollTop write
     if (opts.repin) { room.scrollTop = room.scrollHeight; repinBottom(room); }
     else room.scrollTop = Chat.anchorScroll(opts.top, opts.height, room.scrollHeight);
+    layoutMs = performance.now() - tl;
     if (i >= 0) requestAnimationFrame(tick);
     else finish();
   };
