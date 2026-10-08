@@ -370,7 +370,6 @@ header { gap:4px; } header #tabs .navicon { display:inline-block; } header #tabs
 /* Idle/busy by shape, no motion (t_e116438b): idle = hollow ring, busy = arc with a gap. */
 .pres { display:inline-flex; width:12px; height:12px; flex:none; } .pres i { flex:1; border-radius:50%; border:2px solid var(--fg-muted); }
 .pres.busy i { border-color:var(--success); border-right-color:transparent; }
-#graph .pres circle { fill:none; stroke-width:2; stroke:var(--fg-muted); } #graph .pres.busy circle { stroke:var(--success); stroke-dasharray:22 10; }
 .presence { display:flex; flex-wrap:wrap; gap:6px; margin:0 0 8px; } .pchip { display:inline-flex; align-items:center; gap:5px; padding:2px 8px; border:1px solid var(--border); border-radius:var(--radius-full); font-size:12px; }
 /* ---- Team graph editor ---- */
 .gtoolbar { gap:var(--space-2); } .gtoolbar .tgroup { display:flex; gap:2px; padding:2px; background:var(--bg-surface); border:1px solid var(--border); border-radius:var(--radius-sm); }
@@ -415,7 +414,6 @@ header { gap:4px; } header #tabs .navicon { display:inline-block; } header #tabs
 .rt-field input.invalid, .rt-field textarea.invalid { border-color:var(--danger); }
 #rd-error { color:var(--danger); white-space:pre-wrap; margin:6px 0 0; } #rd-error:empty { display:none; }
 #graph .capsdot circle { fill:var(--fg-muted); opacity:.55; } #graph .capsdot.caps-ok circle { fill:var(--success); opacity:1; } #graph .capsdot.caps-error circle { fill:var(--danger); opacity:1; }
-#graph .status circle { fill:var(--fg-muted); } #graph .status.s-working circle { fill:var(--success); } #graph .status.s-needs-human circle { fill:var(--warning-strong); }
 #graph .handle { fill:var(--bg-raised); stroke:var(--accent); stroke-width:2; opacity:0; cursor:crosshair; transition:opacity var(--dur-fast), r var(--dur-fast); }
 #graph .node:hover .handle, #graph .node.sel .handle { opacity:1; } #graph .handle:hover { r:8; fill:var(--accent); }
 #graph .qacts { opacity:0; pointer-events:none; transition:opacity var(--dur-fast); } #graph .node:hover .qacts { opacity:1; pointer-events:all; }
