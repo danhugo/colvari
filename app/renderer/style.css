@@ -5,7 +5,7 @@ nav button { border:1px solid transparent; background:none; padding:6px 10px; te
 nav .navicon { width:14px; height:14px; flex:0 0 auto; stroke:currentColor; fill:none; stroke-width:1.6; stroke-linecap:round; stroke-linejoin:round; }
 .spacer { flex:1; } .pill { padding:3px 8px; border-radius:10px; border:1px solid var(--line); } .pill.on { background:var(--ok); color:var(--fg-on-accent); }
 button, input, select, textarea { font:inherit; color:var(--fg); background:var(--card); border:1px solid var(--line); border-radius:6px; padding:5px 9px; }
-button { cursor:pointer; } button.primary { background:var(--acc); color:var(--fg-on-accent); border-color:var(--acc); } button.on { outline:2px solid var(--acc); }
+button { cursor:pointer; border-color:transparent; background:var(--bg-hover); } button.primary { background:var(--acc); color:var(--fg-on-accent); border-color:transparent; } button.on { background:var(--accent-soft); color:var(--accent-text); }
 main { flex:1; overflow:hidden; } .tab { display:none; height:100%; padding:10px; flex-direction:column; gap:8px; } .tab.active { display:flex; }
 /* Usage (t_1c907493): the fixed-height flex tab clipped the hero/account tables with no way to
    scroll — the whole tab is one scrolling page now, and the runs table header sticks while the
@@ -214,7 +214,7 @@ nav button:focus:not(:focus-visible) { outline:none; }
 nav button:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
 nav button.active:hover { background:var(--accent-soft); }
 button, input, select, textarea { border-radius:var(--radius-sm); transition:border-color var(--dur-fast), background var(--dur-fast), box-shadow var(--dur-fast); }
-button:hover { background:var(--bg-hover); } button.primary:hover { background:color-mix(in srgb, var(--accent) 88%, black); }
+button:hover { background:color-mix(in srgb, var(--fg-primary) 8%, var(--bg-hover)); } button.primary:hover { background:color-mix(in srgb, var(--accent) 88%, black); }
 button:focus-visible, input:focus, select:focus, textarea:focus { outline:none; border-color:var(--accent); box-shadow:var(--ring); }
 .pill { border-radius:var(--radius-full); } .pill.on { background:var(--success-soft); color:var(--success-text); border-color:transparent; }
 .panel, .col, .stat, #graph { border-radius:var(--radius-md); box-shadow:var(--shadow-sm); }
@@ -835,11 +835,8 @@ details.evrun .evrow { padding-left:0; }
 .panel, .col, .stat, .gcontrols, #minimap, .us-kpis > div, .us-chart, .us-card { box-shadow: var(--hl), var(--shadow-sm); }
 .card:hover { box-shadow: var(--hl), var(--shadow-md); }
 .card.sel, .card.approval { box-shadow: var(--ring), var(--hl), var(--shadow-md); }
-/* Signature primary: teal gradient with a deep border and a pressed state. */
-button.primary { background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 92%, white), var(--accent)); border-color: var(--accent-deep); box-shadow: var(--hl), var(--shadow-sm); text-shadow: 0 1px 0 rgba(255,255,255,.12); }
-button.primary:hover { background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 88%, white), color-mix(in srgb, var(--accent) 90%, black)); }
-button.primary:active { transform: translateY(.5px); box-shadow: var(--shadow-sm); }
-.gtoolbar .tgroup > button.primary { background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 92%, white), var(--accent)); }
+/* Primary: solid accent fill, pressed nudge (t_2d23aa3d: no gradient/border/glow). */
+button.primary:active { transform: translateY(.5px); }
 /* Motion on view + overlay state changes (quiet, 120–260ms; reduced-motion handled globally). */
 .tab.active { animation: view-in var(--dur-in) var(--ease-out); }
 @keyframes view-in { from { opacity: 0; transform: translateY(4px); } }
@@ -992,3 +989,14 @@ header .runctl #stop { padding:0 10px; }
 /* Icon buttons sit in a <nav> so they reuse the tab button look (no border, hover/active bg); only size them. */
 header .hdricons { display:inline-flex; gap:2px; }
 header .hdricons button { width:var(--topbar-h); height:var(--topbar-h); padding:0; justify-content:center; }
+
+/* t_2d23aa3d: borderless buttons and chips — soft-tone fills instead of outlines.
+   Inputs keep their 1px edge; :focus-visible rings stay. */
+.pill, .tag, .pchip, .cchip summary, .cchip summary:hover, .limitmeter .lm-chip.lm-unknown, .seg, .lvchips, .asswitch .sw, .asswitch input:checked + .sw { border-color:transparent; border-style:solid; }
+.pill:not([class*="pf-"]):not([class*="upd-"]):not(.on), .pchip, .seg, .lvchips, .limitmeter .lm-chip.lm-unknown { background:var(--bg-hover); }
+.pill.pf-stale, .pill.pf-testing, .pill.upd-pending, .pill.upd-draining { background:var(--warning-soft); color:var(--warning-text); }
+.pill.upd-testing, .pchip.wake { background:var(--accent-soft); color:var(--accent-text); }
+.pill.upd-deferred, .pill.pf-untested { background:var(--bg-hover); }
+.lvchip.on, .lvchip.lv-info.on, .lvchip.lv-warn.on, .lvchip.lv-error.on { box-shadow:none; }
+.seg button.on { background:var(--accent-soft); color:var(--accent-text); }
+.ctxmenu button.danger:hover, #sidebar .sb-actions button.danger:hover { color:var(--danger); background:var(--danger-soft); }
