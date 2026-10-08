@@ -185,7 +185,7 @@ header .pill { font-variant-numeric:tabular-nums; } .pill.quiet { color:var(--mu
 .chat-head { display:flex; align-items:center; gap:8px; padding:10px 16px; border-bottom:1px solid var(--border); } .chat .muted { color:var(--fg-muted); }
 #chat-room { flex:1; overflow:auto; padding:8px 0; } .cgroup { display:flex; gap:10px; padding:6px 16px; } .cgroup:hover { background:var(--bg-hover); }
 .avatar { flex:0 0 36px; height:36px; border-radius:50%; display:flex; align-items:center; justify-content:center; color:var(--fg-on-accent); font-weight:700; font-size:13px; position:relative; }
-/* DiceBear face fills its avatar shell; radius follows the shell (squircle chips, circle leads).
+/* DiceBear face fills its avatar shell; radius follows the shell (squircle for every agent).
    img-scoped on purpose: on the SVG <image> nodes CSS width/height would override the geometry attrs. */
 img.avface { width:100%; height:100%; display:block; border-radius:inherit; }
 .cbody { min-width:0; flex:1; } .cname { font-weight:700; } .role { font-size:10px; padding:0 6px; border-radius:6px; background:var(--bg-hover); color:var(--fg-secondary); margin-left:6px; font-weight:600; } .cname time { color:var(--fg-muted); font-size:11px; font-weight:400; margin-left:6px; }
@@ -302,7 +302,7 @@ button:focus-visible, input:focus, select:focus, textarea:focus { outline:none; 
 .cgroup.self .cname { color:var(--fg-primary); }
 /* Presence by shape: working = slow-blinking ring, needs-you = "!" badge. Blink animates opacity only (t_3e975251),
    so it stays on the compositor. Paused when hidden/blurred and off for reduced motion. */
-.avatar.working::after { content:''; position:absolute; inset:-4px; width:auto; height:auto; border-radius:50%; border:2px solid var(--success); box-sizing:border-box; will-change:opacity; animation:ringpulse 1.8s ease-in-out infinite alternate; }
+.avatar.working::after { content:''; position:absolute; inset:-4px; width:auto; height:auto; border-radius:inherit; border:2px solid var(--success); box-sizing:border-box; will-change:opacity; animation:ringpulse 1.8s ease-in-out infinite alternate; }
 @keyframes ringpulse { from { opacity:.25; } to { opacity:.8; } }
 .anim-paused .avatar.working::after, .anim-paused #graph .avring { animation-play-state:paused; }
 @media (prefers-reduced-motion: reduce) { .avatar.working::after { animation:none; opacity:.55; } }
@@ -857,7 +857,6 @@ button, .pchip, .tag, .badge, .pill, .avatar, .cchip summary, .lvchip, .asswitch
 /* Avatars: glass-pebble treatment — slight inner highlight + soft edge, squircle default.
    Leads/PMs read as circles (shape = standing in the team graph, see who()). */
 .avatar { box-shadow: inset 0 1px 0 rgba(255,255,255,.28), 0 1px 2px rgba(37,33,24,.18); border-radius: 30%; }
-.avatar.is-lead { border-radius: 50%; }
 /* Empty states: display-font heading, accent-tinted glyph, one quiet sentence + one action. */
 .cempty svg, .wk-emptystate svg { color: var(--accent); opacity: .85; }
 .us-empty, .hint-first { border-style: dashed; }

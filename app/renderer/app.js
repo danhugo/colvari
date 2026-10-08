@@ -1021,7 +1021,7 @@ function drawClusterCard(g, n, onExpand) {
   // Back cards peek straight DOWN only: side anchors exit at the main card's left/right edges, so a
   // diagonal stack would put its overhang under every edge start (and the card-crossing check).
   el('rect', { class: 'card stack2', width: W, height: H, rx: 12, x: 0, y: 10 }, g); el('rect', { class: 'card stack1', width: W, height: H, rx: 12, x: 0, y: 5 }, g); el('rect', { class: 'card', width: W, height: H, rx: 12 }, g);
-  const c = agentColor(n.head); el('circle', { class: 'avatar', cx: 30, cy: 26, r: 14, style: `fill:var(--agent-${c})` }, g); el('text', { x: 30, y: 30.5, class: 'avtext', 'text-anchor': 'middle' }, g).textContent = n.members.length;
+  const c = agentColor(n.head); el('rect', { class: 'avatar', x: 16, y: 12, width: 28, height: 28, rx: 8.4, style: `fill:var(--agent-${c})` }, g); el('text', { x: 30, y: 30.5, class: 'avtext', 'text-anchor': 'middle' }, g).textContent = n.members.length;
   el('text', { x: 52, y: 23, class: 'nname' }, g).textContent = clipText(n.name, 18); el('text', { x: 52, y: 38, class: 'nrole' }, g).textContent = n.role + ' · expand';
   n.members.slice(0, 16).forEach((m, i) => el('circle', { class: 'mdot s-' + nodeLive(m), cx: 16 + i * 10, cy: 54, r: 3.5 }, g));
   el('text', { x: 12, y: 72, class: 'clsum' }, g).textContent = [cnt.working && cnt.working + ' working', cnt['needs-human'] && cnt['needs-human'] + ' needs you', cnt.idle && cnt.idle + ' idle'].filter(Boolean).join(' · ');
@@ -1212,7 +1212,7 @@ function renderGraph() {
   const defs = el('defs', {}, svg);
   for (const t of ['assign', 'message', 'review', 'sel']) { const m = el('marker', { id: 'arr-' + t, viewBox: '0 0 10 10', refX: 9, refY: 5, markerWidth: 8, markerHeight: 8, markerUnits: 'userSpaceOnUse', orient: 'auto-start-reverse' }, defs); el('path', { d: 'M0,1 L9,5 L0,9 z', class: 'arrow arrow-' + t }, m); }
   // One shared round mask (objectBoundingBox → scales to every node's <image>) for the DiceBear faces.
-  el('circle', { cx: 0.5, cy: 0.5, r: 0.5 }, el('clipPath', { id: 'avclip-team', clipPathUnits: 'objectBoundingBox' }, defs));
+  el('rect', { width: 1, height: 1, rx: 0.3 }, el('clipPath', { id: 'avclip-team', clipPathUnits: 'objectBoundingBox' }, defs));
   const vp = el('g', { class: 'viewport' }, svg); const eL = el('g', { class: 'edges' }, vp), nL = el('g', { class: 'nodes' }, vp), xL = el('g', { class: 'edges cross-layer' }, vp), lL = el('g', { class: 'labels' }, vp); // cross-team edges draw above nodes so the dashed line into the ghost stays visible
   const nodes = allGraphNodes(); const byId = Object.fromEntries(nodes.map((n) => [n.id, n]));
   const edges = GV.edges;
@@ -1260,9 +1260,9 @@ function renderGraph() {
     const g = el('g', { class: 'node' + (sel.node === n.id || connectFrom === n.id ? ' sel' : '') + ' st-' + live + (live === 'working' ? ' working' : '') + (rtuFor(n.id) ? ' rtpaused' : ''), transform: `translate(${n.x},${n.y})`, 'data-id': n.id }, nL);
     el('rect', { class: 'card', width: W, height: H, rx: 12 }, g);
     el('rect', { class: 'stripe', width: 4, height: H - 20, x: 0, y: 10, rx: 2, style: `fill:${agentVar(n.id)}` }, g);
-    // Working ring (t_3e975251): plain SVG circle, slow opacity blink.
-    if (live === 'working') el('circle', { class: 'avring', cx: 30, cy: 26, r: 19 }, g);
-    el('circle', { class: 'avatar', cx: 30, cy: 26, r: 14, style: `fill:${agentVar(n.id)};--av:${agentVar(n.id)}` }, g);
+    // Working ring (t_3e975251, t_18c36839): squircle matching the avatar, slow opacity blink.
+    if (live === 'working') el('rect', { class: 'avring', x: 11, y: 7, width: 38, height: 38, rx: 11.4 }, g);
+    el('rect', { class: 'avatar', x: 16, y: 12, width: 28, height: 28, rx: 8.4, style: `fill:${agentVar(n.id)};--av:${agentVar(n.id)}` }, g);
     if (isLeadRole(n.role)) el('text', { x: 40, y: 37, class: 'leadstar', 'text-anchor': 'middle' }, g).textContent = '★';
     el('image', { class: 'avface', href: faceUri(n.id), x: 16, y: 12, width: 28, height: 28, 'clip-path': 'url(#avclip-team)' }, g);
     el('text', { x: 52, y: 23, class: 'nname' }, g).textContent = clipText(n.name, Math.max(6, Math.round(16 / Math.max(1, 11 / (13 * VP.zoom)))));
@@ -3075,7 +3075,7 @@ const faceUri = (id, seed) => { seed = seed || ((nodeById(id) || {}).avatarSeed 
   return u; };
 const avatarBg = (w) => (w.human || w.sys) ? w.color : (w.bg || w.color);
 const avatarBody = (id, w) => (w.human || w.sys) ? esc(w.ini) : `<img class="avface" src="${faceUri(id)}" alt="" draggable="false">`;
-const avatarHtml = (id, working, ask) => { const w = who(id); return `<div class="avatar${w.lead ? ' is-lead' : ''}${w.human ? ' human' : ''}${w.sys ? ' sys' : ''}${working.has(id) ? ' working' : ''}${ask.has(id) ? ' ask' : ''}" style="background:${avatarBg(w)}" title="${esc(w.name)}${working.has(id) ? ' · working' : ask.has(id) ? ' · needs you' : ''}">${avatarBody(id, w)}</div>`; };
+const avatarHtml = (id, working, ask) => { const w = who(id); return `<div class="avatar${w.human ? ' human' : ''}${w.sys ? ' sys' : ''}${working.has(id) ? ' working' : ''}${ask.has(id) ? ' ask' : ''}" style="background:${avatarBg(w)}" title="${esc(w.name)}${working.has(id) ? ' · working' : ask.has(id) ? ' · needs you' : ''}">${avatarBody(id, w)}</div>`; };
 // ≥3 consecutive handoffs from one actor fold into one expandable "assigned N tasks" row.
 const bubbleRuns = (items) => { const out = []; items.forEach((it, k) => { it._sameTask = k > 0 && !!it.taskId && items[k - 1].taskId === it.taskId; }); for (let i = 0; i < items.length;) { let j = i; while (j < items.length && items[j].type === 'handoff') j++;
   if (j - i >= 3) { const run = items.slice(i, j); out.push(`<details class="evrun"><summary class="evrow"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg><span>assigned ${run.length} tasks</span></summary>${run.map(bubble).join('')}</details>`); i = j; } else { j = Math.max(j, i + 1); out.push(...items.slice(i, j).map(bubble)); i = j; } } return out.join(''); };
@@ -3444,7 +3444,7 @@ function chatPreview() {
   box.classList.toggle('hidden', !open);
   if (open) {
     CH.mi = Math.min(CH.mi, Math.max(0, ms.length - 1));
-    const html = ms.map((n, i) => `<div data-name="${esc(n.name)}" class="${i === CH.mi ? 'sel' : ''}"><span class="avatar${isLeadRole(n.role) ? ' is-lead' : ''}" style="background:${agentVar(n.id)}">${avatarBody(n.id, who(n.id))}</span>${esc(n.name)} <span class="role">${esc(n.role)}</span></div>`).join('');
+    const html = ms.map((n, i) => `<div data-name="${esc(n.name)}" class="${i === CH.mi ? 'sel' : ''}"><span class="avatar" style="background:${agentVar(n.id)}">${avatarBody(n.id, who(n.id))}</span>${esc(n.name)} <span class="role">${esc(n.role)}</span></div>`).join('');
     if (box.innerHTML !== html) {
       box.innerHTML = html;
       box.querySelectorAll('div').forEach((d) => d.onmousedown = (e) => { e.preventDefault(); pickMention(d.dataset.name); });
