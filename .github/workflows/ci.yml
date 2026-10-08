@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [master, 'squad/t_c20a5aca']
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: linux (node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - name: Install Electron test deps (xvfb)
+        run: sudo apt-get update && sudo apt-get install -y xvfb
+      - name: npm ci
+        working-directory: app
+        run: npm ci
+      - name: npm test (under xvfb)
+        working-directory: app
+        run: xvfb-run -a npm test
