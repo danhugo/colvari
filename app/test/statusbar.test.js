@@ -15,8 +15,8 @@ test('passive status lives in the bottom status bar, not the top bar (t_13fabf5a
   assert.match(bar, /Not what you pay on a Pro\/Max/, 'API-eq tooltip kept');
 });
 
-test('top bar keeps run control, New goal, bell, settings, help; theme moved to Settings', () => {
-  for (const id of ['runstate', 'runbtn', 'stop', 'newgoal', 'alertbell', 'settingsbtn', 'help']) assert.ok(header.includes(`id="${id}"`), id);
+test('top bar keeps run control, bell, settings, help; theme moved to Settings', () => {
+  for (const id of ['runstate', 'runbtn', 'stop', 'alertbell', 'settingsbtn', 'help']) assert.ok(header.includes(`id="${id}"`), id);
   assert.match(header, /class="runctl"><span id="runstate"[^]*id="stop"/, 'run state + Run/Stop are one control');
   assert.ok(!html.includes('id="themebtn"'), 'theme toggle no longer in the static header');
   assert.ok(fs.readFileSync(path.join(__dirname, '../renderer/app.js'), 'utf8').includes('id="themebtn"'), 'theme toggle rendered in Settings');
@@ -28,7 +28,6 @@ test('run control: Stop only while Running, Run only while Stopped; one size for
   assert.ok(js.includes(`$('#runbtn').classList.toggle('hidden', rs.state !== 'stopped')`), 'Run only when stopped');
   const css = fs.readFileSync(path.join(__dirname, '../renderer/style.css'), 'utf8');
   assert.match(css, /--topbar-h:\s*28px/, 'one control height');
-  assert.match(header, /id="newgoal" class="primary topbtn"/, 'New goal is the compact primary');
 });
 
 test('bell, settings, help reuse the nav tab button style (t_53cd3fd7)', () => {
