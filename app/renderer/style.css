@@ -38,7 +38,7 @@ main { flex:1; overflow:hidden; } .tab { display:none; height:100%; padding:10px
 #settingsform .set-ctl select { width:190px; }
 #settingsform .set-ctl input[type="checkbox"] { width:16px; height:16px; accent-color:var(--accent); }
 .set-actions { margin:22px 0 0; }
-.toolbar { display:flex; gap:6px; align-items:center; flex-wrap:wrap; } .muted { color:var(--muted); } .hidden { display:none; }
+.toolbar { display:flex; gap:6px; align-items:center; flex-wrap:wrap; } .muted { color:var(--muted); } .hidden { display:none !important; }
 .toolbar label.inline { display:inline-flex; gap:4px; align-items:center; } .toolbar label.inline input { width:auto; }
 #logsearch { min-width:160px; }
 .split { display:flex; gap:10px; flex:1; min-height:0; } .panel { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:10px; width:340px; overflow:auto; }
