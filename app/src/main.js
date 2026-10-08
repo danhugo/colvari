@@ -2994,6 +2994,10 @@ const api = {
   unmergedBranches: (c) => ST(c).listUnmergedBranches(),
   // Worktree lifecycle (t_9b662983): cached worktree count + bytes for the header/settings UI.
   getDiskUsage: (c) => WT.diskUsage(APP_ROOT),
+  // Status-bar worktree popover (t_13fabf5a): task worktrees + the same safety-gated sweep the idle timer runs.
+  appVersion: () => app.getVersion(),
+  listTaskWorktrees: async () => (await WT.listWorktrees(APP_ROOT)).filter((w) => w.path.includes('/.squad/worktrees/')),
+  cleanupWorktrees: (c) => (orchFor(c.p).running ? { error: 'Stop the team first' } : WT.sweepWorktrees({ repoDir: APP_ROOT, store: ST(c) })),
   pickDir: async () => { const { dialog } = require('electron'); const r = await dialog.showOpenDialog(win, { properties: ['openDirectory', 'createDirectory'] }); return r.canceled ? null : r.filePaths[0]; },
   agentStates: (c) => orchFor(c.p).agentStates(),
   // Live per-node data for the graph: runtime, model, status (working|idle|needs-human).
