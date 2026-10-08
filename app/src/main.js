@@ -916,7 +916,7 @@ async function guiE2E() {
       const label = await ex(`return $('#runstate').textContent`);
       expect('idle: the run stays alive with the board drained', o.running === true, o.running);
       expect('idle: the pill reads Idle (nothing to do)', /idle/i.test(label) && !/running/i.test(label), label);
-      expect('idle: Stop stays in the bar while the run idles', await ex(`return !$('#stop').classList.contains('hidden') && $('#stop').getBoundingClientRect().width > 0`));
+      expect('idle: no Stop while the run idles (t_53cd3fd7)', await ex(`return $('#stop').classList.contains('hidden')`));
       const runsBefore = s.listRuns().length;
       await new Promise((r) => setTimeout(r, 2500));
       expect('idle: nothing spawns while idle (zero cost waiting)', s.listRuns().length === runsBefore && o.procs.size === 0, { before: runsBefore, after: s.listRuns().length, procs: o.procs.size });

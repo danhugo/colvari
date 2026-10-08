@@ -21,3 +21,12 @@ test('top bar keeps run control, New goal, bell, settings, help; theme moved to 
   assert.ok(!html.includes('id="themebtn"'), 'theme toggle no longer in the static header');
   assert.ok(fs.readFileSync(path.join(__dirname, '../renderer/app.js'), 'utf8').includes('id="themebtn"'), 'theme toggle rendered in Settings');
 });
+
+test('run control: Stop only while Running, Run only while Stopped; one size for the cluster (t_53cd3fd7)', () => {
+  const js = fs.readFileSync(path.join(__dirname, '../renderer/app.js'), 'utf8');
+  assert.ok(js.includes(`$('#stop').classList.toggle('hidden', rs.state !== 'running')`), 'Idle hides Stop');
+  assert.ok(js.includes(`$('#runbtn').classList.toggle('hidden', rs.state !== 'stopped')`), 'Run only when stopped');
+  const css = fs.readFileSync(path.join(__dirname, '../renderer/style.css'), 'utf8');
+  assert.match(css, /--topbar-h:\s*28px/, 'one control height');
+  assert.match(header, /id="newgoal" class="primary topbtn"/, 'New goal is the compact primary');
+});
