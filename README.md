@@ -97,6 +97,4 @@ Issues and pull requests are welcome. Run `npm test` in `app/` before you open a
 
 ## License
 
-`app/package.json` says MIT, but there is no `LICENSE` file in the repo yet.
-
-<!-- TODO (human): add a LICENSE file (MIT?) so the license is clear. -->
+[MIT](LICENSE)
