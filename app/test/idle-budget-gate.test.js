@@ -8,10 +8,19 @@ const fs = require('node:fs');
 const path = require('node:path');
 const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
 
-test('style.css ships zero infinite animations (baseline #1 culprit, Quinn t_09b11191)', () => {
+test('style.css infinite animations are compositor-only, paused when hidden, off for reduced motion (t_edaa52ea)', () => {
   const css = read('renderer/style.css');
-  const bad = [...css.matchAll(/animation[^;{}]*infinite/gi)].map((m) => m[0].trim());
-  assert.deepEqual(bad, [], `infinite animation(s) found — replace with a static state marker: ${bad.join(' | ')}`);
+  const names = [...css.matchAll(/animation[^;{}]*infinite/gi)].map((m) => (m[0].match(/animation\s*:\s*([\w-]+)/) || [])[1]);
+  for (const n of names) {
+    const kf = css.match(new RegExp(`@keyframes ${n}\\s*\\{((?:[^{}]*\\{[^}]*\\})*)[^{}]*\\}`));
+    assert.ok(kf, `missing @keyframes ${n}`);
+    const props = [...kf[1].matchAll(/([\w-]+)\s*:/g)].map((m) => m[1]);
+    assert.deepEqual(props.filter((p) => p !== 'transform' && p !== 'opacity'), [], `@keyframes ${n} repaints every frame — animate only transform/opacity`);
+  }
+  assert.deepEqual([...new Set(names)], ['ringspin'], 'only the working ring may loop');
+  assert.match(css, /\.anim-paused [^{]*\{[^}]*animation-play-state:\s*paused/, 'ring must pause when the window is hidden/blurred');
+  assert.match(css, /prefers-reduced-motion: reduce\)\s*\{[^@]*\.avatar\.working::after[^}]*animation:\s*none/, 'ring must stop for reduced motion');
+  assert.match(read('renderer/app.js'), /anim-paused/, 'renderer toggles .anim-paused on hide/blur');
 });
 
 test('renderer keeps no fast fixed timers: every setInterval is >= 2s and none drives chat', () => {
