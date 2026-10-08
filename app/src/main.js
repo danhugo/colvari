@@ -2007,7 +2007,7 @@ async function guiE2E() {
     for (const [wd, tag] of [[1400, 1400], [1100, 1100]]) for (const th of ['light', 'dark']) {
       win.setSize(wd, 800); require('electron').nativeTheme.themeSource = th; await ex(`await w(400);`);
       const hd = await ex(`const vis = (s) => { const e = document.querySelector(s); return !!e && e.offsetWidth > 2; };
-        return { brand: vis('header > strong.brand'), chat: vis('#tabs button[data-tab=chat]'), team: vis('#tabs button[data-tab=team]'), board: vis('#tabs button[data-tab=board]'), bell: vis('#alertbell') }`);
+        return { brand: vis('#sidebar > strong.brand'), chat: vis('#tabs button[data-tab=chat]'), team: vis('#tabs button[data-tab=team]'), board: vis('#tabs button[data-tab=board]'), bell: vis('#alertbell') }`);
       expect(`alerts: header keeps the logo, the Chat/Team/Board tabs and the bell at ${tag}px ${th} even with 0 alerts`, hd.brand && hd.chat && hd.team && hd.board && hd.bell, hd);
       await shot(`alerts-0-${tag}-${th}`);
     }
@@ -2528,6 +2528,7 @@ async function guiE2E() {
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'board') { await boardShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'conflict') { await conflictShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'graph') { await graphShots(); for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`$('#tabs button[data-tab=team]').click(); await w(500);`); await shot(`graph-${t}`); } require('electron').nativeTheme.themeSource = 'system'; throw null; }
+    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'brand') { win.setSize(1400, 820); for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`await w(600);`); await shot(`brand-${t}`); } require('electron').nativeTheme.themeSource = 'system'; throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'chat') { await chatShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'chatmsg') { await chatMsgShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'agentimage') { await agentImageShots(); throw null; }

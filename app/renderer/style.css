@@ -689,8 +689,8 @@ rect.usb-rep, i.usb-rep { fill:var(--accent); background:var(--accent); } rect.u
 .usr-bar { display:flex; height:6px; border-radius:3px; background:var(--bg-app); overflow:hidden; margin-top:3px; }
 
 /* Colvari brand */
-header > strong.brand { display:flex; align-items:center; gap:6px; font-weight:700; letter-spacing:-.02em; color:var(--fg-primary); }
-@media (max-width:1000px) { header > strong.brand { display:none; } }
+/* Brand sits at the top of the left panel (Slack/Linear/Discord pattern); the top bar is for context + actions (t_b104166a). */
+#sidebar > strong.brand { display:flex; align-items:center; gap:6px; flex:0 0 auto; padding:2px var(--space-2) var(--space-2); font-weight:700; letter-spacing:-.02em; color:var(--fg-primary); }
 /* macOS hiddenInset draws the traffic lights over the page's top-left (~x 12-70) — inset the
    header content clear of them so the brand never collides with the window controls
    (Vex audit t_9399168c → t_56896946). Other platforms have no overlay controls there. */
@@ -830,7 +830,7 @@ details.evrun .evrow { padding-left:0; }
 /* ===== Identity pass (t_300e8fd2): "iridescence" — see design/tokens.css v2 ===== */
 /* Display type: Space Grotesk carries the brand voice — wordmark, section headers,
    page titles, stat numbers, empty-state headings. UI text stays Inter. */
-header > strong.brand { font-family: var(--font-display); font-weight: var(--fw-bold); letter-spacing: -.02em; font-size: 15px; }
+#sidebar > strong.brand { font-family: var(--font-display); font-weight: var(--fw-bold); letter-spacing: -.02em; font-size: 15px; }
 .brandmark .bm-arc { color: var(--accent); } .brandmark .bm-dots { color: var(--fg-primary); }
 .col h3, #sidebar h4, .sb-head h4, .ovtl-head label, #settingsform h3, .sb-more > summary { font-family: var(--font-display); letter-spacing: var(--track-caps); }
 .set-pagetitle, .wk-emptystate h3, .cempty b, #helpdlg h3, #nodeform h3 { font-family: var(--font-display); letter-spacing: -.01em; }
