@@ -3099,7 +3099,7 @@ const faceUri = (id, seed) => { seed = seed || ((nodeById(id) || {}).avatarSeed 
   return u; };
 const avatarBg = (w) => (w.human || w.sys) ? w.color : (w.bg || w.color);
 const avatarBody = (id, w) => (w.human || w.sys) ? esc(w.ini) : `<img class="avface" src="${faceUri(id)}" alt="" draggable="false">`;
-const avatarHtml = (id, working, ask) => { const w = who(id); return `<div class="avatar${w.human ? ' human' : ''}${w.sys ? ' sys' : ''}${working.has(id) ? ' working' : ''}${ask.has(id) ? ' ask' : ''}" style="background:${avatarBg(w)}" title="${esc(w.name)}${working.has(id) ? ' · working' : ask.has(id) ? ' · needs you' : ''}">${avatarBody(id, w)}</div>`; };
+const avatarHtml = (id, working, ask) => { const w = who(id); return `<div class="avatar${w.human ? ' human' : ''}${w.sys ? ' sys' : ''}${ask.has(id) ? ' ask' : ''}" style="background:${avatarBg(w)}" title="${esc(w.name)}${ask.has(id) ? ' · needs you' : ''}">${avatarBody(id, w)}</div>`; };
 // ≥3 consecutive handoffs from one actor fold into one expandable "assigned N tasks" row.
 const bubbleRuns = (items) => { const out = []; items.forEach((it, k) => { it._sameTask = k > 0 && !!it.taskId && items[k - 1].taskId === it.taskId; }); for (let i = 0; i < items.length;) { let j = i; while (j < items.length && items[j].type === 'handoff') j++;
   if (j - i >= 3) { const run = items.slice(i, j); out.push(`<details class="evrun"><summary class="evrow"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg><span>assigned ${run.length} tasks</span></summary>${run.map(bubble).join('')}</details>`); i = j; } else { j = Math.max(j, i + 1); out.push(...items.slice(i, j).map(bubble)); i = j; } } return out.join(''); };
@@ -3429,10 +3429,9 @@ function patchChatAvatars(room, workingT) {
       if (r.bottom < vr.top - 200 || r.top > vr.bottom + 200) return;
     }
     const av = g.querySelector('.avatar'); if (!av) return;
-    const w = workingT.has(id), a = ask.has(id);
-    if (av.classList.contains('working') !== w) av.classList.toggle('working', w);
+    const a = ask.has(id); // no working ring in chat: it lives in the Team map / sidebar (t_e4510e8a)
     if (av.classList.contains('ask') !== a) av.classList.toggle('ask', a);
-    const nm = who(id); const title = nm.name + (w ? ' · working' : a ? ' · needs you' : '');
+    const nm = who(id); const title = nm.name + (a ? ' · needs you' : '');
     if (av.getAttribute('title') !== title) av.setAttribute('title', title);
   });
 }
