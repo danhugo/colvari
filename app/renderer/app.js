@@ -3167,7 +3167,7 @@ function updateNewPill() { const btn = $('#chat-newpill'); const n = CH.pendingN
 $('#chat-newpill').onclick = () => { const room = $('#chat-room'); room.scrollTop = room.scrollHeight; CH.pendingNew = 0; updateNewPill(); };
 // Windowing (t_fb193107): only the last Chat.PAGE events are in the DOM; scrolling near the top
 // prepends the next older page (anchored, no jump), and returning to the bottom shrinks again.
-const chatGrow = () => { CH.win = (CH.win || Chat.PAGE) + Chat.PAGE; chatSched.force(); };
+const chatGrow = () => { if (CH._drainGen) return; CH.win = (CH.win || Chat.PAGE) + Chat.PAGE; chatSched.force(); }; // a running drain loads the next page when it lands
 $('#chat-room').addEventListener('scroll', () => { const room = $('#chat-room');
   if (room.scrollHeight - room.scrollTop - room.clientHeight < 40) { CH.pendingNew = 0; if ((CH.win || Chat.PAGE) > Chat.PAGE) { CH.win = Chat.PAGE; chatSched.force(); } updateNewPill(); }
   else if (room.scrollTop < 80 && CH.ev && CH.ev.length > (CH.win || Chat.PAGE)) chatGrow(); });
@@ -3238,7 +3238,12 @@ function renderChatBody() {
   const workKey = [...workingT].sort().join() + '|' + [...needsYou()].sort().join();
   if (CH.stamp === stamp && CH.evFp && CH.evFp.length) {
     // Scroll-up window growth (chatGrow): prepend the next older page instead of rebuilding.
-    if (!atBottom && (CH.win || Chat.PAGE) > (CH.domWin || 0) && applyChatPrepend(ev, workingT, prevTop, prevH)) { CH.workKey = workKey; return; }
+    // While a drain owns the head, defer: prepending mid-drain would tangle the under-the-bar
+    // anchor order; the drain's finish re-forces this draw on a quiescent room.
+    if (!atBottom && (CH.win || Chat.PAGE) > (CH.domWin || 0)) {
+      if (CH._drainGen) { CH._growPending = true; return; }
+      if (applyChatPrepend(ev, workingT, prevTop, prevH)) { CH.workKey = workKey; return; }
+    }
     if (atBottom) {
       const plan = Chat.tailPlan(CH.evFp, ev, CH.win || Chat.PAGE, subRecOf);
       if (plan && applyChatAppend(ev, plan, workingT)) { CH.workKey = workKey; return; }
@@ -3252,6 +3257,7 @@ function renderChatBody() {
     }
   }
   CH.stamp = stamp; CH.workKey = workKey;
+  CH._drainGen = null; CH._growPending = false; // the full render owns the room: any drain is superseded
   // Progressive first paint (t_7e53747c): the cold render of a full page (100 events, fat board)
   // measured 87ms under load — over the 50ms bar. Split at a GROUP boundary (Chat.group is what
   // renderGroups applies anyway, so two half-renders group exactly like one) and prepend the
@@ -3261,8 +3267,7 @@ function renderChatBody() {
   const headFps = split ? split.head.map((e) => Chat.eventFp(e, subRecOf)) : null;
   const tailFps = tailItems.map((e) => Chat.eventFp(e, subRecOf));
   CH.evFp = tailFps;
-  CH.renderGen = (CH.renderGen || 0) + 1;
-  const myGen = CH.renderGen;
+  CH.renderGen = (CH.renderGen || 0) + 1; // supersedes any older-half drain a previous render started
   room.innerHTML = page.items.length ? (page.hidden ? `<button id="chat-older" class="olderbar linklike">↑ ${page.hidden} earlier message${page.hidden === 1 ? '' : 's'} — scroll up or click to load</button>` : '') + renderGroups(tailItems, workingT)
     : sel.chatTeam ? '<p class="muted logempty" data-testid="chat-empty-team">No messages for this team.</p>'
     : S.team.nodes.length ? `<div class="cempty"><svg class="brandmark big" viewBox="0 0 32 32" aria-hidden="true"><path d="M23 9A10 10 0 1 0 23 23" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/><g fill="currentColor"><circle cx="23" cy="9" r="3.6"/><circle cx="6" cy="16" r="3.6"/><circle cx="23" cy="23" r="3.6"/></g></svg><b>#company is quiet</b>Type a goal below, or @mention an agent (e.g. <code>@${esc(S.team.nodes[0].name)} write hello.txt</code>).</div>` : '<div class="cempty"><svg class="brandmark big" viewBox="0 0 32 32" aria-hidden="true"><path d="M23 9A10 10 0 1 0 23 23" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/><g fill="currentColor"><circle cx="23" cy="9" r="3.6"/><circle cx="6" cy="16" r="3.6"/><circle cx="23" cy="23" r="3.6"/></g></svg><b>No team yet</b>Create your team in the Team tab (or use the first-run guide), then chat with it here.</div>';
@@ -3274,34 +3279,14 @@ function renderChatBody() {
   syncThreadPanel(ev, workingT);
   bindChatBubbles($('#tab-chat'));
   if (headItems) {
-    // The older half goes in across frames, adaptively chunked: one big rAF still measured 60ms
-    // (a long task wherever it runs). Each frame builds+inserts as many groups as fit ~24ms,
-    // grows the books by exactly what it inserted, and re-anchors; a superseded generation stops
-    // early — the next draw heals the remaining books (a short books list plans a rebuild).
+    // The older half goes in across frames via the shared budgeted drain (t_031d789b): one big
+    // rAF still measured 60ms and the old adaptive-chunk stepper overshot to 220-330ms per tick
+    // under load — a long task wherever it runs. The drain builds+inserts group by group within
+    // ~24ms frames, grows the books by exactly what it inserts, and re-anchors per frame; a
+    // superseded generation stops early — the next draw heals the remaining books.
     const endTop = room.scrollTop, endH = room.scrollHeight; // phase-A end state for the re-anchor
-    const groups2 = split.headGroups; const perGroupFps = groups2.map((grp) => grp.items.map((e) => Chat.eventFp(e, subRecOf)));
-    let gi = 0, chunk = 6;
-    const step = () => {
-      if (CH.renderGen !== myGen || gi >= groups2.length) return; // a newer draw owns the room; it heals the books itself
-      const t0 = performance.now();
-      const take = groups2.slice(gi, gi + chunk);
-      const t = document.createElement('template');
-      t.innerHTML = renderGroups(take.flatMap((grp) => grp.items), workingT);
-      const ob2 = $('#chat-older'); const anchor = ob2 ? ob2.nextSibling : room.firstChild;
-      room.insertBefore(t.content, anchor);
-      let fps = CH.evFp;
-      for (let k = take.length - 1; k >= 0; k--) fps = perGroupFps[gi + k].concat(fps);
-      CH.evFp = fps;
-      bindChatBubbles(t);
-      if (room.scrollHeight - room.scrollTop - room.clientHeight < 40) { room.scrollTop = room.scrollHeight; repinBottom(room); }
-      else room.scrollTop = Chat.anchorScroll(endTop, endH, room.scrollHeight);
-      gi += take.length;
-      if (gi < groups2.length) {
-        chunk = Math.max(2, Math.min(24, Math.round(chunk * 24 / Math.max(1, performance.now() - t0))));
-        requestAnimationFrame(step);
-      }
-    };
-    requestAnimationFrame(step);
+    const perGroupFps = split.headGroups.map((grp) => grp.items.map((e) => Chat.eventFp(e, subRecOf)));
+    startOlderDrain(split.headGroups, perGroupFps, { workingT, top: endTop, height: endH, repin: atBottom });
   }
 }
 // Thread links and ask-human answer forms ride the bubbles; both paths (full render and tail
@@ -3390,6 +3375,54 @@ function finishAppend(room, ev, win, ob, workingT) {
   updateNewPill();
   syncThreadPanel(ev, workingT);
 }
+// Older-group drain (t_031d789b): every "insert older groups above the room" batch — the cold
+// render's older half and scroll-up prepends — goes through this one sequential stepper instead
+// of synchronous whole-page inserts (a 100-event prepend measured 87ms idle and 300ms+ under
+// 5-agent load, and the old adaptive-chunk stepper overshot its budget to 220-330ms per tick:
+// the 866ms worst frame). Groups drain newest-first — each insert lands above the previous one
+// at the older-bar anchor — a few per frame with a ~24ms budget, and CH.evFp grows after every
+// single insert, so books mirror the DOM at every yield and appends/ring patches stay exact
+// while a drain runs. One drain at a time: CH._drainGen marks ownership (chatGrow and the
+// prepend path defer to it), CH.renderGen supersedes a drain when a full render or a newer
+// prepend takes the room. repin keeps the room pinned to the bottom (cold render at bottom);
+// otherwise the viewport re-anchors to the content it was reading (scroll-up growth).
+function startOlderDrain(groups, perGroupFps, opts) {
+  const room = $('#chat-room');
+  CH.renderGen = (CH.renderGen || 0) + 1;
+  const myGen = CH.renderGen;
+  CH._drainGen = myGen;
+  const budget = CH._olderBudgetMs != null ? CH._olderBudgetMs : 24;
+  let i = groups.length - 1; // newest group first
+  let topRef = null; // the topmost node the drain inserted: older groups go above it
+  const finish = () => {
+    CH._drainGen = null;
+    if (opts.after) opts.after();
+    if (CH._growPending) { CH._growPending = false; chatSched.force(); }
+  };
+  if (i < 0) { finish(); return; }
+  const tick = () => {
+    if (CH.renderGen !== myGen) return; // a newer draw owns the room; it set its own books
+    const t0 = performance.now();
+    while (i >= 0) {
+      const t = document.createElement('template');
+      t.innerHTML = renderGroups(groups[i].items, opts.workingT);
+      bindChatBubbles(t.content); // bind while the nodes still live in the fragment (t_c69c2170)
+      const first = t.content.firstChild;
+      const ob = $('#chat-older');
+      room.insertBefore(t.content, topRef || (ob ? ob.nextSibling : room.firstChild));
+      topRef = first; // this group's first node is the new top of the drained region
+      CH.evFp = perGroupFps[i].concat(CH.evFp);
+      i--;
+      if (performance.now() - t0 > budget) break; // over budget: finish this group, yield the rest
+    }
+    if (opts.repin) { room.scrollTop = room.scrollHeight; repinBottom(room); }
+    else room.scrollTop = Chat.anchorScroll(opts.top, opts.height, room.scrollHeight);
+    if (i >= 0) requestAnimationFrame(tick);
+    else finish();
+  };
+  requestAnimationFrame(tick);
+}
+
 // Prepend the next older page (chatGrow) without rebuilding the room (t_1fb02462 — the scroll-up
 // prepend was a whole-room innerHTML at fat feeds, the 1.3s worst frame in Quinn's trace). The
 // fp-verified older slice renders into a fragment inserted under the older bar; a slice ending in
@@ -3404,7 +3437,7 @@ function applyChatPrepend(ev, workingT, prevTop, prevH) {
   const ob = $('#chat-older');
   const { target, slice } = plan;
   const groupsNew = mergeGroups(Chat.group(slice));
-  let fragItems = slice;
+  let merged = false;
   if (groupsNew.length) {
     const lastNew = groupsNew[groupsNew.length - 1];
     const first = room.querySelector('.cgroup');
@@ -3414,36 +3447,44 @@ function applyChatPrepend(ev, workingT, prevTop, prevH) {
       && firstItems[0].type !== 'question' && lastNew.items[0].type !== 'question'
       && firstItems[0].at - lastNew.items[lastNew.items.length - 1].at < Chat.GROUP_MS) {
       // merge: the boundary group re-collapses over both halves
-      const merged = [...lastNew.items, ...firstItems];
-      fragItems = slice.slice(0, slice.length - lastNew.items.length);
+      merged = true;
+      const mergedItems = [...lastNew.items, ...firstItems];
       const body = first.querySelector('.cbody');
       if (!body) return false;
-      body.innerHTML = groupHeadHtml({ who: merged[0].who, at: merged[0].at }) + bubbleRuns(Chat.collapseRepeats(merged));
-      first.dataset.cnt = String(merged.reduce((a, it) => a + (it.count || 1), 0));
+      body.innerHTML = groupHeadHtml({ who: mergedItems[0].who, at: mergedItems[0].at }) + bubbleRuns(Chat.collapseRepeats(mergedItems));
+      first.dataset.cnt = String(mergedItems.reduce((a, it) => a + (it.count || 1), 0));
       bindChatBubbles(first);
+      // The merged group is in the DOM now: its book entries are lastNew's events ahead of the
+      // old first group's (already in CH.evFp). The drain prepends the remaining fragment
+      // groups' entries one insert at a time, landing on exactly `target`'s fps when done.
+      CH.evFp = lastNew.items.map((e) => Chat.eventFp(e, subRecOf)).concat(CH.evFp);
     }
   }
-  if (fragItems.length) {
-    const t = document.createElement('template');
-    t.innerHTML = renderGroups(fragItems, workingT);
-    bindChatBubbles(t.content); // bind BEFORE the insert moves the nodes out — a drained template matches nothing
-    const anchor = ob ? ob.nextSibling : room.firstChild;
-    room.insertBefore(t.content, anchor);
-  }
-  CH.evFp = target.map((e) => Chat.eventFp(e, subRecOf));
-  CH.renderGen = (CH.renderGen || 0) + 1; // owns the room: pending split chunks must stop
-  CH.domWin = win;
+  const fragGroups = merged ? groupsNew.slice(0, -1) : groupsNew;
+  const fragFps = fragGroups.map((grp) => grp.items.map((e) => Chat.eventFp(e, subRecOf)));
+  CH.renderGen = (CH.renderGen || 0) + 1; // owns the room: a running cold-render drain stops
   if (ob) { const hidden = ev.length - win; const label = `↑ ${hidden} earlier message${hidden === 1 ? '' : 's'} — scroll up or click to load`;
     if (hidden > 0) { if (ob.textContent !== label) ob.textContent = label; }
     else ob.remove(); }
-  // Anchor: the fresh content adds (new - prev) px above the viewport; content-visibility
-  // resolves the prepended rows' real heights on paint, so re-anchor once the frame settles.
-  room.scrollTop = Chat.anchorScroll(prevTop, prevH, room.scrollHeight);
-  const want = room.scrollTop;
-  requestAnimationFrame(() => requestAnimationFrame(() => {
-    if (Math.abs(room.scrollTop - want) < 2) room.scrollTop = Chat.anchorScroll(prevTop, prevH, room.scrollHeight);
-  }));
-  syncThreadPanel(ev, workingT);
+  if (fragGroups.length) {
+    startOlderDrain(fragGroups, fragFps, {
+      workingT, top: prevTop, height: prevH,
+      after: () => {
+        CH.domWin = win;
+        syncThreadPanel(ev, workingT);
+        // content-visibility resolves the prepended rows' real heights on paint: re-anchor once
+        // the frame settles, as long as the browser kept our anchor
+        const want = room.scrollTop;
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          if (Math.abs(room.scrollTop - want) < 2) room.scrollTop = Chat.anchorScroll(prevTop, prevH, room.scrollHeight);
+        }));
+      },
+    });
+  } else {
+    CH.domWin = win;
+    room.scrollTop = Chat.anchorScroll(prevTop, prevH, room.scrollHeight);
+    syncThreadPanel(ev, workingT);
+  }
   return true;
 }
 // Working/needs-you rings live in the group avatars; append/prepend/no-op draws don't touch their

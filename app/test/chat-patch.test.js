@@ -43,15 +43,15 @@ function buildRenderer(env) {
   const stubs = {
     Chat, CH: env.CH, S: env.S,
     $: (sel) => (sel === '#chat-room' ? room : env.els[sel] || null),
-    document: { createElement: () => ({ set innerHTML(v) { /* recorded via renderGroups */ }, get content() { return { children: env.__rendered }; } }) },
-    requestAnimationFrame: () => {},
+    document: { createElement: () => ({ set innerHTML(v) { /* recorded via renderGroups */ }, get content() { return { children: env.__rendered, get firstChild() { return env.__rendered[0] || null; } }; } }) },
+    requestAnimationFrame: (fn) => { env.__raf.push(fn); },
     esc: (s) => String(s ?? ''),
     who: (id) => ({ name: id }),
     groupHeadHtml: (g) => `head:${g.who}`,
     bubbleRuns: (items) => `runs:${items.length}`,
     mergeGroups: (gs) => gs,
     needsYou: () => env.ask,
-    renderGroups: (events) => { env.__renderCaptured = events; env.__rendered = events.map((e) => { const g = makeGroup(e.who, 1); g.parent = room; return g; }); return ''; },
+    renderGroups: (events) => { env.__renderCaptured = events; env.__renderedTotal += events.length; env.__rendered = events.map((e) => { const g = makeGroup(e.who, 1); g.parent = room; return g; }); return ''; },
     bindChatBubbles: (scope) => { env.__bound.push(scope); for (const n of (scope && scope.children) || []) env.__boundNodes.push(n); },
     repinBottom: () => { env.__repins++; },
     updateNewPill: () => { env.__pills++; },
@@ -82,9 +82,14 @@ function envFor(drawn, groups, win, withOb) {
   const env = { room, CH: { thread: null, win, domWin: win, evFp: fps(drawn), pendingNew: 1, thKey: null },
     S: { tasks: [], orch: { agents: {} }, allNodes: [] }, ask: new Set(),
     els: { '#chat-older': ob, '#chat-thread': { classes: new Set(), classList: { toggle() {} }, innerHTML: '' }, '#ch-close': { onclick: null }, '#chat-newpill': { classes: new Set(['hidden']), querySelector: () => ({ textContent: '' }) } },
-    __rendered: [], __renderCaptured: null, __bound: [], __boundNodes: [], __repins: 0, __pills: 0 };
+    __rendered: [], __renderCaptured: null, __bound: [], __boundNodes: [], __repins: 0, __pills: 0, __raf: [], __renderedTotal: 0 };
   return env;
 }
+
+// Run every queued rAF callback (the older-group drain advances one frame per call).
+function flushRaf(env) { while (env.__raf.length) env.__raf.shift()(); }
+// Run exactly one frame: only the callbacks queued right now, not their re-queues.
+function frameRaf(env) { env.__raf.splice(0).forEach((fn) => fn()); }
 
 test('append: new groups join the room, books mirror the feed exactly', () => {
   const feed = [ev(1, 'a'), ev(2, 'a'), ev(3, 'b'), ev(4, 'b'), ev(5, 'a'), ev(6, 'a'), ev(7, 'b'), ev(8, 'a')];
@@ -168,11 +173,13 @@ test('prepend: the older page slides in under the older bar, books grow to the w
   const ob = env.els['#chat-older'];
   ob.nextSibling = env.room.children[0];
   assert.equal(R.applyChatPrepend(feed, new Set(), 0, 100), true);
+  flushRaf(env);
   assert.deepEqual(env.room.children.map((g) => g.dataset.who), ['a', 'b', 'c', 'd', 'a', 'b', 'c', 'd', 'a', 'b']);
   assert.equal(env.CH.evFp.length, 10);
   assert.deepEqual(env.CH.evFp, fps(feed));
   assert.equal(env.CH.domWin, 10);
-  assert.equal(env.__renderCaptured.length, 4, 'only the older slice rendered');
+  assert.equal(env.__renderedTotal, 4, 'only the older slice rendered');
+  assert.equal(env.CH._drainGen, null, 'the drain latch cleared when it finished');
 });
 
 test('prepend: a same-author boundary merges into the room\'s first group', () => {
@@ -225,7 +232,29 @@ test('prepend: the older page is bound before the fragment insert drains the tem
   env.CH.win = 10; // chatGrow grew the window
   env.els['#chat-older'].nextSibling = env.room.children[0];
   assert.equal(R.applyChatPrepend(feed, new Set(), 0, 100), true);
+  flushRaf(env);
   const inserted = env.room.children.slice(0, 4); // the older slice joined at the top
   assert.equal(inserted.length, 4);
   for (const g of inserted) assert.ok(env.__boundNodes.includes(g), 'prepended group got its handlers while still in the fragment');
+});
+
+test('prepend: the drain yields per group under budget, books mirroring the DOM at every step', () => {
+  const feed = [ev(1, 'a'), ev(2, 'b'), ev(3, 'c'), ev(4, 'd'), ev(5, 'a'), ev(6, 'b'), ev(7, 'c'), ev(8, 'd'), ev(9, 'a'), ev(10, 'b')];
+  const groups = [makeGroup('a', 1), makeGroup('b', 1), makeGroup('c', 1), makeGroup('d', 1), makeGroup('a', 1), makeGroup('b', 1)]; // events 5..10, win 6
+  const env = envFor(feed.slice(4), groups, 6, true);
+  const R = buildRenderer(env);
+  env.CH._olderBudgetMs = -1; // every group exceeds the budget: one group per frame
+  env.CH.win = 10;
+  env.els['#chat-older'].nextSibling = env.room.children[0];
+  assert.equal(R.applyChatPrepend(feed, new Set(), 0, 100), true);
+  assert.ok(env.CH._drainGen, 'a drain owns the head while groups are pending');
+  const domEvents = () => env.room.children.reduce((a, g) => a + (+g.dataset.cnt || 1), 0);
+  for (let k = 1; k <= 4; k++) {
+    frameRaf(env); // one group per frame
+    assert.equal(domEvents(), 6 + k, `frame ${k}: exactly one more group in the DOM`);
+    assert.equal(env.CH.evFp.length, 6 + k, `frame ${k}: books grew by exactly what was inserted`);
+  }
+  assert.equal(env.CH._drainGen, null, 'drain finished');
+  assert.deepEqual(env.CH.evFp, fps(feed));
+  assert.equal(env.CH.domWin, 10, 'domWin advanced only when the drain landed');
 });
