@@ -148,18 +148,14 @@ test('append: refuses when the older bar does not match the window boundary', ()
   assert.deepEqual(env.CH.evFp, fps(feed), 'books untouched on refusal');
 });
 
-test('avatars: working/needs-you rings patch in place from the books', () => {
+test('avatars: chat never shows the working ring (t_e4510e8a)', () => {
   const feed = [ev(1, 'a'), ev(2, 'a'), ev(3, 'b')];
   const groups = [makeGroup('a', 2), makeGroup('b', 1)];
   const env = envFor(feed, groups, 100, false);
   const R = buildRenderer(env);
   R.patchChatAvatars(env.room, new Set(['b']));
-  const [ga, gb] = env.room.children;
-  assert.equal(ga.children[0].classes.has('working'), false);
-  assert.equal(gb.children[0].classes.has('working'), true, 'b is working');
-  assert.equal(gb.children[0].title, 'b · working');
-  R.patchChatAvatars(env.room, new Set()); // b stopped working
-  assert.equal(gb.children[0].classes.has('working'), false);
+  const gb = env.room.children[1];
+  assert.equal(gb.children[0].classes.has('working'), false, 'b is working but chat has no ring');
   assert.equal(gb.children[0].title, 'b');
 });
 

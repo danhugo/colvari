@@ -505,10 +505,10 @@ async function guiE2E() {
     await ex(`window._refresh = refresh; refresh = async () => {}; if (!$('#tab-chat.active')) $('#tabs button[data-tab=chat]').click();`);
     // Re-seed on every read (idempotent): a stray render tick can repaint the room between
     // seeding and reading, so each sample re-asserts the synthetic state before measuring it.
-    const seedRead = `${seedWorking} await w(50); return { typing: $('#chat-typing').textContent, header: $('#runstate').textContent, dot: !!document.querySelector('#chat-room .avatar.working') }`;
+    const seedRead = `${seedWorking} await w(50); return { typing: $('#chat-typing').textContent, header: $('#runstate').textContent, noRing: !document.querySelector('#chat-room .avatar.working') }`;
     let typing = null;
-    for (let i = 0; i < 10; i++) { typing = await ex(seedRead); if (typing.typing.includes(b.name + ' is working') && /^Running \(\d+\)$/.test(typing.header) && typing.dot) break; await new Promise((r) => setTimeout(r, 300)); }
-    expect('chat: working indicator (text, running header, green dot)', typing.typing.includes(b.name + ' is working') && /^Running \(\d+\)$/.test(typing.header) && typing.dot, typing);
+    for (let i = 0; i < 10; i++) { typing = await ex(seedRead); if (typing.typing.includes(b.name + ' is working') && /^Running \(\d+\)$/.test(typing.header) && typing.noRing) break; await new Promise((r) => setTimeout(r, 300)); }
+    expect('chat: working indicator (text, running header, no avatar ring)', typing.typing.includes(b.name + ' is working') && /^Running \(\d+\)$/.test(typing.header) && typing.noRing, typing);
     await shot('19-chat-working'); await ex(`refresh = window._refresh; await refresh();`);
     const origRun = api.run; api.run = () => ({ stubbed: true });
     await ex(`CH.thread = null; const i = $('#chat-input'); i.value = '@${b.name.slice(0, 2)}'; i.dispatchEvent(new Event('input')); await w(200);`);
