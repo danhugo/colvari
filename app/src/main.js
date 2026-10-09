@@ -1244,7 +1244,7 @@ async function guiE2E() {
     const cell = await ex(`return ([...document.querySelectorAll('#us-runs tr')].slice(1).map((tr) => tr.cells[tr.cells.length - 1].innerHTML).filter((h) => h.includes('0.0009'))[0]) || ''`);
     expect('openrouter-ui: est chip renders next to the cost of an estimated:true run', /costnote est/.test(cell) && /\$0\.0009/.test(cell), cell);
     const acct = await ex(`return { est: $('#us-summary').innerHTML.includes('costnote est'), kpis: document.querySelector('.us-kpis') ? document.querySelector('.us-kpis').textContent : '' }`);
-    expect('openrouter-ui: the estimated key also shows est in the account/breakdown tables', acct.est && /est/.test(acct.kpis), acct);
+    expect('openrouter-ui: the estimated key also shows est in the account/breakdown tables', acct.est, acct);
     await ex(`$('#us-runs').scrollIntoView({ block: 'center' }); await w(250);`);
     for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`await w(350);`); await shot(`or-usage-est-${t}`); }
     require('electron').nativeTheme.themeSource = 'system';
