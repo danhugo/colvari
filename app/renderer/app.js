@@ -664,13 +664,13 @@ function renderHeader() {
   // sum the Usage tab's grand total shows, so pill and tab can never disagree (t_b1115e48). The
   // billed vs subscription split stays in the tooltip: subscription usage is covered by the plan,
   // not billed per token, but its API-eq is part of the total for comparability across accounts.
-  let billed = 0, sub = 0, total = 0;
+  let billed = 0, sub = 0, total = 0, anyEst = false;
   if (RUNS.length) {
     for (const r of RUNS) { const isSub = (r.billingSource || 'auto') === 'subscription';
-      for (const e of runLedger(r)) { const rc = e.costUsd || 0; total += rc; if (isSub) sub += rc; else billed += rc; } }
+      for (const e of runLedger(r)) { const rc = e.costUsd || 0; if (rc && (e.costSource === 'estimated' || e.estimated)) anyEst = true; total += rc; if (isSub) sub += rc; else billed += rc; } }
   } else { billed = o.billedCost || 0; sub = o.subCost || 0; total = billed + sub; }
   const c = $('#totalcost');
-  const costText = total > 0 ? `API-eq $${total.toFixed(2)}` : 'no cost yet';
+  const costText = total > 0 ? `API-eq $${total.toFixed(2)}${anyEst ? ' est' : ''}` : 'no cost yet';
   setText(c, costText);
   // An empty placeholder pill is dead weight in an already tight header — hide it until it has
   // something to say (the meter chips need every pixel at 1400px).
@@ -2770,9 +2770,9 @@ function usageHero(rs, led, o) {
   const today = b[DAYS - 1];
   const scope = o && o.filtered && o.global != null && Math.abs(o.global - led.costUsd) > 0.005 ? ` · all runs $${o.global.toFixed(2)} (the header pill)` : 'the app’s single cost total — same number as the header pill';
   return `<div class="us-hero"><div class="us-kpis">
-    <div><small>API-eq, today</small><b title="${esc(EQ)}">$${(today.rep + today.est).toFixed(2)}</b><small>${today.runs} run${today.runs === 1 ? '' : 's'} today</small></div>
-    <div><small>API-eq, grand total</small><b title="${esc(EQ)}">$${led.costUsd.toFixed(2)}</b><small>${led.costPartial ? 'partial — some keys report no cost · ' : ''}${scope}</small></div>
-    <div><small>Avg cost / run</small><b>$${(rs.length ? led.costUsd / rs.length : 0).toFixed(2)}</b><small>across ${rs.length} recorded run${rs.length === 1 ? '' : 's'}</small></div>
+    <div><small>API-eq, today</small><b title="${esc(EQ)}">$${(today.rep + today.est).toFixed(2)}${today.est ? estTag('includes list-price estimates') : ''}</b><small>${today.runs} run${today.runs === 1 ? '' : 's'} today</small></div>
+    <div><small>API-eq, grand total</small><b title="${esc(EQ)}">$${led.costUsd.toFixed(2)}${led.rows.some((r) => r.costSource === 'estimated' || r.costSource === 'mixed') ? estTag('includes list-price estimates') : ''}</b><small>${led.costPartial ? 'partial — some keys report no cost · ' : ''}${scope}</small></div>
+    <div><small>Avg cost / run</small><b>$${(rs.length ? led.costUsd / rs.length : 0).toFixed(2)}${led.rows.some((r) => r.costSource === 'estimated' || r.costSource === 'mixed') ? estTag('includes list-price estimates') : ''}</b><small>across ${rs.length} recorded run${rs.length === 1 ? '' : 's'}</small></div>
     <div><small>Model keys</small><b>${led.rows.length}</b><small>runtime · provider · model combinations</small></div>
   </div><div class="us-chart"><div class="us-chart-head"><small>API-eq, last ${DAYS} days</small><span class="us-leg"><i class="usb-rep"></i>reported <i class="usb-est"></i>estimated</span></div>
   <svg viewBox="0 0 100 100" preserveAspectRatio="none">${bars}</svg><div class="us-axis"><small>${b[0].d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</small><small>today</small></div></div></div>`;
