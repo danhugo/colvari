@@ -112,6 +112,7 @@ test('classifyFailure: auth and model-matching errors classify, everything else 
     'no such model: fake/mini',
     'unknown model: gpt-9',
     "model 'opus-4.9' does not exist",
+    '{"type":"error","message":"{\\"detail\\":\\"The \'gpt-5.6-sol\' model is not supported when using Codex with a ChatGPT account.\\"}"}',
   ]) assert.equal(FAIL.classifyFailure(t), 'model', JSON.stringify(t));
   for (const t of [
     '', GENERIC_A, GENERIC_B, 'ECONNRESET', 'SyntaxError: Unexpected token',
