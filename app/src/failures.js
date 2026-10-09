@@ -22,6 +22,7 @@ function classifyFailure(text) {
 function redactError(text) {
   let s = String(text || '');
   s = s.replace(/(bearer\s+)[A-Za-z0-9._~+/=-]{8,}/gi, '$1[REDACTED]');
+  s = s.replace(/\bsk-or-v1-[A-Za-z0-9]+\b/g, '[REDACTED]'); // OpenRouter keys, explicit ahead of the generic sk- rule
   s = s.replace(/\b(sk|key|token|secret)[-_][A-Za-z0-9._-]{8,}/gi, '[REDACTED]');
   s = s.replace(/((?:api[ -]?key|x-api-key|token|password|secret)\s*[=:]\s*["']?)[A-Za-z0-9._~+/=-]{8,}/gi, '$1[REDACTED]');
   s = s.replace(/\b[A-Fa-f0-9]{32,}\b/g, '[REDACTED]');
