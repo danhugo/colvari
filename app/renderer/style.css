@@ -510,7 +510,7 @@ header { gap:4px; } header #tabs .navicon { display:inline-block; } header #tabs
 .wk-backlinks ul { margin:0; padding-left:18px; }
 .wk-backlinks li { cursor:pointer; color:var(--accent-text); }
 .wk-backlinks li:hover { text-decoration:underline; }
-.rtpresets { flex-wrap:wrap; gap:4px; align-items:center; } .rtpresets small { opacity:.7; font-family:var(--font-mono); }
+.rtpresets { flex-wrap:wrap; gap:4px; align-items:center; } .rtpresets > .muted { flex-basis:100%; } .rtpresets small { opacity:.7; font-family:var(--font-mono); }
 /* wake-run: agent running because a message woke it (no in_progress task) */
 .wakebar { border:1px solid var(--accent); background:var(--accent-soft); color:var(--accent-text); border-radius:6px; padding:4px 8px; margin-bottom:4px; display:flex; gap:8px; align-items:center; font-size:12px; }
 .wakebar .spacer { flex:1; }
