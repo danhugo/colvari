@@ -289,7 +289,7 @@ function buildLedger(run, { proxyHost = null, priceBook = null, proxySpend = nul
   const primary = canonModel(run.model || (run.models && run.models[0]) || '');
   const flat = () => {
     const seen = run.flatSeen && run.flatSeen.length ? run.flatSeen : ['inputTokens', 'outputTokens'];
-    return { [primary.model]: { inputTokens: run.inputTokens || 0, outputTokens: run.outputTokens || 0, cacheReadTokens: run.cacheReadTokens || 0, cacheCreationTokens: run.cacheCreationTokens || 0, costUsd: null, provider: null, canonicalModel: null, seen } };
+    return { [run.runtime === 'opencode' ? (run.model || primary.model) : primary.model]: { inputTokens: run.inputTokens || 0, outputTokens: run.outputTokens || 0, cacheReadTokens: run.cacheReadTokens || 0, cacheCreationTokens: run.cacheCreationTokens || 0, costUsd: null, provider: null, canonicalModel: null, seen } };
   };
   const pm = run.perModel && Object.keys(run.perModel).length ? run.perModel : flat();
   const entries = [];
@@ -300,8 +300,10 @@ function buildLedger(run, { proxyHost = null, priceBook = null, proxySpend = nul
       cacheCreationTokens: seen.includes('cacheCreationTokens') ? e.cacheCreationTokens || 0 : null };
     if (!(tokens.inputTokens + tokens.outputTokens + (tokens.cacheReadTokens || 0) + (tokens.cacheCreationTokens || 0))) continue;
     const c = canonModel(e.canonicalModel || rawModel);
+    // opencode ids are "provider/model" routes: the prefix is part of the model identity (openrouter/x/y != x/y).
+    const keepPrefix = run.runtime === 'opencode' && c.providerHint;
     const hint = c.providerHint || (rawModel === primary.model ? primary.providerHint : null);
-    entries.push({ runtime: accountRuntime(run.runtime, c.model), provider: providerOf({ muProvider: e.provider, providerHint: hint, billingSource: run.billingSource, proxyHost, providerId }), model: c.model, ...tokens, costUsd: e.costUsd });
+    entries.push({ runtime: accountRuntime(run.runtime, c.model), provider: providerOf({ muProvider: e.provider, providerHint: hint, billingSource: run.billingSource, proxyHost, providerId }), model: keepPrefix ? `${c.providerHint}/${c.model}` : c.model, ...tokens, costUsd: e.costUsd });
   }
   // Whole-run cost with no per-model split (resumed-run fallbacks, CLIs without modelUsage cost):
   // attribute it to the primary model's entry rather than losing or splitting it. Only KNOWN
