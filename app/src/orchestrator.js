@@ -157,6 +157,29 @@ function buildPrompt(team, node, task, extra = {}) {
   ].filter((l) => l !== '').join('\n');
 }
 
+// Comments added since this agent's last comment on the task (author is the node name, or its id
+// in older/demo data). null when the agent never commented: the caller then sends the full prompt.
+function commentsSince(comments, node) {
+  const list = comments || [];
+  for (let k = list.length - 1; k >= 0; k--) if (list[k].author === node.name || list[k].author === node.id) return list.slice(k + 1);
+  return null;
+}
+
+// Short prompt for a task run that resumes this agent's own task session: the session already holds
+// the full brief and earlier comments, so only the new comments go in (t_0e476897). Returns null when
+// there is no earlier comment by this agent — the caller falls back to buildPrompt.
+function resumePrompt(node, task, extra = {}) {
+  const fresh = commentsSince(task.comments, node);
+  if (!fresh) return null;
+  const tools = enabledTools({ ...normalizeNode(applyPreset(node, extra.presets)), id: node.id }, extra.devMode);
+  return [
+    `Continuing task ${task.id} ("${task.title}") in the same session — the full brief and earlier comments are above.`,
+    fresh.length ? `New comments since your last one:\n${fresh.map((c) => ['- ' + c.author + ': ' + c.text, attachedFilesLines(c.attachments)].filter(Boolean).join('\n')).join('\n')}` : 'No new comments since your last one.',
+    extra.unread ? `You have ${extra.unread} unread message(s): call read_messages.` : '',
+    tools.includes('update_task_status') ? `When you have finished your part, ${tools.includes('comment_task') ? 'add a short comment summarising what you did and ' : ''}call update_task_status with taskId=${task.id} and status="done".` : '',
+  ].filter(Boolean).join('\n');
+}
+
 // Prompt lines for files already saved under <store>/attachments: absolute paths only. The agent
 // reads them from disk with its own file tools (claude gets the dir via --add-dir); bytes never
 // travel through the prompt.
@@ -1707,7 +1730,10 @@ class Orchestrator extends EventEmitter {
       // Sessions are per owner: only resume this agent's own session on this runtime (the legacy
       // shared task.sessionId had no owner info and got other agents' dead sessions resumed).
       const sessKey = `${node.id}:${meta.runtime}`;
-      let resume = (task.sessions && task.sessions[sessKey]) || (m.continueSession ? this.lastSession(node.id, meta.runtime) : null);
+      const taskSess = task.sessions && task.sessions[sessKey];
+      let resume = taskSess || (m.continueSession ? this.lastSession(node.id, meta.runtime) : null);
+      // Resuming this task's own session in single/goal mode: send only what changed (null = full prompt).
+      const resumeBrief = taskSess && base !== null && m.mode !== 'workflow' && m.mode !== 'loop' ? resumePrompt(node, task, { presets, unread, devMode: this.devMode }) : null;
       this.log(node.id, 'system', `▶ ${node.name} starts "${task.title}" in ${cwd} [mode=${m.mode}${resume ? ', resume ' + resume : ''}]`);
       let code = 1; let judge = null; let i = 0; let reason = ''; let human = null; let recover = false; let humanAtts = []; let freshTried = false; let stderr = '';
       a.stopRequested = false; a.pendingHuman = [];
@@ -1719,7 +1745,7 @@ class Orchestrator extends EventEmitter {
         let args = null;
         if (base !== null) {
           const b = m.mode === 'loop' && !isLastLoop(m, i) ? baseDefer : base;
-          const prompt = human ? humanPrompt(human, resume || wf ? null : b) : recover ? stallPrompt(task) : iterationPrompt(m, b, i, { reason: judge && judge.reason, task: wf ? (this.store.getTask(task.id) || task) : null });
+          const prompt = human ? humanPrompt(human, resume || wf ? null : b) : recover ? stallPrompt(task) : freshTried && !resume ? b : i === 0 && resumeBrief && resume === taskSess ? resumeBrief : iterationPrompt(m, b, i, { reason: judge && judge.reason, task: wf ? (this.store.getTask(task.id) || task) : null });
           // Only runs that actually carry attachments get the attachments dir passed (claude maps it
           // to --add-dir; profile runtimes work from the paths in the prompt).
           const runAtts = (task.attachments || []).concat(humanAtts);
@@ -2250,4 +2276,4 @@ class Orchestrator extends EventEmitter {
     }
   }
 }
-module.exports = { Orchestrator, boardMcpCause, buildPrompt, humanPrompt, wakePrompt, stallPrompt, attachedFilesLines, WAKE, WATCH, STALL, SCHED, RESTART, autoCompactEnv, runPidsDir, reapRunPids, interruptedFromReap };
+module.exports = { Orchestrator, boardMcpCause, buildPrompt, resumePrompt, commentsSince, humanPrompt, wakePrompt, stallPrompt, attachedFilesLines, WAKE, WATCH, STALL, SCHED, RESTART, autoCompactEnv, runPidsDir, reapRunPids, interruptedFromReap };
