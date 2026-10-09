@@ -415,7 +415,7 @@ function usageLedger(runs = [], { priceBook = null } = {}) {
     if (!row) { row = { ...newRow(e), key: gk }; map.set(gk, row); }
     row.runs++;
     for (const k of TOKEN_FIELDS) if (e[k] != null) row[k] = (row[k] || 0) + e[k];
-    if (e.costUsd != null) { row.costUsd = (row.costUsd || 0) + e.costUsd; row[e.costSource === 'estimated' ? 'estimated' : 'reported']++; }
+    if (e.costUsd != null) { row.costUsd = (row.costUsd || 0) + e.costUsd; row[e.costSource === 'estimated' || e.estimated ? 'estimated' : 'reported']++; }
     else row.unknown++;
     if (!sub) { if (e.costUsd != null) row.billed += e.costUsd; else row.billedUnknown++; }
     // subscription runs contribute a KNOWN $0 (covered by the plan), never an unknown

@@ -203,3 +203,11 @@ test('totals equal the sum of the rows (the header invariant), billed and apiEq 
   assert.equal(l.billed, l.rows.reduce((a, r) => a + (r.billed || 0), 0));
   assert.ok(approx(l.billed, 0.2710154)); // only the per-token-billed account contributes
 });
+
+test('estimated:true ledger entries count as estimated, not reported (t_021c2eaf)', () => {
+  const U = require('../src/usage');
+  const led = U.usageLedger([{ id: 'r1', agent: 'a', startedAt: new Date().toISOString(), ledger: [{ runtime: 'codex', provider: 'openrouter', model: 'openai/gpt-5-mini', inputTokens: 1000, outputTokens: 500, costUsd: 0.0009, estimated: true }] }]);
+  assert.equal(led.rows[0].costSource, 'estimated');
+  assert.equal(led.costUsd, 0.0009);
+  assert.equal(led.apiEq, 0.0009);
+});
