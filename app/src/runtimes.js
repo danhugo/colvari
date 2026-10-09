@@ -3,7 +3,7 @@
 // itself (no hand-built per-CLI profiles, no CLI-specific parsing), and this module spawns/parses
 // purely from that profile data.
 const { buildClaudeArgs, normalizeNode, splitArgs } = require('./agent-config');
-const { buildProfileArgs, writePerRunMcpConfig, binConfigEnvKey, getPath } = require('./profile-runner');
+const { buildProfileArgs, writePerRunMcpConfig, binConfigEnvKey, getPathTyped } = require('./profile-runner');
 const { introspectRuntime, defaultExec, makeExec } = require('./introspector');
 const { isSubagentTool } = require('./subagents');
 
@@ -118,6 +118,24 @@ const RUNTIMES = {
     capabilities: { tokens: false, cost: false, mcp: false, resume: false }, // stub: not installed here, nothing tested
     buildArgs(node, prompt) { const n = normalizeNode(node); return ['run', ...(n.model ? ['-m', n.model] : []), prompt]; },
   },
+  // pi 0.73.1: non-interactive run is the ROOT flag -p (never a subcommand); "--resume" opens an
+  // interactive session picker and is never sent — resume targets a concrete id via "--session".
+  // No MCP support: mcp is ignored (no board tools, no fallback config) and capabilities say so.
+  pi: {
+    id: 'pi', label: 'Pi', bin: (s) => (s && s.piPath) || 'pi',
+    capabilities: { tokens: true, cost: true, mcp: false, resume: true }, // usage/cost proven on the recorded 0.73.1 stream (test/fixtures/probe-pi-live.jsonl)
+    buildArgs(node, prompt, settings, mcp, opts = {}) {
+      const n = normalizeNode(node);
+      const args = ['-p', '--mode', 'json'];
+      if (n.model) args.push('--model', n.model);
+      if (PI_THINKING[n.effort]) args.push('--thinking', PI_THINKING[n.effort]);
+      args.push(...splitArgs(n.extraArgs));
+      if (opts.resume) args.push('--session', String(opts.resume));
+      args.push(prompt);
+      return args;
+    },
+    parseEvent: (ev) => parsePiEvent(ev),
+  },
   helpycode: profileRuntime('helpycode', 'HelpyCode', (s) => (s && s.helpycodePath) || 'helpycode'),
 };
 // board MCP server -> codex `-c mcp_servers.<name>.*` overrides (TOML values; JSON strings/arrays are valid TOML)
@@ -133,6 +151,37 @@ function codexMcpArgs(mcp) {
 const RUNTIME_IDS = Object.keys(RUNTIMES);
 // empty -> claude (the default); unknown/typo'd id throws (no silent fallback)
 const getRuntime = (id) => { if (!id) return RUNTIMES.claude; if (!RUNTIMES[id]) throw new Error(`unknown runtime "${id}" (expected ${RUNTIME_IDS.join('/')})`); return RUNTIMES[id]; };
+
+// Node effort (EFFORT_LEVELS) -> pi's --thinking vocabulary; "max" clamps to pi's xhigh ceiling.
+const PI_THINKING = { low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'xhigh' };
+
+// pi -p --mode json line -> same shape as parseCodexEvent. Event shapes from the real 0.73.1 stream
+// (recorded live through OpenRouter, test/fixtures/probe-pi-live.jsonl): the session id is the
+// `session` event's .id; assistant text streams as message_update ->
+// assistantMessageEvent.text_delta.delta; usage and cost are read ONLY from `message_end` events
+// whose message.role is "assistant" (message.usage.{input,output,cacheRead}, message.usage.cost.total).
+// turn_end repeats the same usage and agent_end repeats the messages — neither is read, so a
+// multi-event stream counts every token exactly once.
+function parsePiEvent(ev) {
+  const out = { logs: [] };
+  if (ev.type === 'session') { out.sessionId = ev.id; out.logs.push(['system', 'pi session ' + ev.id]); }
+  else if (ev.type === 'message_update') {
+    const de = ev.assistantMessageEvent || {};
+    if (de.type === 'text_delta' && typeof de.delta === 'string' && de.delta) out.logs.push(['text', de.delta]);
+  } else if (ev.type === 'message_end') {
+    const m = ev.message || {};
+    if (m.role === 'assistant') {
+      const u = m.usage || {};
+      out.tokens = { inputTokens: u.input || 0, outputTokens: u.output || 0, ...(u.cacheRead != null ? { cacheReadTokens: u.cacheRead } : {}) };
+      out.cost = (u.cost && u.cost.total) || 0;
+      out.done = true;
+      const text = Array.isArray(m.content) ? m.content.filter((b) => b && b.type === 'text').map((b) => b.text || '').join('') : '';
+      if (text) out.result = text;
+      out.logs.push(['result', `pi result: ${out.tokens.inputTokens} in / ${out.tokens.outputTokens} out`]);
+    }
+  } else if (ev.type === 'error') { out.failed = true; out.logs.push(['error', String(ev.message || 'error')]); }
+  return out;
+}
 
 // codex exec --json line -> { logs: [[kind, text]], sessionId?, result?, tokens?, done?, failed? }
 function parseCodexEvent(ev) {
@@ -217,21 +266,24 @@ function parseProfileEvent(ev, profile) {
     };
     return out;
   }
-  const text = getPath(ev, em.textPath);
+  const text = getPathTyped(ev, em.textPath);
   // Fail loud: a text event with no textPath means the profile derivation failed; never drop silently.
   if (!em.textPath && (ev.type === 'text' || part.type === 'text')) out.logs.push(['error', `${profile.label}: runtime profile has no textPath (introspection failed; is "${profile.binary}" on PATH?). Reply text dropped.`]);
   if (typeof text === 'string' && text) { out.logs.push(['text', text]); out.result = text; }
-  const sessionId = getPath(ev, em.sessionIdPath);
+  const sessionId = getPathTyped(ev, em.sessionIdPath);
   // opencode-derived CLIs put the session id on every event: capture it silently, log only a
   // dedicated session-type event (a line per event would flood the live log).
   if (sessionId != null) { out.sessionId = String(sessionId); if (ev.type === 'session') out.logs.push(['system', `${profile.label} session ${sessionId}`]); }
   if (ev.type === 'error') { out.failed = true; out.logs.push(['error', String(ev.message || 'error')]); }
-  const input = Number(getPath(ev, em.inputPath)) || 0;
-  const output = Number(getPath(ev, em.outputPath)) || 0;
-  const cost = getPath(ev, em.costPath);
+  // Mapping paths may pin an event type ("message_end:...") so a CLI that repeats usage on
+  // turn_end/agent_end counts once (getPathTyped); the usage gate below then simply never fires
+  // on the repeating events.
+  const input = Number(getPathTyped(ev, em.inputPath)) || 0;
+  const output = Number(getPathTyped(ev, em.outputPath)) || 0;
+  const cost = getPathTyped(ev, em.costPath);
   if (ev.type === 'result' || input || output || typeof cost === 'number') {
-    const reasoning = Number(getPath(ev, em.reasoningPath)) || 0;
-    const cacheRaw = getPath(ev, em.cachePath); const cache = Number(cacheRaw);
+    const reasoning = Number(getPathTyped(ev, em.reasoningPath)) || 0;
+    const cacheRaw = getPathTyped(ev, em.cachePath); const cache = Number(cacheRaw);
     out.tokens = { inputTokens: input, outputTokens: output + reasoning, ...(cacheRaw != null && Number.isFinite(cache) ? { cacheReadTokens: cache } : {}) };
     out.cost = Number(cost) || 0;
     out.done = ev.type !== 'step_finish' || part.reason === 'stop';
@@ -262,4 +314,4 @@ async function detectRuntimes(settings = {}, env = process.env, exec = async (b,
   return r;
 }
 
-module.exports = { RUNTIMES, codexMcpArgs, RUNTIME_IDS, getRuntime, parseCodexEvent, parseProfileEvent, parseVersion, detectRuntimes, deriveRuntimeProfile, capabilitiesFromProfile, profileRuntime };
+module.exports = { RUNTIMES, codexMcpArgs, RUNTIME_IDS, getRuntime, parseCodexEvent, parsePiEvent, parseProfileEvent, parseVersion, detectRuntimes, deriveRuntimeProfile, capabilitiesFromProfile, profileRuntime };
