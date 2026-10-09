@@ -8,7 +8,7 @@ const FAIL = {
 };
 
 const AUTH_RE = /(not logged in|login required|please run [`"']?[a-z]* ?login|invalid[^\n]{0,30}(api[ -]?key|x-api-key)|\b401\b|unauthorized|authentication[^\n]{0,20}(error|failed))/i;
-const MODEL_RE = /(model[._ -]?not[._ -]?found|no such model|unknown model|model[^\n]{0,40}(does not exist|is not available)|invalid model)/i;
+const MODEL_RE = /(model[._ -]?not[._ -]?found|no such model|unknown model|model[^\n]{0,40}(does not exist|is not available)|invalid model|model[^\n]{0,60}is not supported)/i;
 
 function classifyFailure(text) {
   const s = String(text || '');
