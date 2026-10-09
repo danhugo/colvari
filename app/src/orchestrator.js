@@ -1610,7 +1610,7 @@ class Orchestrator extends EventEmitter {
       child.stdout.on('data', (d) => {
         a.lastActivityAt = Date.now();
         buf += d; let i;
-        while ((i = buf.indexOf('\n')) >= 0) { const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1); if (line) this.onEvent(node, line, run, rt.id); }
+        while ((i = buf.indexOf('\n')) >= 0) { const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1); if (line) { if (/"(error|turn\.failed)"/.test(line)) run.stdoutErr = ((run.stdoutErr || '') + '\n' + line).slice(-4096); this.onEvent(node, line, run, rt.id); } }
       });
       child.stderr.on('data', (d) => { a.lastActivityAt = Date.now(); errbuf += d; if (errbuf.length > 8192) errbuf = errbuf.slice(-8192); this.log(node.id, 'stderr', String(d).trim()); });
       child.on('error', (e) => this.log(node.id, 'error', e.code === 'ENOENT' ? `${rt.label} binary not found: "${rt.bin(settings)}". Install it or set its path in Settings (run failed, no fallback).` : 'spawn failed: ' + e.message));
@@ -1953,7 +1953,7 @@ class Orchestrator extends EventEmitter {
     if (!rt || rt === 'unknown' || r.stalled) return;
     const a = this.agents[nodeId];
     if (a && (a.stopRequested || this.drainCutNodes.has(nodeId))) return;
-    const raw = [r.stderr, r.result].filter(Boolean).join('\n').trim();
+    const raw = [r.stderr, r.result, r.stdoutErr].filter(Boolean).join('\n').trim(); // stdoutErr: JSON error events (Codex prints failures on stdout)
     const text = FQ.redactError(raw) || `exit ${r.code}`;
     this.log(nodeId, 'error', `runtime ${rt} run failed (exit ${r.code}): ${text.slice(0, 500)}`);
     const kind = forcedKind || FQ.classifyFailure(raw);
