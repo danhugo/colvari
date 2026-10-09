@@ -13,6 +13,7 @@ const { isSubagentTool } = require('./subagents');
 // one (key "|help") for capability detection, which must not cost a model call.
 // Async since t_5a78aa95: derivation spawns (--version/--help/models/probe) and used to block the
 // main process for seconds at dispatch time. Sync fakes injected by tests keep working under await.
+const OPENCODE_EVENTS = { textPath: 'text:part.text', sessionIdPath: 'sessionID', costPath: 'step_finish:part.cost', inputPath: 'step_finish:part.tokens.input', outputPath: 'step_finish:part.tokens.output', reasoningPath: 'step_finish:part.tokens.reasoning', cachePath: 'step_finish:part.tokens.cache.read' };
 const derivedProfiles = new Map(); // cacheKey -> { version, profile }
 async function deriveRuntimeProfile(bin, { exec, label, probe = true, askAgent = false, env, probeModel } = {}) {
   const key = probe ? bin : `${bin}|help`;
@@ -23,6 +24,9 @@ async function deriveRuntimeProfile(bin, { exec, label, probe = true, askAgent =
   if (hit && hit.version === version) return hit.profile;
   const id = String(bin).split(/[\\/]/).pop().replace(/\.(exe|sh)$/i, '').toLowerCase().replace(/[^a-z0-9_.-]/g, '_');
   const { profile } = await introspectRuntime(bin, run, { id, label: label || id, probe, askAgent, probeModel });
+  // The probe needs a real model call (sandbox env, no provider key => opencode only emits an error
+  // event): fall back to the event shape recorded from opencode 1.18 (test/fixtures/probe-opencode-live.jsonl).
+  if (id === 'opencode' && !(profile.eventMapping || {}).textPath) profile.eventMapping = { ...OPENCODE_EVENTS };
   // Binary not found (e.g. packaged app launched from Finder with a minimal PATH): do not cache the
   // empty profile, or it would stick for the whole session. Re-derives next call (cheap: no run).
   if (version) derivedProfiles.set(key, { version, profile });
@@ -332,7 +336,7 @@ function parseProfileEvent(ev, profile) {
   }
   const text = getPathTyped(ev, em.textPath);
   // Fail loud: a text event with no textPath means the profile derivation failed; never drop silently.
-  if (!em.textPath && (ev.type === 'text' || part.type === 'text')) out.logs.push(['error', `${profile.label}: runtime profile has no textPath (introspection failed; is "${profile.binary}" on PATH?). Reply text dropped.`]);
+  if (!em.textPath && (ev.type === 'text' || part.type === 'text')) out.logs.push(['error', `${profile.label}: runtime profile has no textPath (the probe run emitted no text event — it needs a configured model and provider key; "${profile.binary}" itself was found). Reply text dropped.`]);
   if (typeof text === 'string' && text) { out.logs.push(['text', text]); out.result = text; }
   const sessionId = getPathTyped(ev, em.sessionIdPath);
   // opencode-derived CLIs put the session id on every event: capture it silently, log only a

@@ -198,7 +198,7 @@ const canCost = (rt) => { const r = ((S.config || {}).runtimes || {})[rt || 'cla
 const vbadge = (n) => n ? `<span class="vbadge vb-${esc(n.runtime || 'claude')}" title="runtime · model">${esc(VENDOR[n.runtime || 'claude'] || n.runtime)}<i>${esc(n.model || 'default')}</i></span>` : '';
 // t_e503dd78: log lines and status lines show a short id chip (t_8308) — the full title lives in the tooltip.
 const shortTaskId = (id) => /^t_/.test(id || '') ? id.slice(0, 6) : (id || '');
-const RT_PRESETS = [{ name: 'Planner', runtime: 'claude', model: 'opus' }, { name: 'Dev', runtime: 'codex', model: '' }, { name: 'Checker', runtime: 'claude', model: 'haiku' }, { name: 'Cheap', runtime: 'codex', model: 'openai/gpt-5-mini', provider: 'openrouter' }];
+const RT_PRESETS = [{ name: 'Planner', runtime: 'claude', model: 'opus' }, { name: 'Dev', runtime: 'codex', model: '' }, { name: 'Checker', runtime: 'claude', model: 'haiku' }, { name: 'Cheap', runtime: 'codex', model: 'openai/gpt-5-mini', provider: 'openrouter' }, { name: 'Cheap (OpenCode)', runtime: 'opencode', model: 'openrouter/openai/gpt-5-mini', provider: 'openrouter' }];
 const billTag = (src, detail) => `<span class="bill bill-${esc(src || 'unknown')}" title="${esc(detail || '')}">${esc(src || 'unknown')}</span>`;
 
 // ---------- providers (contract t_7a95202c): settings.providers = [{id,label,baseUrl,keyEnv,kind}] ----------
@@ -2675,7 +2675,7 @@ function accountOf(e) {
   const label = runtimeLabel(rt);
   const bySrc = {
     subscription: { name: `${label} subscription`, detail: e.billingDetail || 'subscription login (not billed per token)' },
-    api: { name: `${label} API key`, detail: e.billingDetail || e.apiKeySource || 'per-token API billing' },
+    api: { name: e.provider === 'openrouter' ? 'OpenRouter' : `${label} API key`, detail: e.billingDetail || e.apiKeySource || 'per-token API billing' },
     proxy: { name: `${label} proxy`, detail: e.billingDetail || (e.provider && e.provider !== 'unknown' ? e.provider : 'proxy endpoint') },
     bedrock: { name: `${label} on AWS Bedrock`, detail: e.billingDetail || 'AWS Bedrock' },
     vertex: { name: `${label} on Google Vertex`, detail: e.billingDetail || 'Google Vertex AI' },

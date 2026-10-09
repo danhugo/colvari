@@ -63,3 +63,16 @@ test('opencode run with no reported cost gets an "estimated" cost from the OpenR
   const [e] = U.buildLedger(run, { priceBook });
   assert.strictEqual(e.costSource, 'estimated'); assert.ok(Math.abs(e.costUsd - 0.00125) < 1e-9);
 });
+
+test('probe failure (error-only stream, t_ca05e49f): recorded opencode mapping keeps text, tokens and cost working', async () => {
+  const rt = RT.getRuntime('opencode');
+  const errExec = (bin, a) => (a.join(' ') === '--version' ? '1.18.1\n' : a.includes('--format') ? '{"type":"error","error":{"name":"UnknownError"}}\n' : exec(bin, a));
+  await rt.buildArgs({ model: 'openrouter/x/y' }, 'hi', {}, null, { exec: errExec, env: {} });
+  const o = rt.parseEvent({ type: 'text', sessionID: 's1', part: { type: 'text', text: 'pong' } }, {});
+  assert.strictEqual(o.result, 'pong'); assert.ok(!o.logs.some(([k]) => k === 'error'));
+  const f = rt.parseEvent({ type: 'step_finish', sessionID: 's1', part: { type: 'step-finish', reason: 'stop', tokens: { input: 10, output: 3, reasoning: 2, cache: { read: 4 } }, cost: 0.002 } }, {});
+  assert.deepStrictEqual([f.tokens.inputTokens, f.tokens.outputTokens, f.cost, f.done], [10, 5, 0.002, true]);
+  const U = require('../src/usage');
+  const l = U.buildLedger({ runtime: 'opencode', model: 'openrouter/x/y', inputTokens: 10, outputTokens: 5, reportedCostUsd: 0.002, costKnown: true });
+  assert.strictEqual(l[0].model, 'openrouter/x/y');
+});
