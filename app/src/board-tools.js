@@ -360,6 +360,9 @@ function makeTools(store, nodeId) {
         ...(prompt != null ? { systemPrompt: String(prompt) } : {}), ...(runtime ? { runtime } : {}),
         ...(model ? { model: String(model) } : {}), ...(effort ? { effort } : {}),
         core: false, createdBy: nodeId, recruitedAt: new Date().toISOString(),
+        // Inherit the core's workdir: without one dispatch falls back to the (non-git) store dir, so
+        // the recruit gets no task worktree and no merge gate (t_eecee24c).
+        ...(core.workdir ? { workdir: core.workdir } : {}),
         // no explicit x/y: the recruit falls through to addNode's free-spot search instead of
         // forcing a core offset that can land on top of an existing teammate
       });

@@ -494,3 +494,23 @@ test('real stdio MCP server lists the team tools only for a core node', async ()
   for (const n of ['recruit_agent', 'retire_agent', 'update_agent']) assert.ok(names2.includes(n), n + ' registered for the core');
   await cc.close();
 });
+
+test('recruit inherits the core\'s workdir, so its task dispatch gets a git worktree (t_eecee24c)', async () => {
+  const { execFileSync } = require('child_process');
+  const WT = require('../src/worktree');
+  const repo = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'squad-dt-repo-')));
+  const g = (...a) => execFileSync('git', ['-c', 'user.email=a@b', '-c', 'user.name=a', ...a], { cwd: repo, stdio: 'pipe' });
+  g('init', '-q', '-b', 'main'); fs.writeFileSync(path.join(repo, 'a.txt'), 'x\n');
+  fs.writeFileSync(path.join(repo, '.gitignore'), '.squad/\n'); g('add', '.'); g('commit', '-q', '-m', 'init');
+  const { s, core, tools } = setup();
+  s.updateNode(core.id, { workdir: repo });
+  const n = tools.recruit_agent({ name: 'Rookie', role: 'Dev', reason: 'r' });
+  assert.equal(n.workdir, repo);
+  // dispatch does `cwd = node.workdir || store.dir` then ensureWorktree(cwd, task.id)
+  const w = await WT.ensureWorktree(n.workdir || s.dir, 't_rookie');
+  assert.ok(!w.warning, w.warning);
+  assert.ok(w.worktreePath.startsWith(repo) && fs.existsSync(w.worktreePath));
+  // a core without a workdir leaves the recruit's workdir unset (dispatch falls back as before)
+  const { tools: t2 } = setup();
+  assert.ok(!t2.recruit_agent({ name: 'R2', role: 'Dev', reason: 'r' }).workdir);
+});
