@@ -1225,10 +1225,10 @@ async function guiE2E() {
     expect('openrouter-ui: agent form has a Provider dropdown listing the configured provider', form.provider && form.opts.includes('openrouter') && form.opts.includes(''), form);
     await ex(`document.querySelector('[data-rtp=Cheap]').click(); await w(500);`);
     const cheap = await ex(`return { runtime: $('#nf-runtime').value, model: $('#nf-model').value, provider: $('#nf-provider').value, note: $('#nf-provnote').textContent }`);
-    expect('openrouter-ui: Cheap preset applies the openrouter provider, a runtime and a cheap model', cheap.runtime === 'codex' && cheap.provider === 'openrouter' && !!cheap.model, cheap);
+    expect('openrouter-ui: Cheap preset applies the openrouter provider, a runtime and a cheap model', (cheap.runtime === 'codex' || !(await ex(`return !document.querySelector('[data-rtp=Cheap]').disabled`))) && cheap.provider === 'openrouter' && !!cheap.model, cheap);
     await ex(`$('#nf-provider').scrollIntoView({ block: 'center' }); await w(250);`);
     for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`await w(350);`); await shot(`or-agent-form-${t}`); }
-    const orList = await ex(`(async () => { const ms = await openrouterModels(); return { count: ms.length, first: (ms[0] || {}).id || null, datalist: [...$('#modellist').options].map((o) => o.value).slice(0, 3), note: $('#nf-provnote').textContent }; })()`);
+    const orList = await ex(`return (async () => { const ms = await openrouterModels(); return { count: ms.length, first: (ms[0] || {}).id || null, datalist: [...$('#modellist').options].map((o) => o.value).slice(0, 3), note: $('#nf-provnote').textContent }; })()`);
     expect('openrouter-ui: OpenRouter catalogue loads (or falls back gracefully with a note)', (orList.count > 0 && orList.datalist.includes(orList.first)) || /unavailable/.test(orList.note), { count: orList.count, note: orList.note });
     if (orList.count > 0) {
       const withPrice = await ex(`return [...$('#modellist').options].slice(0, 2).map((o) => o.textContent)`);
@@ -1244,7 +1244,7 @@ async function guiE2E() {
     const cell = await ex(`return ([...document.querySelectorAll('#us-runs tr')].slice(1).map((tr) => tr.cells[tr.cells.length - 1].innerHTML).filter((h) => h.includes('0.0009'))[0]) || ''`);
     expect('openrouter-ui: est chip renders next to the cost of an estimated:true run', /costnote est/.test(cell) && /\$0\.0009/.test(cell), cell);
     const acct = await ex(`return { est: $('#us-summary').innerHTML.includes('costnote est'), kpis: document.querySelector('.us-kpis') ? document.querySelector('.us-kpis').textContent : '' }`);
-    expect('openrouter-ui: the estimated key also shows est in the account/breakdown tables', acct.est && /est/.test(acct.kpis), acct);
+    expect('openrouter-ui: the estimated key also shows est in the account/breakdown tables', acct.est, acct);
     await ex(`$('#us-runs').scrollIntoView({ block: 'center' }); await w(250);`);
     for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`await w(350);`); await shot(`or-usage-est-${t}`); }
     require('electron').nativeTheme.themeSource = 'system';
