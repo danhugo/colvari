@@ -142,7 +142,15 @@ function findMcp(text) {
 // cannot reach the paths it needs (t_2cd0112e).
 function findBypassFlag(text) {
   const m = String(text || '').match(/\s(--[\w-]*(?:skip-permissions|bypass|yolo|auto-approve)[\w-]*)\b/);
-  return m ? m[1] : '';
+  if (m) return m[1];
+  // Short flags whose name alone says nothing but whose own description advertises auto-approval
+  // (opencode 1.18: "--auto  auto-approve permissions that are not explicitly denied (dangerous!)").
+  // Claimed from the line the CLI itself printed — same evidence standard as findRootRunFlag.
+  for (const line of String(text || '').split('\n')) {
+    const lm = line.match(/^\s+(?:-[\w],\s*)?(--[\w-]+)\s+.*\bauto-approve\b/i);
+    if (lm) return lm[1];
+  }
+  return '';
 }
 
 // Recursively flatten a JSON value into { 'a.b.c': value } for scalar leaves.
@@ -402,7 +410,11 @@ async function introspectRuntime(bin, execOrOpts, maybeOpts) {
   // Layer 3: one probe run to learn the event stream shape.
   let eventMapping = { textPath: '', sessionIdPath: '', costPath: '', inputPath: '', outputPath: '', reasoningPath: '', cachePath: '' };
   if (opts.probe !== false && formatFlag) {
-    const filled = argsTemplate.map((t) => t.replace('{model}', '\0').replace('{variant}', '\0').replace('{prompt}', opts.probePrompt || 'say pong'));
+    // The probe runs the caller's real model when given (dispatch passes the node's model): a CLI
+    // with no configured default provider (opencode: unauthenticated auth store) only emits its
+    // error event, and the mapping would degrade to a bare session id.
+    const model = opts.probeModel ? String(opts.probeModel) : '\0';
+    const filled = argsTemplate.map((t) => t.replace('{model}', model).replace('{variant}', '\0').replace('{prompt}', opts.probePrompt || 'say pong'));
     const probeArgs = [];
     for (let i = 0; i < filled.length; i++) {
       if (filled[i] === '\0') { probeArgs.pop(); continue; } // drop the flag that took this unset placeholder

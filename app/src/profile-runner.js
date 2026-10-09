@@ -46,13 +46,17 @@ function mcpArgs(profile, mcpConfig) {
 
 // board MCP server -> a project-local config file (e.g. helpycode's <cwd>/helpycode.json), the shape
 // an opencode-derived CLI expects: { mcp: { <name>: { type: 'local', command: [bin, ...args], enabled } } }.
-function writeFileMcpConfig(cwd, filename, mcpConfig) {
+// extra (optional) merges additional top-level config sections into the same file — e.g. a provider
+// profile (runtimes.js perRunProviderConfig). Its values carry env NAMES only ({env:KEY}), never keys.
+function writeFileMcpConfig(cwd, filename, mcpConfig, extra) {
   const mcp = {};
   for (const [name, sv] of Object.entries((mcpConfig && mcpConfig.mcpServers) || {})) {
     mcp[name] = { type: 'local', command: [sv.command, ...(sv.args || [])], enabled: true };
     if (sv.env && Object.keys(sv.env).length) mcp[name].environment = sv.env;
   }
-  fs.writeFileSync(path.join(cwd, filename), JSON.stringify({ $schema: 'https://opencode.ai/config.json', mcp }, null, 2));
+  const cfg = { $schema: 'https://opencode.ai/config.json', mcp };
+  if (extra && typeof extra === 'object') Object.assign(cfg, extra);
+  fs.writeFileSync(path.join(cwd, filename), JSON.stringify(cfg, null, 2));
 }
 
 // <BIN>_CONFIG env var (opencode-style, e.g. HELPYCODE_CONFIG) that points the CLI at a config file.
@@ -74,9 +78,9 @@ function removePerRunMcpDirs(env) {
   perRunMcpDirs.delete(env);
   try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
 }
-function writePerRunMcpConfig(bin, filename, mcpConfig, env) {
+function writePerRunMcpConfig(bin, filename, mcpConfig, env, extra) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-squad-mcp-'));
-  writeFileMcpConfig(dir, filename, mcpConfig);
+  writeFileMcpConfig(dir, filename, mcpConfig, extra);
   const cfgPath = path.join(dir, filename);
   if (env) { env[binConfigEnvKey(bin)] = cfgPath; perRunMcpDirs.set(env, dir); }
   return cfgPath;
