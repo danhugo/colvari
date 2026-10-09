@@ -100,6 +100,10 @@ The orchestrator exposes the aggregate, memoized on the runs signature, as
 and re-aggregates client-side with `ledgerFromRuns` (`renderer/app.js`, a mirror of
 `usageLedger`) when an agent/task filter is active — both must stay shape-compatible.
 
+## OpenCode / OpenRouter cost
+
+opencode `step_finish` events carry per-step `tokens` (input/output/reasoning/cache.read) and a `cost` estimate in USD, taken from models.dev pricing for the routed model. This is an estimate (OpenRouter billing may differ); only `part.reason === 'stop'` ends the turn, intermediate steps are summed once each. Custom providers without pricing metadata report cost 0 and fall back to token counts.
+
 ## Migration: pre-ledger runs
 
 Runs recorded before the ledger existed carry flat totals that mix models and cannot
