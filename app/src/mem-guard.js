@@ -31,7 +31,8 @@ class MemGuard {
     this.now = opts.now || (() => Date.now());
     this.cacheMs = opts.cacheMs ?? PROBE_CACHE_MS;
     this.deferAt = DEFER_AT.warning; // guard on at warning by default; configure() follows settings
-    this._probe = opts.probe || null; // injectable override: () => Promise<{level}|{freeBytes}|{error}>
+    // Test isolation: host pressure must not gate unit tests that don't inject a probe/platform.
+    this._probe = opts.probe || (process.env.AGENTS_SQUAD_TEST_ISOLATION && !opts.platform && !opts.execFile ? async () => ({ level: 1, freeBytes: Infinity }) : null); // injectable override: () => Promise<{level}|{freeBytes}|{error}>
     this._busy = false;
     this._state = { defer: false, level: null, freeBytes: null, source: this.platform === 'darwin' ? 'pressure' : 'freemem', why: 'no reading yet', at: null, deferAt: 'warning' };
   }
