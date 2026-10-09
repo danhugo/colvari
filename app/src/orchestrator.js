@@ -17,6 +17,7 @@ const PF = require('./preflight');
 const C = require('./controls');
 const IDLE = require('./idle');
 const WT = require('./worktree');
+const CP = require('./cp');
 const SB = require('./sandbox');
 const MG = require('./merge-gate');
 const RT = require('./runtimes');
@@ -31,6 +32,17 @@ const { MemGuard } = require('./mem-guard');
 
 const MCP_SERVER = path.join(__dirname, 'mcp-server.js');
 // The init event only says "failed" (often a misleading ENOENT posix_spawn): name the real cause.
+// Runtimes without board MCP (Pi) can't comment on their own task: after a clean exit the orchestrator
+// lists the worktree's commits ahead of the base (or says there are none). Status flow is untouched.
+async function noMcpCommitComment(store, taskId, rt, settings, root, wtDir) {
+  const caps = typeof rt.capabilities === 'function' ? await rt.capabilities(settings) : rt.capabilities;
+  if (!caps || caps.mcp !== false) return false;
+  let log = '';
+  try { const base = await CP.runThrow('git', ['symbolic-ref', '--short', 'HEAD'], { cwd: root }); log = String(await CP.runThrow('git', ['log', '--oneline', `${String(base).trim()}..HEAD`], { cwd: wtDir })).trim(); } catch { return false; }
+  store.commentTask(taskId, 'orchestrator', log ? `Run exited 0 (no board MCP on this runtime). New commits:\n${log}` : 'Run exited 0 (no board MCP on this runtime). No new commits on the task branch.');
+  return true;
+}
+
 function boardMcpCause(status, execPath = process.execPath, appDir = path.join(__dirname, '..')) {
   const why = !fs.existsSync(execPath) ? `app/node_modules is missing or broken (Electron binary not found: ${execPath}) — run npm install in app/`
     : !fs.existsSync(path.join(appDir, 'node_modules', '@modelcontextprotocol', 'sdk')) ? 'app/node_modules is missing or broken (MCP SDK not found) — run npm install in app/'
@@ -1838,6 +1850,7 @@ class Orchestrator extends EventEmitter {
       // button still works: only the auto path consults the stamp.
       if (stoppedWhy && !a.budgetStop) await this.store.updateTaskAsync(task.id, { noAutoResume: true });
       a.status = 'idle'; a.taskId = null; a.task = null; a.iteration = 0; a.stall = null;
+      if (code === 0 && worktree && !stoppedWhy) { try { await noMcpCommitComment(this.store, task.id, RT.getRuntime(cfg.runtime), settings, node.workdir || this.store.dir, cwd); } catch {} }
       const t = this.store.getTask(task.id);
       const gate = (st) => C.gateStatus(st, node, this.store.getSettings());
       if (m.mode === 'goal' && t && judge && !judge.met && t.status === 'done') {
@@ -2276,4 +2289,4 @@ class Orchestrator extends EventEmitter {
     }
   }
 }
-module.exports = { Orchestrator, boardMcpCause, buildPrompt, resumePrompt, commentsSince, humanPrompt, wakePrompt, stallPrompt, attachedFilesLines, WAKE, WATCH, STALL, SCHED, RESTART, autoCompactEnv, runPidsDir, reapRunPids, interruptedFromReap };
+module.exports = { noMcpCommitComment, Orchestrator, boardMcpCause, buildPrompt, resumePrompt, commentsSince, humanPrompt, wakePrompt, stallPrompt, attachedFilesLines, WAKE, WATCH, STALL, SCHED, RESTART, autoCompactEnv, runPidsDir, reapRunPids, interruptedFromReap };
