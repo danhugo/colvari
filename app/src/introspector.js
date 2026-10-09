@@ -52,13 +52,31 @@ function parseCommands(help) {
 
 // Prefer an exec/run command by name; else one whose description advertises non-interactive/JSON
 // output (name check first: plenty of unrelated commands mention JSON in their description, e.g.
-// helpycode's "export ... export session data as JSON"); else first.
+// helpycode's "export ... export session data as JSON"); else first. Management verbs are never
+// candidates: some are mutating (pi 0.73.1: install/remove/uninstall/update), others open a TUI
+// (config) — the probe runs what this returns, and a mutating pick made it execute
+// `pi install <prompt>`.
+const NON_RUN_COMMAND = /^(install|uninstall|remove|rm|add|update|upgrade|config|configure|login|logout|auth|publish|init|import|migrate)$/i;
 function pickRunCommand(commands) {
-  const byName = commands.find((c) => /^(exec|run)$/i.test(c.name));
+  const safe = commands.filter((c) => !NON_RUN_COMMAND.test(c.name));
+  const byName = safe.find((c) => /^(exec|run)$/i.test(c.name));
   if (byName) return byName.name;
-  const byHint = commands.find((c) => /json|non-interactiv/i.test(c.desc));
+  const byHint = safe.find((c) => /json|non-interactiv/i.test(c.desc));
   if (byHint) return byHint.name;
-  return commands[0] ? commands[0].name : '';
+  return safe[0] ? safe[0].name : '';
+}
+
+// Root-flag run mode: the CLI's non-interactive run is a root flag, not a subcommand (claude
+// "-p, --print   Print response and exit (non-interactive mode)", pi 0.73.1 "--print, -p
+// Non-interactive mode: process prompt and exit"). Such CLIs run from the root and their
+// subcommands are management verbs — with no root detection the run-command picker fell through to
+// `install`. Claimed only when the flag's own line advertises non-interactive behavior.
+function findRootRunFlag(text) {
+  for (const line of String(text || '').split('\n')) {
+    const m = line.match(/^\s+(?:-[\w],\s*)?(--print|--non-interactive)\b\s*(.*)$/i);
+    if (m && /non-interactive/i.test(m[2])) return m[1];
+  }
+  return '';
 }
 
 // "--effort <level>   Reasoning effort (low, medium, high)" -> { flag: '--effort', values: [...] }
@@ -77,7 +95,10 @@ function findEffort(text) {
 }
 
 function findResume(text, commands) {
-  if (/--resume\b/.test(text)) return '--resume';
+  // A "--resume" whose own description says it SELECTS (pi 0.73.1: "Select a session to resume")
+  // opens an interactive picker in scripted use — never send it; a session-targeting flag resumes
+  // a concrete id instead.
+  if (/--resume\b/.test(text) && !/select a session/i.test(text)) return '--resume';
   if (commands.some((c) => c.name === 'resume')) return 'resume';
   const flat = String(text || '').replace(/\s+/g, ' ');
   const short = flat.match(/(-\w),\s*--session\b/i);
@@ -96,6 +117,10 @@ function findModelFlag(text) {
 function findFormatFlag(text) {
   if (/--format\b/.test(text)) return { flag: '--format', value: 'json' };
   if (/--json\b/.test(text)) return { flag: '--json', value: '' };
+  // pi-style output mode: "--mode <mode>   Output mode: text (default), json, or rpc". json must be
+  // among the modes the CLI itself advertises, never assumed.
+  const m = String(text || '').match(/^\s+--mode\b.*$/im);
+  if (m && /\bjson\b/i.test(m[0])) return { flag: '--mode', value: 'json' };
   return { flag: '', value: '' };
 }
 
@@ -285,7 +310,8 @@ function validateAgentProfile(raw, bin) {
   const eventMapping = {};
   for (const k of EVENT_MAPPING_KEYS) {
     const v = String(emRaw[k] || '');
-    if (v && !/^[\w.]+$/.test(v)) throw new Error(`agent profile: unsafe eventMapping path "${v}"`);
+    // "message_end:message.usage.input" — a path may pin the event type it reads from (see getPathTyped)
+    if (v && !/^[\w.]+(?::[\w.]+)?$/.test(v)) throw new Error(`agent profile: unsafe eventMapping path "${v}"`);
     eventMapping[k] = v;
   }
   return normalizeRuntimeProfile({
@@ -336,7 +362,12 @@ async function introspectRuntime(bin, execOrOpts, maybeOpts) {
   // Layer 1: tolerant --help parsing (top level + the run subcommand).
   const help = await safeExec(['--help']);
   const commands = parseCommands(help);
-  const runCommand = pickRunCommand(commands);
+  // A CLI that runs via a root flag (claude/pi "-p/--print") has no run subcommand — its
+  // subcommands are management verbs. Picking one derived "install" as the run command for pi and
+  // pointed the probe at a mutating subcommand (`pi install <prompt>`); with a root run flag
+  // advertised, the template starts from the root and no subcommand is ever picked or probed.
+  const rootRunFlag = findRootRunFlag(help);
+  const runCommand = rootRunFlag ? '' : pickRunCommand(commands);
   const subHelp = runCommand ? await safeExec([runCommand, '--help']) : '';
   const text = help + '\n' + subHelp;
 
@@ -349,7 +380,8 @@ async function introspectRuntime(bin, execOrOpts, maybeOpts) {
   const hasModelsCmd = commands.some((c) => c.name === 'models');
 
   const argsTemplate = [];
-  if (runCommand) argsTemplate.push(runCommand);
+  if (rootRunFlag) argsTemplate.push(rootRunFlag); // root-flag run mode: no subcommand, the flag IS the run mode
+  else if (runCommand) argsTemplate.push(runCommand);
   if (formatFlag) argsTemplate.push(formatFlag, formatValue || 'json');
   if (modelFlag) argsTemplate.push(modelFlag, '{model}');
   if (effortFlag) argsTemplate.push(effortFlag, '{variant}');
@@ -409,4 +441,4 @@ function askAgentArgs(profile, opts = {}) {
   return args;
 }
 
-module.exports = { SRC, parseCommands, pickRunCommand, findEffort, findResume, findModelFlag, findFormatFlag, findMcp, findBypassFlag, flatten, deriveEventMapping, parseJsonLines, parseModelsOutput, extractJson, validateAgentProfile, mergeAgentFields, assertSafeArgs, sandboxEnv, makeExec, askAgentArgs, AGENT_PROFILE_PROMPT, introspectRuntime, defaultExec };
+module.exports = { SRC, parseCommands, pickRunCommand, findRootRunFlag, findEffort, findResume, findModelFlag, findFormatFlag, findMcp, findBypassFlag, flatten, deriveEventMapping, parseJsonLines, parseModelsOutput, extractJson, validateAgentProfile, mergeAgentFields, assertSafeArgs, sandboxEnv, makeExec, askAgentArgs, AGENT_PROFILE_PROMPT, introspectRuntime, defaultExec };

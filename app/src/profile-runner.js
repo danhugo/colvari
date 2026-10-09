@@ -13,6 +13,19 @@ const getPath = (obj, path) => {
   return path.split('.').reduce((o, k) => (o && typeof o === 'object' ? o[k] : undefined), obj);
 };
 
+// Event-mapping paths may pin an event type: "message_end:message.usage.input" reads that path only
+// off events whose own `type` is message_end — a CLI that repeats the same usage on turn_end /
+// agent_end (pi 0.73.1) would otherwise double-count every total. A bare path reads every event, as
+// before. applyProfileEvent and parseProfileEvent both go through here, so hand-written profiles
+// get the same filter as derived ones.
+function getPathTyped(obj, spec) {
+  const s = String(spec || '');
+  const c = s.indexOf(':');
+  if (c === -1) return getPath(obj, s);
+  if (!obj || obj.type !== s.slice(0, c)) return undefined;
+  return getPath(obj, s.slice(c + 1));
+}
+
 // board MCP server -> `<flag> mcp_servers.<name>.<key>=<json-value>` style overrides (codex-compatible).
 function tomlMcpArgs(flag, mcpConfig) {
   const out = [];
@@ -84,18 +97,19 @@ function buildProfileArgs(profile, { model, prompt, variant, session, bypass, mc
   return args;
 }
 
-// Apply one parsed JSON event to a run accumulator using the profile's eventMapping.
+// Apply one parsed JSON event to a run accumulator using the profile's eventMapping. Paths may pin
+// an event type ("message_end:...") — see getPathTyped.
 function applyProfileEvent(run, ev, mapping) {
-  const text = getPath(ev, mapping.textPath);
+  const text = getPathTyped(ev, mapping.textPath);
   if (typeof text === 'string' && text) { run.result = (run.result || '') + text; }
-  const sessionId = getPath(ev, mapping.sessionIdPath);
+  const sessionId = getPathTyped(ev, mapping.sessionIdPath);
   if (sessionId != null) run.sessionId = String(sessionId);
-  const cost = getPath(ev, mapping.costPath);
+  const cost = getPathTyped(ev, mapping.costPath);
   if (typeof cost === 'number') run.reportedCostUsd += cost;
-  const input = getPath(ev, mapping.inputPath); if (typeof input === 'number') run.inputTokens += input;
-  const output = getPath(ev, mapping.outputPath); if (typeof output === 'number') run.outputTokens += output;
-  const reasoning = getPath(ev, mapping.reasoningPath); if (typeof reasoning === 'number') run.reasoningTokens += reasoning;
-  const cache = getPath(ev, mapping.cachePath); if (typeof cache === 'number') run.cacheReadTokens += cache;
+  const input = getPathTyped(ev, mapping.inputPath); if (typeof input === 'number') run.inputTokens += input;
+  const output = getPathTyped(ev, mapping.outputPath); if (typeof output === 'number') run.outputTokens += output;
+  const reasoning = getPathTyped(ev, mapping.reasoningPath); if (typeof reasoning === 'number') run.reasoningTokens += reasoning;
+  const cache = getPathTyped(ev, mapping.cachePath); if (typeof cache === 'number') run.cacheReadTokens += cache;
   return run;
 }
 
@@ -134,4 +148,4 @@ function runProfile(profile, opts = {}, spawnFn = spawn) {
   });
 }
 
-module.exports = { buildProfileArgs, applyProfileEvent, runProfile, mcpArgs, writeFileMcpConfig, writePerRunMcpConfig, removePerRunMcpDirs, binConfigEnvKey, getPath };
+module.exports = { buildProfileArgs, applyProfileEvent, runProfile, mcpArgs, writeFileMcpConfig, writePerRunMcpConfig, removePerRunMcpDirs, binConfigEnvKey, getPath, getPathTyped };
