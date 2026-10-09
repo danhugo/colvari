@@ -55,3 +55,11 @@ test('opencode parsing on the recorded live stream: tools, text, usage per finis
   assert.ok(kinds.has('tool_result'));
   assert.ok(tokens <= events.filter((e) => e.type === 'step_finish').length);
 });
+
+test('opencode run with no reported cost gets an "estimated" cost from the OpenRouter list price', () => {
+  const U = require('../src/usage');
+  const priceBook = { estimate: (m, t) => ({ costUsd: t.inputTokens * 2.5e-7 + t.outputTokens * 2e-6, partial: false }) };
+  const run = { runtime: 'opencode', model: 'openrouter/openai/gpt-5-mini', inputTokens: 1000, outputTokens: 500, reportedCostUsd: 0, costKnown: false, billingSource: 'api' };
+  const [e] = U.buildLedger(run, { priceBook });
+  assert.strictEqual(e.costSource, 'estimated'); assert.ok(Math.abs(e.costUsd - 0.00125) < 1e-9);
+});
