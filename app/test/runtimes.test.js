@@ -25,8 +25,8 @@ test('codex event parsing (real event shapes from codex-cli 0.144.6)', () => {
   assert.ok(RT.parseCodexEvent({ type: 'turn.failed', error: { message: 'bad model' } }).failed);
   assert.strictEqual(RT.parseCodexEvent({ type: 'error', message: 'x' }).logs[0][0], 'error');
 });
-test('capabilities are honest: opencode claims nothing, codex no cost/mcp', () => {
-  assert.deepStrictEqual(RT.RUNTIMES.opencode.capabilities, { tokens: false, cost: false, mcp: false, resume: false });
+test('capabilities are honest: opencode is derived (profileRuntime), codex no cost/mcp', () => {
+  assert.strictEqual(typeof RT.RUNTIMES.opencode.parseEvent, 'function'); // derived path, not the old stub
   assert.strictEqual(RT.RUNTIMES.codex.capabilities.cost, false); assert.strictEqual(RT.RUNTIMES.codex.capabilities.mcp, true);
 });
 test('detectRuntimes marks missing binaries not installed', async () => {

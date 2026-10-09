@@ -17,6 +17,7 @@ const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
 const NODE_DEFAULTS = {
   name: 'Agent', role: 'Dev', runtime: 'claude', systemPrompt: '', model: '', workdir: '',
   permissionMode: '', allowedTools: [], disallowedTools: [], extraArgs: '', env: {},
+  provider: '', // settings.providers profile id routing this agent ('' = today's behaviour; goal t_50b102dc contract)
   maxTurns: 0, appendSystemPrompt: '', addDirs: [], disabledBoardTools: [],
   billingMode: 'auto', billingBaseUrl: '',
   requireApproval: false, budgetUsd: 0, budgetTokens: 0,
@@ -75,6 +76,7 @@ function normalizeNode(n = {}, base = NODE_DEFAULTS) {
   const r = {};
   for (const k of NODE_FIELDS) r[k] = n[k] !== undefined ? n[k] : (Array.isArray(base[k]) ? [...base[k]] : typeof base[k] === 'object' ? { ...base[k] } : base[k]);
   r.runtime = r.runtime ? String(r.runtime) : 'claude'; // unknown ids are kept so the run errors instead of silently using claude
+  r.provider = String(r.provider || '').trim();
   r.name = String(r.name || 'Agent'); r.role = String(r.role || '').trim() || 'Dev';
   r.avatarSeed = String(r.avatarSeed || '');
   r.core = !!r.core; r.createdBy = String(r.createdBy || ''); r.recruitedAt = String(r.recruitedAt || '');

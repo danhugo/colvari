@@ -14,7 +14,7 @@ const { isSubagentTool } = require('./subagents');
 // Async since t_5a78aa95: derivation spawns (--version/--help/models/probe) and used to block the
 // main process for seconds at dispatch time. Sync fakes injected by tests keep working under await.
 const derivedProfiles = new Map(); // cacheKey -> { version, profile }
-async function deriveRuntimeProfile(bin, { exec, label, probe = true, askAgent = false, env } = {}) {
+async function deriveRuntimeProfile(bin, { exec, label, probe = true, askAgent = false, env, probeModel } = {}) {
   const key = probe ? bin : `${bin}|help`;
   const run = exec || (env ? makeExec(env) : defaultExec);
   let version = '';
@@ -22,7 +22,7 @@ async function deriveRuntimeProfile(bin, { exec, label, probe = true, askAgent =
   const hit = derivedProfiles.get(key);
   if (hit && hit.version === version) return hit.profile;
   const id = String(bin).split(/[\\/]/).pop().replace(/\.(exe|sh)$/i, '').toLowerCase().replace(/[^a-z0-9_.-]/g, '_');
-  const { profile } = await introspectRuntime(bin, run, { id, label: label || id, probe, askAgent });
+  const { profile } = await introspectRuntime(bin, run, { id, label: label || id, probe, askAgent, probeModel });
   // Binary not found (e.g. packaged app launched from Finder with a minimal PATH): do not cache the
   // empty profile, or it would stick for the whole session. Re-derives next call (cheap: no run).
   if (version) derivedProfiles.set(key, { version, profile });
@@ -46,7 +46,7 @@ function capabilitiesFromProfile(profile) {
 // user of this factory. exec/askAgent injectable via opts for tests (askAgent opts into the
 // expensive ask-the-agent introspection layer; never on by default).
 function profileRuntime(id, label, binFromSettings) {
-  const profileFor = async (settings, opts = {}) => deriveRuntimeProfile(binFromSettings(settings || {}), { label, exec: opts.exec, probe: opts.probe !== false, askAgent: !!opts.askAgent, env: opts.env });
+  const profileFor = async (settings, opts = {}) => deriveRuntimeProfile(binFromSettings(settings || {}), { label, exec: opts.exec, probe: opts.probe !== false, askAgent: !!opts.askAgent, env: opts.env, probeModel: opts.probeModel });
   return {
     id, label, bin: binFromSettings,
     // help-only derivation: cheap, no probe/model call (used by detectRuntimes)
@@ -56,20 +56,30 @@ function profileRuntime(id, label, binFromSettings) {
     },
     async buildArgs(node, prompt, settings, mcp, opts = {}) {
       const n = normalizeNode(node);
-      const profile = await profileFor(settings, opts);
-      if (mcp && mcp.mcpServers && Object.keys(mcp.mcpServers).length && profile.mcp.method === 'file') {
-        // One config per run in a fresh temp dir, delivered via <BIN>_CONFIG (opencode-style). Writing
-        // it into a shared cwd made concurrent agents overwrite each other's board identity ("task not
-        // visible"); without an env to carry the per-run path there is no safe way to inject it at all.
-        const bin = binFromSettings(settings || {});
+      // The probe rides the node's model (a CLI without a configured default only emits its error
+      // event, which would degrade the derived event mapping to a bare session id).
+      const profile = await profileFor(settings, { ...opts, probeModel: n.model });
+      const provider = providerMapping(n, settings);
+      const model = providerModelArg(provider, n.model);
+      const bin = binFromSettings(settings || {});
+      const hasMcp = mcp && mcp.mcpServers && Object.keys(mcp.mcpServers).length;
+      // One config per run in a fresh temp dir, delivered via <BIN>_CONFIG (opencode-style). Writing
+      // it into a shared cwd made concurrent agents overwrite each other's board identity ("task not
+      // visible"); without an env to carry the per-run path there is no safe way to inject it at all.
+      // Provider profiles ride the same per-run file (perRunProviderConfig).
+      if ((hasMcp || provider) && profile.mcp.method === 'file') {
         if (!opts.env) throw new Error(`${label}: file-method MCP needs opts.env (per-run config via ${binConfigEnvKey(bin)})`);
-        writePerRunMcpConfig(bin, profile.mcp.flag, mcp, opts.env);
+        writePerRunMcpConfig(bin, profile.mcp.flag, hasMcp ? mcp : null, opts.env, perRunProviderConfig(provider, model));
+      } else if (provider) {
+        // A provider profile can only be delivered through the per-run config file; with any other
+        // MCP method there is no channel for it, so refuse instead of silently ignoring the setting.
+        throw new Error(`${label}: provider "${provider.id}" needs file-method config delivery (derived "${profile.mcp.method}")`);
       }
       // Same effective-mode rule as buildClaudeArgs: unset falls through to bypassPermissions.
       // Without the derived bypass flag, non-interactive profile-runtime runs auto-reject permission
       // asks (e.g. helpycode's external_directory) and the agent cannot reach the paths it needs.
       const bypass = (n.permissionMode || (settings || {}).permissionMode || 'bypassPermissions') === 'bypassPermissions';
-      const args = buildProfileArgs(profile, { model: n.model, prompt, variant: n.effort, session: opts.resume, bypass });
+      const args = buildProfileArgs(profile, { model, prompt, variant: n.effort, session: opts.resume, bypass });
       args.push(...splitArgs(n.extraArgs));
       // opencode-style CLIs realpath() positional messages: a prompt longer than a path segment dies
       // with ENAMETOOLONG. Long prompts go over stdin instead (they read it when it is not a TTY);
@@ -113,11 +123,10 @@ const RUNTIMES = {
     },
     parseEvent: (ev) => parseCodexEvent(ev),
   },
-  opencode: {
-    id: 'opencode', label: 'OpenCode', bin: (s) => (s && s.opencodePath) || 'opencode',
-    capabilities: { tokens: false, cost: false, mcp: false, resume: false }, // stub: not installed here, nothing tested
-    buildArgs(node, prompt) { const n = normalizeNode(node); return ['run', ...(n.model ? ['-m', n.model] : []), prompt]; },
-  },
+  // opencode 1.18 (real binary, recorded help + live stream): derived like any other CLI via
+  // profileRuntime — run --format json events, per-run OPENCODE_CONFIG carries the board MCP (and a
+  // provider profile when set), -m takes "provider/model" ids, -s resumes, --variant is effort.
+  opencode: profileRuntime('opencode', 'OpenCode', (s) => (s && s.opencodePath) || 'opencode'),
   // pi 0.73.1: non-interactive run is the ROOT flag -p (never a subcommand); "--resume" opens an
   // interactive session picker and is never sent — resume targets a concrete id via "--session".
   // No MCP support: mcp is ignored (no board tools, no fallback config) and capabilities say so.
@@ -151,6 +160,39 @@ function codexMcpArgs(mcp) {
 const RUNTIME_IDS = Object.keys(RUNTIMES);
 // empty -> claude (the default); unknown/typo'd id throws (no silent fallback)
 const getRuntime = (id) => { if (!id) return RUNTIMES.claude; if (!RUNTIMES[id]) throw new Error(`unknown runtime "${id}" (expected ${RUNTIME_IDS.join('/')})`); return RUNTIMES[id]; };
+
+// Provider profiles (settings.providers [{id,label,baseUrl,keyEnv,kind}], agent field provider —
+// goal t_50b102dc contract): route one run through the named provider. The key travels ONLY by env
+// name — {env:<keyEnv>} inside the per-run config file and the variable itself in the run env —
+// never argv and never as a literal config value.
+const OPENROUTER_BASE = 'https://openrouter.ai/api/v1';
+function providerMapping(n, settings) {
+  const pid = String(n.provider || '').trim();
+  if (!pid) return null;
+  return (((settings || {}).providers || []).find((p) => p && p.id === pid)) || null;
+}
+// opencode models are provider-namespaced ("-m provider/model"): a bare id gains the profile's
+// prefix, an already-prefixed one passes through untouched.
+function providerModelArg(provider, model) {
+  if (!provider || !model || model.startsWith(provider.id + '/')) return model;
+  return `${provider.id}/${model}`;
+}
+// provider profile -> the `provider` section merged into the per-run config file. The native
+// OpenRouter provider (standard base URL) needs no section: the CLI already knows it and <keyEnv>
+// in the run env authenticates it — a section would shadow models.dev metadata (pricing, context).
+function perRunProviderConfig(provider, model) {
+  if (!provider) return undefined;
+  if (provider.kind === 'openrouter' && (!provider.baseUrl || provider.baseUrl === OPENROUTER_BASE)) return undefined;
+  const entry = {
+    npm: provider.kind === 'openrouter' ? '@ai-sdk/openrouter-compatible' : '@ai-sdk/openai-compatible',
+    name: provider.label || provider.id,
+    options: { apiKey: `{env:${provider.keyEnv}}` },
+    models: {},
+  };
+  if (provider.baseUrl) entry.options.baseURL = provider.baseUrl;
+  if (model) entry.models[model.startsWith(provider.id + '/') ? model.slice(provider.id.length + 1) : model] = {};
+  return { provider: { [String(provider.id)]: entry } };
+}
 
 // Node effort (EFFORT_LEVELS) -> pi's --thinking vocabulary; "max" clamps to pi's xhigh ceiling.
 const PI_THINKING = { low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'xhigh' };
@@ -314,4 +356,4 @@ async function detectRuntimes(settings = {}, env = process.env, exec = async (b,
   return r;
 }
 
-module.exports = { RUNTIMES, codexMcpArgs, RUNTIME_IDS, getRuntime, parseCodexEvent, parsePiEvent, parseProfileEvent, parseVersion, detectRuntimes, deriveRuntimeProfile, capabilitiesFromProfile, profileRuntime };
+module.exports = { RUNTIMES, codexMcpArgs, RUNTIME_IDS, getRuntime, parseCodexEvent, parsePiEvent, parseProfileEvent, parseVersion, detectRuntimes, deriveRuntimeProfile, capabilitiesFromProfile, profileRuntime, providerMapping, providerModelArg, perRunProviderConfig };
