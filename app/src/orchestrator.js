@@ -8,7 +8,7 @@ const { EventEmitter } = require('events');
 const path = require('path');
 const fs = require('fs');
 const { outgoing, incoming, reviewees } = require('./scope');
-const { buildClaudeArgs, applyPreset, normalizeNode } = require('./agent-config');
+const { buildClaudeArgs, applyPreset, normalizeNode, resolveProvider } = require('./agent-config');
 const { enabledTools } = require('./board-tools');
 const { normalizeMode, iterationPrompt, nextStep, judgeArgs, parseJudge, isLastLoop } = require('./agent-modes');
 const U = require('./usage');
@@ -698,9 +698,11 @@ class Orchestrator extends EventEmitter {
       this.changed();
       let cfg;
       try { cfg = normalizeNode(applyPreset(node, settings.rolePresets || [])); } catch (e) { cfg = { env: {}, mode: 'single' }; this.log(node.id, 'error', 'bad agent settings: ' + e.message); }
-      const bill = U.applyBillingEnv(cfg, this.env(cfg)); const env = bill.env;
-      for (const w of bill.warnings) this.log(node.id, 'error', w);
-      const meta = { billingMode: cfg.billingMode || 'auto', runtime: cfg.runtime || 'claude' };
+      const prov = this.providerFor(cfg, settings, node.id);
+      const bill = U.applyBillingEnv(cfg, this.env(cfg));
+      const penv = U.applyProviderEnv(prov, bill.env); const env = penv.env;
+      for (const w of [...bill.warnings, ...penv.warnings]) this.log(node.id, 'error', w);
+      const meta = { billingMode: cfg.billingMode || 'auto', runtime: cfg.runtime || 'claude', provider: prov ? prov.id : '' };
       a.runtime = meta.runtime; a.model = cfg.model || '';
       if (!this.cwds) this.cwds = new Map();
       let cwd = node.workdir || this.store.dir;
@@ -720,7 +722,7 @@ class Orchestrator extends EventEmitter {
       const prompt = msgs.every((m) => m.from === 'human') ? humanPrompt(msgs.map((m) => m.text).join('\n\n'), null, wakeAtts) : wakePrompt(team, node, msgs);
       try { args = await RT.getRuntime(cfg.runtime).buildArgs(cfg, prompt, settings, this.mcpConfig(node), { resume, cwd, env, ...(wakeAtts.length ? { attachDir: this.store.attachmentsDir() } : {}) }); }
       catch (e) { this.log(node.id, 'error', 'bad agent settings: ' + e.message); }
-      const r = await this.spawnRun(node, args, cwd, env, settings, { ...meta, resumedFrom: args && resume ? resume : null });
+      const r = await this.spawnRun(node, args, cwd, env, settings, { ...meta, resumedFrom: args && resume ? resume : null }, prov);
       a.status = 'idle'; a.iteration = 0; a.activity = null;
       this.log(node.id, 'system', `■ ${node.name} finished the wake run (exit ${r.code})`);
       this.changed();
@@ -1483,6 +1485,15 @@ class Orchestrator extends EventEmitter {
     return env;
   }
 
+  // A node's provider profile (settings.providers, openrouter-runtimes): null unless the node set
+  // `provider` to a defined profile id. A bad id fails loudly (logged, run proceeds with the
+  // runtime's own default) rather than silently rerouting spend.
+  providerFor(cfg, settings, nodeId) {
+    if (!cfg || !cfg.provider) return null;
+    try { return resolveProvider(settings && settings.providers, cfg.provider); }
+    catch (e) { this.log(nodeId, 'error', 'bad provider profile: ' + e.message); return null; }
+  }
+
   // Last cumulative usage snapshot of a session (resumed runs report session-cumulative modelUsage/cost).
   sessionBaseline(sessionId) {
     const m = this.sessionCum && this.sessionCum.get(sessionId); if (m) return m;
@@ -1496,12 +1507,12 @@ class Orchestrator extends EventEmitter {
   // BACKGROUND after the child is registered — an await BEFORE the spawn would leave the
   // synchronous placeholder ({kill(){}} slot reservation) in procs for ~30ms, so a drain
   // haltProcs in that window would signal nothing. The watchdog + pidfile arm a beat later.
-  spawnRun(node, args, cwd, env, settings, meta = {}) {
+  spawnRun(node, args, cwd, env, settings, meta = {}, provider = null) {
     return new Promise((resolve) => {
       const startedMs = Date.now();
       const usage = U.newRun({ projectId: this.store.meta() ? this.store.meta().id : null, nodeId: node.id, agent: node.name, ...meta });
       usage.runtime = meta.runtime || node.runtime || 'unknown'; // ledger key part; the init event corrects it if the CLI reports its own
-      usage.proxyBase = (env && env.ANTHROPIC_BASE_URL) || null; // the proxy this run billed through (reportedCostOf + spend-log fetch)
+      usage.proxyBase = U.providerBaseOf(env, provider); // the channel this run billed through (reportedCostOf + spend-log fetch); generalised beyond ANTHROPIC_BASE_URL (t_7a95202c)
       if (!usage.model && node.model) usage.model = node.model; // non-claude runtimes report no model in events; the node's config is the best known value
       if (usage.resumedFrom) usage.baseline = this.sessionBaseline(usage.resumedFrom);
       let rt; try { rt = RT.getRuntime(meta.runtime); } catch (e) { this.log(node.id, 'error', e.message + ' (run failed, no fallback)'); rt = { id: String(meta.runtime), label: String(meta.runtime), bin: () => '' }; args = null; }
@@ -1585,7 +1596,7 @@ class Orchestrator extends EventEmitter {
           }
           delete usage.baseline;
           if (usage.sessionId && usage.cumulative) (this.sessionCum ||= new Map()).set(usage.sessionId, usage.cumulative);
-          if (args) this.record(U.finishRun(usage, { code, env, billingMode: meta.billingMode, startedMs, priceBook: this.priceBook }));
+          if (args) this.record(U.finishRun(usage, { code, env, billingMode: meta.billingMode, startedMs, priceBook: this.priceBook, provider }));
           if (args) this.resolveProxyCost(usage, env);
         } catch (e) { this.log(node.id, 'error', 'run close bookkeeping crashed: ' + e.message); }
         resolve({ code, ...run });
@@ -1682,9 +1693,11 @@ class Orchestrator extends EventEmitter {
       const wf = m.mode === 'workflow' && !!m.slashCommand && base !== null;
       const runCfg = wf ? { ...cfg, appendSystemPrompt: [base, cfg.appendSystemPrompt].filter(Boolean).join('\n\n') } : cfg;
       if (m.mode === 'goal' && !m.goalCondition.trim()) { this.log(node.id, 'error', 'goal mode without a completion condition: running once'); m.mode = 'single'; }
-      const bill = U.applyBillingEnv(cfg, this.env(cfg)); const env = bill.env;
-      for (const w of bill.warnings) this.log(node.id, 'error', w);
-      const meta = { taskId: task.id, task: task.title, billingMode: cfg.billingMode || 'auto', runtime: cfg.runtime || 'claude' };
+      const prov = this.providerFor(cfg, settings, node.id);
+      const bill = U.applyBillingEnv(cfg, this.env(cfg));
+      const penv = U.applyProviderEnv(prov, bill.env); const env = penv.env;
+      for (const w of [...bill.warnings, ...penv.warnings]) this.log(node.id, 'error', w);
+      const meta = { taskId: task.id, task: task.title, billingMode: cfg.billingMode || 'auto', runtime: cfg.runtime || 'claude', provider: prov ? prov.id : '' };
       // claude >=2.1.284 reads CLAUDE_AUTOCOMPACT_PCT_OVERRIDE as a percent (0-100] of the context
       // window (see autoCompactEnv) — this is set at spawn instead of the app sending /compact itself.
       // Per-agent threshold wins over the project default so thinkers (PM/reviewer/critic) can compact later.
@@ -1715,7 +1728,7 @@ class Orchestrator extends EventEmitter {
         }
         if (i > 0) this.log(node.id, 'system', `↻ ${node.name} iteration ${i + 1} (${m.mode})`);
         const usedResume = !!(args && resume);
-        const r = await this.spawnRun(node, args, cwd, env, settings, { ...meta, iteration: i + 1, resumedFrom: usedResume ? resume : null });
+        const r = await this.spawnRun(node, args, cwd, env, settings, { ...meta, iteration: i + 1, resumedFrom: usedResume ? resume : null }, prov);
         code = r.code; stderr = r.stderr || ''; i++; human = null; recover = false; humanAtts = [];
         if (code !== 0) this.noteRuntimeFailure(node.id, meta.runtime, r, task.id);
         else this._rtFailures.delete(meta.runtime); // real progress resets the streak

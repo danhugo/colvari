@@ -2,7 +2,7 @@
 // runs through the generic profile path: the introspector derives a RuntimeProfile from the binary
 // itself (no hand-built per-CLI profiles, no CLI-specific parsing), and this module spawns/parses
 // purely from that profile data.
-const { buildClaudeArgs, normalizeNode, splitArgs } = require('./agent-config');
+const { buildClaudeArgs, normalizeNode, splitArgs, resolveProvider } = require('./agent-config');
 const { buildProfileArgs, writePerRunMcpConfig, binConfigEnvKey, getPathTyped } = require('./profile-runner');
 const { introspectRuntime, defaultExec, makeExec } = require('./introspector');
 const { isSubagentTool } = require('./subagents');
@@ -106,6 +106,12 @@ const RUNTIMES = {
       const args = ['exec', '--json', '--skip-git-repo-check', ...codexMcpArgs(mcp)];
       if ((n.permissionMode || settings.permissionMode) === 'bypassPermissions') args.push('--dangerously-bypass-approvals-and-sandbox');
       if (n.model) args.push('-m', n.model);
+      // Provider profile (settings.providers) -> codex's own TOML provider config. The key travels
+      // ONLY as the env var name (env_key); its value must already be in the child env
+      // (orchestrator applyProviderEnv) — never in argv. Proven live (spike, t_7a95202c): codex
+      // 0.144.6 + wire_api responses + MCP tool calls through openrouter.ai.
+      const prov = resolveProvider(settings && settings.providers, n.provider);
+      if (prov) args.push(...codexProviderArgs(prov));
       args.push(...splitArgs(n.extraArgs));
       if (opts.resume) args.push('resume', String(opts.resume));
       args.push(prompt);
@@ -128,6 +134,9 @@ const RUNTIMES = {
       const n = normalizeNode(node);
       const args = ['-p', '--mode', 'json'];
       if (n.model) args.push('--model', n.model);
+      // pi maps a provider profile by its own id (--provider <id>); the profile's key rides the
+      // child env under keyEnv (applyProviderEnv) — pi reads it by the provider's env var name.
+      if (n.provider && resolveProvider(settings && settings.providers, n.provider)) args.push('--provider', n.provider);
       if (PI_THINKING[n.effort]) args.push('--thinking', PI_THINKING[n.effort]);
       args.push(...splitArgs(n.extraArgs));
       if (opts.resume) args.push('--session', String(opts.resume));
@@ -146,6 +155,19 @@ function codexMcpArgs(mcp) {
     out.push('-c', `${k}.command=${JSON.stringify(sv.command)}`, '-c', `${k}.args=${JSON.stringify(sv.args || [])}`);
     for (const [ek, ev] of Object.entries(sv.env || {})) out.push('-c', `${k}.env.${ek}=${JSON.stringify(String(ev))}`);
   }
+  return out;
+}
+// Provider profile -> codex `-c model_provider=<id>` + `-c model_providers.<id>.*` overrides.
+// env_key is the NAME of the env var that holds the key — the key value itself never appears here.
+// wire_api responses only where it is proven (openrouter); a LiteLLM proxy keeps codex's default
+// chat wire (its /v1 endpoint speaks OpenAI chat completions).
+function codexProviderArgs(prov) {
+  if (!prov || prov.kind === 'native') return [];
+  const k = `model_providers.${prov.id}`;
+  const out = ['-c', `model_provider=${JSON.stringify(prov.id)}`, '-c', `${k}.name=${JSON.stringify(prov.label || prov.id)}`];
+  if (prov.baseUrl) out.push('-c', `${k}.base_url=${JSON.stringify(prov.baseUrl)}`);
+  if (prov.keyEnv) out.push('-c', `${k}.env_key=${JSON.stringify(prov.keyEnv)}`);
+  if (prov.kind === 'openrouter') out.push('-c', `${k}.wire_api="responses"`);
   return out;
 }
 const RUNTIME_IDS = Object.keys(RUNTIMES);
@@ -314,4 +336,4 @@ async function detectRuntimes(settings = {}, env = process.env, exec = async (b,
   return r;
 }
 
-module.exports = { RUNTIMES, codexMcpArgs, RUNTIME_IDS, getRuntime, parseCodexEvent, parsePiEvent, parseProfileEvent, parseVersion, detectRuntimes, deriveRuntimeProfile, capabilitiesFromProfile, profileRuntime };
+module.exports = { RUNTIMES, codexMcpArgs, codexProviderArgs, RUNTIME_IDS, getRuntime, parseCodexEvent, parsePiEvent, parseProfileEvent, parseVersion, detectRuntimes, deriveRuntimeProfile, capabilitiesFromProfile, profileRuntime };
