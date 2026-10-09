@@ -51,6 +51,10 @@ default system prompt, allowed/disallowed tools, permission mode. Saved per-pres
 **Runtimes** — appended by `renderRuntimesSection()` (custom-runtime onboarding draft form,
 see `onboarding-introspection.md`); wired by `wireRuntimesSection()`.
 
+## OpenCode runtime and providers
+
+`opencode` is a built-in runtime derived like any profile CLI (`opencodePath` overrides the binary). Each run gets a per-run `OPENCODE_CONFIG` file in a fresh temp dir carrying the board MCP server and, when the agent's `provider` names a `settings.providers` entry, a `provider` section. Keys travel by env NAME only (`{env:<keyEnv>}`); never argv or literal config values. Models are `provider/model` ids: a bare model id gains the profile prefix. The native OpenRouter provider (standard base URL) adds no section; the key env in the run env authenticates it. Tests: `app/test/opencode.test.js`.
+
 ## Save path
 
 `#st-save` collects every field in one `saveSettings` call: blank CLI path → `'claude'`,
