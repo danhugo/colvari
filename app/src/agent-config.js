@@ -16,6 +16,7 @@ const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
 // Fields every node carries. '' / 0 / [] / {} mean "not set" (use the project default or the CLI default).
 const NODE_DEFAULTS = {
   name: 'Agent', role: 'Dev', runtime: 'claude', systemPrompt: '', model: '', workdir: '',
+  provider: '', // provider profile id from settings.providers ('' = the runtime's own default)
   permissionMode: '', allowedTools: [], disallowedTools: [], extraArgs: '', env: {},
   provider: '', // settings.providers profile id routing this agent ('' = today's behaviour; goal t_50b102dc contract)
   maxTurns: 0, appendSystemPrompt: '', addDirs: [], disabledBoardTools: [],
@@ -84,6 +85,7 @@ function normalizeNode(n = {}, base = NODE_DEFAULTS) {
   // protected from retirement, recruits are not. Explicit values always win (the human's toggle).
   r.protected = n.protected !== undefined ? !!n.protected : !r.createdBy;
   if (r.permissionMode && !PERMISSION_MODES.includes(r.permissionMode)) throw new Error('bad permission mode ' + r.permissionMode);
+  r.provider = String(r.provider || '').trim();
   r.allowedTools = toList(r.allowedTools); r.disallowedTools = toList(r.disallowedTools); r.addDirs = toList(r.addDirs);
   r.enabledCapabilities = toList(r.enabledCapabilities);
   r.disabledBoardTools = toList(r.disabledBoardTools).filter((t) => BOARD_TOOLS.includes(t));
@@ -122,6 +124,42 @@ function normalizePreset(p) {
   if (pm && !PERMISSION_MODES.includes(pm)) throw new Error('bad permission mode ' + pm);
   return { name: String(p.name).trim(), systemPrompt: String(p.systemPrompt || ''), allowedTools: toList(p.allowedTools), disallowedTools: toList(p.disallowedTools), permissionMode: pm };
 }
+// Provider profiles (settings.providers, openrouter-runtimes plan): one entry per API vendor agents
+// can route through. The key itself never lives here (or anywhere in argv) — only the NAME of the
+// env var that carries it (keyEnv); each runtime maps the profile to its own flags/env.
+//   { id, label, baseUrl, keyEnv, kind: 'openrouter'|'litellm'|'native' }
+// kind 'native' = the CLI's own vendor (a label/allowlist entry, no flag or env mapping).
+const PROVIDER_KINDS = ['openrouter', 'litellm', 'native'];
+const PROVIDER_ID_RE = /^[A-Za-z0-9_-]+$/;
+function normalizeProviders(providers) {
+  if (providers == null || providers === '') return [];
+  if (!Array.isArray(providers)) throw new Error('providers must be an array');
+  const out = providers.map((p) => {
+    if (!p || typeof p !== 'object') throw new Error('each provider must be an object');
+    const id = String(p.id || '').trim();
+    if (!id || !PROVIDER_ID_RE.test(id)) throw new Error(`provider id "${id}" is required and may only contain letters, digits, - and _`);
+    const kind = String(p.kind || '').trim();
+    if (!PROVIDER_KINDS.includes(kind)) throw new Error(`provider "${id}": kind must be one of ${PROVIDER_KINDS.join('/')}`);
+    const baseUrl = String(p.baseUrl || '').trim();
+    if (kind !== 'native' && !/^https?:\/\//.test(baseUrl)) throw new Error(`provider "${id}": baseUrl must start with http:// or https://`);
+    const keyEnv = String(p.keyEnv || '').trim();
+    if (keyEnv && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(keyEnv)) throw new Error(`provider "${id}": keyEnv must be an environment variable name`);
+    if (kind === 'openrouter' && !keyEnv) throw new Error(`provider "${id}": kind openrouter needs keyEnv (the env var carrying the sk-or- key)`);
+    return { id, label: String(p.label || '').trim() || id, baseUrl, keyEnv, kind };
+  });
+  const ids = out.map((p) => p.id);
+  if (new Set(ids).size !== ids.length) throw new Error('duplicate provider id');
+  return out;
+}
+// A node's provider field -> its profile (''/unknown -> null: today's behaviour, no mapping).
+function resolveProvider(providers, id) {
+  const pid = String(id || '').trim();
+  if (!pid) return null;
+  const hit = normalizeProviders(providers || []).find((p) => p.id === pid);
+  if (!hit) throw new Error(`unknown provider "${pid}" (set it up in Settings > Providers)`);
+  return hit;
+}
+
 const findPreset = (presets, role) => (presets || []).find((p) => p.name.toLowerCase() === String(role || '').toLowerCase());
 // Fill empty node fields from the preset matching its role (explicit values win).
 function applyPreset(node, presets) {
@@ -161,4 +199,4 @@ function buildClaudeArgs(node, prompt, settings, mcpConfig, opts = {}) {
   return args;
 }
 
-module.exports = { SUGGESTED_ROLES, PERMISSION_MODES, EDGE_TYPES, BOARD_TOOLS, RESTART_TOOLS, EFFORT_LEVELS, NODE_DEFAULTS, NODE_FIELDS, toList, toEnv, envToText, splitArgs, normalizeNode, normalizePatch, normalizePreset, findPreset, applyPreset, roleSuggestions, buildClaudeArgs, migrateEffortArg };
+module.exports = { SUGGESTED_ROLES, PERMISSION_MODES, EDGE_TYPES, BOARD_TOOLS, RESTART_TOOLS, EFFORT_LEVELS, NODE_DEFAULTS, NODE_FIELDS, toList, toEnv, envToText, splitArgs, normalizeNode, normalizePatch, normalizePreset, findPreset, applyPreset, roleSuggestions, buildClaudeArgs, migrateEffortArg, PROVIDER_KINDS, normalizeProviders, resolveProvider };

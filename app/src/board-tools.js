@@ -30,7 +30,11 @@ function enabledTools(node, devMode) {
 const AGENT_IMAGE_MIMES = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp' };
 function saveAgentAttachments(store, refs) {
   if (refs == null) return null;
-  if (!Array.isArray(refs) || !refs.length) throw new Error('attachments must be a non-empty array of {path}');
+  if (!Array.isArray(refs)) throw new Error('attachments must be an array of {path}');
+  // An EMPTY array means "no attachments": codex's MCP client fills schema-default [] into every
+  // call even when the model omits the field (spike t_7a95202c), and rejecting it dead-ends every
+  // codex comment/message. Same shape as the absent field.
+  if (!refs.length) return null;
   if (refs.length > 5) throw new Error(`too many attachments (${refs.length}); max 5 per call`);
   let root;
   try { root = fs.realpathSync(process.cwd()); } catch (e) { throw new Error('cannot resolve the working directory: ' + e.message); }

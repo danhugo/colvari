@@ -14,7 +14,7 @@ const C = require('./controls');
 const TL = require('./timeline');
 const PRESET_FIELDS = ['systemPrompt', 'allowedTools', 'disallowedTools', 'permissionMode'];
 const pick = (o, ks) => Object.fromEntries(ks.map((k) => [k, o[k]]));
-const { normalizeNode, normalizePatch, normalizePreset, applyPreset, EDGE_TYPES, SUGGESTED_ROLES } = require('./agent-config');
+const { normalizeNode, normalizePatch, normalizePreset, applyPreset, EDGE_TYPES, SUGGESTED_ROLES, normalizeProviders } = require('./agent-config');
 const { defaultName } = require('./agent-name');
 const WT = require('./worktree');
 const MG = require('./merge-gate');
@@ -36,7 +36,7 @@ const STATUSES = ['todo', 'in_progress', 'review', 'done', 'waiting_for_human', 
 // 'critical' (3), or 'off'. NOT os.freemem(): it excludes the reclaimable file cache and sat at
 // ~70 MB while the system was fine on this box, so the original freemem guard would never
 // dispatch. Non-mac platforms fall back to the literal freemem < 1.5 GB rule (src/mem-guard.js).
-const SETTINGS_DEFAULTS = { claudePath: 'claude', maxConcurrency: 5, maxRuns: 30, permissionMode: 'bypassPermissions', rolePresets: [], budgetUsd: 0, budgetTokens: 0, requireApproval: false, useWorktrees: true, usageLimits: {}, autoCompactPct: 40, stallTimeoutMin: 10, watchIntervalMin: 10, autoRestart: false, maxAgents: 6, teamChangeApproval: 'ask', memGuardDeferAt: 'warning' };
+const SETTINGS_DEFAULTS = { claudePath: 'claude', maxConcurrency: 5, maxRuns: 30, permissionMode: 'bypassPermissions', rolePresets: [], providers: [], budgetUsd: 0, budgetTokens: 0, requireApproval: false, useWorktrees: true, usageLimits: {}, autoCompactPct: 40, stallTimeoutMin: 10, watchIntervalMin: 10, autoRestart: false, maxAgents: 6, teamChangeApproval: 'ask', memGuardDeferAt: 'warning' };
 
 // Version-map keys whose getAll section changed since the client's last fetch (all keys when `since`
 // is null = first load / project switch). Pure so the delta contract is testable without Electron.
@@ -1738,6 +1738,9 @@ class Store {
       const names = next.rolePresets.map((p) => p.name.toLowerCase());
       if (new Set(names).size !== names.length) throw new Error('duplicate preset name');
     }
+    // Provider profiles (openrouter-runtimes): validated shape {id,label,baseUrl,keyEnv,kind}; the
+    // key value itself is never stored — only the NAME of the env var that carries it.
+    if (s.providers !== undefined) next.providers = normalizeProviders(s.providers);
     // Core-agent team limits (see the dynamic-team plan): team size cap and approval mode.
     if (s.maxAgents !== undefined) { const n = Number(s.maxAgents); if (!Number.isInteger(n) || n < 1) throw new Error('maxAgents must be an integer >= 1'); next.maxAgents = n; }
     if (s.teamChangeApproval !== undefined && !['ask', 'auto'].includes(s.teamChangeApproval)) throw new Error('teamChangeApproval must be "ask" or "auto"');

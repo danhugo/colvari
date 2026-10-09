@@ -1189,6 +1189,67 @@ async function guiE2E() {
     await ex(`await switchTo(${JSON.stringify(prevCtx)}); await w(300);`);
     console.log('[gui-e2e] limits-providers', JSON.stringify({ scenarios: scenarios.map((x) => ({ name: x.name, pct: (x.m.txt.match(/\d+%/g) || []).join(','), chips: x.m.chips, providerKeyed: !!(x.m.st && x.m.st.providers), rects: x.g && x.g.chips, overlap: x.g && x.g.overlap, clipped: x.g && x.g.clipped })) }));
   };
+  // Provider UI (t_7c86a452): the Settings Providers section (added through the real form; the key is
+  // stored/shown by env NAME only), the agent-form Provider dropdown + OpenRouter model suggestions
+  // (real fetch of the public models endpoint, graceful when offline) + Cheap quick preset, and the
+  // "est" cost chip for usage rows carrying estimated:true. Fixture data in a throwaway project; no
+  // model calls. Screenshots land in the AGENTS_SQUAD_GUI_E2E dir, light+dark for the key states.
+  const openrouterShots = async () => {
+    const pj = pm.create('OpenRouter UI'); const s = pm.store(pj.id);
+    await ex(`await refresh(); await w(300);`);
+    await ex(`P = await call('listProjects'); renderSidebar(); await switchTo({ p: ${JSON.stringify(pj.id)} }); await w(600);`);
+    // Settings is the static #settingsbtn glyph (not a #tabs button): open it, wait for the form.
+    await ex(`$('#settingsbtn').click(); await w(300);`);
+    await waitFor(`return !!document.querySelector('#prov-add')`);
+    await ex(`$('#providerstable').scrollIntoView({ block: 'center' }); await w(250);`);
+    await shot('or-settings-empty');
+    await ex(`$('#prov-add').click(); await w(250);
+      $('#pd-label').value = 'OpenRouter'; $('#pd-url').value = 'https://openrouter.ai/api/v1'; $('#pd-keyenv').value = 'OPENROUTER_API_KEY'; $('#pd-kind').value = 'openrouter';
+      $('#pd-save').click(); await w(600);`);
+    const prov = s.getSettings().providers;
+    expect('openrouter-ui: provider saved through the form (id derived from the label)', prov && prov.length === 1 && prov[0].id === 'openrouter' && prov[0].keyEnv === 'OPENROUTER_API_KEY' && prov[0].kind === 'openrouter', prov);
+    expect('openrouter-ui: no key VALUE anywhere in settings', !/sk-or/.test(JSON.stringify(s.getSettings())), 'settings checked');
+    const provRow = await ex(`return $('#providerstable') ? $('#providerstable').textContent : ''`);
+    expect('openrouter-ui: providers table shows label, base URL and the key env NAME (never a value)', /OpenRouter/.test(provRow) && /OPENROUTER_API_KEY/.test(provRow) && !/sk-/.test(provRow), provRow);
+    for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`await w(350); $('#providerstable').scrollIntoView({ block: 'center' }); await w(250);`); await shot(`or-settings-provider-${t}`); }
+    // Validation: a malformed env var name is refused inline and saves nothing.
+    await ex(`$('#prov-add').click(); await w(250); $('#pd-label').value = 'Bad'; $('#pd-keyenv').value = 'not valid'; $('#pd-save').click(); await w(300);`);
+    const errShown = await ex(`return $('#pd-error') ? $('#pd-error').textContent : ''`);
+    expect('openrouter-ui: invalid env var name is refused inline, nothing saved', s.getSettings().providers.length === 1 && /OPENROUTER_API_KEY/.test(errShown), { errShown, n: s.getSettings().providers.length });
+    await ex(`$('#pd-cancel').click(); await w(200);`);
+    // Agent form: Provider dropdown, Cheap preset, OpenRouter suggestions.
+    const dev = s.addNode({ name: 'Uma', role: 'Dev', runtime: 'codex', model: '', x: 60, y: 60 });
+    await ex(`$('#tabs button[data-tab=team]').click(); await w(400); await refresh(); await w(500); $('#mode-edit').click(); await w(200); sel.node = ${JSON.stringify(dev.id)}; renderNodeForm(); await w(400);`);
+    await waitFor(`return !!document.querySelector('#nf-provider') && !!document.querySelector('[data-rtp=Cheap]')`);
+    const form = await ex(`return { provider: !!$('#nf-provider'), opts: $('#nf-provider') ? [...$('#nf-provider').options].map((o) => o.value) : [], cheap: !!document.querySelector('[data-rtp=Cheap]') }`);
+    expect('openrouter-ui: agent form has a Provider dropdown listing the configured provider', form.provider && form.opts.includes('openrouter') && form.opts.includes(''), form);
+    await ex(`document.querySelector('[data-rtp=Cheap]').click(); await w(500);`);
+    const cheap = await ex(`return { runtime: $('#nf-runtime').value, model: $('#nf-model').value, provider: $('#nf-provider').value, note: $('#nf-provnote').textContent }`);
+    expect('openrouter-ui: Cheap preset applies the openrouter provider, a runtime and a cheap model', (cheap.runtime === 'codex' || !(await ex(`return !document.querySelector('[data-rtp=Cheap]').disabled`))) && cheap.provider === 'openrouter' && !!cheap.model, cheap);
+    await ex(`$('#nf-provider').scrollIntoView({ block: 'center' }); await w(250);`);
+    for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`await w(350);`); await shot(`or-agent-form-${t}`); }
+    const orList = await ex(`return (async () => { const ms = await openrouterModels(); return { count: ms.length, first: (ms[0] || {}).id || null, datalist: [...$('#modellist').options].map((o) => o.value).slice(0, 3), note: $('#nf-provnote').textContent }; })()`);
+    expect('openrouter-ui: OpenRouter catalogue loads (or falls back gracefully with a note)', (orList.count > 0 && orList.datalist.includes(orList.first)) || /unavailable/.test(orList.note), { count: orList.count, note: orList.note });
+    if (orList.count > 0) {
+      const withPrice = await ex(`return [...$('#modellist').options].slice(0, 2).map((o) => o.textContent)`);
+      expect('openrouter-ui: model suggestions carry prices (and a tools hint when unsupported)', withPrice.every((x) => /\/M in/.test(x) && /\/M out/.test(x)), withPrice);
+    }
+    console.log('[gui-e2e] openrouter models', JSON.stringify({ count: orList.count, sample: orList.first, note: orList.note }));
+    // est chip: a run whose ledger entry carries estimated:true renders the "est" tag in Usage.
+    s.addRun({ id: 'or-est-1', projectId: pj.id, nodeId: dev.id, agent: 'Uma', kind: 'agent', runtime: 'codex', model: 'openai/gpt-5-mini', models: ['openai/gpt-5-mini'],
+      provider: 'openrouter', billingMode: 'auto', billingSource: 'proxy', billingDetail: 'openrouter', startedAt: new Date().toISOString(), endedAt: new Date().toISOString(),
+      inputTokens: 1000, outputTokens: 500, numTurns: 1, exitCode: 0, isError: false, sessionId: 'or-est-1',
+      ledger: [{ runtime: 'codex', provider: 'openrouter', model: 'openai/gpt-5-mini', inputTokens: 1000, outputTokens: 500, costUsd: 0.0009, estimated: true, billingSource: 'proxy', billingDetail: 'openrouter' }] });
+    await ex(`$('#tabs button[data-tab=usage]').click(); await refresh(); await w(700);`);
+    const cell = await ex(`return ([...document.querySelectorAll('#us-runs tr')].slice(1).map((tr) => tr.cells[tr.cells.length - 1].innerHTML).filter((h) => h.includes('0.0009'))[0]) || ''`);
+    expect('openrouter-ui: est chip renders next to the cost of an estimated:true run', /costnote est/.test(cell) && /\$0\.0009/.test(cell), cell);
+    const acct = await ex(`return { est: $('#us-summary').innerHTML.includes('costnote est'), kpis: document.querySelector('.us-kpis') ? document.querySelector('.us-kpis').textContent : '' }`);
+    expect('openrouter-ui: the estimated key also shows est in the account/breakdown tables', acct.est, acct);
+    await ex(`$('#us-runs').scrollIntoView({ block: 'center' }); await w(250);`);
+    for (const t of ['light', 'dark']) { require('electron').nativeTheme.themeSource = t; await ex(`await w(350);`); await shot(`or-usage-est-${t}`); }
+    require('electron').nativeTheme.themeSource = 'system';
+    console.log('[gui-e2e] openrouter-ui done');
+  };
   // Discovery panel regression: the recorded real init event (58 skills / 123 slash commands, incl.
   // goal+loop modes — test/fixtures/real-init-event.json) drives the Usage tab's #us-discovery panel the
   // same way a real Refresh would (discoverCapabilities({initEvent}) -> node.capabilities), so the panel's
@@ -2567,6 +2628,7 @@ async function guiE2E() {
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'mixed') { await mixedShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'limits') { await limitsShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'limits-providers') { await limitsProvidersShots(); throw null; }
+    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'openrouter') { await openrouterShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'discovery') { await discoveryPanelShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'usage') { await usagePerModelShots(); throw null; }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'existingdata') { await existingDataShots(); throw null; }
