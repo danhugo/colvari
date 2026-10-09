@@ -198,8 +198,42 @@ const canCost = (rt) => { const r = ((S.config || {}).runtimes || {})[rt || 'cla
 const vbadge = (n) => n ? `<span class="vbadge vb-${esc(n.runtime || 'claude')}" title="runtime · model">${esc(VENDOR[n.runtime || 'claude'] || n.runtime)}<i>${esc(n.model || 'default')}</i></span>` : '';
 // t_e503dd78: log lines and status lines show a short id chip (t_8308) — the full title lives in the tooltip.
 const shortTaskId = (id) => /^t_/.test(id || '') ? id.slice(0, 6) : (id || '');
-const RT_PRESETS = [{ name: 'Planner', runtime: 'claude', model: 'opus' }, { name: 'Dev', runtime: 'codex', model: '' }, { name: 'Checker', runtime: 'claude', model: 'haiku' }];
+const RT_PRESETS = [{ name: 'Planner', runtime: 'claude', model: 'opus' }, { name: 'Dev', runtime: 'codex', model: '' }, { name: 'Checker', runtime: 'claude', model: 'haiku' }, { name: 'Cheap', runtime: 'codex', model: 'openai/gpt-5-mini', provider: 'openrouter' }];
 const billTag = (src, detail) => `<span class="bill bill-${esc(src || 'unknown')}" title="${esc(detail || '')}">${esc(src || 'unknown')}</span>`;
+
+// ---------- providers (contract t_7a95202c): settings.providers = [{id,label,baseUrl,keyEnv,kind}] ----------
+// The backend maps the chosen profile to each runtime's flags/env; agents reference it by id. The key
+// travels by env NAME only — the value is never stored or rendered here. Until the settings IPC grows
+// the field, saveSettings persists it as-is (the store merge keeps unknown keys) and getAll returns it.
+const PROV_KINDS = ['openrouter', 'litellm', 'native'];
+const providersList = () => (Array.isArray((S.settings || {}).providers) ? S.settings.providers : []).filter((p) => p && p.id);
+const providerById = (id) => providersList().find((p) => p.id === id) || null;
+const openrouterProvider = () => providersList().find((p) => p.kind === 'openrouter' || p.id === 'openrouter') || null;
+// OpenRouter model catalogue for the model suggestions: the public models endpoint (CORS-open), read
+// at most once per 24 h and cached in localStorage; offline, a stale cache still beats nothing.
+const OR_MODELS_KEY = 'openrouterModelCatalog';
+let orModelsPromise = null;
+function openrouterModels() {
+  if (orModelsPromise) return orModelsPromise;
+  orModelsPromise = (async () => {
+    let cached = null; try { cached = JSON.parse(localStorage.getItem(OR_MODELS_KEY)); } catch {}
+    if (cached && cached.ts && Date.now() - cached.ts < 864e5 && Array.isArray(cached.data) && cached.data.length) return cached.data;
+    try {
+      const ac = new AbortController(); const timer = setTimeout(() => ac.abort(), 8000);
+      const res = await fetch('https://openrouter.ai/api/v1/models', { signal: ac.signal });
+      clearTimeout(timer);
+      const j = await res.json();
+      const data = (j && Array.isArray(j.data) ? j.data : []).map((m) => ({ id: m.id, name: m.name || m.id,
+        inPrice: +(m.pricing && m.pricing.prompt) || 0, outPrice: +(m.pricing && m.pricing.completion) || 0,
+        tools: (m.supported_parameters || []).includes('tools') }));
+      if (data.length) { try { localStorage.setItem(OR_MODELS_KEY, JSON.stringify({ ts: Date.now(), data })); } catch {} return data; }
+    } catch {} // offline or blocked: fall through to any stale cache
+    return (cached && Array.isArray(cached.data)) ? cached.data : [];
+  })();
+  orModelsPromise.catch(() => { orModelsPromise = null; }); // a failed fetch may be retried on the next open
+  return orModelsPromise;
+}
+const orPrice = (p) => { const v = (p || 0) * 1e6; return v === 0 ? 'free' : '$' + (v < 0.01 ? v.toFixed(4) : v.toFixed(2)) + '/M'; };
 
 // ---------- custom runtimes: add-by-path -> stub introspection -> editable draft profile ----------
 // Stored client-side (no backend support yet); node.runtime holds "custom:<id>" once assigned.
@@ -400,6 +434,49 @@ function wireRuntimesSection() {
   });
   document.querySelectorAll('[data-editrt]').forEach((b) => b.onclick = () => { const r = findCustomRuntime(b.dataset.editrt); rtDraft = { ...r, editingId: r.id, sources: draftSources(r, r.sources) }; wireDraftForm(); });
   document.querySelectorAll('[data-delrt]').forEach((b) => b.onclick = act(async () => { saveCustomRuntimes(loadCustomRuntimes().filter((r) => r.id !== b.dataset.delrt)); refresh(); }));
+}
+
+// ---------- providers section: add/edit a {id,label,baseUrl,keyEnv,kind} profile ----------
+let provDraft = null; // in-progress add/edit draft, or null
+const provSlug = (s) => String(s).toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '');
+function renderProvidersSection() {
+  const rows = providersList().map((p) => `<tr><td>${esc(p.label || p.id)}</td><td><code>${esc(p.baseUrl || '—')}</code></td><td><code title="the key VALUE lives in your environment — only the name is stored">${esc(p.keyEnv || '—')}</code></td><td>${esc(p.kind || 'native')}</td><td><button data-editprov="${esc(p.id)}">Edit</button><button data-delprov="${esc(p.id)}">Delete</button></td></tr>`).join('');
+  return `<h3>Providers</h3><p class="muted">Provider profiles route an agent's model and API key. Pick one per agent in the Team tab. The key is read from the environment by its NAME — the value is never stored or shown here.</p>
+    <table id="providerstable"><tr><th>Label</th><th>Base URL</th><th>Key env var</th><th>Kind</th><th></th></tr>${rows || '<tr><td colspan="5" class="muted">No providers yet — agents use the CLI default.</td></tr>'}</table>
+    <div class="toolbar"><button id="prov-add">Add provider</button></div>
+    <div id="prov-draft"></div>`;
+}
+function wireProvidersSection() {
+  $('#prov-add').onclick = () => { provDraft = { editingId: '' }; wireProvDraft(); };
+  document.querySelectorAll('[data-editprov]').forEach((b) => b.onclick = () => { provDraft = { ...providerById(b.dataset.editprov), editingId: b.dataset.editprov }; wireProvDraft(); });
+  document.querySelectorAll('[data-delprov]').forEach((b) => b.onclick = act(async () => { await call('saveSettings', { providers: providersList().filter((p) => p.id !== b.dataset.delprov) }); refresh(); }));
+}
+function wireProvDraft() {
+  const box = $('#prov-draft'); if (!provDraft) { box.innerHTML = ''; return; }
+  const d = provDraft;
+  box.innerHTML = `<fieldset><legend>${d.editingId ? 'Edit' : 'Add'} provider${d.editingId ? ` <span class="muted">id: <code>${esc(d.editingId)}</code> (agents reference it)</span>` : ''}</legend>
+    <div class="rt-field"><label>Label</label><input id="pd-label" value="${esc(d.label || '')}" placeholder="OpenRouter"></div>
+    <div class="rt-field"><label>Base URL</label><input id="pd-url" value="${esc(d.baseUrl || '')}" placeholder="https://openrouter.ai/api/v1" spellcheck="false"></div>
+    <div class="rt-field"><label>Key env var name <span class="muted">(name only — the value stays in your environment)</span></label><input id="pd-keyenv" value="${esc(d.keyEnv || '')}" placeholder="OPENROUTER_API_KEY" spellcheck="false"></div>
+    <div class="rt-field"><label>Kind</label><select id="pd-kind">${PROV_KINDS.map((k) => `<option ${k === (d.kind || 'openrouter') ? 'selected' : ''}>${k}</option>`).join('')}</select></div>
+    <div id="pd-error" role="alert"></div>
+    <p><button id="pd-save" class="primary">Save provider</button> <button id="pd-cancel">Cancel</button></p></fieldset>`;
+  $('#pd-save').onclick = act(async () => {
+    const label = $('#pd-label').value.trim(); const keyEnv = $('#pd-keyenv').value.trim().toUpperCase();
+    const id = d.editingId || provSlug(label) || provSlug($('#pd-url').value.trim());
+    const errs = [];
+    if (!label) errs.push('Label is required.');
+    if (!id) errs.push('Could not derive an id from the label — use letters, numbers, dashes.');
+    if (keyEnv && !/^[A-Z_][A-Z0-9_]*$/.test(keyEnv)) errs.push('Key env var name must look like OPENROUTER_API_KEY (uppercase, no spaces).');
+    if (!d.editingId && id && providersList().some((p) => p.id === id)) errs.push(`A provider with id "${id}" already exists.`);
+    $('#pd-label').classList.toggle('invalid', !label); $('#pd-keyenv').classList.toggle('invalid', !!keyEnv && !/^[A-Z_][A-Z0-9_]*$/.test(keyEnv));
+    $('#pd-error').textContent = errs.join('\n');
+    if (errs.length) return;
+    const list = providersList().filter((p) => p.id !== id);
+    await call('saveSettings', { providers: [...list, { id, label, baseUrl: $('#pd-url').value.trim(), keyEnv, kind: $('#pd-kind').value }] });
+    provDraft = null; refresh();
+  });
+  $('#pd-cancel').onclick = () => { provDraft = null; wireProvDraft(); };
 }
 
 // ---------- discovered capabilities (modes/skills/commands/MCP): collapsible groups, search, per-agent toggles ----------
@@ -1336,7 +1413,7 @@ function renderGraph() {
     if (VP.zoom >= 0.6) { const oc = openCnt[n.id] || 0; if (oc) putChip(`${oc} open`, 12, 'chip chip-load', `${oc} open task${oc === 1 ? '' : 's'} assigned to ${n.name}`); else putChip('idle', 6, 'chip chip-idle', `${n.name} has no open tasks`); }
     if (VP.zoom >= 0.6) for (const chip of [runtimeLabel(rtId), ns.model || n.model || 'default'].filter(Boolean)) putChip(chip, 14, 'chip');
     if (VP.zoom >= 0.6 && rtId !== 'claude') { const rows = ((S.orch.ledger || {}).byAgent || {})[n.name] || []; const cost = rows.reduce((c, r) => c + (r.costUsd || 0), 0);
-      putChip(rows.length ? `$${cost.toFixed(2)} · ${rows.length} key${rows.length === 1 ? '' : 's'}` : 'no usage', 20, 'chip chip-usage', rows.length ? `${runtimeLabel(rtId)} usage, per model key (tokens are never summed across models): ${rows.map((r) => `${r.model}: ${r.runs} run(s) · ${r.costUsd != null ? '$' + r.costUsd.toFixed(4) + (r.costSource === 'estimated' ? ' est' : '') : 'cost —'}`).join(' · ')}` : `${runtimeLabel(rtId)} has no recorded usage yet`); }
+      putChip(rows.length ? `$${cost.toFixed(2)} · ${rows.length} key${rows.length === 1 ? '' : 's'}` : 'no usage', 20, 'chip chip-usage', rows.length ? `${runtimeLabel(rtId)} usage, per model key (tokens are never summed across models): ${rows.map((r) => `${r.model}: ${r.runs} run(s) · ${r.costUsd != null ? '$' + r.costUsd.toFixed(4) + (r.costSource === 'estimated' || r.estimated ? ' est' : '') : 'cost —'}`).join(' · ')}` : `${runtimeLabel(rtId)} has no recorded usage yet`); }
     const effort = n.effort || 'low';
     if (VP.zoom >= 0.6) for (const chip of [`E:${effort}`, n.autoCompact ? `AC:${n.autoCompact}` : null].filter(Boolean)) { const isDefaultEffort = chip === `E:${effort}` && !n.effort; putChip(chip, 14, 'chip chip-em' + (isDefaultEffort ? ' chip-default' : ''), chip.startsWith('E:') ? `Reasoning effort: ${effort}${isDefaultEffort ? ' (default)' : ''}` : `Auto-compact window: ${n.autoCompact}`); }
     if (VP.zoom >= 0.6 && n.createdBy && !n.core) putChip('recruited', 10, 'chip chip-recruited', 'Recruited by ' + nodeName(n.createdBy));
@@ -1590,6 +1667,8 @@ function renderNodeForm() {
     <label>Runtime</label><select id="nf-runtime">${allRuntimeOptions().map((r) => `<option value="${r.id}" ${r.id === (n.runtime || 'claude') ? 'selected' : ''} ${r.installed ? '' : 'disabled'}>${esc(r.label)}${r.custom ? ' (custom)' : ''}${r.installed ? ' ' + esc(r.version || '') : ' (not installed)'}</option>`).join('')}</select>
     <div id="nf-caps" class="muted"></div>
     <div class="toolbar rtpresets"><span class="muted">Quick preset:</span>${RT_PRESETS.map((p) => `<button data-rtp="${p.name}" ${(C.runtimes || {})[p.runtime] && !C.runtimes[p.runtime].installed ? 'disabled title="' + p.runtime + ' not installed"' : ''}>${p.name} <small>${VENDOR[p.runtime]}/${p.model || 'default'}</small></button>`).join('')}</div>
+    <label>Provider <span class="muted">(routes the model + key; manage in Settings › Providers)</span></label><select id="nf-provider"><option value="" ${!(n.provider || '') ? 'selected' : ''}>Default (CLI's own provider)</option>${providersList().map((p) => `<option value="${esc(p.id)}" ${p.id === (n.provider || '') ? 'selected' : ''}>${esc(p.label || p.id)}${p.kind && p.kind !== (p.label || p.id) ? ' · ' + esc(p.kind) : ''}</option>`).join('')}</select>
+    <p class="muted" id="nf-provnote"></p>
     <label>Model <span class="muted">(alias or any model ID, e.g. a proxy/provider model; empty = claude CLI default)</span></label><input id="nf-model" list="modellist" value="${esc(n.model || '')}" placeholder="default (claude CLI default)" spellcheck="false"><datalist id="modellist">${(isCustomRuntime(n.runtime) && findCustomRuntime(n.runtime) ? findCustomRuntime(n.runtime).models : MODELS).map((m) => `<option value="${esc(m)}">`).join('')}</datalist>
     <label>Working directory</label><input id="nf-workdir" value="${esc(n.workdir)}" placeholder="${esc(S.dir)}">
     <label>System prompt</label><textarea id="nf-prompt" rows="6">${esc(n.systemPrompt)}</textarea>
@@ -1636,14 +1715,31 @@ function renderNodeForm() {
     ${a.budgetStop ? `<p class="warn">${esc(a.budgetStop)}</p>` : ''}<p class="muted">Status: ${a.status || 'idle'} · runs ${a.runs || 0} · ${fmtTok(a.inputTokens)} in / ${fmtTok(a.outputTokens)} out / ${fmtTok(a.cacheTokens)} cache tok${a.model ? ' · ' + esc(a.model) : ''}${a.billingSource ? ' · ' + a.billingSource : ''}</p>`;
   const BILL_NOTE = { auto: 'Detected per run from the CLI init event (apiKeySource) and env.', subscription: 'API keys and proxy/Bedrock/Vertex env vars are removed so the run uses your claude.ai login. ' + COST_NOTE.subscription + '.', api: 'Billed per token to the API key in the agent env vars (or inherited env).', proxy: 'Requests go to the base URL; the provider bills you. Reported cost is only an API-equivalent estimate.' };
   wireLiveCard(n);
+  const isOrProv = (p) => !!p && (p.kind === 'openrouter' || p.id === 'openrouter');
+  const baseProvNote = (p) => p ? `key: ${p.keyEnv || '—'} (from the environment; the value is never shown)${p.baseUrl ? ' · ' + p.baseUrl : ''}` : '';
+  const showModelList = () => {
+    const custom = findCustomRuntime($('#nf-runtime').value);
+    const defaults = (custom ? custom.models : MODELS).map((m) => `<option value="${esc(m)}">`).join('');
+    if (!isOrProv(providerById($('#nf-provider').value))) { $('#modellist').innerHTML = defaults; return; }
+    openrouterModels().then((ms) => {
+      if (!isOrProv(providerById($('#nf-provider').value))) return; // the provider changed while fetching
+      $('#modellist').innerHTML = ms.length ? ms.map((m) => `<option value="${esc(m.id)}">${esc(orPrice(m.inPrice))} in · ${esc(orPrice(m.outPrice))} out${m.tools ? '' : ' · no tools'}</option>`).join('') : defaults;
+      const p = providerById($('#nf-provider').value);
+      $('#nf-provnote').textContent = baseProvNote(p) + (ms.length ? ` · ${ms.length} OpenRouter models with prices (cached 24 h)` : ' · OpenRouter model list unavailable (offline?) — runtime defaults shown');
+    });
+  };
+  const showProvider = () => { $('#nf-provnote').textContent = baseProvNote(providerById($('#nf-provider').value)); showModelList(); };
   const showCaps = () => {
     const rid = $('#nf-runtime').value; const r = allRuntimeOptions().find((x) => x.id === rid);
     $('#nf-caps').innerHTML = r ? ['tokens', 'cost', 'mcp', 'resume'].map((k) => `<span class="cap ${r.capabilities[k] ? 'on' : 'off'}">${r.capabilities[k] ? '✓' : '✗'} ${k}</span>`).join(' ') : '';
     if (r) { $('#nf-mode option[value=goal]').disabled = !r.capabilities.resume; $('#nf-goalnote').classList.toggle('hidden', !!r.capabilities.resume); }
-    const custom = findCustomRuntime(rid); $('#modellist').innerHTML = (custom ? custom.models : MODELS).map((m) => `<option value="${esc(m)}">`).join('');
+    showModelList();
   };
-  $('#nf-runtime').onchange = showCaps; showCaps();
-  f.querySelectorAll('[data-rtp]').forEach((b) => { b.onclick = () => { const p = RT_PRESETS.find((x) => x.name === b.dataset.rtp); $('#nf-runtime').value = p.runtime; $('#nf-model').value = p.model; showCaps(); }; });
+  $('#nf-runtime').onchange = showCaps; showCaps(); showProvider();
+  $('#nf-provider').onchange = showProvider;
+  f.querySelectorAll('[data-rtp]').forEach((b) => { b.onclick = () => { const p = RT_PRESETS.find((x) => x.name === b.dataset.rtp); $('#nf-runtime').value = p.runtime; $('#nf-model').value = p.model || '';
+    if (p.provider) { const prov = p.provider === 'openrouter' ? openrouterProvider() : providerById(p.provider); if (prov) $('#nf-provider').value = prov.id; }
+    showCaps(); showProvider(); }; });
   const showBill = () => { const m = $('#nf-billing').value; $('.bill-proxy-url').classList.toggle('hidden', m !== 'proxy'); $('#nf-billnote').textContent = BILL_NOTE[m] || ''; };
   $('#nf-billing').onchange = showBill; showBill();
   const showMode = () => { const m = $('#nf-mode').value; for (const k of ['goal', 'loop', 'workflow']) document.querySelector('.mode-' + k).classList.toggle('hidden', m !== k); };
@@ -1658,6 +1754,7 @@ function renderNodeForm() {
   $('#nf-resetface').onclick = () => { seed = ''; showFace(); };
   const read = () => ({
     avatarSeed: seed,
+    provider: $('#nf-provider').value,
     runtime: $('#nf-runtime').value, name: $('#nf-name').value, role: $('#nf-role').value.trim() || 'Dev', model: $('#nf-model').value.trim(), workdir: $('#nf-workdir').value.trim(), systemPrompt: $('#nf-prompt').value,
     permissionMode: $('#nf-perm').value, allowedTools: $('#nf-allowed').value, disallowedTools: $('#nf-disallowed').value, maxTurns: +$('#nf-maxturns').value || 0,
     appendSystemPrompt: $('#nf-append').value, addDirs: $('#nf-adddirs').value, env: $('#nf-env').value, extraArgs: $('#nf-extra').value.trim(),
@@ -2554,11 +2651,14 @@ function runLedger(r) {
   // Billing is detected per run at finish (detectBilling); stamp it onto every entry so account
   // grouping (t_b1115e48) can attribute each key to the account that actually paid for it.
   const bill = { billingSource: r.billingSource || 'unknown', billingDetail: r.billingDetail || '', apiKeySource: r.apiKeySource || null };
-  if (Array.isArray(r.ledger) && r.ledger.length) return r.ledger.map((e) => (e.billingSource ? e : { ...bill, ...e }));
+  // Usage rows may carry estimated:true (t_7a95202c — OpenRouter runs priced from the PriceBook
+  // when the provider reports no cost); normalize it into costSource so every chip lights up.
+  const est = (e) => (e && e.estimated && !e.costSource ? { ...e, costSource: 'estimated' } : e);
+  if (Array.isArray(r.ledger) && r.ledger.length) return r.ledger.map((e) => est(e.billingSource ? e : { ...bill, ...e }));
   if (!r || !(r.inputTokens || r.outputTokens || r.cacheReadTokens || r.cacheCreationTokens)) return [];
   const cost = r.reportedCostUsd > 0 ? r.reportedCostUsd : null;
   return [{ ...bill, runtime: r.runtime || 'unknown', provider: r.provider || '', model: r.model || (r.models && r.models[0]) || 'unknown',
-    inputTokens: r.inputTokens || 0, outputTokens: r.outputTokens || 0, cacheReadTokens: r.cacheReadTokens || 0, cacheCreationTokens: r.cacheCreationTokens || 0, costUsd: cost, costSource: cost != null ? 'reported' : 'unknown' }];
+    inputTokens: r.inputTokens || 0, outputTokens: r.outputTokens || 0, cacheReadTokens: r.cacheReadTokens || 0, cacheCreationTokens: r.cacheCreationTokens || 0, costUsd: cost, costSource: cost != null ? (r.estimated ? 'estimated' : 'reported') : 'unknown' }];
 }
 // One usage row per ACCOUNT (t_b1115e48): an account is where the money actually goes — billing
 // source + its detail (which login, API key or endpoint) — not the CLI's provider label, and the
@@ -2589,7 +2689,7 @@ function ledgerFromRuns(rs) {
   const F = ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheCreationTokens'];
   const add = (map, gk, e) => { const row = map.get(gk) || { key: gk, runtime: e.runtime, provider: e.provider, model: e.model, runs: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: null, cacheCreationTokens: null, costUsd: null, reported: 0, estimated: 0, unknown: 0 };
     row.runs++; for (const k of F) if (e[k] != null) row[k] = (row[k] || 0) + e[k];
-    if (e.costUsd != null) { row.costUsd = (row.costUsd || 0) + e.costUsd; row[e.costSource === 'estimated' ? 'estimated' : 'reported']++; } else row.unknown++;
+    if (e.costUsd != null) { row.costUsd = (row.costUsd || 0) + e.costUsd; row[e.costSource === 'estimated' || e.estimated ? 'estimated' : 'reported']++; } else row.unknown++;
     map.set(gk, row); };
   const top = new Map(), byAgent = new Map(), byTask = new Map(); const accts = new Map();
   for (const r of rs) for (const e of runLedger(r)) {
@@ -2637,7 +2737,7 @@ function ledgerCostCell(row) {
 function runCostCell(r) {
   const es = runLedger(r); const known = es.filter((e) => e.costUsd != null);
   if (!known.length) return `<span class="costnote" title="${!es.length ? 'no usage reported for this run' : 'tokens recorded, but no cost reported or estimable'}">—</span>`;
-  return `$${known.reduce((a, e) => a + e.costUsd, 0).toFixed(4)}${known.some((e) => e.costSource === 'estimated') ? estTag('estimated from list prices') : ''}${known.length < es.length ? ' <span class="costnote" title="some model keys of this run report no cost">partial</span>' : ''}`;
+  return `$${known.reduce((a, e) => a + e.costUsd, 0).toFixed(4)}${known.some((e) => e.costSource === 'estimated' || e.estimated) ? estTag('estimated from list prices') : ''}${known.length < es.length ? ' <span class="costnote" title="some model keys of this run report no cost">partial</span>' : ''}`;
 }
 // The primary table (t_b1115e48): one row per ACCOUNT — where the money actually goes (billing
 // source + its detail) — with that account's model keys nested beneath it. Token columns stay
@@ -2918,13 +3018,13 @@ function renderSettings(force) {
     <label>Default allowed tools</label><input id="pr-allowed" placeholder="Read, Grep"><label>Default disallowed tools</label><input id="pr-disallowed">
     <label>Permission mode</label><select id="pr-perm"><option value="">project default</option>${(S.config.permissionModes || []).map((m) => `<option>${m}</option>`).join('')}</select>
     <p><button id="pr-save">Save preset</button></p></div>
-    <hr>${renderRuntimesSection()}`;
+    <hr>${renderRuntimesSection()}<hr>${renderProvidersSection()}`;
   const ts = $('#tpl-select'); if (ts && tplCur) ts.value = tplCur;
   $('#st-copydir').onclick = async () => {
     try { await navigator.clipboard.writeText(S.dir); } catch { const t = document.createElement('textarea'); t.value = S.dir; document.body.appendChild(t); t.select(); document.execCommand('copy'); t.remove(); }
     $('#st-copydir').textContent = 'Copied'; setTimeout(() => { const b = $('#st-copydir'); if (b) b.textContent = 'Copy'; }, 1200);
   };
-  wireRuntimesSection(); wireDraftForm();
+  wireRuntimesSection(); wireDraftForm(); wireProvidersSection(); wireProvDraft();
   document.querySelectorAll('[data-delp]').forEach((b) => b.onclick = act(async () => { await call('deletePreset', b.dataset.delp); refresh(); }));
   document.querySelectorAll('[data-editp]').forEach((b) => b.onclick = () => { const p = (s.rolePresets || []).find((x) => x.name === b.dataset.editp); if (!p) return; $('#pr-name').value = p.name; $('#pr-prompt').value = p.systemPrompt || ''; $('#pr-allowed').value = (p.allowedTools || []).join(', '); $('#pr-disallowed').value = (p.disallowedTools || []).join(', '); $('#pr-perm').value = p.permissionMode || ''; });
   $('#pr-save').onclick = act(async () => { const name = $('#pr-name').value.trim(); if (!name) return; await call('savePreset', { name, systemPrompt: $('#pr-prompt').value, allowedTools: $('#pr-allowed').value, disallowedTools: $('#pr-disallowed').value, permissionMode: $('#pr-perm').value }); refresh(); });
