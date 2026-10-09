@@ -30,11 +30,37 @@ function applyBillingEnv(cfg, env) {
   return { env: e, warnings };
 }
 
+// Provider profile env (openrouter-runtimes): make sure the profile's key env var reaches the
+// child — from the env it is given (project/agent env wins), else from this process's env. The
+// key VALUE is only ever copied env->env; it never enters argv, logs or the run record. Returns
+// { env, warnings } like applyBillingEnv; no profile or no keyEnv is a no-op.
+function applyProviderEnv(provider, env = {}) {
+  const e = { ...env }; const warnings = [];
+  if (provider && provider.keyEnv && !e[provider.keyEnv]) {
+    if (process.env[provider.keyEnv]) e[provider.keyEnv] = process.env[provider.keyEnv];
+    else warnings.push(`provider "${provider.id}" needs ${provider.keyEnv} in the environment (set it in the agent's env vars or your shell)`);
+  }
+  return { env: e, warnings };
+}
+
+// The base URL a run billed through, generalised beyond the claude proxy (t_7a95202c): the LiteLLM
+// proxy base (ANTHROPIC_BASE_URL) or a provider profile's endpoint (openrouter/litellm kinds —
+// 'native' profiles are the CLI's own vendor, i.e. direct). null when the channel is direct.
+function providerBaseOf(env, provider) {
+  return (env && env.ANTHROPIC_BASE_URL) || (provider && provider.kind !== 'native' && provider.baseUrl) || null;
+}
+
 const hostOf = (u) => { try { return new URL(u).host; } catch { return String(u); } };
 // Where a run was billed, from the env it ran with and the init event's apiKeySource.
-function detectBilling(env = {}, apiKeySource) {
+// provider (a settings.providers profile) is checked BEFORE the generic env: an agent explicitly
+// routed through a profile billed through it — OpenRouter (per-token api) or a LiteLLM proxy —
+// and only counts when the profile's key env var is actually set on the child env.
+function detectBilling(env = {}, apiKeySource, provider = null) {
   if (truthy(env.CLAUDE_CODE_USE_BEDROCK)) return { source: 'bedrock', detail: 'AWS Bedrock' };
   if (truthy(env.CLAUDE_CODE_USE_VERTEX)) return { source: 'vertex', detail: 'Google Vertex AI' };
+  if (provider && provider.kind !== 'native' && provider.baseUrl && (!provider.keyEnv || env[provider.keyEnv])) {
+    return { source: provider.kind === 'litellm' ? 'proxy' : 'api', detail: `${provider.id} (${hostOf(provider.baseUrl)})`, providerId: provider.id };
+  }
   if (env.ANTHROPIC_BASE_URL) return { source: 'proxy', detail: hostOf(env.ANTHROPIC_BASE_URL) + (apiKeySource && apiKeySource !== 'none' ? ` (${apiKeySource})` : '') };
   if (apiKeySource === 'none') return { source: 'subscription', detail: 'claude.ai login (Pro/Max)' };
   if (apiKeySource) return { source: 'api', detail: String(apiKeySource) };
@@ -110,10 +136,10 @@ function resolveEntryCost(e, { proxyUnpriced = false, priceBook = null, proxyCos
 // (multi-vendor channels: the vendor is already prefixed in the model id), else the model id's org
 // prefix, else the billing channel. Two distinct logins on the same channel (two API keys on
 // "firstParty") can't be told apart from what CLIs report and share a row by design.
-function providerOf({ muProvider, providerHint, billingSource, proxyHost }) {
+function providerOf({ muProvider, providerHint, billingSource, proxyHost, providerId }) {
   if (billingSource === 'subscription') return 'subscription';
   const CH = { api: 'api', proxy: 'proxy', bedrock: 'bedrock', vertex: 'vertex' };
-  return muProvider || (billingSource === 'proxy' && proxyHost) || providerHint || CH[billingSource] || 'unknown';
+  return muProvider || providerId || (billingSource === 'proxy' && proxyHost) || providerHint || CH[billingSource] || 'unknown';
 }
 
 // Runtime attribution for entries that predate the runtime stamp (from when claude was the only
@@ -259,7 +285,7 @@ function applyEvent(run, ev) {
 // are dropped. Each entry also carries `billed` — the part of its cost actually billed per token:
 // $0 for subscription runs (covered by the plan; the $0 is known, not missing), else the same value
 // as costUsd, null when that is unknown.
-function buildLedger(run, { proxyHost = null, priceBook = null, proxySpend = null, proxyUnpriced = false } = {}) {
+function buildLedger(run, { proxyHost = null, priceBook = null, proxySpend = null, proxyUnpriced = false, providerId = null } = {}) {
   const primary = canonModel(run.model || (run.models && run.models[0]) || '');
   const flat = () => {
     const seen = run.flatSeen && run.flatSeen.length ? run.flatSeen : ['inputTokens', 'outputTokens'];
@@ -275,7 +301,7 @@ function buildLedger(run, { proxyHost = null, priceBook = null, proxySpend = nul
     if (!(tokens.inputTokens + tokens.outputTokens + (tokens.cacheReadTokens || 0) + (tokens.cacheCreationTokens || 0))) continue;
     const c = canonModel(e.canonicalModel || rawModel);
     const hint = c.providerHint || (rawModel === primary.model ? primary.providerHint : null);
-    entries.push({ runtime: accountRuntime(run.runtime, c.model), provider: providerOf({ muProvider: e.provider, providerHint: hint, billingSource: run.billingSource, proxyHost }), model: c.model, ...tokens, costUsd: e.costUsd });
+    entries.push({ runtime: accountRuntime(run.runtime, c.model), provider: providerOf({ muProvider: e.provider, providerHint: hint, billingSource: run.billingSource, proxyHost, providerId }), model: c.model, ...tokens, costUsd: e.costUsd });
   }
   // Whole-run cost with no per-model split (resumed-run fallbacks, CLIs without modelUsage cost):
   // attribute it to the primary model's entry rather than losing or splitting it. Only KNOWN
@@ -295,11 +321,11 @@ function buildLedger(run, { proxyHost = null, priceBook = null, proxySpend = nul
   for (const e of entries) { resolveEntryCost(e, { proxyUnpriced, priceBook, proxyCostUsd: spendOf(e, e === main) }); e.billed = run.billingSource === 'subscription' ? 0 : (e.costUsd != null ? e.costUsd : null); }
   return entries;
 }
-function finishRun(run, { code, env, billingMode, startedMs, priceBook = null, proxySpend = null } = {}) {
+function finishRun(run, { code, env, billingMode, startedMs, priceBook = null, proxySpend = null, provider = null } = {}) {
   run.exitCode = code ?? null; run.endedAt = new Date().toISOString();
   if (startedMs) run.durationMs = Date.now() - startedMs;
   if (billingMode) run.billingMode = billingMode;
-  const b = detectBilling(env || {}, run.apiKeySource);
+  const b = detectBilling(env || {}, run.apiKeySource, provider);
   run.billingSource = b.source; run.billingDetail = b.detail;
   run.billingMismatch = !['auto', undefined].includes(run.billingMode) && b.source !== 'unknown' && b.source !== run.billingMode;
   // A reported $0 only means "proxy had no price for this model" when the run really billed through one.
@@ -307,7 +333,7 @@ function finishRun(run, { code, env, billingMode, startedMs, priceBook = null, p
   // ran (no env there), a known total of exactly 0 over a proxy billing source is the same case.
   const proxyUnpriced = (!!run.proxyUnpriced || (run.costKnown && !(run.reportedCostUsd > 0))) && b.source === 'proxy';
   run.proxyUnpriced = proxyUnpriced;
-  run.ledger = buildLedger(run, { proxyHost: env && env.ANTHROPIC_BASE_URL ? hostOf(env.ANTHROPIC_BASE_URL) : null, priceBook, proxySpend, proxyUnpriced });
+  run.ledger = buildLedger(run, { proxyHost: env && env.ANTHROPIC_BASE_URL ? hostOf(env.ANTHROPIC_BASE_URL) : null, priceBook, proxySpend, proxyUnpriced, providerId: b.providerId || null });
   if (run.ledger.length) run.provider = run.ledger[0].provider;
   delete run.perModel; delete run.flatSeen; // internal accumulators; the ledger is the persisted split
   return run;
@@ -723,7 +749,7 @@ function parseCompactBoundary(ev) {
   return { preTokens: +cm.pre_tokens || 0, postTokens: +cm.post_tokens || 0, trigger: cm.trigger || 'unknown' };
 }
 
-module.exports = { resultSnapshot, tokensForRun, BILLING_MODES, BILLING_SOURCES, normalizeBilling, applyBillingEnv, detectBilling, costNote, tokensFromResult, totalTokens, newRun, applyEvent, finishRun, summarize, total, modelStats, toCSV, CSV_COLS,
+module.exports = { resultSnapshot, tokensForRun, BILLING_MODES, BILLING_SOURCES, normalizeBilling, applyBillingEnv, applyProviderEnv, providerBaseOf, detectBilling, costNote, tokensFromResult, totalTokens, newRun, applyEvent, finishRun, summarize, total, modelStats, toCSV, CSV_COLS,
   canonModel, reportedCostOf, resolveEntryCost, applyProxySpend, providerOf, accountRuntime, buildLedger, usageLedger, ledgerEntriesOf,
   LIMITS_DEFAULTS, normalizeLimits, authType, windowUsage, limitStatus, usageStatus, applyCliRateLimits, parseRateLimitWindow, parseRateLimits, liveRateLimits, nodeLiveRateLimits, effectiveRuntime, subscriptionGuard, providerUsageStatus, usageProviders, GUARD_DEFAULT_PCT,
   CONTEXT_WINDOW_DEFAULT, CONTEXT_WINDOW_1M, contextWindowFor, contextFromAssistant, parseCompactBoundary };
