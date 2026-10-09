@@ -64,7 +64,7 @@ const flushFactory = (logs, { renderLiveThrows = false, logRowThrows = false } =
     new Set(['info', 'warn', 'error']),
     logRow, renderLog, renderLive,
   ];
-  const api = new Function(...names, `${flushBlock}\nreturn { flushLogTail, appendLogTail, isDirty: () => logTailDirty };`)(...args);
+  const api = new Function(...names, `let logSeq = 0, logTailSeq = 0, logTailAt = 0;\n${flushBlock}\nreturn { flushLogTail, appendLogTail, isDirty: () => logTailDirty };`)(...args);
   api.renderLog = renderLog; api.renderLive = renderLive; api.box = els['#log'];
   return api;
 };
