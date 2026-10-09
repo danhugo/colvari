@@ -1664,12 +1664,12 @@ function renderNodeForm() {
     <div class="toolbar"><button id="nf-applypreset" ${presets.some((p) => p.name.toLowerCase() === String(n.role).toLowerCase()) ? '' : 'disabled'}>Apply preset</button><button id="nf-savepreset">Save as role preset</button></div>
     <label class="inline"><input type="checkbox" id="nf-core" ${n.core ? 'checked' : ''}> Core agent <span class="muted">(protected; recruits and retires teammates; one per team)</span></label>
     <label class="inline"><input type="checkbox" id="nf-protected" ${n.protected ? 'checked' : ''}> Protected from retirement <span class="muted">(agents cannot retire this node; only you may clear this)</span></label>
-    <label>Runtime</label><select id="nf-runtime">${allRuntimeOptions().map((r) => `<option value="${r.id}" ${r.id === (n.runtime || 'claude') ? 'selected' : ''} ${r.installed ? '' : 'disabled'}>${esc(r.label)}${r.custom ? ' (custom)' : ''}${r.installed ? ' ' + esc(r.version || '') : ' (not installed)'}</option>`).join('')}</select>
+    <label>Runtime</label><select id="nf-runtime">${allRuntimeOptions().map((r) => `<option value="${r.id}" ${r.id === (n.runtime || 'claude') ? 'selected' : ''} ${r.installed || r.id === (n.runtime || 'claude') ? '' : 'disabled'}>${esc(r.label)}${r.custom ? ' (custom)' : ''}${r.installed ? ' ' + esc(r.version || '') : ' (not installed)'}</option>`).join('')}</select>
     <div id="nf-caps" class="muted"></div>
     <div class="toolbar rtpresets"><span class="muted">Quick preset:</span>${RT_PRESETS.map((p) => `<button data-rtp="${p.name}" ${(C.runtimes || {})[p.runtime] && !C.runtimes[p.runtime].installed ? 'disabled title="' + p.runtime + ' not installed"' : ''}>${p.name} <small>${VENDOR[p.runtime]}/${p.model || 'default'}</small></button>`).join('')}</div>
     <label>Provider <span class="muted">(routes the model + key; manage in Settings › Providers)</span></label><select id="nf-provider"><option value="" ${!(n.provider || '') ? 'selected' : ''}>Default (CLI's own provider)</option>${providersList().map((p) => `<option value="${esc(p.id)}" ${p.id === (n.provider || '') ? 'selected' : ''}>${esc(p.label || p.id)}${p.kind && p.kind !== (p.label || p.id) ? ' · ' + esc(p.kind) : ''}</option>`).join('')}</select>
     <p class="muted" id="nf-provnote"></p>
-    <label>Model <span class="muted">(alias or any model ID, e.g. a proxy/provider model; empty = claude CLI default)</span></label><input id="nf-model" list="modellist" value="${esc(n.model || '')}" placeholder="default (claude CLI default)" spellcheck="false"><datalist id="modellist">${(isCustomRuntime(n.runtime) && findCustomRuntime(n.runtime) ? findCustomRuntime(n.runtime).models : MODELS).map((m) => `<option value="${esc(m)}">`).join('')}</datalist>
+    <label>Model <span class="muted">(alias or any model ID, e.g. a proxy/provider model; empty = <span id="nf-modeldef">claude CLI</span> default)</span></label><input id="nf-model" list="modellist" value="${esc(n.model || '')}" placeholder="default (claude CLI default)" spellcheck="false"><datalist id="modellist">${(isCustomRuntime(n.runtime) && findCustomRuntime(n.runtime) ? findCustomRuntime(n.runtime).models : MODELS).map((m) => `<option value="${esc(m)}">`).join('')}</datalist>
     <label>Working directory</label><input id="nf-workdir" value="${esc(n.workdir)}" placeholder="${esc(S.dir)}">
     <label>System prompt</label><textarea id="nf-prompt" rows="6">${esc(n.systemPrompt)}</textarea>
     <details id="nf-adv"><summary>Advanced</summary>
@@ -1733,11 +1733,13 @@ function renderNodeForm() {
     const rid = $('#nf-runtime').value; const r = allRuntimeOptions().find((x) => x.id === rid);
     $('#nf-caps').innerHTML = r ? ['tokens', 'cost', 'mcp', 'resume'].map((k) => `<span class="cap ${r.capabilities[k] ? 'on' : 'off'}">${r.capabilities[k] ? '✓' : '✗'} ${k}</span>`).join(' ') : '';
     if (r) { $('#nf-mode option[value=goal]').disabled = !r.capabilities.resume; $('#nf-goalnote').classList.toggle('hidden', !!r.capabilities.resume); }
+    const md = $('#nf-modeldef'); if (md) md.textContent = r ? r.label : 'runtime';
+    const rs = $('#nf-runtime'); const opt = rs.selectedOptions[0]; if (opt && r && !r.installed && !/not installed/.test(opt.textContent)) opt.textContent += ' (not installed)';
     showModelList();
   };
   $('#nf-runtime').onchange = showCaps; showCaps(); showProvider();
   $('#nf-provider').onchange = showProvider;
-  f.querySelectorAll('[data-rtp]').forEach((b) => { b.onclick = () => { const p = RT_PRESETS.find((x) => x.name === b.dataset.rtp); $('#nf-runtime').value = p.runtime; $('#nf-model').value = p.model || '';
+  f.querySelectorAll('[data-rtp]').forEach((b) => { b.onclick = () => { const p = RT_PRESETS.find((x) => x.name === b.dataset.rtp); const ro = $('#nf-runtime'); const po = [...ro.options].find((o) => o.value === p.runtime); if (po) po.disabled = false; ro.value = p.runtime; $('#nf-model').value = p.model || '';
     if (p.provider) { const prov = p.provider === 'openrouter' ? openrouterProvider() : providerById(p.provider); if (prov) $('#nf-provider').value = prov.id; }
     showCaps(); showProvider(); }; });
   const showBill = () => { const m = $('#nf-billing').value; $('.bill-proxy-url').classList.toggle('hidden', m !== 'proxy'); $('#nf-billnote').textContent = BILL_NOTE[m] || ''; };
