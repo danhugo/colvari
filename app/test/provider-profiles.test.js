@@ -162,3 +162,13 @@ test('redactError covers sk-or-v1 keys and the codex argv shape leaks no key val
   assert.ok(!out.includes('sk-or-'));
   assert.ok(out.includes('OPENROUTER_API_KEY')); // the name is fine to surface
 });
+
+test('no real OpenRouter key is committed under test/fixtures', () => {
+  const fs = require('fs'); const path = require('path');
+  const dir = path.join(__dirname, 'fixtures');
+  const walk = (d) => fs.readdirSync(d, { withFileTypes: true }).flatMap((e) => e.isDirectory() ? walk(path.join(d, e.name)) : [path.join(d, e.name)]);
+  for (const f of walk(dir)) {
+    const m = fs.readFileSync(f, 'utf8').match(/sk-or-v1-[0-9a-f]{40,}/g) || [];
+    for (const k of m) assert.ok(/^sk-or-v1-0+$/.test(k), `real-looking key in ${path.relative(dir, f)}`);
+  }
+});
