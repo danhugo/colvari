@@ -3328,7 +3328,7 @@ function renderChatBody() {
   const typingHtml = [...workingT].map((id) => { const wk = wakeLabel(id); return `<span class="typing"><span class="spin"></span>${esc(clipText(wk || `${who(id).name} is working`, 64))}<span class="dots"></span></span>`; }).join(' · ');
   if (CH.typingKey !== typingHtml) { CH.typingKey = typingHtml; $('#chat-typing').innerHTML = typingHtml; }
   renderYourTurn(ev);
-  const room = $('#chat-room'); const atBottom = room.scrollHeight - room.scrollTop - room.clientHeight < 40;
+  const room = $('#chat-room'); const atBottom = CH.stickNext || room.scrollHeight - room.scrollTop - room.clientHeight < 40; CH.stickNext = false; // own send always follows
   const prevH = room.scrollHeight, prevTop = room.scrollTop;
   const page = Chat.pageOf(ev, CH.win || Chat.PAGE);
   // The event list is a sliding window (capped at MAX), so ev.length alone can't count new arrivals —
@@ -3380,7 +3380,7 @@ function renderChatBody() {
     : sel.chatTeam ? '<p class="muted logempty" data-testid="chat-empty-team">No messages for this team.</p>'
     : S.team.nodes.length ? `<div class="cempty"><svg class="brandmark big" viewBox="0 0 32 32" aria-hidden="true"><path d="M23 9A10 10 0 1 0 23 23" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/><g fill="currentColor"><circle cx="23" cy="9" r="3.6"/><circle cx="6" cy="16" r="3.6"/><circle cx="23" cy="23" r="3.6"/></g></svg><b>#company is quiet</b>Type a goal below, or @mention an agent (e.g. <code>@${esc(S.team.nodes[0].name)} write hello.txt</code>).</div>` : '<div class="cempty"><svg class="brandmark big" viewBox="0 0 32 32" aria-hidden="true"><path d="M23 9A10 10 0 1 0 23 23" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/><g fill="currentColor"><circle cx="23" cy="9" r="3.6"/><circle cx="6" cy="16" r="3.6"/><circle cx="23" cy="23" r="3.6"/></g></svg><b>No team yet</b>Create your team in the Team tab (or use the first-run guide), then chat with it here.</div>';
   if (atBottom) { CH.win = Chat.PAGE; room.scrollTop = room.scrollHeight; repinBottom(room); CH.pendingNew = 0; }
-  else { room.scrollTop = Chat.anchorScroll(prevTop, prevH, room.scrollHeight); CH.pendingNew = (CH.pendingNew || 0) + delta; }
+  else { room.scrollTop = prevTop; /* new events land below the reader: hold the spot, never shift by the growth */ CH.pendingNew = (CH.pendingNew || 0) + delta; }
   CH.domWin = CH.win || Chat.PAGE; // the window the DOM now shows (after the at-bottom reset)
   const ob = $('#chat-older'); if (ob) ob.onclick = chatGrow;
   updateNewPill();
@@ -3706,6 +3706,7 @@ async function chatSend() {
   } catch (err) { i.value = draft; chatPreview(); throw err; } // send failed: hand the draft back
   for (const a of chatAtts) if (a.url) URL.revokeObjectURL(a.url);
   chatAtts.length = 0; renderChatAtts();
+  CH.stickNext = true;
   refresh();
 }
 $('#chat-input').addEventListener('input', chatPreview);
