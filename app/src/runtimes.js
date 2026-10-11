@@ -84,6 +84,9 @@ function profileRuntime(id, label, binFromSettings) {
       // asks (e.g. helpycode's external_directory) and the agent cannot reach the paths it needs.
       const bypass = (n.permissionMode || (settings || {}).permissionMode || 'bypassPermissions') === 'bypassPermissions';
       const args = buildProfileArgs(profile, { model, prompt, variant: n.effort, session: opts.resume, bypass });
+      // opencode resolves its project root from the git common dir, so a worktree run edited the
+      // main checkout (t_2a58e7ac): pin it to the run's cwd explicitly.
+      if (id === 'opencode' && opts.cwd) args.splice(1, 0, '--dir', opts.cwd);
       args.push(...splitArgs(n.extraArgs));
       // opencode-style CLIs realpath() positional messages: a prompt longer than a path segment dies
       // with ENAMETOOLONG. Long prompts go over stdin instead (they read it when it is not a TTY);

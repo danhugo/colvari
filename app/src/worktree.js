@@ -163,6 +163,16 @@ async function unmergedSquadBranches(root) {
 // HEAD sha of `dir`'s repo, or null when git fails (not a repo, no git).
 async function headSha(dir) { try { return await git(dir, ['rev-parse', 'HEAD']); } catch { return null; } }
 
+// Gate-bypass guard (t_2a58e7ac): first-parent commits added to the main checkout's HEAD since
+// `before` that are not a merge-gate landing ("Merge branch 'squad/<id>'"). [] when clean/unknown.
+async function strayBaseCommits(root, before) {
+  if (!before) return [];
+  try {
+    const out = await git(root, ['log', '--first-parent', '--format=%h%x09%P%x09%s', `${before}..HEAD`]);
+    return out.split('\n').filter(Boolean).map((l) => l.split('\t')).filter(([, parents, subj]) => !(/ /.test(parents) && /^Merge branch 'squad\//.test(subj))).map(([h, , subj]) => `${h} ${subj}`);
+  } catch { return []; }
+}
+
 // Commits on `to` that `from` lacks, or null when the range does not resolve.
 async function commitsBehind(root, from, to) { try { return Number(await git(root, ['rev-list', '--count', `${from}..${to}`])); } catch { return null; } }
 
@@ -351,4 +361,4 @@ async function diskUsage(repoDir, opts = {}) {
   return val;
 }
 
-module.exports = { ensureWorktree, branchExists, linkNodeModules, cloneNodeModules, worktreeDiff, worktreeMerge, worktreeDiscard, unmergedSquadBranches, branchMergeState, dirtyMergeMessage, worktreeDirtyMessage, dirtyMainFiles, headSha, commitsBehind, removeWorktree, sweepWorktrees, pruneWorktrees, diskUsage, worktreeDirty, listWorktrees };
+module.exports = { ensureWorktree, branchExists, linkNodeModules, cloneNodeModules, worktreeDiff, worktreeMerge, worktreeDiscard, unmergedSquadBranches, branchMergeState, dirtyMergeMessage, worktreeDirtyMessage, dirtyMainFiles, headSha, strayBaseCommits, commitsBehind, removeWorktree, sweepWorktrees, pruneWorktrees, diskUsage, worktreeDirty, listWorktrees };
