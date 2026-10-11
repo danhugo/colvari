@@ -20,6 +20,8 @@ npm run smoke:real # real-machine check (no fixtures): discovery against real $H
 
 You need the `claude` CLI on your PATH and logged in.
 
+Runtime adapters for Claude, Codex, OpenCode, Pi and HelpyCode are documented in `docs/runtimes.md`.
+
 **Test/demo isolation contract.** Tests and demos must never touch the real store (`~/.agents-squad`):
 `npm test`, `npm run e2e` and the gui-e2e/smoke scripts all set `AGENTS_SQUAD_PROJECT` to a fresh
 temp dir (plus `AGENTS_SQUAD_TEST_ISOLATION=1`), and `test/store-leak-guard.test.js` fails the suite
