@@ -1821,8 +1821,15 @@ const wakeBadgeText = (w, task) => `${w.from} ✉ "${w.excerpt}"${w.queued ? ` (
 // Pending wake (t_139bd3eb): unread agent->agent messages held back by the per-agent wake gap —
 // a.wakePending {count, suppressed, nextWakeAt} from the orchestrator snapshot; absent = nothing pending.
 function wakePending(id) { const w = (S.orch.agents[id] || {}).wakePending; return w && +w.count > 0 ? w : null; }
-const pendingWakeText = (w) => { const n = +w.count; return w.suppressed ? `${n} message${n === 1 ? '' : 's'} pending — wake in ~${Math.max(1, Math.round((w.nextWakeAt - Date.now()) / 60000))}min` : `${n} message${n === 1 ? '' : 's'} pending — waking…`; };
-const pendingWakeBadgeText = (w) => { const n = +w.count; return w.suppressed ? `${n} pending — wake in ~${Math.max(1, Math.round((w.nextWakeAt - Date.now()) / 60000))}min` : `${n} pending — waking…`; };
+// Age/blocked contract (Devon, t_6197c9a9): wakePending.oldestUnreadAt (ms) + blockedReason (string|null); both optional.
+const WAKE_OVERDUE_MS = 10 * 60000;
+const pendingAgeMs = (w) => (+w.oldestUnreadAt > 0 ? Math.max(0, Date.now() - w.oldestUnreadAt) : 0);
+const pendingOverdue = (w) => !!w.blockedReason || pendingAgeMs(w) > WAKE_OVERDUE_MS;
+const fmtPendingAge = (ms) => { const m = Math.round(ms / 60000); return m < 1 ? '<1m' : m < 60 ? `${m}m` : m < 2880 ? `${Math.floor(m / 60)}h` : `${Math.floor(m / 1440)}d`; };
+const pendingWhen = (w) => w.blockedReason ? `blocked: ${w.blockedReason}` : w.suppressed ? `wake in ~${Math.max(1, Math.round((w.nextWakeAt - Date.now()) / 60000))}min` : 'waking…';
+const pendingAgeTxt = (w) => (+w.oldestUnreadAt > 0 ? `, oldest ${fmtPendingAge(pendingAgeMs(w))}` : '');
+const pendingWakeText = (w) => { const n = +w.count; return `${n} message${n === 1 ? '' : 's'} pending${pendingAgeTxt(w)} — ${pendingWhen(w)}`; };
+const pendingWakeBadgeText = (w) => `${+w.count} pending${+w.oldestUnreadAt > 0 ? ` ${fmtPendingAge(pendingAgeMs(w))}` : ''} — ${w.blockedReason ? 'blocked' : pendingWhen(w)}`;
 // Shared badge drawing for the Team and Overview node SVGs: a strip just below the node card
 // (inside the card there is no free row — the chip row and ctx bar own the bottom edge).
 function drawWakeBadge(g, w, onclick) {
@@ -1837,7 +1844,7 @@ function drawWakeBadge(g, w, onclick) {
 // stall says more than messages waiting). Deliberately calm — dashed neutral, not an alarm color.
 function drawPendingBadge(g, wp) {
   const full = pendingWakeText(wp);
-  const bg = el('g', { class: 'pendingwakebadge', transform: `translate(4,${H + 3})` }, g);
+  const bg = el('g', { class: 'pendingwakebadge' + (pendingOverdue(wp) ? ' overdue' : ''), transform: `translate(4,${H + 3})` }, g);
   el('rect', { width: W - 8, height: 13, rx: 6 }, bg);
   el('text', { x: (W - 8) / 2, y: 9.5, 'text-anchor': 'middle' }, bg).textContent = clipText(pendingWakeBadgeText(wp), 30);
   el('title', {}, bg).textContent = full;
@@ -2089,7 +2096,7 @@ function renderIdle() {
   // presence is already visible here and as node colors. Only the wake bars + presence chips remain.
   // Both follow the board's team scope (t_1158f757).
   const idleNodes = S.allNodes.filter((n) => teamScoped(sel.boardTeam, n.id));
-  $('#presence').innerHTML = idleNodes.map((n) => { const p = presence(n.id); const wk = wakeLabel(n.id); const wp = wk ? null : wakePending(n.id); const pt = wk || (wp ? pendingWakeText(wp) : ''); return `<span class="pchip ${p}${wk ? ' wake' : ''}" title="${esc(pt || n.role)}"><span class="pres ${p}"><i></i></span>${esc(n.name)} <span class="muted">${pt ? esc(clipText(pt, 52)) : p}</span></span>`; }).join('');
+  $('#presence').innerHTML = idleNodes.map((n) => { const p = presence(n.id); const wk = wakeLabel(n.id); const wp = wk ? null : wakePending(n.id); const pt = wk || (wp ? pendingWakeText(wp) : ''); return `<span class="pchip ${p}${wk ? ' wake' : ''}${wp && pendingOverdue(wp) ? ' overdue' : ''}" title="${esc(pt || n.role)}"><span class="pres ${p}"><i></i></span>${esc(n.name)} <span class="muted">${pt ? esc(clipText(pt, 52)) : p}</span></span>`; }).join('');
   const wakes = idleNodes.map((n) => ({ n, w: wakeRun(n.id) })).filter((x) => x.w);
   const wb = $('#wakebar');
   if (wb) { wb.classList.toggle('hidden', !wakes.length);

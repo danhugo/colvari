@@ -1006,3 +1006,6 @@ header .hdricons button { width:var(--topbar-h); height:var(--topbar-h); padding
 .lvchip.on, .lvchip.lv-info.on, .lvchip.lv-warn.on, .lvchip.lv-error.on { box-shadow:none; }
 .seg button.on { background:var(--accent-soft); color:var(--accent-text); }
 .ctxmenu button.danger:hover, #sidebar .sb-actions button.danger:hover { color:var(--danger); background:var(--danger-soft); }
+#graph .pendingwakebadge.overdue rect{ stroke:var(--warn, #d9822b); stroke-dasharray:none; }
+#graph .pendingwakebadge.overdue text{ fill:var(--warn, #d9822b); }
+.pchip.overdue{ border-color:var(--warn, #d9822b); color:var(--warn, #d9822b); }
