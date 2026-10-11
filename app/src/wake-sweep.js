@@ -13,7 +13,7 @@
 // MIN_GAP_MS no longer gates message wakes (t_9e4b4805) — it only anchors the watchdog nudge
 // throttle in nudgeIdle. Shared with orchestrator.js by reference (tests shorten the timings
 // in place, orchestrator re-exports this same object).
-const WAKE = { SWEEP_MS: 1000, DEBOUNCE_MS: 1500, MIN_GAP_MS: 5 * 60 * 1000, MAX_PER_PAIR: 3, PAIR_WINDOW_MS: 10 * 60 * 1000, SLOW_SWEEP_MS: 25 };
+const WAKE = { SWEEP_MS: 1000, DEBOUNCE_MS: 1500, MIN_GAP_MS: 5 * 60 * 1000, MAX_PER_PAIR: 3, PAIR_WINDOW_MS: 10 * 60 * 1000, SLOW_SWEEP_MS: 25, OVERDUE_MS: 10 * 60 * 1000, MEM_REFRESH_MS: 5000 };
 // SLOW_SWEEP_MS: the sweep runs at 1 Hz on the main event loop and listMessages() re-reads the
 // inbox per idle agent (orch.wakeUnread), so a sweep over this duration is a UI jank signal
 // worth logging — the same instrumentation the stall watchdog carries for its own sweep.
@@ -42,6 +42,7 @@ function sweepAgent(orch, node, a, team, st, now, mkey) {
   const unread = orch.wakeUnread(node.id, team, mkey);
   if (!unread.length) {
     if (a.wakePending) { a.wakePending = null; orch.changed(); }
+    a.wakeBlocked = null; a.wakeOverdueLogged = null;
     return false;
   }
   // Per-agent wake debounce: while an agent runs (task or wake), messages stay queued unread —
@@ -52,20 +53,58 @@ function sweepAgent(orch, node, a, team, st, now, mkey) {
   // Task dispatch is NOT debounced either (an assigned/unblocked task reaches the agent right
   // away and its prompt carries the unread count); system wakes never enter this sweep.
   const prev = a.wakePending;
-  if (!prev || prev.count !== unread.length) {
+  const oldestUnreadAt = oldestAt(unread);
+  const blocked = a.wakeBlocked && a.wakeBlocked.reason || null;
+  if (!prev || prev.count !== unread.length || prev.wakeBlockedReason !== blocked || prev.oldestUnreadAt !== oldestUnreadAt) {
     // nextWakeAt is the armed timer's due time; recomputed only on a transition so an unchanged
     // pending state does not churn a state push every sweep.
-    a.wakePending = { count: unread.length, suppressed: false, nextWakeAt: (prev && prev.nextWakeAt) || now + WAKE.DEBOUNCE_MS };
+    a.wakePending = { count: unread.length, suppressed: false, nextWakeAt: (prev && prev.nextWakeAt) || now + WAKE.DEBOUNCE_MS, oldestUnreadAt, wakeBlockedReason: blocked };
     orch.changed();
   }
+  checkOverdue(orch, node, a, unread, now);
   armWakeTimer(orch, node.id, st, now);
   return true;
+}
+
+function oldestAt(msgs) {
+  let t = Infinity;
+  for (const m of msgs) { const x = Date.parse(m.at); if (x < t) t = x; }
+  return Number.isFinite(t) ? t : null;
+}
+
+// A human message unread past OVERDUE_MS on an idle agent: log once per reason (again only when it changes).
+function checkOverdue(orch, node, a, unread, now) {
+  const t = oldestAt(unread.filter((m) => m.from === 'human'));
+  if (t == null || now - t < WAKE.OVERDUE_MS) return;
+  const reason = a.wakeBlocked ? a.wakeBlocked.reason : 'no dispatch attempt recorded';
+  if (a.wakeOverdueLogged === reason) return;
+  a.wakeOverdueLogged = reason;
+  orch.log(node.id, 'system', `wake overdue: human message unread for ${Math.round((now - t) / 60000)} min while idle — ${reason}`);
+}
+
+function pidAlive(pid) { try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } }
+
+// Self-heal for a "busy" agent with an overdue human message: a procs entry whose pid is dead, or
+// status 'working' with no procs entry, is a leaked state — clear it so the agent is idle again.
+function healStale(orch, node, a, now) {
+  const p = orch.procs.get(node.id);
+  const deadProc = p && p.pid && !pidAlive(p.pid);
+  const orphanWorking = !p && a.status === 'working';
+  if (!deadProc && !orphanWorking) return;
+  const t = oldestAt(orch.wakeUnread(node.id).filter((m) => m.from === 'human'));
+  if (t == null || now - t < WAKE.OVERDUE_MS) return;
+  orch.procs.delete(node.id);
+  a.status = 'idle';
+  orch.log(node.id, 'system', `wake self-heal: ${deadProc ? 'dead run process (pid ' + p.pid + ')' : 'stale working status without a run'} cleared, agent set back to idle`);
+  orch.changed();
 }
 
 function sweepWakes(orch) {
   if (orch.userStopped || orch.dispatchPaused) { clearWakeTimers(orch); return; }
   const st = orch._wakeStats || (orch._wakeStats = { sweeps: 0, totalMs: 0, maxMs: 0, armed: 0 });
   const sweepStart = Date.now();
+  // memGuard's reading must not depend on tick(): refresh it on the sweep's own throttle.
+  if (orch.memGuard && sweepStart - (st.memAt || 0) >= WAKE.MEM_REFRESH_MS) { st.memAt = sweepStart; try { orch.memGuard.refresh().catch(() => {}); } catch {} }
   let scanned = 0, withUnread = 0;
   try {
     const team = orch.store.getTeam();
@@ -73,7 +112,10 @@ function sweepWakes(orch) {
     const mkey = unreadKey(orch);
     for (const node of team.nodes) {
       const a = orch.agent(node.id);
-      if (orch.procs.has(node.id) || a.status === 'working') continue;
+      if (orch.procs.has(node.id) || a.status === 'working') {
+        try { healStale(orch, node, a, now); } catch {}
+        if (orch.procs.has(node.id) || a.status === 'working') continue;
+      }
       scanned++;
       // One broken agent state (or a throwing wakeUnread seam) must not blind the rest of the
       // roster: the failure is logged against its node and the sweep moves on.
