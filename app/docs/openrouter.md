@@ -3,7 +3,7 @@
 Configure an OpenRouter provider in Settings > Providers (id: `openrouter`,
 `https://openrouter.ai/api/v1`, `OPENROUTER_API_KEY`, kind `openrouter`). The API key
 lives in the env var named by `keyEnv` — never in settings JSON, argv, logs or run
-records (`agent-config.js:127-129`, `main.js:1207`).
+records (`agent-config.js:127-129`, `main.js:1210-1211`).
 
 ---
 
@@ -14,7 +14,7 @@ records (`agent-config.js:127-129`, `main.js:1207`).
 | **API key source** | `OPENROUTER_API_KEY` (the profile's `keyEnv`) — copied into the child env by `applyProviderEnv` (`usage.js:37-44`); codex receives the env var name via `-c model_providers.<id>.env_key=<keyEnv>` (`runtimes.js:182`) |
 | **Model id format** | Raw model slug, e.g. `openai/gpt-4o` — passed as `-m <model>` (`runtimes.js:122`). The provider profile routes it to OpenRouter. |
 | **Provider profile flags** | `-c model_provider=<id>` + `-c model_providers.<id>.name=...` + wire_api set to `"responses"` for OpenRouter (`runtimes.js:177-184`). No `env_key` means no key env var — kind `openrouter` requires it (`agent-config.js:147`). |
-| **Cost in Usage** | Codex capabilities say `cost: false` (`runtimes.js:117`) — it does not emit a per-run `total_cost_usd`. Cost is therefore *estimated* via `PriceBook.estimate` (`usage.js:114-130`, `litellm.js:235-246`) from LiteLLM's published price list, or `unknown` when the model has no price entry. |
+| **Cost in Usage** | Codex capabilities say `cost: false` (`runtimes.js:117`) — it does not emit a per-run `total_cost_usd`. Cost is therefore *estimated* via `PriceBook.estimate` (`usage.js:119-130`, `litellm.js:235-246`) from LiteLLM's published price list, or `unknown` when the model has no price entry. |
 | **Known limits** | No per-model usage split from the CLI; a single flat ledger entry is synthesized from the total token count. Wire API responses mode is proven on codex 0.144.6 (`runtimes.js:126`). |
 
 ---
