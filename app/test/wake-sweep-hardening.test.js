@@ -90,3 +90,85 @@ test('overdue human unread: records block reason, logs once, heals leaked procs/
     assert.ok(logs.some((t) => /self-heal/.test(t)));
   } finally { WAKE.OVERDUE_MS = old; }
 });
+
+// ---- long-run stall (t_13eeaaae): fake clock jumps 11 min past an unread human message ----
+const { mock } = require('node:test');
+const OVERDUE = () => WAKE.OVERDUE_MS + 60000;
+function stalled() {
+  const s = new Store(path.join(tmp('squad-wake-stall-'), 'p'));
+  const b = s.addNode({ name: 'B', role: 'Dev' });
+  const o = makeOrch(s);
+  s.sendMessage({ from: 'human', to: b.id, text: 'are you there?' });
+  const real = Date.now;
+  const clock = mock.method(Date, 'now', () => real() + OVERDUE());
+  return { s, b, o, clock, logs: () => s.readLogs(Infinity).map((l) => l.text) };
+}
+
+test('stall: leaked dead proc is self-healed and the overdue human message gets woken', () => {
+  const { b, o, clock, logs } = stalled();
+  try {
+    let dispatched = 0;
+    o.dispatchWake = async () => { dispatched++; };
+    o.procs.set(b.id, { pid: 2147483646 }); // no such process
+    o.agent(b.id).status = 'working';
+    o.sweepWakes();
+    assert.ok(!o.procs.has(b.id) && o.agent(b.id).status === 'idle', 'stale proc cleared');
+    assert.ok(logs().some((t) => t.includes('wake self-heal')));
+    assert.equal(o.agent(b.id).wakePending.count, 1, 'wake armed in the same sweep');
+    assert.ok(o.wakeTimers.has(b.id));
+  } finally { clock.mock.restore(); }
+});
+
+test('stall: orphan "working" status with no proc is self-healed', () => {
+  const { b, o, clock, logs } = stalled();
+  try {
+    o.dispatchWake = async () => {};
+    o.agent(b.id).status = 'working';
+    o.sweepWakes();
+    assert.equal(o.agent(b.id).status, 'idle');
+    assert.ok(logs().some((t) => t.includes('stale working status')));
+  } finally { clock.mock.restore(); }
+});
+
+test('stall: a live proc is not healed', () => {
+  const { b, o, clock } = stalled();
+  try {
+    o.procs.set(b.id, { pid: process.pid });
+    o.sweepWakes();
+    assert.ok(o.procs.has(b.id));
+  } finally { clock.mock.restore(); }
+});
+
+test('stall: memGuard defer records the reason and raises one overdue alert; wake lands once it clears', async () => {
+  const { b, o, clock, logs } = stalled();
+  try {
+    o.memGuard = { status: () => ({ defer: true, why: 'memory pressure critical' }), refresh: async () => {}, configure() {} };
+    await o.dispatchWake(b.id);
+    assert.match(o.agent(b.id).wakeBlocked.reason, /memory guard: memory pressure critical/);
+    o.sweepWakes(); o.sweepWakes();
+    const alerts = logs().filter((t) => t.includes('wake overdue'));
+    assert.equal(alerts.length, 1, 'alerted once, not per sweep');
+    assert.match(alerts[0], /memory guard/);
+    assert.match(o.agent(b.id).wakePending.wakeBlockedReason, /memory guard/);
+    assert.ok(o.agent(b.id).wakePending.oldestUnreadAt, 'age exposed for the UI');
+  } finally { clock.mock.restore(); }
+});
+
+test('stall: sweep refreshes memGuard itself (not via tick)', () => {
+  const { o, clock } = stalled();
+  try {
+    let n = 0;
+    o.memGuard = { status: () => ({ defer: false }), refresh: async () => { n++; }, configure() {} };
+    o.sweepWakes();
+    assert.equal(n, 1);
+  } finally { clock.mock.restore(); }
+});
+
+test('stall: a throwing wakeUnread is logged, sweep survives', () => {
+  const { b, o, clock, logs } = stalled();
+  try {
+    o.wakeUnread = () => { throw new Error('boom'); };
+    assert.doesNotThrow(() => o.sweepWakes());
+    assert.ok(logs().some((t) => t.includes('boom')));
+  } finally { clock.mock.restore(); }
+});
