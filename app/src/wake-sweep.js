@@ -13,7 +13,7 @@
 // MIN_GAP_MS no longer gates message wakes (t_9e4b4805) — it only anchors the watchdog nudge
 // throttle in nudgeIdle. Shared with orchestrator.js by reference (tests shorten the timings
 // in place, orchestrator re-exports this same object).
-const WAKE = { SWEEP_MS: 1000, DEBOUNCE_MS: 1500, MIN_GAP_MS: 5 * 60 * 1000, MAX_PER_PAIR: 3, PAIR_WINDOW_MS: 10 * 60 * 1000, SLOW_SWEEP_MS: 25, OVERDUE_MS: 10 * 60 * 1000, MEM_REFRESH_MS: 5000 };
+const WAKE = { SWEEP_MS: 1000, DEBOUNCE_MS: 1500, MIN_GAP_MS: 5 * 60 * 1000, MAX_PER_PAIR: 3, PAIR_WINDOW_MS: 10 * 60 * 1000, SLOW_SWEEP_MS: 25, OVERDUE_MS: process.env.SQUAD_WAKE_OVERDUE_MS ? +process.env.SQUAD_WAKE_OVERDUE_MS : 10 * 60 * 1000, MEM_REFRESH_MS: 5000 };
 // SLOW_SWEEP_MS: the sweep runs at 1 Hz on the main event loop and listMessages() re-reads the
 // inbox per idle agent (orch.wakeUnread), so a sweep over this duration is a UI jank signal
 // worth logging — the same instrumentation the stall watchdog carries for its own sweep.
@@ -55,10 +55,10 @@ function sweepAgent(orch, node, a, team, st, now, mkey) {
   const prev = a.wakePending;
   const oldestUnreadAt = oldestAt(unread);
   const blocked = a.wakeBlocked && a.wakeBlocked.reason || null;
-  if (!prev || prev.count !== unread.length || prev.wakeBlockedReason !== blocked || prev.oldestUnreadAt !== oldestUnreadAt) {
+  if (!prev || prev.count !== unread.length || prev.blockedReason !== blocked || prev.oldestUnreadAt !== oldestUnreadAt) {
     // nextWakeAt is the armed timer's due time; recomputed only on a transition so an unchanged
     // pending state does not churn a state push every sweep.
-    a.wakePending = { count: unread.length, suppressed: false, nextWakeAt: (prev && prev.nextWakeAt) || now + WAKE.DEBOUNCE_MS, oldestUnreadAt, wakeBlockedReason: blocked };
+    a.wakePending = { count: unread.length, suppressed: false, nextWakeAt: (prev && prev.nextWakeAt) || now + WAKE.DEBOUNCE_MS, oldestUnreadAt, blockedReason: blocked };
     orch.changed();
   }
   checkOverdue(orch, node, a, unread, now);
