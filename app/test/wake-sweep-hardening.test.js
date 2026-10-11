@@ -79,8 +79,14 @@ test('overdue human unread: records block reason, logs once, heals leaked procs/
     assert.match(o.agent(a.id).wakeBlocked.reason, /memory guard: pressure critical/);
     o.sweepWakes(); o.sweepWakes();
     const wp = o.agent(a.id).wakePending;
-    assert.match(wp.wakeBlockedReason, /memory guard/);
+    assert.match(wp.blockedReason, /memory guard/);
     assert.ok(wp.oldestUnreadAt > 0);
+    // the renderer's badge helpers read this exact output (field-name contract)
+    const src = fs.readFileSync(path.join(__dirname, '../renderer/app.js'), 'utf8');
+    const pick = (n) => src.match(new RegExp('^(?:const|function) ' + n + '\\b.*$', 'm'))[0];
+    const badge = new Function(['pendingAgeMs', 'fmtPendingAge', 'pendingWhen', 'pendingWakeBadgeText', 'pendingOverdue'].map(pick).concat('return { pendingWakeBadgeText, pendingOverdue };').join('\n'))();
+    assert.match(badge.pendingWakeBadgeText(wp), /— blocked$/);
+    assert.ok(badge.pendingOverdue(wp));
     assert.equal(logs.filter((t) => /wake overdue/.test(t)).length, 1, 'logged once per reason');
     // leaked procs entry with a dead pid
     o.procs.set(a.id, { pid: 2 ** 22 + 12345, kill() {} }); o.agent(a.id).status = 'working';
@@ -149,7 +155,7 @@ test('stall: memGuard defer records the reason and raises one overdue alert; wak
     const alerts = logs().filter((t) => t.includes('wake overdue'));
     assert.equal(alerts.length, 1, 'alerted once, not per sweep');
     assert.match(alerts[0], /memory guard/);
-    assert.match(o.agent(b.id).wakePending.wakeBlockedReason, /memory guard/);
+    assert.match(o.agent(b.id).wakePending.blockedReason, /memory guard/);
     assert.ok(o.agent(b.id).wakePending.oldestUnreadAt, 'age exposed for the UI');
   } finally { clock.mock.restore(); }
 });
