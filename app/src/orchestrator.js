@@ -654,12 +654,19 @@ class Orchestrator extends EventEmitter {
   async dispatchWake(nodeId) {
     const team = this.store.getTeam();
     const node = team.nodes.find((n) => n.id === nodeId);
-    if (!node || this.userStopped || this.dispatchPaused || this.procs.has(nodeId)) return;
+    if (!node) return;
     const a = this.agent(nodeId);
-    if (a.status === 'working' || a.budgetStop) return; // busy (or over budget): stay unread, the next sweep retries
+    // Every skip records why (wake-sweep reads a.wakeBlocked for the overdue-unread log + UI); stay unread, the next sweep retries.
+    const skip = (reason) => { a.wakeBlocked = { reason, at: Date.now() }; };
+    if (this.userStopped) return skip('project stopped');
+    if (this.dispatchPaused) return skip('dispatch paused');
+    if (this.procs.has(nodeId)) return skip('agent has a live run');
+    if (a.status === 'working') return skip('agent is working');
+    if (a.budgetStop) return skip('over budget');
     const settings = this.store.getSettings();
-    if (settings.maxConcurrency > 0 && this.procs.size >= settings.maxConcurrency) return;
-    if (this.memGuard?.status().defer) return; // memory pressure: stay unread, the next sweep retries (t_a9864978)
+    if (settings.maxConcurrency > 0 && this.procs.size >= settings.maxConcurrency) return skip(`max concurrency (${settings.maxConcurrency}) reached`);
+    const mg = this.memGuard?.status();
+    if (mg?.defer) return skip(`memory guard: ${mg.why}`); // memory pressure (t_a9864978)
     const msgs = this.wakeUnread(nodeId, team);
     if (!msgs.length) return;
     const now = Date.now();
@@ -668,7 +675,7 @@ class Orchestrator extends EventEmitter {
     // neither is the system status check (the nudge button replaced a human message — same rule).
     // The cap only guards agent->agent ping-pong between two autonomous senders.
     const capped = (f) => { if (f === 'human' || f === 'system') return false; const e = this.wakePairs.get(f + '>' + nodeId); return e && now - e.since < WAKE.PAIR_WINDOW_MS && e.count >= WAKE.MAX_PER_PAIR; };
-    if (senders.every(capped)) return; // ping-pong loop: every sender pair is at its cap, stay quiet
+    if (senders.every(capped)) return skip('ping-pong pair cap'); // every sender pair is at its cap, stay quiet
     for (const f of senders) {
       if (f === 'human' || f === 'system') continue;
       const k = f + '>' + nodeId; const e = this.wakePairs.get(k);
@@ -676,7 +683,7 @@ class Orchestrator extends EventEmitter {
       else { e.count++; if (e.count === WAKE.MAX_PER_PAIR) this.log(nodeId, 'system', `wake cap reached for messages from ${f}: no more auto-wakes from this pair for a while`); }
     }
     this.wakeLastAt.set(nodeId, now); // nudge-throttle anchor: a just-woken agent is not re-nudged at once
-    a.wakePending = null;
+    a.wakePending = null; a.wakeBlocked = null;
     this.store.markMessagesRead(msgs.map((m) => m.id)); // delivered verbatim in the prompt below
     this.emit('woken_by_message', { nodeId, by: senders, messageIds: msgs.map((m) => m.id) });
     const nameOf = (id) => (id === 'system' ? 'the system status check' : (team.nodes.find((n) => n.id === id) || {}).name || id);

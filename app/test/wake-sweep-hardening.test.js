@@ -64,3 +64,29 @@ test('wake sweep: one broken agent does not blind the rest of the roster', () =>
   assert.equal(errors[0].nodeId, a.id, 'the failure is logged against the broken agent');
   assert.match(errors[0].text, /boom/);
 });
+
+test('overdue human unread: records block reason, logs once, heals leaked procs/working', async () => {
+  const d = tmp('squad-wake-overdue-');
+  const s = new Store(path.join(d, 'p'));
+  const a = s.addNode({ name: 'A', role: 'Dev' });
+  const o = makeOrch(s);
+  const logs = []; o.log = (n, k, t) => logs.push(t);
+  const m = s.sendMessage({ from: 'human', to: a.id, text: 'hi' });
+  const old = WAKE.OVERDUE_MS; WAKE.OVERDUE_MS = 0;
+  try {
+    o.memGuard = { status: () => ({ defer: true, why: 'pressure critical' }), refresh: async () => {}, configure() {} };
+    await o.dispatchWake(a.id);
+    assert.match(o.agent(a.id).wakeBlocked.reason, /memory guard: pressure critical/);
+    o.sweepWakes(); o.sweepWakes();
+    const wp = o.agent(a.id).wakePending;
+    assert.match(wp.wakeBlockedReason, /memory guard/);
+    assert.ok(wp.oldestUnreadAt > 0);
+    assert.equal(logs.filter((t) => /wake overdue/.test(t)).length, 1, 'logged once per reason');
+    // leaked procs entry with a dead pid
+    o.procs.set(a.id, { pid: 2 ** 22 + 12345, kill() {} }); o.agent(a.id).status = 'working';
+    o.sweepWakes();
+    assert.equal(o.procs.has(a.id), false);
+    assert.equal(o.agent(a.id).status, 'idle');
+    assert.ok(logs.some((t) => /self-heal/.test(t)));
+  } finally { WAKE.OVERDUE_MS = old; }
+});
