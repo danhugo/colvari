@@ -2002,6 +2002,9 @@ function renderIdle() {
 // ---------- board ----------
 const PRIORITIES = ['P0', 'P1', 'P2', 'P3'];
 const priorityOf = (t) => PRIORITIES.includes(t.priority) ? t.priority : 'P2';
+// Scheduled reminder (t_22fa32e9): next time + repeat, e.g. "⏰ 14:30 ↻60m".
+const remindLabel = (t) => t.remindAt ? `<span class="cremind" title="Scheduled check ${esc(new Date(t.remindAt).toLocaleString())}">⏰ ${esc(new Date(t.remindAt).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }))}${t.remindEveryMin ? ` ↻${t.remindEveryMin}m` : ''}</span>` : '';
+const localDT = (iso) => { const d = new Date(iso); return new Date(d - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16); };
 const priorityBadge = (t) => `<span class="tag prio prio-${priorityOf(t)}" title="Priority ${priorityOf(t)}">${priorityOf(t)}</span>`;
 // Titles ride through String() so a corrupted task file without one cannot throw inside
 // localeCompare and kill the whole board render (t_e25151db).
@@ -2074,7 +2077,7 @@ function cardHtml(t) {
   const snippet = String(t.description || '').replace(/\s+/g, ' ').trim();
   const nCmts = (t.comments || []).length; // a task without a comments array must not kill the whole board render
   const cmtWord = nCmts === 1 ? 'comment' : 'comments';
-  return `<div class="card ${sel.task === t.id ? 'sel' : ''}${t.awaitingApproval ? ' approval' : ''}" data-id="${t.id}"><b>${esc(t.title)}</b>${snippet && snippet !== t.title ? `<span class="cdesc" title="${esc(snippet)}">${esc(clipText(snippet, 100))}</span>` : ''}${tags ? `<span class="ctags">${tags}</span>` : ''}<small class="cmeta">${priorityBadge(t)}${t.assignee ? ((w) => `<span class="avatar sm" style="background:${avatarBg(w)}" title="${esc(w.name)}">${avatarBody(t.assignee, w)}</span><span class="cname">${esc(w.name)}</span>`)(who(t.assignee)) : '<span class="muted">unassigned</span>'}<span class="cago" title="last updated">${ago(t.updatedAt) || '—'}</span>${nCmts ? `<span class="ccount" title="${nCmts} ${cmtWord}">💬 ${nCmts}</span>` : ''}</small></div>`;
+  return `<div class="card ${sel.task === t.id ? 'sel' : ''}${t.awaitingApproval ? ' approval' : ''}" data-id="${t.id}"><b>${esc(t.title)}</b>${snippet && snippet !== t.title ? `<span class="cdesc" title="${esc(snippet)}">${esc(clipText(snippet, 100))}</span>` : ''}${tags ? `<span class="ctags">${tags}</span>` : ''}<small class="cmeta">${priorityBadge(t)}${t.assignee ? ((w) => `<span class="avatar sm" style="background:${avatarBg(w)}" title="${esc(w.name)}">${avatarBody(t.assignee, w)}</span><span class="cname">${esc(w.name)}</span>`)(who(t.assignee)) : '<span class="muted">unassigned</span>'}${remindLabel(t)}<span class="cago" title="last updated">${ago(t.updatedAt) || '—'}</span>${nCmts ? `<span class="ccount" title="${nCmts} ${cmtWord}">💬 ${nCmts}</span>` : ''}</small></div>`;
 }
 // Card-html memo (t_d6c2be24): every store write (any comment, any run push) bumps the board
 // version, and the old path met that by re-running cardHtml for ALL cards — ~500 html strings on
@@ -2169,6 +2172,8 @@ function renderBoard() {
     <label>Priority</label><select id="td-priority">${PRIORITIES.map((p) => `<option ${p === priorityOf(t) ? 'selected' : ''}>${p}</option>`).join('')}</select>
     <label>Status</label><select id="td-status">${STATUSES.map((s) => `<option ${s === t.status ? 'selected' : ''}>${s}</option>`).join('')}</select>
     <label>Assignee</label><select id="td-assignee">${S.allNodes.map((n) => `<option value="${n.id}" ${n.id === t.assignee ? 'selected' : ''}>${esc(n.name)}</option>`).join('')}</select>
+    <label>Scheduled check ${remindLabel(t)} <span class="muted">(messages the assignee at this time; repeat minutes ≥ 30, empty = once)</span></label>
+    <div class="toolbar"><input id="td-remind-at" type="datetime-local" value="${t.remindAt ? localDT(t.remindAt) : ''}"><input id="td-remind-every" type="number" min="30" step="1" placeholder="repeat min" value="${t.remindEveryMin || ''}" style="width:7em"><button id="td-remind-save">Set</button>${t.remindAt ? '<button id="td-remind-clear">Clear</button>' : ''}</div>
     <label>Blocked by <span class="muted">(runs only after these are done${bl.length ? ` · ${bl.length} open` : ''})</span></label>
     <div id="td-deps" class="checks deps">${S.tasks.filter((x) => x.id !== t.id).map((x) => `<label class="${deps.has(x.id) && x.status !== 'done' ? 'open' : ''}"><input type="checkbox" value="${x.id}" ${deps.has(x.id) ? 'checked' : ''}> ${esc(x.title)} <span class="muted">(${x.status})</span></label>`).join('') || '<span class="muted">no other tasks</span>'}</div>
     <label>Description</label><div class="comment">${esc(t.description) || '<span class="muted">none</span>'}</div>
@@ -2185,6 +2190,12 @@ function renderBoard() {
   $('#td-priority').onchange = async (e) => { await call('updateTask', t.id, { priority: e.target.value }); refresh(); };
   $('#td-status').onchange = async (e) => { await call('updateTask', t.id, { status: e.target.value }); refresh(); };
   $('#td-assignee').onchange = async (e) => { await call('updateTask', t.id, { assignee: e.target.value }); refresh(); };
+  $('#td-remind-save').onclick = act(async () => {
+    const at = $('#td-remind-at').value; if (!at) return;
+    const ev = $('#td-remind-every').value;
+    await call('updateTask', t.id, { remindAt: new Date(at).toISOString(), remindEveryMin: ev ? Math.max(30, Math.round(Number(ev))) : null }); refresh();
+  });
+  if ($('#td-remind-clear')) $('#td-remind-clear').onclick = act(async () => { await call('updateTask', t.id, { remindAt: null, remindEveryMin: null }); refresh(); });
   $('#td-addc').onclick = async () => { const v = $('#td-comment').value.trim(); if (v) { await call('commentTask', t.id, v); refresh(); } };
   document.querySelectorAll('#td-deps input').forEach((x) => x.onchange = act(async () => { await call('updateTask', t.id, { blockedBy: [...document.querySelectorAll('#td-deps input')].filter((y) => y.checked).map((y) => y.value) }); refresh(); }));
   if ($('#td-approve')) { $('#td-approve').onclick = act(async () => { await call('approveTask', t.id, true, $('#td-note').value.trim()); refresh(); }); $('#td-reject').onclick = act(async () => { await call('approveTask', t.id, false, $('#td-note').value.trim()); refresh(); }); }

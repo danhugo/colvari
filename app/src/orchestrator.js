@@ -15,6 +15,7 @@ const U = require('./usage');
 const TL = require('./timeline');
 const PF = require('./preflight');
 const C = require('./controls');
+const R = require('./remind');
 const IDLE = require('./idle');
 const WT = require('./worktree');
 const SB = require('./sandbox');
@@ -278,6 +279,13 @@ class Orchestrator extends EventEmitter {
     // idle; tick() stays the fast path while running. unref'd: it must not hold the process open.
     this._restartTimer = setInterval(() => { try { if (!this.running) this.sweepRestart(); } catch {} }, RESTART.IDLE_SWEEP_MS);
     if (this._restartTimer.unref) this._restartTimer.unref();
+    // Always-on reminder timer (t_22fa32e9): task.remindAt fires whether or not a Run is up; while
+    // idle it also drives sweepWatch (tick() only runs it during a Run). unref'd like _restartTimer.
+    this._remindTimer = setInterval(() => {
+      try { this.sweepReminders(); } catch (e) { this.log(null, 'error', 'reminder sweep: ' + e.message); }
+      try { if (!this.running) this.sweepWatch(); } catch (e) { this.log(null, 'error', 'watch sweep: ' + e.message); }
+    }, 60000);
+    if (this._remindTimer.unref) this._remindTimer.unref();
     // A fired marker here means the previous process relaunched itself: the schedule did its job.
     // Consume it now (Cato t_42f310cf #4: cleared only after the new process boots — never before
     // the restart, or a crash mid-relaunch loses it; never left set, or state reads stale).
@@ -979,9 +987,21 @@ class Orchestrator extends EventEmitter {
   // from the one the core was last woken for AND the per-agent wake gap has passed — deferred or
   // busy-suppressed digests stay pending and re-fire on a later tick. The delivery reuses the nudge
   // path (system message + wakeForHuman), so the single-run, budget and usage-pause guards all apply.
+  // Due task reminders -> a queued system status check to the assignee (any status, done included),
+  // then advance to the next repeat slot or clear. sendToAgent applies the usual wake rules.
+  sweepReminders() {
+    for (const t of this.store.listTasks()) {
+      if (!R.due(t) || !t.assignee) continue;
+      const nxt = R.next(t);
+      this.store.updateTask(t.id, nxt ? { remindAt: nxt } : { remindAt: null, remindEveryMin: null });
+      this.sendToAgent(t.assignee, R.text(t), t.id, { from: 'system', interrupt: false });
+    }
+  }
+
   sweepWatch() {
     const st = this.watch ||= { lastWatchAt: null, lastDigest: '', wokeDigest: null, active: null };
-    const active = !!(this.running && !this.userStopped && !this.dispatchPaused && this.procs.size > 0);
+    // Also active on a quiet board (no live run) that still has open tasks, so idle work wakes the core.
+    const active = !!(!this.userStopped && !this.dispatchPaused && (this.procs.size > 0 ? this.running : this.store.listTasks().some((t) => t.status !== 'done')));
     if (st.active !== active) {
       st.active = active;
       // Activation arms the first interval (a digest the moment work starts duplicates what the core

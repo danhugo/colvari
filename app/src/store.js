@@ -864,12 +864,13 @@ class Store {
   }
   // Main-process (IPC) twin: waits for a busy lock by yielding, not sleepSync-spinning (t_c02b7d0b).
   async createTaskAsync(t) { return this.createTask(t, (fn) => this._withTasksAsync(fn)); }
-  createTask({ title, description = '', assignee = null, createdBy = 'human', parentId = null, blockedBy = [], priority, attachments = null }, withTasks = (fn) => this._withTasks(fn)) {
+  createTask({ title, description = '', assignee = null, createdBy = 'human', parentId = null, blockedBy = [], priority, attachments = null, remindAt = null, remindEveryMin = null }, withTasks = (fn) => this._withTasks(fn)) {
     if (!title) throw new Error('title required');
     const now = new Date().toISOString();
     const task = { id: id('t'), title, description, assignee, status: 'todo', priority: C.normalizePriority(priority), createdBy, parentId, blockedBy: [], comments: [], createdAt: now, updatedAt: now };
     const atts = sanitizeAttachments(attachments);
     if (atts) task.attachments = atts;
+    if (remindAt) { task.remindAt = remindAt; if (remindEveryMin) task.remindEveryMin = remindEveryMin; }
     const r = withTasks((tasks) => { task.blockedBy = C.validateDeps(task.id, blockedBy, tasks); tasks.push(task); });
     return r && r.then ? r.then(() => task) : task;
   }
@@ -897,7 +898,7 @@ class Store {
       if (patch.blockedBy !== undefined) t.blockedBy = C.validateDeps(tid, patch.blockedBy, tasks);
       if (patch.status && patch.status !== 'review') t.awaitingApproval = false;
       if (patch.priority !== undefined) t.priority = C.normalizePriority(patch.priority);
-      for (const k of ['title', 'description', 'assignee', 'status', 'sessionId', 'sessions', 'iterations', 'awaitingApproval', 'reopenCount', 'worktreePath', 'worktreeBranch', 'isConflictResolution', 'conflictBranch', 'conflictRetries', 'parkedForHuman', 'stallRecoveries', 'drainCuts', 'redMaster', 'reviewStage', 'reviewWakes', 'reviewWakeAt', 'autoResumeTried', 'noAutoResume', 'stuckAlertFor']) if (patch[k] !== undefined) t[k] = patch[k];
+      for (const k of ['title', 'description', 'assignee', 'status', 'sessionId', 'sessions', 'iterations', 'awaitingApproval', 'reopenCount', 'worktreePath', 'worktreeBranch', 'isConflictResolution', 'conflictBranch', 'conflictRetries', 'parkedForHuman', 'stallRecoveries', 'drainCuts', 'redMaster', 'reviewStage', 'reviewWakes', 'reviewWakeAt', 'autoResumeTried', 'noAutoResume', 'stuckAlertFor', 'remindAt', 'remindEveryMin']) if (patch[k] !== undefined) t[k] = patch[k];
       t.updatedAt = new Date().toISOString();
       for (let c = t; c.status === 'done' && c.parentId;) {
         const parent = tasks.find((x) => x.id === c.parentId);
@@ -932,7 +933,7 @@ class Store {
       if (patch.blockedBy !== undefined) t.blockedBy = C.validateDeps(tid, patch.blockedBy, tasks);
       if (patch.status && patch.status !== 'review') t.awaitingApproval = false;
       if (patch.priority !== undefined) t.priority = C.normalizePriority(patch.priority);
-      for (const k of ['title', 'description', 'assignee', 'status', 'sessionId', 'sessions', 'iterations', 'awaitingApproval', 'reopenCount', 'worktreePath', 'worktreeBranch', 'isConflictResolution', 'conflictBranch', 'conflictRetries', 'parkedForHuman', 'stallRecoveries', 'drainCuts', 'redMaster', 'reviewStage', 'reviewWakes', 'reviewWakeAt', 'autoResumeTried', 'noAutoResume', 'stuckAlertFor']) if (patch[k] !== undefined) t[k] = patch[k];
+      for (const k of ['title', 'description', 'assignee', 'status', 'sessionId', 'sessions', 'iterations', 'awaitingApproval', 'reopenCount', 'worktreePath', 'worktreeBranch', 'isConflictResolution', 'conflictBranch', 'conflictRetries', 'parkedForHuman', 'stallRecoveries', 'drainCuts', 'redMaster', 'reviewStage', 'reviewWakes', 'reviewWakeAt', 'autoResumeTried', 'noAutoResume', 'stuckAlertFor', 'remindAt', 'remindEveryMin']) if (patch[k] !== undefined) t[k] = patch[k];
       t.updatedAt = new Date().toISOString();
       for (let c = t; c.status === 'done' && c.parentId;) {
         const parent = tasks.find((x) => x.id === c.parentId);
@@ -1126,7 +1127,7 @@ class Store {
       if (patch.blockedBy !== undefined) t.blockedBy = C.validateDeps(tid, patch.blockedBy, tasks);
       if (patch.status && patch.status !== 'review') t.awaitingApproval = false;
       if (patch.priority !== undefined) t.priority = C.normalizePriority(patch.priority);
-      for (const k of ['title', 'description', 'assignee', 'status', 'sessionId', 'sessions', 'iterations', 'awaitingApproval', 'reopenCount', 'worktreePath', 'worktreeBranch', 'isConflictResolution', 'conflictBranch', 'conflictRetries', 'parkedForHuman', 'stallRecoveries', 'drainCuts', 'redMaster', 'reviewStage', 'reviewWakes', 'reviewWakeAt', 'autoResumeTried', 'noAutoResume', 'stuckAlertFor']) if (patch[k] !== undefined) t[k] = patch[k];
+      for (const k of ['title', 'description', 'assignee', 'status', 'sessionId', 'sessions', 'iterations', 'awaitingApproval', 'reopenCount', 'worktreePath', 'worktreeBranch', 'isConflictResolution', 'conflictBranch', 'conflictRetries', 'parkedForHuman', 'stallRecoveries', 'drainCuts', 'redMaster', 'reviewStage', 'reviewWakes', 'reviewWakeAt', 'autoResumeTried', 'noAutoResume', 'stuckAlertFor', 'remindAt', 'remindEveryMin']) if (patch[k] !== undefined) t[k] = patch[k];
       t.updatedAt = new Date().toISOString();
       // Parent auto-complete: when the last open subtask is done, the parent moves to done.
       for (let c = t; c.status === 'done' && c.parentId;) {

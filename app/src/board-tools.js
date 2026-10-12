@@ -1,11 +1,12 @@
 // Pure tool implementations with scope enforcement. Used by the MCP server and by tests.
 const fs = require('fs');
 const path = require('path');
-const { outgoing, incoming, canAssign, canMessage, reviewees, visibleTask, canSetStatus, AGENT_PATCH_FIELDS, capPermissionMode, canManageAgent, canRetire } = require('./scope');
+const { outgoing, incoming, canAssign, canMessage, reviewees, visibleTask, canSetStatus, canModifyTask, AGENT_PATCH_FIELDS, capPermissionMode, canManageAgent, canRetire } = require('./scope');
 const { BOARD_TOOLS, RESTART_TOOLS } = require('./agent-config');
 const { getRuntime } = require('./runtimes');
 const WT = require('./worktree');
 const C = require('./controls');
+const R = require('./remind');
 const SU = require('./self-update');
 
 // Board tools this node may use (the rest are disabled in the node's settings). The restart tools
@@ -194,13 +195,25 @@ function makeTools(store, nodeId) {
         .sort((a, b) => String(a.assignee).localeCompare(String(b.assignee)) || String(a.priority).localeCompare(String(b.priority)))
         .map((tk) => fmtTask(t, tk, all, { brief: true }));
     },
-    create_task({ title, description = '', assignee, parentId = null, blockedBy = [], priority }) {
+    create_task({ title, description = '', assignee, parentId = null, blockedBy = [], priority, remindAt, remindEveryMin }) {
       const t = me();
       const target = assignee ? resolve(t, assignee, 'assignee') : t.nodes.find((n) => n.id === nodeId);
       if (!canAssign(t, nodeId, target.id)) throw new Error(`scope violation: ${nodeName(t, nodeId)} cannot assign tasks to ${target.name} (no assign edge)`);
-      const task = store.createTask({ title, description, assignee: target.id, createdBy: nodeId, parentId, blockedBy, priority });
+      const task = store.createTask({ title, description, assignee: target.id, createdBy: nodeId, parentId, blockedBy, priority, remindAt: remindAt ? R.parseAt(remindAt) : null, remindEveryMin: remindEveryMin != null ? R.parseEvery(remindEveryMin) : null });
       const warn = overloadWarning(t, target);
       return warn ? { ...task, warning: warn } : task;
+    },
+    // Set/clear a task reminder: the assignee, the creator, or a PM with an assign edge to the assignee.
+    schedule_task({ taskId, remindAt, remindEveryMin, clear = false }) {
+      const tk = store.getTask(taskId);
+      if (!tk) throw new Error('no task ' + taskId);
+      if (!canModifyTask(me(), nodeId, tk)) throw new Error('scope violation: only the assignee, the creator or their PM can schedule this task');
+      if (clear) return store.updateTask(taskId, { remindAt: null, remindEveryMin: null });
+      const patch = {};
+      if (remindAt) patch.remindAt = R.parseAt(remindAt);
+      if (remindEveryMin != null) patch.remindEveryMin = R.parseEvery(remindEveryMin);
+      if (!patch.remindAt && !tk.remindAt) throw new Error('remindAt required');
+      return store.updateTask(taskId, patch);
     },
     // PM-only: move a task to another teammate (needs an assign edge). Worktree, branch and comments stay.
     // Only todo tasks: a running/finished task still belongs to its agent.
