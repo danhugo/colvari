@@ -32,6 +32,7 @@ class MemGuard {
     this.cacheMs = opts.cacheMs ?? PROBE_CACHE_MS;
     this.deferAt = DEFER_AT.warning; // guard on at warning by default; configure() follows settings
     this._probe = opts.probe || null; // injectable override: () => Promise<{level}|{freeBytes}|{error}>
+    this._snapshot = opts.snapshot || (() => this._psSnapshot()); // t_b2b497f3: what eats RAM, for the alert
     this._busy = false;
     this._state = { defer: false, level: null, freeBytes: null, source: this.platform === 'darwin' ? 'pressure' : 'freemem', why: 'no reading yet', at: null, deferAt: 'warning' };
   }
@@ -74,6 +75,17 @@ class MemGuard {
     this._recompute();
   }
   _recompute() {
+    const was = this._state.defer;
+    this._recomputeDefer();
+    // t_b2b497f3: hold start = one process/vm_stat snapshot (never per sweep); clear = clearSince so
+    // the alert can wait ~60 s before saying "resumed" (flapping must not spam).
+    const s = this._state;
+    if (s.defer && !was) {
+      this._state = { ...s, heldSince: this.now(), clearSince: null, snapshot: null };
+      Promise.resolve().then(this._snapshot).then((snap) => { if (this._state.defer) this._state = { ...this._state, snapshot: snap }; }, () => {});
+    } else if (!s.defer && was) this._state = { ...s, heldSince: null, clearSince: this.now() };
+  }
+  _recomputeDefer() {
     const s = this._state;
     if (this.deferAt === DEFER_AT.off) { this._state = { ...s, defer: false, why: 'memory guard off' }; return; }
     if (s.source === 'freemem') {
@@ -91,6 +103,18 @@ class MemGuard {
     const level = parseInt(out, 10);
     if (!(level >= 1)) throw new Error(`unparsable ${SYSCTL_KEY}: "${out}"`);
     return { level };
+  }
+  async _psSnapshot() {
+    const run = (cmd, args) => new Promise((resolve) => this.execFile(cmd, args, { timeout: 3000, maxBuffer: 4 << 20 }, (e, out) => resolve(e ? '' : String(out))));
+    return MemGuard.parseSnapshot(await run('ps', ['-axo', 'rss=,comm=']), this.platform === 'darwin' ? await run('vm_stat', []) : '');
+  }
+  // ps rss is KB; vm_stat counts pages. Top 5 by RAM, any process (Docker etc. included).
+  static parseSnapshot(ps, vm) {
+    const procs = String(ps).split('\n').map((l) => l.trim().match(/^(\d+)\s+(.+)$/)).filter(Boolean)
+      .map((m) => ({ name: m[2].split('/').pop(), mb: Math.round(+m[1] / 1024) })).sort((a, b) => b.mb - a.mb).slice(0, 5);
+    const page = +((/page size of (\d+)/.exec(vm) || [])[1]) || 4096;
+    const pages = (re) => { const m = re.exec(vm); return m ? Math.round(+m[1] * page / 2 ** 20) : null; };
+    return { procs, freeMB: pages(/Pages free:\s+(\d+)/), compressedMB: pages(/Pages occupied by compressor:\s+(\d+)/) };
   }
   // Synchronous read of the last probe: what every dispatch guard consults. Fail-open by shape —
   // before the first successful reading defer is false.

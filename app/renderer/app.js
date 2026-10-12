@@ -572,7 +572,7 @@ function renderHeader() {
     setText(pill, `● Running ${par || 1}${holds.length ? ` +${holds.length}` : ''}`); // short status chip (t_db67859d): full wording in the tooltip
     setTitle(pill, `running · ${par > 1 ? `${par} in parallel` : `${par || 1} agent`} · ${o.runs || 0} runs${holds.length ? ` · ${holds.length} queued: ${holds.slice(0, 3).map((h) => `"${h.title}" — ${h.why}`).join('; ')}${holds.length > 3 ? ` +${holds.length - 3} more` : ''}` : ''}`);
   } else if (rs.state === 'idle') {
-    setText(pill, '● Idle');
+    setText(pill, (S.orch.memGuard || {}).defer && holds.length ? '● Idle · memory' : '● Idle');
     setTitle(pill, `idle · ${rs.reason || 'waiting for todo tasks'}${holds.length ? ` · ${holds.length} queued` : ''} · ${o.runs || 0} runs`);
   } else {
     setText(pill, todos ? `Stopped (${todos} todo)` : 'Stopped');
@@ -1861,6 +1861,7 @@ async function renderAlerts() {
     stalls, teamNodes: S.team.nodes, limits, stuckMinutes: S.settings.stuckMinutes || 5, now: Date.now(),
     nodeNames: Object.fromEntries(S.allNodes.map((n) => [n.id, n.name])),
     rtu: rtu ? { ...rtu, paused, label: runtimeLabel(rtu.runtime) } : null,
+    memGuard: S.orch.memGuard, memHeld: (S.orch.dispatchHolds || []).filter((h) => /memory/i.test(h.why || '')).length,
   }).filter((a) => a.kind !== 'preflight');
   if (wtDisk && (wtDisk.count > WT_DISK_CAP.count || wtDisk.bytes > WT_DISK_CAP.bytes)) all.push({ id: 'wtdisk', kind: 'wtdisk', severity: 'warn', at: Date.now(), dismissable: true,
     text: `Worktrees use ${fmtWtBytes(wtDisk.bytes)} (${wtDisk.count}) — clean up from the status bar`, fingerprint: String(wtDisk.count) });
@@ -2067,7 +2068,7 @@ function cardHtml(t) {
     noWorker ? `<span class="tag noworker" title="in_progress but no live agent process for ${esc(nodeName(t.assignee))}">No worker</span>` : '',
     stallTag(t),
     (upd.devMode !== false && rstGated(t)) ? `<span class="tag rstwait" title="held back by the restart gate${rst.scheduledAfter ? ` — starts after the core restart (after ${esc(shortTaskId(rst.scheduledAfter))})` : ' — starts after the core restarts'}">waits for restart</span>` : '',
-    holdOf(t.id) ? `<span class="tag queued" title="queued: ${esc(holdOf(t.id).why)} · waiting ${ago(holdOf(t.id).since) || 'just now'}">⏳ waiting</span>` : '',
+    holdOf(t.id) ? `<span class="tag queued" title="queued: ${esc(holdOf(t.id).why)} · waiting ${ago(holdOf(t.id).since) || 'just now'}">⏳ waiting · ${esc(String(holdOf(t.id).why || '').slice(0, 40))}</span>` : '',
     bl.length ? `<span class="tag blocked" title="waits for: ${esc(bl.map(taskTitle).join(', '))}">Blocked by ${esc(taskTitle(bl[0]).slice(0, 28))}${bl.length > 1 ? ` +${bl.length - 1}` : ''}</span>` : ready ? '<span class="tag ready" title="Ready">Ready</span>' : '',
     t.awaitingApproval ? '<span class="tag approval" title="needs approval">needs approval</span>' : ''].join('');
   const snippet = String(t.description || '').replace(/\s+/g, ' ').trim();
