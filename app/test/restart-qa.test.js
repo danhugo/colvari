@@ -49,6 +49,7 @@ test('qa: a landed merge never restarts — only the pending count moves', async
   o.tick();
   const orig = MG.gateMerge;
   const root = tmp('squad-restart-qa-root-');
+  s.appRoot = root;
   try {
     MG.gateMerge = () => ({ merged: true, base: 'master', root, gate: { state: 'green', tests: 1, flaky: [] } });
     const t = s.createTask({ title: 'm', assignee: a.id, createdBy: 'human' });
