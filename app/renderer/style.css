@@ -792,10 +792,8 @@ header #stop:hover { background:var(--danger-soft); color:var(--danger); }
 .sb-inbox.active { background:var(--accent-soft); color:var(--accent-text); }
 .sb-inbox:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
 .sb-inbox .badge { margin-left:auto; }
-/* Section action icons reveal on hover or keyboard focus only; --fg-secondary keeps them ≥3:1
-   on the sidebar surface in both themes (the old --fg-muted glyphs read as background noise). */
-#sidebar .sb-actions { opacity:0; transition:opacity var(--dur-fast) var(--ease-out); }
-.sb-sec:hover .sb-actions, .sb-sec:focus-within .sb-actions { opacity:1; }
+/* Section action icons are always visible (hover-only hid the New team ＋, t_77bd7ab9); --fg-secondary
+   keeps them ≥3:1 on the sidebar surface in both themes. */
 #sidebar .sb-actions button { width:24px; height:24px; color:var(--fg-secondary); }
 
 /* Chat: collapsed task-event runs, monochrome event rows, same-size You avatar, single-field composer */
