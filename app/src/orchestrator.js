@@ -679,6 +679,18 @@ class Orchestrator extends EventEmitter {
     await this.wakeRun(node, list, team, settings);
     return true;
   }
+  // t_2c11c485: a finished task wakes the team node that created it, once, so a lead's multi-step
+  // plan keeps going (idle wakes need open tasks; parent auto-close may leave none). Run-end is the
+  // one place every agent-driven done (worker or reviewer) passes through.
+  wakeCreatorOnDone(t) {
+    if (!t || t.status !== 'done' || !t.createdBy || t.createdBy === t.assignee || this.budgetStop) return;
+    if ((this._creatorWoken ||= new Set()).has(t.id)) return;
+    if (!this.store.getTeam().nodes.some((n) => n.id === t.createdBy)) return;
+    this._creatorWoken.add(t.id);
+    const m = this.store.sendMessage({ from: 'system', to: t.createdBy, text: `Task ${t.id} "${t.title}" is done. If your plan has more steps, create the next tasks now; otherwise stop.` });
+    this.wakeForHuman(t.createdBy, [m], { reason: 'task done', taskIds: [t.id], action: 'wake creator' })
+      .catch((e) => this.log(t.createdBy, 'error', 'creator wake: ' + e.message));
+  }
   // One background run delivering the messages (resumes the agent's last session when it has one).
   async wakeRun(node, msgs, team, settings) {
     // Single-run lock, enforced at the last choke point: never a second live run for one agent, even
@@ -1845,6 +1857,7 @@ class Orchestrator extends EventEmitter {
         this.store.commentTask(task.id, 'orchestrator', `Agent exited (code ${code}) after moving this task to review during iteration ${i}; parked for a human because the run crashed.`);
       }
       const t2 = this.store.getTask(task.id);
+      this.wakeCreatorOnDone(t2);
       if (t2 && t2.awaitingApproval) { this.log(node.id, 'system', `⏸ "${task.title}" waits for human approval`); }
       this.log(node.id, 'system', `■ ${node.name} finished (exit ${code}, ${i} iteration(s), ${reason})`);
       this.changed();
