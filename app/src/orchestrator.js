@@ -301,6 +301,15 @@ class Orchestrator extends EventEmitter {
       store.clearRestartPending();
       this.log(null, 'system', 'packaged build: restart scheduling is unavailable here — cleared stored restart state');
     }
+    // A project whose worktrees live in another repo never makes this app stale: drop the bogus
+    // tally older builds counted from its merges (t_c1663d2d).
+    if (store.restartPending()) {
+      const roots = [...new Set(store.listTasks().filter((t) => t.worktreePath).map((t) => path.resolve(t.worktreePath, '..', '..', '..')))];
+      if (roots.length && !roots.some((r) => store.isAppRepo(r))) {
+        store.clearRestartPending();
+        this.log(null, 'system', 'restart: this project merges into another repo — cleared stored restart state');
+      }
+    }
     // What this RUNNING process was built from (t_7e590e54): the merge path reads it to express
     // restartPending.count as "commits behind". It lives in meta because merges run in whichever
     // process holds the store (an agent's board server flips tasks done), not just the app.

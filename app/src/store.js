@@ -24,6 +24,19 @@ const { BoardCache } = require('./board-cache');
 // Bounce payload for a gate-blocked merge: failing test names + a capped output tail (#8).
 const blockPayload = (r) => `${(r.names || []).length ? (r.names || []).map((n) => '- ' + n).join('\n') : '- (test names unavailable)'}\n\ntail of the test output:\n\`\`\`\n${r.output || '(none)'}\n\`\`\``;
 
+const APP_ROOT = path.join(__dirname, '..', '..');
+// Repo identity shared by all worktrees of one repo: the main .git dir (a worktree's .git file
+// points at <main>/.git/worktrees/<name>), realpath'd; the dir itself if not a repo.
+const repoId = (dir) => {
+  const real = (p) => { try { return fs.realpathSync(p); } catch { return path.resolve(p); } };
+  try {
+    const g = path.join(dir, '.git');
+    if (fs.statSync(g).isDirectory()) return real(g);
+    const m = /gitdir:\s*(.+)/.exec(fs.readFileSync(g, 'utf8'));
+    if (m) return real(path.resolve(dir, m[1].trim(), '..', '..'));
+  } catch {}
+  return real(dir);
+};
 const ROLES = SUGGESTED_ROLES; // suggestions only: roles are free text
 const soonQ = new Map(); // dir -> tail promise of this process's queued deferred writes (Store._soon)
 const STATUSES = ['todo', 'in_progress', 'review', 'done', 'waiting_for_human', 'merge_conflict'];
@@ -139,6 +152,7 @@ class Store {
     this.dir = dir;
     this.teamId = teamId;
     this.devMode = opts.devMode !== false;
+    this.appRoot = opts.appRoot || APP_ROOT; // tests inject a temp repo
     fs.mkdirSync(dir, { recursive: true });
     // Main-process board cache (t_479e7290): opt-in, one shared instance per project dir (the
     // cache outlives the throwaway Store instances). The board MCP server processes construct
@@ -387,6 +401,8 @@ class Store {
   // Merges only bump the pending counter; a restart happens solely through an armed schedule
   // (schedule_restart tool, human pill, or the cap). The state lives in project.json so it
   // survives relaunches and is writable from every process that holds the store.
+  // Only merges into the app's own repo make the running app stale (t_c1663d2d).
+  isAppRepo(root) { return !!root && repoId(root) === repoId(this.appRoot); }
   restartPending() { return (this.meta() || {}).restartPending || null; }
   // withLock + explicit read/write (not update('project', null, fn)): a fresh project has no
   // project.json yet, and update() writes the object it read — a null dflt would clobber the file.
@@ -1021,7 +1037,7 @@ class Store {
       // Packaged build (devMode=false): nothing can ever restart, so merges count nothing —
       // otherwise the tally would grow forever and a later dev run of the same project would
       // inherit a bogus "commits behind".
-      if (this.devMode) {
+      if (this.devMode && this.isAppRepo(r.root)) {
         let bump = { sha: r.sha || null };
         try {
           const build = (this.meta() || {}).buildSha;
