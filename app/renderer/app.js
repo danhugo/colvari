@@ -3705,13 +3705,13 @@ function renderInbox() {
 // ---------- live updates ----------
 let pending = null, pendingP = null;
 // Self-update status push: prefer the dedicated bridge method, fall back to either plausible channel name.
-const onUpdPush = (d) => { upd = { ...normUpd(d), stub: false }; trackUpd(); if (upd.state !== 'idle') clearRstToast(); renderSelfUpdate(); renderUpdSettings(); renderAlerts(); }; // flow visible via veil/pill — the "Restarting…" toast retires
+const onUpdPush = (d) => { if (d && d.projectId && d.projectId !== ctx.p) return; upd = { ...normUpd(d), stub: false }; trackUpd(); if (upd.state !== 'idle') clearRstToast(); renderSelfUpdate(); renderUpdSettings(); renderAlerts(); }; // flow visible via veil/pill — the "Restarting…" toast retires
 if (squad.onSelfUpdateStatus) squad.onSelfUpdateStatus(onUpdPush);
 else { squad.on('selfUpdateStatus', onUpdPush); squad.on('self-update-status', onUpdPush); }
 // Restart/watch pushes: prefer dedicated bridge helpers, fall back to plausible channel names
 // (Devon adds the preload helpers when the backend lands — see contract on t_20d5a23c).
-const onRestartPush = (d) => { rst = { ...normRestart(d), stub: false }; rstSeen = true; if (!rstArmed() && rst.pendingCount === 0) clearRstToast(); renderHeader(); renderAlerts(); boardSig = null; renderBoard(); };
-const onWatchPush = (d) => { watch = { ...normWatch(d), stub: false }; renderHeader(); };
+const onRestartPush = (d) => { if (d && d.projectId && d.projectId !== ctx.p) return; rst = { ...normRestart(d), stub: false }; rstSeen = true; if (!rstArmed() && rst.pendingCount === 0) clearRstToast(); renderHeader(); renderAlerts(); boardSig = null; renderBoard(); };
+const onWatchPush = (d) => { if (d && d.projectId && d.projectId !== ctx.p) return; watch = { ...normWatch(d), stub: false }; renderHeader(); };
 if (squad.onRestartState) squad.onRestartState(onRestartPush);
 else { squad.on('restart-state', onRestartPush); squad.on('restartStatus', onRestartPush); }
 if (squad.onWatchStatus) squad.onWatchStatus(onWatchPush);
