@@ -180,9 +180,12 @@ test('mem-hold: one warn alert while held — count, cause, top 5 procs, what to
   assert.match(a.text, /Electron/);
   assert.doesNotMatch(a.text, /zsh/); // top 5 only
   assert.match(a.text, /stop Docker, or wait/);
-  assert.equal(a.fingerprint, '2');
-  const b = collect({ memGuard: { ...mg, snapshot: { procs: procs.slice(1) } }, memHeld: 1 })[0];
-  assert.equal(b.fingerprint, a.fingerprint); // new process list must not re-fire a dismissed alert
+  assert.match(a.fingerprint, /^2\|3\|0\|/); assert.equal(a.action.op, 'mem-override');
+  const same = collect({ memGuard: { ...mg, snapshot: { procs: procs.slice(1) } }, memHeld: 3 })[0];
+  assert.equal(same.fingerprint, a.fingerprint); // new process list must not re-fire a dismissed alert
+  assert.notEqual(collect({ memGuard: mg, memHeld: 3, memWakes: 2 })[0].fingerprint, a.fingerprint); // a new hold re-shows
+  assert.match(collect({ memGuard: mg, memHeld: 3, memWakes: 2 })[0].text, /3 tasks \/ 2 agents waiting/);
+  const b = a;
   assert.match(collect({ memGuard: { ...mg, snapshot: null }, memHeld: 1 })[0].text, /1 task waiting/);
 });
 

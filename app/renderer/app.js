@@ -1954,7 +1954,32 @@ const fakeAlerts = (n) => Array.from({ length: n }, (_, i) => {
     text: `Fake alert ${i + 1} — injected for testing`, agentId: nd.id || null, taskId: t.id || null, fingerprint: `fake${i}${fakeAlertFp}`,
     action: t.id ? { label: 'Open task', op: 'open-task', arg: t.id } : null };
 });
+// Held work for the guard: queued tasks (dispatchHolds) plus blocked agent wakes (t_h0a1c302).
+function memHeldCounts() {
+  const mg = S.orch.memGuard || {};
+  const tasks = mg.heldTasks != null ? mg.heldTasks : (S.orch.dispatchHolds || []).filter((h) => /memory/i.test(h.why || '')).length;
+  const wakes = mg.heldWakes != null ? mg.heldWakes : Object.values(S.orch.agents || {}).filter((a) => a.wakeBlocked && /memory/i.test(a.wakeBlocked.reason || '')).length;
+  return { tasks, wakes };
+}
+const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+const MEM_LEVELS = { 1: 'normal', 2: 'warning', 3: 'critical' };
+function renderMemStatus() {
+  const el = $('#memst'); if (!el) return;
+  const mg = S.orch.memGuard || {}; const { tasks, wakes } = memHeldCounts();
+  const lvl = mg.level != null ? (mg.levelName || (mg.level === 3 ? 'critical' : MEM_LEVELS[mg.level] || String(mg.level))) : null;
+  const sn = mg.snapshot || {};
+  const avail = mg.availPct != null ? mg.availPct : sn.availPct;
+  const disk = mg.diskFreeGB != null ? mg.diskFreeGB : (mg.diskFreeMB != null ? mg.diskFreeMB / 1024 : null);
+  const held = !!mg.defer;
+  const parts = [lvl ? `Mem ${lvl}` : 'Mem', avail != null ? `${Math.round(avail)}% avail` : '', disk != null ? `disk ${disk.toFixed(0)} GB free` : ''].filter(Boolean);
+  const ov = mg.override && mg.override.until > Date.now() ? ` · override ${Math.ceil((mg.override.until - Date.now()) / 60000)} min` : '';
+  const guard = held ? `holding ${plural(tasks, 'task')} / ${plural(wakes, 'agent wake')}${mg.why ? ': ' + mg.why : ''}` : `guard ok${ov}`;
+  el.textContent = `${parts.join(' · ')} · ${guard}`;
+  el.title = el.textContent;
+  el.classList.toggle('warn', held);
+}
 async function renderAlerts() {
+  renderMemStatus();
   const limits = await usageStatusOnce(); // shared per-second fetch (see usageStatusOnce)
   const stalls = S.allNodes.map((n) => ({ id: n.id, st: stallState(n.id) })).filter((x) => x.st && x.st.state === 'recovery_failed');
   const paused = rtu ? (rtu.agents ? rtu.agents.length : S.team.nodes.filter((n) => rtuFor(n.id)).length) : 0;
@@ -1967,7 +1992,7 @@ async function renderAlerts() {
     stalls, teamNodes: S.team.nodes, limits, stuckMinutes: S.settings.stuckMinutes || 5, now: Date.now(),
     nodeNames: Object.fromEntries(S.allNodes.map((n) => [n.id, n.name])),
     rtu: rtu ? { ...rtu, paused, label: runtimeLabel(rtu.runtime) } : null,
-    memGuard: S.orch.memGuard, memHeld: (S.orch.dispatchHolds || []).filter((h) => /memory/i.test(h.why || '')).length,
+    memGuard: S.orch.memGuard, memHeld: memHeldCounts().tasks, memWakes: memHeldCounts().wakes,
   }).filter((a) => a.kind !== 'preflight');
   if (wtDisk && (wtDisk.count > WT_DISK_CAP.count || wtDisk.bytes > WT_DISK_CAP.bytes)) all.push({ id: 'wtdisk', kind: 'wtdisk', severity: 'warn', at: Date.now(), dismissable: true,
     text: `Worktrees use ${fmtWtBytes(wtDisk.bytes)} (${wtDisk.count}) — clean up from the status bar`, fingerprint: String(wtDisk.count) });
@@ -2020,6 +2045,7 @@ async function runAlertOp(op, arg) {
   else if (op === 'open-team') showTab('team');
   else if (op === 'restart-core') await rstAction('now');
   else if (op === 'resume-runtime') { try { await call('resumeRuntime', arg); clearRtu(arg); await refresh(); } catch (e) { alert(String(e.message || e).replace(/^Error invoking remote method 'api':\s*(Error:\s*)?/, '')); } }
+  else if (op === 'mem-override') { try { await call('memOverride', 30); await refresh(); } catch (e) { alert(String(e.message || e).replace(/^Error invoking remote method 'api':\s*(Error:\s*)?/, '')); } }
   else if (op === 'retest') await testAgents(arg ? [arg] : []);
 }
 $('#alertbell').onclick = () => { alertsOpen = !alertsOpen; renderAlerts(); };
