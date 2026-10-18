@@ -178,3 +178,22 @@ test('stall: a throwing wakeUnread is logged, sweep survives', () => {
     assert.ok(logs().some((t) => t.includes('boom')));
   } finally { clock.mock.restore(); }
 });
+
+// t_4871baf1: a human message bypasses a non-critical memory hold (level 2, any availability);
+// an agent message under the same hold stays blocked; level 3 blocks everyone.
+for (const [level, availPct, human, woken] of [[2, 40, true, true], [2, 5, true, true], [2, 5, false, false], [3, 5, true, false]]) {
+  test(`mem guard wake: level ${level}, ${availPct}% avail, ${human ? 'human' : 'agent'} message -> ${woken ? 'woken' : 'blocked'}`, async () => {
+    const s = new Store(path.join(tmp('squad-wake-mem-'), 'p'));
+    const a = s.addNode({ name: 'A', role: 'Dev' }); const b = s.addNode({ name: 'B', role: 'Dev' });
+    const o = makeOrch(s);
+    // 40% avail at level 2 is no hold at all (wake must still go); 5% is a non-critical hold the human bypasses.
+    const { MemGuard } = require('../src/mem-guard');
+    const g = new MemGuard({ platform: 'darwin', probe: async () => ({ level, availPct }), snapshot: async () => ({}) });
+    await g.refresh(); o.memGuard = g;
+    let runs = 0; o.wakeRun = async () => { runs++; };
+    s.sendMessage({ from: human ? 'human' : b.id, to: a.id, text: 'ping' });
+    await o.dispatchWake(a.id);
+    assert.equal(runs, woken ? 1 : 0);
+    if (!woken) assert.match(o.agent(a.id).wakeBlocked.reason, /memory guard/);
+  });
+}

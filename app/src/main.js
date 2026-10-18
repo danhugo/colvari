@@ -2589,6 +2589,36 @@ async function guiE2E() {
     win.setContentSize(prevSize[0], prevSize[1]); await ex(`await refresh(); await w(300);`);
   };
   try {
+    if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'memguard') { // t_4871baf1: #memst line + mem-hold alert + "Proceed anyway" releases a held wake
+      const p = pid(); const s = pm.store(p); const team = pm.store(p, pm.get(p).teams[0].id); const o = orchFor(p);
+      const fake = path.join(require('os').tmpdir(), 'squad-memguard-claude.sh');
+      fs.writeFileSync(fake, `#!/bin/sh\nsleep 1\necho '{"type":"result","subtype":"success","session_id":"mg","total_cost_usd":0,"num_turns":1,"usage":{"input_tokens":1,"output_tokens":1}}'\n`); fs.chmodSync(fake, 0o755);
+      s.saveSettings({ claudePath: fake, maxConcurrency: 4, memGuardDeferAt: 'warning' });
+      const A = team.addNode({ name: 'MemPM', role: 'PM' }); const B = team.addNode({ name: 'MemDev', role: 'Dev' }); team.addEdge(A.id, B.id, 'assign');
+      const stubCaps = { ok: true, probedAt: new Date().toISOString(), source: 'stub', slashCommands: [], commands: [], skills: [], modes: [], categorized: [] };
+      team.updateNode(A.id, { capabilities: stubCaps }); team.updateNode(B.id, { capabilities: stubCaps });
+      const mg = o.memGuard; let reading = { level: 1, availPct: 60 }; mg._probe = async () => reading; mg._snapshot = async () => ({ procs: [{ name: 'Docker', mb: 2000 }], freeMB: 300, compressedMB: 1000 });
+      const until = async (fn, ms = 10000) => { for (let t = 0; t < ms; t += 200) { if (fn()) return true; await new Promise((r) => setTimeout(r, 200)); } return false; };
+      await mg.refresh(); await ex(`await refresh(); await w(300);`);
+      const ok = await ex(`return $('#memst').textContent`); await shot('memguard-1-ok');
+      expect('memguard: normal state reads "guard ok"', /guard ok/.test(ok), ok);
+      reading = { level: 2, availPct: 5 }; await mg.refresh(); await new Promise((r) => setTimeout(r, 300));
+      s.sendMessage({ from: B.id, to: A.id, text: 'status update that must wait for memory' });
+      await o.dispatchWake(A.id);
+      expect('memguard: wake is blocked by the guard', !!(o.agent(A.id).wakeBlocked && /memory guard/.test(o.agent(A.id).wakeBlocked.reason)), o.agent(A.id).wakeBlocked);
+      await ex(`await refresh(); await w(400);`);
+      const held = await ex(`return $('#memst').textContent`); await shot('memguard-2-held');
+      expect('memguard: held line shows level 2, 5% and a blocked wake', /warning/.test(held) && /5% avail/.test(held) && /[1-9]\d* agent wakes?/.test(held) && /holding/.test(held), held);
+      await ex(`$('#alertbell').click(); await w(400);`); await shot('memguard-3-alert');
+      const al = await ex(`return $('#alertpanel').textContent`);
+      expect('memguard: mem-hold alert shows the wake count', /Memory guard:.*\/ 1 agent waiting/.test(al), al);
+      await ex(`$('#alertpanel .al-act[data-alop=mem-override]').click(); await w(500);`);
+      const woke = await until(() => !o.agent(A.id).wakeBlocked, 8000);
+      const dispatched = await until(() => o.procs.has(A.id) || o.agent(A.id).status === 'working' || (o.agent(A.id).iteration || 0) > 0, 12000);
+      await ex(`await refresh(); await w(300);`); await shot('memguard-4-after-override');
+      expect('memguard: "Proceed anyway" dispatches the held wake', woke && dispatched, { blocked: o.agent(A.id).wakeBlocked, status: o.agent(A.id).status, memst: await ex(`return $('#memst').textContent`) });
+      throw null;
+    }
     if (process.env.AGENTS_SQUAD_GUI_E2E_ONLY === 'onestart') { // t_1efad5d8: chat is the one way to start work
       await ex(`$('#reopenguide') && $('#reopenguide').click(); await w(300);`); await shot('onestart-onboarding'); // empty team: the guide's Start box
       if (!store.getTeam().nodes.length) store.addNode({ name: 'PM', role: 'PM', x: 80, y: 120 });
