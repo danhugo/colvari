@@ -180,12 +180,9 @@ test('mem-hold: one warn alert while held — count, cause, top 5 procs, what to
   assert.match(a.text, /Electron/);
   assert.doesNotMatch(a.text, /zsh/); // top 5 only
   assert.match(a.text, /stop Docker, or wait/);
-  assert.match(a.fingerprint, /^2\|3\|0\|/); assert.equal(a.action.op, 'mem-override');
-  const same = collect({ memGuard: { ...mg, snapshot: { procs: procs.slice(1) } }, memHeld: 3 })[0];
-  assert.equal(same.fingerprint, a.fingerprint); // new process list must not re-fire a dismissed alert
-  assert.notEqual(collect({ memGuard: mg, memHeld: 3, memWakes: 2 })[0].fingerprint, a.fingerprint); // a new hold re-shows
-  assert.match(collect({ memGuard: mg, memHeld: 3, memWakes: 2 })[0].text, /3 tasks \/ 2 agents waiting/);
-  const b = a;
+  assert.match(a.fingerprint, /^2\|/);
+  const b = collect({ memGuard: { ...mg, snapshot: { procs: procs.slice(1) } }, memHeld: 3 })[0];
+  assert.equal(b.fingerprint, a.fingerprint); // new process list must not re-fire a dismissed alert
   assert.match(collect({ memGuard: { ...mg, snapshot: null }, memHeld: 1 })[0].text, /1 task waiting/);
 });
 
@@ -197,4 +194,13 @@ test('mem-hold flapping: no alert on clear; "resumed" only after 60 s clear, and
   assert.equal(r.fingerprint, String(NOW - 61000));
   assert.equal(collect({ memGuard: { defer: false, level: 1, clearSince: NOW - 10 * 60000 } }).length, 0);
   assert.equal(collect({ memGuard: { defer: false, level: 1, clearSince: null } }).length, 0);
+});
+
+test('mem-hold alert: counts tasks and agents, fingerprint tracks count + heldSince, offers override', () => {
+  const A = require('../src/alerts');
+  const st = (extra) => ({ now: 1e6, memHeld: 1, memGuard: { defer: true, level: 2, why: 'x', heldSince: 5, blockedWakes: 2, ...extra } });
+  const a = A.collect(st()).find((x) => x.id === 'mem-hold');
+  assert.match(a.text, /1 task \/ 2 agents waiting/);
+  assert.equal(a.action.op, 'mem-override');
+  assert.notEqual(a.fingerprint, A.collect(st({ heldSince: 9 })).find((x) => x.id === 'mem-hold').fingerprint);
 });

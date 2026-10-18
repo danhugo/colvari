@@ -1957,8 +1957,8 @@ const fakeAlerts = (n) => Array.from({ length: n }, (_, i) => {
 // Held work for the guard: queued tasks (dispatchHolds) plus blocked agent wakes (t_h0a1c302).
 function memHeldCounts() {
   const mg = S.orch.memGuard || {};
-  const tasks = mg.heldTasks != null ? mg.heldTasks : (S.orch.dispatchHolds || []).filter((h) => /memory/i.test(h.why || '')).length;
-  const wakes = mg.heldWakes != null ? mg.heldWakes : Object.values(S.orch.agents || {}).filter((a) => a.wakeBlocked && /memory/i.test(a.wakeBlocked.reason || '')).length;
+  const tasks = mg.memHeld != null ? mg.memHeld : (S.orch.dispatchHolds || []).filter((h) => /memory/i.test(h.why || '')).length;
+  const wakes = mg.blockedWakes || 0;
   return { tasks, wakes };
 }
 const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
@@ -1969,10 +1969,10 @@ function renderMemStatus() {
   const lvl = mg.level != null ? (mg.levelName || (mg.level === 3 ? 'critical' : MEM_LEVELS[mg.level] || String(mg.level))) : null;
   const sn = mg.snapshot || {};
   const avail = mg.availPct != null ? mg.availPct : sn.availPct;
-  const disk = mg.diskFreeGB != null ? mg.diskFreeGB : (mg.diskFreeMB != null ? mg.diskFreeMB / 1024 : null);
+  const disk = mg.diskFreeBytes != null ? mg.diskFreeBytes / 2 ** 30 : null;
   const held = !!mg.defer;
   const parts = [lvl ? `Mem ${lvl}` : 'Mem', avail != null ? `${Math.round(avail)}% avail` : '', disk != null ? `disk ${disk.toFixed(0)} GB free` : ''].filter(Boolean);
-  const ov = mg.override && mg.override.until > Date.now() ? ` · override ${Math.ceil((mg.override.until - Date.now()) / 60000)} min` : '';
+  const ov = mg.overridden ? ' · override active' : '';
   const guard = held ? `holding ${plural(tasks, 'task')} / ${plural(wakes, 'agent wake')}${mg.why ? ': ' + mg.why : ''}` : `guard ok${ov}`;
   el.textContent = `${parts.join(' · ')} · ${guard}`;
   el.title = el.textContent;
@@ -1992,7 +1992,7 @@ async function renderAlerts() {
     stalls, teamNodes: S.team.nodes, limits, stuckMinutes: S.settings.stuckMinutes || 5, now: Date.now(),
     nodeNames: Object.fromEntries(S.allNodes.map((n) => [n.id, n.name])),
     rtu: rtu ? { ...rtu, paused, label: runtimeLabel(rtu.runtime) } : null,
-    memGuard: S.orch.memGuard, memHeld: memHeldCounts().tasks, memWakes: memHeldCounts().wakes,
+    memGuard: S.orch.memGuard, memHeld: memHeldCounts().tasks,
   }).filter((a) => a.kind !== 'preflight');
   if (wtDisk && (wtDisk.count > WT_DISK_CAP.count || wtDisk.bytes > WT_DISK_CAP.bytes)) all.push({ id: 'wtdisk', kind: 'wtdisk', severity: 'warn', at: Date.now(), dismissable: true,
     text: `Worktrees use ${fmtWtBytes(wtDisk.bytes)} (${wtDisk.count}) — clean up from the status bar`, fingerprint: String(wtDisk.count) });
