@@ -164,3 +164,34 @@ test('mapping: self-update abort -> one dismissable error alert with the reason;
   assert.equal(collect({ updError: '' }).length, 0);
   assert.equal(collect({ updError: 'x', devMode: false }).length, 0);
 });
+
+test('mem-hold: one warn alert while held — count, cause, top 5 procs, what to do; fingerprint = level only', () => {
+  const procs = ['Docker', 'Chrome', 'Slack', 'Code', 'Electron', 'zsh'].map((name, i) => ({ name, mb: 3000 - i * 400 }));
+  const mg = { defer: true, level: 2, why: 'memory pressure warning (level 2)', heldSince: NOW - 1000, snapshot: { procs, freeMB: 300, compressedMB: 2100 } };
+  const out = collect({ memGuard: mg, memHeld: 3 });
+  assert.equal(out.length, 1);
+  const a = out[0];
+  assert.equal(a.id, 'mem-hold');
+  assert.equal(a.severity, 'warn');
+  assert.match(a.text, /3 tasks waiting/);
+  assert.match(a.text, /memory pressure warning \(level 2\)/);
+  assert.match(a.text, /free 0\.3 GB, compressed 2\.1 GB/);
+  assert.match(a.text, /Docker 2\.9 GB/);
+  assert.match(a.text, /Electron/);
+  assert.doesNotMatch(a.text, /zsh/); // top 5 only
+  assert.match(a.text, /stop Docker, or wait/);
+  assert.equal(a.fingerprint, '2');
+  const b = collect({ memGuard: { ...mg, snapshot: { procs: procs.slice(1) } }, memHeld: 1 })[0];
+  assert.equal(b.fingerprint, a.fingerprint); // new process list must not re-fire a dismissed alert
+  assert.match(collect({ memGuard: { ...mg, snapshot: null }, memHeld: 1 })[0].text, /1 task waiting/);
+});
+
+test('mem-hold flapping: no alert on clear; "resumed" only after 60 s clear, and only for a while', () => {
+  assert.equal(collect({ memGuard: { defer: false, level: 1, clearSince: NOW - 30000 } }).length, 0); // still could flap back
+  const [r] = collect({ memGuard: { defer: false, level: 1, clearSince: NOW - 61000 } });
+  assert.equal(r.id, 'mem-resumed');
+  assert.equal(r.severity, 'info');
+  assert.equal(r.fingerprint, String(NOW - 61000));
+  assert.equal(collect({ memGuard: { defer: false, level: 1, clearSince: NOW - 10 * 60000 } }).length, 0);
+  assert.equal(collect({ memGuard: { defer: false, level: 1, clearSince: null } }).length, 0);
+});

@@ -53,6 +53,7 @@ test('store: landed merges bump the pending counter; refusals and empty merges d
   const since = rp.since;
   const orig = MG.gateMerge;
   const root = tmp('squad-restart-root-');
+  s.appRoot = root;
   try {
     MG.gateMerge = () => ({ merged: true, base: 'master', root, gate: { state: 'green', tests: 1, flaky: [] } });
     s.updateTask(s.createTask({ title: 'x', assignee: pm.id, createdBy: 'human' }).id, { worktreePath: '/w', worktreeBranch: 'squad/x', status: 'done' });
@@ -92,6 +93,7 @@ test('store: a landed merge points the pending restart at the new tip, N commits
   const orig = MG.gateMerge;
   const origCB = WT.commitsBehind;
   const root = tmp('squad-restart-root-');
+  s.appRoot = root;
   try {
     MG.gateMerge = () => ({ merged: true, base: 'master', root, sha: 'tip-9', gate: { state: 'green', tests: 1, flaky: [] } });
     WT.commitsBehind = () => 4;
@@ -441,6 +443,7 @@ test('packaged build: N merges >= cap still dispatch todo tasks (no count, no ar
   s.saveSettings({ restartCap: 2 });
   const orig = MG.gateMerge;
   const root = tmp('squad-restart-root-');
+  s.appRoot = root;
   try {
     MG.gateMerge = () => ({ merged: true, base: 'master', root, gate: { state: 'green', tests: 1, flaky: [] } });
     for (let i = 0; i < 3; i++) {
@@ -588,4 +591,18 @@ test('watcher: restartScheduled runs the full flow even with auto-restart off; c
   hangs.cancel();
   assert.equal(hangs.phase, 'idle', 'cancel aborts the in-flight flow');
   assert.equal(relaunches.length, 1, 'cancelled flow never relaunches');
+});
+
+test('store: a merge into a non-app repo does not bump restartPending (t_c1663d2d)', async () => {
+  const d = tmp('squad-restart-');
+  const s = new Store(path.join(d, 'p'), null, { appRoot: tmp('squad-app-root-') });
+  const pm = s.addNode({ name: 'PM', role: 'PM' });
+  const orig = MG.gateMerge;
+  const root = tmp('squad-other-root-');
+  try {
+    MG.gateMerge = () => ({ merged: true, base: 'master', root, gate: { state: 'green', tests: 1, flaky: [] } });
+    s.updateTask(s.createTask({ title: 'x', assignee: pm.id, createdBy: 'human' }).id, { worktreePath: '/w', worktreeBranch: 'squad/x', status: 'done' });
+    await s._mergeQueue;
+  } finally { MG.gateMerge = orig; }
+  assert.equal(s.restartPending(), null);
 });
