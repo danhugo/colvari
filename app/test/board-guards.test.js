@@ -112,8 +112,8 @@ test('done re-links a lost worktree link and runs the merge gate when squad/<id>
   s._updateTask(tk.id, { status: 'in_progress', worktreePath: null, worktreeBranch: null });
   const from = (s.getTask(tk.id).comments || []).length;
   await makeTools(s, dev.id).update_task_status({ taskId: tk.id, status: 'done' });
-  assert.ok(fs.existsSync(path.join(repo, 'l.txt')), 'gate ran on done: branch work must land on the base');
   const final = await settle(s, tk.id, from);
+  assert.ok(fs.existsSync(path.join(repo, 'l.txt')), 'gate ran on done: branch work must land on the base');
   assert.strictEqual(final.status, 'done');
   assert.strictEqual(final.worktreePath, w.worktreePath, 'link restored before the gate ran');
   assert.strictEqual(final.worktreeBranch, `squad/${tk.id}`);
@@ -173,4 +173,21 @@ test('done tasks do not count toward the open load', async () => {
   s.updateTask(a.id, { status: 'done' });
   const b = makeTools(s, pm.id).create_task({ title: 'b', assignee: dev.id });
   assert.strictEqual(b.warning, undefined);
+});
+
+test('update_task_status(done) returns right away while the merge gate is still pending (t_3a08ad0e)', async () => {
+  const { repo, s, pm, dev } = await setup();
+  const tk = makeTools(s, pm.id).create_task({ title: 'slow gate', assignee: dev.id });
+  const w = await ensureWorktree(repo, tk.id);
+  s._updateTask(tk.id, { status: 'in_progress', worktreePath: w.worktreePath, worktreeBranch: w.worktreeBranch });
+  let started = false;
+  s._mergeOnDone = () => { started = true; return new Promise(() => {}); }; // gate never finishes
+  const r = await Promise.race([
+    makeTools(s, dev.id).update_task_status({ taskId: tk.id, status: 'done' }),
+    new Promise((res) => setTimeout(() => res('HUNG'), 2000)),
+  ]);
+  assert.notStrictEqual(r, 'HUNG', 'call must not wait on the gate');
+  assert.ok(started, 'gate was kicked off');
+  assert.strictEqual(r.status, 'done');
+  assert.match(r.note, /Merge gate running in the background/);
 });

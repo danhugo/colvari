@@ -266,9 +266,12 @@ function makeTools(store, nodeId) {
       // eligible for reviewer dispatch (no reviewer -> it stays in review, surfaced).
       if (g.status === 'review') g.parkedForHuman = false;
       const patch = priority !== undefined ? { ...g, priority } : g;
-      // A done flip awaits the merge gate (async since t_5a78aa95) so the agent reads the
-      // post-gate state (merged / reopened / merge_conflict) right in this tool result.
-      const r = (status === 'done' && tk.worktreePath && tk.worktreeBranch) ? await store.updateTaskAsync(taskId, patch) : store.updateTask(taskId, patch);
+      // A done flip returns right away (the gate runs ~minutes and the MCP call timed out at -32001);
+      // store.updateTask fires the merge gate in the background and it posts its verdict (merged /
+      // reopened / merge_conflict) as task comments.
+      const r = store.updateTask(taskId, patch);
+      const merging = status === 'done' && tk.worktreePath && tk.worktreeBranch && r.status === 'done';
+      if (merging) return { ...r, note: 'Merge gate running in the background; its result (merged / reopened / merge_conflict) is posted as a task comment. Do not wait on it.' };
       return g.awaitingApproval ? { ...r, note: 'Moved to review: a human must approve this task before it is done.' } : r;
     },
     comment_task({ taskId, text, attachments }) {
