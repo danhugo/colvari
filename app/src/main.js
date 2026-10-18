@@ -3104,6 +3104,7 @@ const api = {
   cancelRestart: (c) => { orchFor(c.p).cancelRestart(); return orchFor(c.p).restartState(); },
   // Runtime breaker resume (t_419062e2): clears the unavailable state and re-dispatches the queued
   // tasks. Throws the reason on failure — the renderer shows it inline in the banner.
+  memOverride: (c) => orchFor(c.p).memOverride(),
   resumeRuntime: (c, runtime) => orchFor(c.p).resumeRuntime(runtime),
   // Stuck-task action (t_0895a580): the renderer's 'Retest + Resume' / 'Rerun fresh' buttons
   // (t_747e0d1e). Returns {ok, skipped?|resumeFailed?, error?}; resumeFailed flips the button state.

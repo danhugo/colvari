@@ -1967,7 +1967,7 @@ async function renderAlerts() {
     stalls, teamNodes: S.team.nodes, limits, stuckMinutes: S.settings.stuckMinutes || 5, now: Date.now(),
     nodeNames: Object.fromEntries(S.allNodes.map((n) => [n.id, n.name])),
     rtu: rtu ? { ...rtu, paused, label: runtimeLabel(rtu.runtime) } : null,
-    memGuard: S.orch.memGuard, memHeld: (S.orch.dispatchHolds || []).filter((h) => /memory/i.test(h.why || '')).length,
+    memGuard: S.orch.memGuard, memHeld: (S.orch.memGuard || {}).memHeld ?? (S.orch.dispatchHolds || []).filter((h) => /memory/i.test(h.why || '')).length,
   }).filter((a) => a.kind !== 'preflight');
   if (wtDisk && (wtDisk.count > WT_DISK_CAP.count || wtDisk.bytes > WT_DISK_CAP.bytes)) all.push({ id: 'wtdisk', kind: 'wtdisk', severity: 'warn', at: Date.now(), dismissable: true,
     text: `Worktrees use ${fmtWtBytes(wtDisk.bytes)} (${wtDisk.count}) — clean up from the status bar`, fingerprint: String(wtDisk.count) });
@@ -2019,6 +2019,7 @@ async function runAlertOp(op, arg) {
   else if (op === 'open-usage') { showTab('usage'); setTimeout(() => $('#us-limits')?.scrollIntoView({ block: 'start' }), 80); }
   else if (op === 'open-team') showTab('team');
   else if (op === 'restart-core') await rstAction('now');
+  else if (op === 'mem-override') { try { await call('memOverride'); await refresh(); } catch (e) { alert(String(e.message || e)); } }
   else if (op === 'resume-runtime') { try { await call('resumeRuntime', arg); clearRtu(arg); await refresh(); } catch (e) { alert(String(e.message || e).replace(/^Error invoking remote method 'api':\s*(Error:\s*)?/, '')); } }
   else if (op === 'retest') await testAgents(arg ? [arg] : []);
 }

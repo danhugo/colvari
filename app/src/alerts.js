@@ -155,18 +155,18 @@
       action: { label: 'Resume', op: 'resume-runtime', arg: rtu.runtime },
     });
 
-    // 6b. Memory guard hold (t_b2b497f3): one row while dispatch is deferred. Fingerprint = level
-    // only, so a changing process list never re-fires a dismissed row. "Resumed" shows only after
+    // 6b. Memory guard hold (t_b2b497f3): one row while dispatch is deferred. Fingerprint = level,
+    // held counts and heldSince (a changing process list never re-fires a dismissed row; a new hold does). "Resumed" shows only after
     // the hold stayed clear 60 s (a flapping guard stays quiet), and fades after 5 min.
     const mg = s.memGuard;
     if (mg && mg.defer) {
-      const sn = mg.snapshot || {}; const gb = (mb) => `${(mb / 1024).toFixed(1)} GB`; const n = s.memHeld || 0;
+      const sn = mg.snapshot || {}; const gb = (mb) => `${(mb / 1024).toFixed(1)} GB`; const n = s.memHeld || 0; const w = mg.blockedWakes || 0;
       const mem = [sn.freeMB != null ? `free ${gb(sn.freeMB)}` : '', sn.compressedMB != null ? `compressed ${gb(sn.compressedMB)}` : ''].filter(Boolean).join(', ');
       const top = (sn.procs || []).slice(0, 5).map((p) => `${p.name} ${gb(p.mb)}`).join(', ');
       out.push({
         id: 'mem-hold', kind: 'mem-hold', severity: 'warn', at: mg.heldSince || now, dismissable: true,
-        text: `Memory guard: ${n} task${n === 1 ? '' : 's'} waiting — ${mg.why}${mem ? ` (${mem})` : ''}.${top ? ` Top RAM: ${top}.` : ''} Close big apps, stop Docker, or wait — work resumes by itself.`,
-        agentId: null, taskId: null, fingerprint: String(mg.level ?? ''), action: null,
+        text: `Memory guard: ${n} task${n === 1 ? '' : 's'}${w ? ` / ${w} agent${w === 1 ? '' : 's'}` : ''} waiting — ${mg.why}${mem ? ` (${mem})` : ''}.${top ? ` Top RAM: ${top}.` : ''} Close big apps, stop Docker, or wait — work resumes by itself.`,
+        agentId: null, taskId: null, fingerprint: `${mg.level ?? ''}|${n}|${w}|${mg.heldSince || ''}`, action: { label: 'Proceed anyway (30 min)', op: 'mem-override' },
       });
     } else if (mg && mg.clearSince && now - mg.clearSince >= 60000 && now - mg.clearSince < 5 * 60000) out.push({
       id: 'mem-resumed', kind: 'mem-resumed', severity: 'info', at: mg.clearSince, dismissable: true,
