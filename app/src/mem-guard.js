@@ -76,7 +76,8 @@ class MemGuard {
     if (this.platform === 'darwin') {
       const level = Number(reading && reading.level);
       if (!(level >= 1 && level <= 3)) throw new Error(`unexpected ${SYSCTL_KEY} value: ${reading && reading.level}`);
-      const availPct = reading.availPct != null && Number.isFinite(+reading.availPct) ? +reading.availPct : null;
+      const ap = reading.availPct ?? reading.availablePct;
+      const availPct = ap != null && Number.isFinite(+ap) ? +ap : null;
       this._state = { ...this._state, level, availPct, freeBytes: null, source: 'pressure', at };
     } else {
       const freeBytes = Number(reading && reading.freeBytes);
@@ -113,7 +114,7 @@ class MemGuard {
     let why = defer ? `memory pressure ${LEVEL_NAME[s.level] || s.level} (level ${s.level}${s.availPct != null ? `, ${Math.round(s.availPct)}% available` : ''})` : null;
     if (!defer && s.defer && s.heldSince && this.now() - s.heldSince < HOLD_MIN_MS) { defer = true; why = s.why; } // hysteresis
     if (defer && this._override) { defer = false; why = `memory guard overridden (${LEVEL_NAME[s.level]})`; }
-    this._state = { ...s, defer, overridden: !!this._override, why: why || `memory ${LEVEL_NAME[s.level] || 'unknown'} (level ${s.level ?? '?'}${s.availPct != null ? `, ${Math.round(s.availPct)}% available` : ''})` };
+    this._state = { ...s, defer, overridden: !!this._override, override: this._override ? this._override.until : null, why: why || `memory ${LEVEL_NAME[s.level] || 'unknown'} (level ${s.level ?? '?'}${s.availPct != null ? `, ${Math.round(s.availPct)}% available` : ''})` };
   }
   async _sysctlLevel() {
     const out = await new Promise((resolve, reject) => {
@@ -148,6 +149,7 @@ class MemGuard {
   override() { this._override = { until: this.now() + OVERRIDE_MS, level: this._state.level ?? 3 }; this._recompute(); return { until: this._override.until }; }
   // Synchronous read of the last probe: what every dispatch guard consults. Fail-open by shape —
   // before the first successful reading defer is false.
+  grantOverride() { return this.override(); }
   status() { if (this._override || this._state.defer) this._recompute(); return this._state; }
 }
 
