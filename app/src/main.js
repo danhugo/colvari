@@ -284,7 +284,8 @@ async function autorun(file) {
   await win.webContents.executeJavaScript(`document.querySelector('#projectlist div[data-pid="${p.id}"]').click()`); await w(1200);
   await win.webContents.executeJavaScript(`document.querySelector('#tabs button[data-tab=team]').click(); const t = document.querySelector('#testteam'); if (t) t.click();`); // the Test team button is gone from some layouts
   for (let i = 0; i < 90; i++) { await w(2000); const t = await win.webContents.executeJavaScript(`(document.querySelector('#pf-summary') || {}).textContent || ''`); if (!/testing|untested/.test(t)) { console.log('[autorun] preflight:', t); break; } }
-  await win.webContents.executeJavaScript(`(() => { document.querySelector('#chat-input').value = ${JSON.stringify(goal)}; window.confirm = () => true; document.querySelector('#chat-send').click(); })()`);
+  if (goal) await win.webContents.executeJavaScript(`(() => { document.querySelector('#chat-input').value = ${JSON.stringify(goal)}; window.confirm = () => true; document.querySelector('#chat-send').click(); })()`);
+  else orchFor(p.id).start(); // no goal: just start the waiting todo tasks (an empty chat send is a no-op)
   console.log('[autorun] started', p.name);
   orchFor(p.id).once('done', () => console.log('[autorun] done', p.name));
 }

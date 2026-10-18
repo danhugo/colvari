@@ -649,7 +649,7 @@ function renderHeader() {
     setText(pill, `● Running ${par || 1}${holds.length ? ` +${holds.length}` : ''}`); // short status chip (t_db67859d): full wording in the tooltip
     setTitle(pill, `running · ${par > 1 ? `${par} in parallel` : `${par || 1} agent`} · ${o.runs || 0} runs${holds.length ? ` · ${holds.length} queued: ${holds.slice(0, 3).map((h) => `"${h.title}" — ${h.why}`).join('; ')}${holds.length > 3 ? ` +${holds.length - 3} more` : ''}` : ''}`);
   } else if (rs.state === 'idle') {
-    setText(pill, '● Idle');
+    setText(pill, (S.orch.memGuard || {}).defer && holds.length ? '● Idle · memory' : '● Idle');
     setTitle(pill, `idle · ${rs.reason || 'waiting for todo tasks'}${holds.length ? ` · ${holds.length} queued` : ''} · ${o.runs || 0} runs`);
   } else {
     setText(pill, todos ? `Stopped (${todos} todo)` : 'Stopped');
@@ -1967,6 +1967,7 @@ async function renderAlerts() {
     stalls, teamNodes: S.team.nodes, limits, stuckMinutes: S.settings.stuckMinutes || 5, now: Date.now(),
     nodeNames: Object.fromEntries(S.allNodes.map((n) => [n.id, n.name])),
     rtu: rtu ? { ...rtu, paused, label: runtimeLabel(rtu.runtime) } : null,
+    memGuard: S.orch.memGuard, memHeld: (S.orch.dispatchHolds || []).filter((h) => /memory/i.test(h.why || '')).length,
   }).filter((a) => a.kind !== 'preflight');
   if (wtDisk && (wtDisk.count > WT_DISK_CAP.count || wtDisk.bytes > WT_DISK_CAP.bytes)) all.push({ id: 'wtdisk', kind: 'wtdisk', severity: 'warn', at: Date.now(), dismissable: true,
     text: `Worktrees use ${fmtWtBytes(wtDisk.bytes)} (${wtDisk.count}) — clean up from the status bar`, fingerprint: String(wtDisk.count) });
@@ -2107,6 +2108,9 @@ function renderIdle() {
 // ---------- board ----------
 const PRIORITIES = ['P0', 'P1', 'P2', 'P3'];
 const priorityOf = (t) => PRIORITIES.includes(t.priority) ? t.priority : 'P2';
+// Scheduled reminder (t_22fa32e9): next time + repeat, e.g. "⏰ 14:30 ↻60m".
+const remindLabel = (t) => t.remindAt ? `<span class="cremind" title="Scheduled check ${esc(new Date(t.remindAt).toLocaleString())}">⏰ ${esc(new Date(t.remindAt).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }))}${t.remindEveryMin ? ` ↻${t.remindEveryMin}m` : ''}</span>` : '';
+const localDT = (iso) => { const d = new Date(iso); return new Date(d - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16); };
 const priorityBadge = (t) => `<span class="tag prio prio-${priorityOf(t)}" title="Priority ${priorityOf(t)}">${priorityOf(t)}</span>`;
 // Titles ride through String() so a corrupted task file without one cannot throw inside
 // localeCompare and kill the whole board render (t_e25151db).
@@ -2173,13 +2177,13 @@ function cardHtml(t) {
     noWorker ? `<span class="tag noworker" title="in_progress but no live agent process for ${esc(nodeName(t.assignee))}">No worker</span>` : '',
     stallTag(t),
     (upd.devMode !== false && rstGated(t)) ? `<span class="tag rstwait" title="held back by the restart gate${rst.scheduledAfter ? ` — starts after the core restart (after ${esc(shortTaskId(rst.scheduledAfter))})` : ' — starts after the core restarts'}">waits for restart</span>` : '',
-    holdOf(t.id) ? `<span class="tag queued" title="queued: ${esc(holdOf(t.id).why)} · waiting ${ago(holdOf(t.id).since) || 'just now'}">⏳ waiting</span>` : '',
+    holdOf(t.id) ? `<span class="tag queued" title="queued: ${esc(holdOf(t.id).why)} · waiting ${ago(holdOf(t.id).since) || 'just now'}">⏳ waiting · ${esc(String(holdOf(t.id).why || '').slice(0, 40))}</span>` : '',
     bl.length ? `<span class="tag blocked" title="waits for: ${esc(bl.map(taskTitle).join(', '))}">Blocked by ${esc(taskTitle(bl[0]).slice(0, 28))}${bl.length > 1 ? ` +${bl.length - 1}` : ''}</span>` : ready ? '<span class="tag ready" title="Ready">Ready</span>' : '',
     t.awaitingApproval ? '<span class="tag approval" title="needs approval">needs approval</span>' : ''].join('');
   const snippet = String(t.description || '').replace(/\s+/g, ' ').trim();
   const nCmts = (t.comments || []).length; // a task without a comments array must not kill the whole board render
   const cmtWord = nCmts === 1 ? 'comment' : 'comments';
-  return `<div class="card ${sel.task === t.id ? 'sel' : ''}${t.awaitingApproval ? ' approval' : ''}" data-id="${t.id}"><b>${esc(t.title)}</b>${snippet && snippet !== t.title ? `<span class="cdesc" title="${esc(snippet)}">${esc(clipText(snippet, 100))}</span>` : ''}${tags ? `<span class="ctags">${tags}</span>` : ''}<small class="cmeta">${priorityBadge(t)}${t.assignee ? ((w) => `<span class="avatar sm" style="background:${avatarBg(w)}" title="${esc(w.name)}">${avatarBody(t.assignee, w)}</span><span class="cname">${esc(w.name)}</span>`)(who(t.assignee)) : '<span class="muted">unassigned</span>'}<span class="cago" title="last updated">${ago(t.updatedAt) || '—'}</span>${nCmts ? `<span class="ccount" title="${nCmts} ${cmtWord}">💬 ${nCmts}</span>` : ''}</small></div>`;
+  return `<div class="card ${sel.task === t.id ? 'sel' : ''}${t.awaitingApproval ? ' approval' : ''}" data-id="${t.id}"><b>${esc(t.title)}</b>${snippet && snippet !== t.title ? `<span class="cdesc" title="${esc(snippet)}">${esc(clipText(snippet, 100))}</span>` : ''}${tags ? `<span class="ctags">${tags}</span>` : ''}<small class="cmeta">${priorityBadge(t)}${t.assignee ? ((w) => `<span class="avatar sm" style="background:${avatarBg(w)}" title="${esc(w.name)}">${avatarBody(t.assignee, w)}</span><span class="cname">${esc(w.name)}</span>`)(who(t.assignee)) : '<span class="muted">unassigned</span>'}${remindLabel(t)}<span class="cago" title="last updated">${ago(t.updatedAt) || '—'}</span>${nCmts ? `<span class="ccount" title="${nCmts} ${cmtWord}">💬 ${nCmts}</span>` : ''}</small></div>`;
 }
 // Card-html memo (t_d6c2be24): every store write (any comment, any run push) bumps the board
 // version, and the old path met that by re-running cardHtml for ALL cards — ~500 html strings on
@@ -2274,6 +2278,8 @@ function renderBoard() {
     <label>Priority</label><select id="td-priority">${PRIORITIES.map((p) => `<option ${p === priorityOf(t) ? 'selected' : ''}>${p}</option>`).join('')}</select>
     <label>Status</label><select id="td-status">${STATUSES.map((s) => `<option ${s === t.status ? 'selected' : ''}>${s}</option>`).join('')}</select>
     <label>Assignee</label><select id="td-assignee">${S.allNodes.map((n) => `<option value="${n.id}" ${n.id === t.assignee ? 'selected' : ''}>${esc(n.name)}</option>`).join('')}</select>
+    <label>Scheduled check ${remindLabel(t)} <span class="muted">(messages the assignee at this time; repeat minutes ≥ 30, empty = once)</span></label>
+    <div class="toolbar"><input id="td-remind-at" type="datetime-local" value="${t.remindAt ? localDT(t.remindAt) : ''}"><input id="td-remind-every" type="number" min="30" step="1" placeholder="repeat min" value="${t.remindEveryMin || ''}" style="width:7em"><button id="td-remind-save">Set</button>${t.remindAt ? '<button id="td-remind-clear">Clear</button>' : ''}</div>
     <label>Blocked by <span class="muted">(runs only after these are done${bl.length ? ` · ${bl.length} open` : ''})</span></label>
     <div id="td-deps" class="checks deps">${S.tasks.filter((x) => x.id !== t.id).map((x) => `<label class="${deps.has(x.id) && x.status !== 'done' ? 'open' : ''}"><input type="checkbox" value="${x.id}" ${deps.has(x.id) ? 'checked' : ''}> ${esc(x.title)} <span class="muted">(${x.status})</span></label>`).join('') || '<span class="muted">no other tasks</span>'}</div>
     <label>Description</label><div class="comment">${esc(t.description) || '<span class="muted">none</span>'}</div>
@@ -2290,6 +2296,12 @@ function renderBoard() {
   $('#td-priority').onchange = async (e) => { await call('updateTask', t.id, { priority: e.target.value }); refresh(); };
   $('#td-status').onchange = async (e) => { await call('updateTask', t.id, { status: e.target.value }); refresh(); };
   $('#td-assignee').onchange = async (e) => { await call('updateTask', t.id, { assignee: e.target.value }); refresh(); };
+  $('#td-remind-save').onclick = act(async () => {
+    const at = $('#td-remind-at').value; if (!at) return;
+    const ev = $('#td-remind-every').value;
+    await call('updateTask', t.id, { remindAt: new Date(at).toISOString(), remindEveryMin: ev ? Math.max(30, Math.round(Number(ev))) : null }); refresh();
+  });
+  if ($('#td-remind-clear')) $('#td-remind-clear').onclick = act(async () => { await call('updateTask', t.id, { remindAt: null, remindEveryMin: null }); refresh(); });
   $('#td-addc').onclick = async () => { const v = $('#td-comment').value.trim(); if (v) { await call('commentTask', t.id, v); refresh(); } };
   document.querySelectorAll('#td-deps input').forEach((x) => x.onchange = act(async () => { await call('updateTask', t.id, { blockedBy: [...document.querySelectorAll('#td-deps input')].filter((y) => y.checked).map((y) => y.value) }); refresh(); }));
   if ($('#td-approve')) { $('#td-approve').onclick = act(async () => { await call('approveTask', t.id, true, $('#td-note').value.trim()); refresh(); }); $('#td-reject').onclick = act(async () => { await call('approveTask', t.id, false, $('#td-note').value.trim()); refresh(); }); }
@@ -3815,13 +3827,13 @@ function renderInbox() {
 // ---------- live updates ----------
 let pending = null, pendingP = null;
 // Self-update status push: prefer the dedicated bridge method, fall back to either plausible channel name.
-const onUpdPush = (d) => { upd = { ...normUpd(d), stub: false }; trackUpd(); if (upd.state !== 'idle') clearRstToast(); renderSelfUpdate(); renderUpdSettings(); renderAlerts(); }; // flow visible via veil/pill — the "Restarting…" toast retires
+const onUpdPush = (d) => { if (d && d.projectId && d.projectId !== ctx.p) return; upd = { ...normUpd(d), stub: false }; trackUpd(); if (upd.state !== 'idle') clearRstToast(); renderSelfUpdate(); renderUpdSettings(); renderAlerts(); }; // flow visible via veil/pill — the "Restarting…" toast retires
 if (squad.onSelfUpdateStatus) squad.onSelfUpdateStatus(onUpdPush);
 else { squad.on('selfUpdateStatus', onUpdPush); squad.on('self-update-status', onUpdPush); }
 // Restart/watch pushes: prefer dedicated bridge helpers, fall back to plausible channel names
 // (Devon adds the preload helpers when the backend lands — see contract on t_20d5a23c).
-const onRestartPush = (d) => { rst = { ...normRestart(d), stub: false }; rstSeen = true; if (!rstArmed() && rst.pendingCount === 0) clearRstToast(); renderHeader(); renderAlerts(); boardSig = null; renderBoard(); };
-const onWatchPush = (d) => { watch = { ...normWatch(d), stub: false }; renderHeader(); };
+const onRestartPush = (d) => { if (d && d.projectId && d.projectId !== ctx.p) return; rst = { ...normRestart(d), stub: false }; rstSeen = true; if (!rstArmed() && rst.pendingCount === 0) clearRstToast(); renderHeader(); renderAlerts(); boardSig = null; renderBoard(); };
+const onWatchPush = (d) => { if (d && d.projectId && d.projectId !== ctx.p) return; watch = { ...normWatch(d), stub: false }; renderHeader(); };
 if (squad.onRestartState) squad.onRestartState(onRestartPush);
 else { squad.on('restart-state', onRestartPush); squad.on('restartStatus', onRestartPush); }
 if (squad.onWatchStatus) squad.onWatchStatus(onWatchPush);
