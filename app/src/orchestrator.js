@@ -275,7 +275,7 @@ class Orchestrator extends EventEmitter {
     this._rtFailures = new Map(); // runtime -> { signature, count, taskIds }
     // Memory-pressure dispatch guard (t_a9864978, src/mem-guard.js): defers NEW dispatch while the
     // machine is under memory pressure; held work stays queued. Injectable for tests.
-    this.memGuard = opts.memGuard || new MemGuard(opts.memGuardOpts);
+    this.memGuard = opts.memGuard || new MemGuard({ diskPath: store && store.dir, ...opts.memGuardOpts });
     // Tasks ready but held back by a global gate (concurrency cap, memory pressure) or a local one
     // (single run per agent, restart gate): taskId -> {taskId, nodeId, title, why, since}. Read by
     // the snapshot's dispatchHolds (the UI's "waiting" display); rebuilt every tick.
@@ -447,9 +447,10 @@ class Orchestrator extends EventEmitter {
   holdsView() { return [...(this.dispatchHolds || new Map()).values()].map((h) => ({ ...h })); }
   // Lazy: hand-wired orchestrator views in tests (Object.create(Orchestrator.prototype)) skip the
   // constructor but still call changed() → snapshotSlim must not crash on a missing guard.
-  memGuardView() { return (this.memGuard ||= new MemGuard()).status(); }
+  memGuardView() { return { ...(this.memGuard ||= new MemGuard()).status(), blockedWakes: this.memBlockedWakes(), memHeld: this.holdsView().filter((h) => /memory/i.test(h.why || '')).length }; }
+  memOverride() { return (this.memGuard ||= new MemGuard()).override(); }
   // Cheap in-memory fingerprint (no I/O): everything volatile the snapshot exposes besides file-backed parts.
-  memSig() { return JSON.stringify([this.running, this.runs, this.runCost, this.runTokens, this.totalCost, this.billedCost, this.subCost, this.budgetStop, this.usagePaused, this.usageStatus || null, this.procs.size, this.agents, this.subscriptionRateLimits, this._idleSince || 0, this._idleReason || '', this.holdsView().map((h) => `${h.taskId}|${h.why}|${Math.floor((h.since || 0) / 60000)}`).join(';'), (this.memGuard && this.memGuard.status().defer) || false]); }
+  memSig() { return JSON.stringify([this.running, this.runs, this.runCost, this.runTokens, this.totalCost, this.billedCost, this.subCost, this.budgetStop, this.usagePaused, this.usageStatus || null, this.procs.size, this.agents, this.subscriptionRateLimits, this._idleSince || 0, this._idleReason || '', this.holdsView().map((h) => `${h.taskId}|${h.why}|${Math.floor((h.since || 0) / 60000)}`).join(';'), (this.memGuard && this.memGuard.status().defer) || false, this.memBlockedWakes()]); }
   // Combined fingerprint for change-driven polling: in-memory state + every file the snapshot reads.
   versionSig() { return [this.memSig(), this.sig('runs'), this.sig('board'), this.sig('wiki'), this.teamsSigOf(), this.logSig()].join('|'); }
   // IPC-safe agent view. a.currentRun carries the live run record, whose .subs is a SubagentTracker
@@ -682,10 +683,10 @@ class Orchestrator extends EventEmitter {
     if (a.budgetStop) return skip('over budget');
     const settings = this.store.getSettings();
     if (settings.maxConcurrency > 0 && this.procs.size >= settings.maxConcurrency) return skip(`max concurrency (${settings.maxConcurrency}) reached`);
-    const mg = this.memGuard?.status();
-    if (mg?.defer) return skip(`memory guard: ${mg.why}`); // memory pressure (t_a9864978)
     const msgs = this.wakeUnread(nodeId, team);
     if (!msgs.length) return;
+    const memWhy = this.memWakeGate(msgs.some((m) => m.from === 'human'));
+    if (memWhy) return skip(memWhy); // memory pressure (t_a9864978)
     const now = Date.now();
     const senders = [...new Set(msgs.map((m) => m.from))];
     // The human operator is never pair-capped (a chat message must always reach an idle agent);
@@ -705,8 +706,18 @@ class Orchestrator extends EventEmitter {
     this.emit('woken_by_message', { nodeId, by: senders, messageIds: msgs.map((m) => m.id) });
     const nameOf = (id) => (id === 'system' ? 'the system status check' : (team.nodes.find((n) => n.id === id) || {}).name || id);
     this.log(nodeId, 'system', `✉ woken by message from ${senders.map(nameOf).join(', ')}: ${msgs[0].text.slice(0, 200)}`);
-    await this.wakeRun(node, msgs, team, settings);
+    try { await this.wakeRun(node, msgs, team, settings); } finally { this._memBypass = false; }
   }
+  // Memory gate for a wake (t_515dbce3): null = proceed, else the block reason. Human wakes bypass a
+  // non-critical hold, one at a time (the flag is cleared by the caller once the wake run ends).
+  memWakeGate(human) {
+    const mg = this.memGuard?.status();
+    if (!mg?.defer) return null;
+    if (human && mg.level !== 3 && !this._memBypass) { this._memBypass = true; return null; }
+    return `memory guard: ${mg.why}`;
+  }
+  // Agents whose wake is blocked by the memory guard, for the alert count + status line.
+  memBlockedWakes() { return Object.values(this.agents).filter((a) => a.wakeBlocked && /^memory guard/.test(a.wakeBlocked.reason)).length; }
   // Deliver already-stored messages to an IDLE agent as a wake run — an immediate, debounce-free
   // lane alongside the sweep (which also delivers human messages since t_7c4538d9, but on the
   // debounce timer): the human's answer to an ask_human (team-answers) must reach the asker at
@@ -728,14 +739,16 @@ class Orchestrator extends EventEmitter {
     if (this.usagePaused && (node.runtime || 'claude') === 'claude') return false; // same pause rule as tick()
     const settings = this.store.getSettings();
     if (settings.maxConcurrency > 0 && this.procs.size >= settings.maxConcurrency) return false;
-    if (this.memGuard?.status().defer) return false; // memory pressure: the wake retries on a later tick (t_a9864978)
-    if (settings.maxRuns > 0 && this.runs >= settings.maxRuns) return false; // at the cap the stored message still informs the human via the Board
+    const memWhy = this.memWakeGate(list.some((m) => m.from === 'human'));
+    if (memWhy) { a.wakeBlocked = { reason: memWhy, at: Date.now() }; return false; } // retries on a later tick (t_a9864978)
+    let bypass = this._memBypass;
+    if (settings.maxRuns > 0 && this.runs >= settings.maxRuns) { if (bypass) this._memBypass = false; return false; } // at the cap the stored message still informs the human via the Board
     this.store.markMessagesRead(list.map((m) => m.id));
     this.emit('woken_by_message', { nodeId, by: [...new Set(list.map((m) => m.from))], messageIds: list.map((m) => m.id) });
     const { reason = 'human message', taskIds = [], action = 'wake' } = why;
     this.log(nodeId, 'monitor', `waking ${node.name}: ${reason}`, { reason, taskIds, action });
     this.log(nodeId, 'system', `✉ waking for ${reason}: ${list[0].text.slice(0, 200)}`);
-    await this.wakeRun(node, list, team, settings);
+    try { await this.wakeRun(node, list, team, settings); } finally { if (bypass) this._memBypass = false; }
     return true;
   }
   // t_2c11c485: a finished task wakes the team node that created it, once, so a lead's multi-step

@@ -71,7 +71,7 @@ test('memory-pressure guard defers dispatch (fail-open when it clears), with the
 test('wake dispatch defers under memory pressure; messages stay unread and are delivered later', async () => {
   const { s, ns } = setup(1);
   let defer = true;
-  const fakeGuard = { configure() {}, refresh: () => Promise.resolve(), status: () => ({ defer, why: 'memory pressure warning (level 2)' }) };
+  const fakeGuard = { configure() {}, refresh: () => Promise.resolve(), status: () => ({ defer, level: 3, why: 'memory pressure critical (level 3)' }) };
   const o = new Orchestrator(s, { memGuard: fakeGuard });
   o.start();
   const m = s.sendMessage({ from: 'human', to: ns[0].id, text: 'hello' });
