@@ -1763,6 +1763,7 @@ class Orchestrator extends EventEmitter {
           else { cwd = w.cwd; worktree = true; this.store.updateTaskSoon(task.id, { worktreePath: w.worktreePath, worktreeBranch: w.worktreeBranch }); }
         }
       }
+      const baseHead0 = worktree ? await WT.headSha(node.workdir || this.store.dir) : null; // gate-bypass guard, checked at run end
       const presets = settings.rolePresets || [];
       const unread = this.store.listMessages({ to: node.id }).filter((m) => !m.read).length;
       let cfg; let base = null; let baseDefer = null;
@@ -1893,6 +1894,12 @@ class Orchestrator extends EventEmitter {
         if (t && t.status !== 'in_progress') this.store.updateTaskSoon(task.id, { status: 'in_progress' });
       }
       const stoppedWhy = a.stopRequested; a.stopRequested = false;
+      // A worktree run must never land commits on the base itself (an agent that wrote through an
+      // absolute path to the main checkout): flag any non-gate commit that appeared meanwhile.
+      if (baseHead0) { try {
+        const stray = await WT.strayBaseCommits(node.workdir || this.store.dir, baseHead0);
+        if (stray.length) { const msg = `⚠ non-gate commit(s) landed on the base branch during this run (possible worktree escape): ${stray.join('; ')}`; this.log(node.id, 'error', msg); this.store.commentTask(task.id, 'system', msg); }
+      } catch {} }
       // A human stop (stopAgent; budget stops excluded — a.budgetStop is set for those) stamps the
       // task so the free-signal auto resume never brings it back (plan t_76da3303 C). The manual
       // button still works: only the auto path consults the stamp.
