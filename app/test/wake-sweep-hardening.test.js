@@ -74,7 +74,7 @@ test('overdue human unread: records block reason, logs once, heals leaked procs/
   const m = s.sendMessage({ from: 'human', to: a.id, text: 'hi' });
   const old = WAKE.OVERDUE_MS; WAKE.OVERDUE_MS = 0;
   try {
-    o.memGuard = { status: () => ({ defer: true, why: 'pressure critical' }), refresh: async () => {}, configure() {} };
+    o.memGuard = { status: () => ({ defer: true, level: 3, why: 'pressure critical' }), refresh: async () => {}, configure() {} };
     await o.dispatchWake(a.id);
     assert.match(o.agent(a.id).wakeBlocked.reason, /memory guard: pressure critical/);
     o.sweepWakes(); o.sweepWakes();
@@ -148,7 +148,7 @@ test('stall: a live proc is not healed', () => {
 test('stall: memGuard defer records the reason and raises one overdue alert; wake lands once it clears', async () => {
   const { b, o, clock, logs } = stalled();
   try {
-    o.memGuard = { status: () => ({ defer: true, why: 'memory pressure critical' }), refresh: async () => {}, configure() {} };
+    o.memGuard = { status: () => ({ defer: true, level: 3, why: 'memory pressure critical' }), refresh: async () => {}, configure() {} };
     await o.dispatchWake(b.id);
     assert.match(o.agent(b.id).wakeBlocked.reason, /memory guard: memory pressure critical/);
     o.sweepWakes(); o.sweepWakes();
