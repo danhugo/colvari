@@ -9,7 +9,7 @@ const EDGE_TYPES = ['assign', 'message', 'review'];
 // The always-available board tools. The two restart tools are NOT here: they only exist where the
 // app can restart itself (dev/dogfood — main.js DEV_MODE), so board-tools.enabledTools appends
 // RESTART_TOOLS only in dev mode and packaged builds never list, register or advertise them.
-const BOARD_TOOLS = ['list_team', 'list_tasks', 'create_task', 'reassign_task', 'update_task_status', 'comment_task', 'send_message', 'read_messages', 'ask_human', 'read_wiki', 'write_wiki', 'recruit_agent', 'retire_agent', 'update_agent'];
+const BOARD_TOOLS = ['list_team', 'list_tasks', 'create_task', 'schedule_task', 'reassign_task', 'update_task_status', 'comment_task', 'send_message', 'read_messages', 'ask_human', 'read_wiki', 'write_wiki', 'recruit_agent', 'retire_agent', 'update_agent'];
 const RESTART_TOOLS = ['request_self_update', 'schedule_restart'];
 const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
 

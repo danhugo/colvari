@@ -76,3 +76,25 @@ test('probe failure (error-only stream, t_ca05e49f): recorded opencode mapping k
   const l = U.buildLedger({ runtime: 'opencode', model: 'openrouter/x/y', inputTokens: 10, outputTokens: 5, reportedCostUsd: 0.002, costKnown: true });
   assert.strictEqual(l[0].model, 'openrouter/x/y');
 });
+
+test('opencode run is pinned to the worktree cwd with --dir (t_2a58e7ac); other runtimes get no --dir', async () => {
+  const a = await RT.getRuntime('opencode').buildArgs({ model: 'x/y' }, 'hi', {}, null, { exec, probe: false, env: {}, cwd: '/wt/t_1' });
+  const i = a.indexOf('--dir');
+  assert.ok(i > 0 && a[i + 1] === '/wt/t_1'); assert.strictEqual(a[0], 'run'); assert.strictEqual(a[a.length - 1], 'hi');
+  const b = await RT.getRuntime('opencode').buildArgs({ model: 'x/y' }, 'hi', {}, null, { exec, probe: false, env: {} });
+  assert.ok(!b.includes('--dir'));
+});
+
+test('strayBaseCommits flags a direct commit on the base but not gate merges (t_2a58e7ac)', async () => {
+  const os = require('node:os'); const { execFileSync } = require('node:child_process'); const WT = require('../src/worktree');
+  const repo = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'stray-')));
+  const g = (...a) => execFileSync('git', ['-c', 'user.email=a@b', '-c', 'user.name=a', ...a], { cwd: repo, stdio: 'pipe' }).toString().trim();
+  g('init', '-q', '-b', 'main'); fs.writeFileSync(path.join(repo, 'a'), '1'); g('add', '.'); g('commit', '-qm', 'init');
+  const before = g('rev-parse', 'HEAD');
+  g('checkout', '-qb', 'squad/t_x'); fs.writeFileSync(path.join(repo, 'b'), '1'); g('add', '.'); g('commit', '-qm', 'work'); g('checkout', '-q', 'main');
+  g('merge', '--no-ff', '--no-edit', 'squad/t_x');
+  assert.deepStrictEqual(await WT.strayBaseCommits(repo, before), []);
+  fs.writeFileSync(path.join(repo, 'c'), '1'); g('add', '.'); g('commit', '-qm', 'escaped edit');
+  const s = await WT.strayBaseCommits(repo, before);
+  assert.strictEqual(s.length, 1); assert.match(s[0], /escaped edit/);
+});

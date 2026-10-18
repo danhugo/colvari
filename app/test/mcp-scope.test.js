@@ -59,7 +59,7 @@ test('real stdio MCP server enforces scope', async () => {
   const cp = await connect(pm.id);
   try {
     const names = (await cd.listTools()).tools.map((t) => t.name).sort();
-    assert.deepEqual(names, ['ask_human', 'comment_task', 'create_task', 'list_tasks', 'list_team', 'read_messages', 'read_wiki', 'reassign_task', 'request_self_update', 'schedule_restart', 'send_message', 'update_task_status', 'write_wiki']);
+    assert.deepEqual(names, ['ask_human', 'comment_task', 'create_task', 'list_tasks', 'list_team', 'read_messages', 'read_wiki', 'reassign_task', 'request_self_update', 'schedule_restart', 'schedule_task', 'send_message', 'update_task_status', 'write_wiki']);
     const bad = await cd.callTool({ name: 'create_task', arguments: { title: 'x', assignee: pm.id } });
     assert.equal(bad.isError, true);
     const ok = await cp.callTool({ name: 'create_task', arguments: { title: 'x', assignee: dev.id } });

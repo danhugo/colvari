@@ -15,6 +15,7 @@ const U = require('./usage');
 const TL = require('./timeline');
 const PF = require('./preflight');
 const C = require('./controls');
+const R = require('./remind');
 const IDLE = require('./idle');
 const WT = require('./worktree');
 const CP = require('./cp');
@@ -313,6 +314,13 @@ class Orchestrator extends EventEmitter {
     // idle; tick() stays the fast path while running. unref'd: it must not hold the process open.
     this._restartTimer = setInterval(() => { try { if (!this.running) this.sweepRestart(); } catch {} }, RESTART.IDLE_SWEEP_MS);
     if (this._restartTimer.unref) this._restartTimer.unref();
+    // Always-on reminder timer (t_22fa32e9): task.remindAt fires whether or not a Run is up; while
+    // idle it also drives sweepWatch (tick() only runs it during a Run). unref'd like _restartTimer.
+    this._remindTimer = setInterval(() => {
+      try { this.sweepReminders(); } catch (e) { this.log(null, 'error', 'reminder sweep: ' + e.message); }
+      try { if (!this.running) this.sweepWatch(); } catch (e) { this.log(null, 'error', 'watch sweep: ' + e.message); }
+    }, 60000);
+    if (this._remindTimer.unref) this._remindTimer.unref();
     // A fired marker here means the previous process relaunched itself: the schedule did its job.
     // Consume it now (Cato t_42f310cf #4: cleared only after the new process boots — never before
     // the restart, or a crash mid-relaunch loses it; never left set, or state reads stale).
@@ -327,6 +335,15 @@ class Orchestrator extends EventEmitter {
     if (!this.devMode && store.restartPending()) {
       store.clearRestartPending();
       this.log(null, 'system', 'packaged build: restart scheduling is unavailable here — cleared stored restart state');
+    }
+    // A project whose worktrees live in another repo never makes this app stale: drop the bogus
+    // tally older builds counted from its merges (t_c1663d2d).
+    if (store.restartPending()) {
+      const roots = [...new Set(store.listTasks().filter((t) => t.worktreePath).map((t) => path.resolve(t.worktreePath, '..', '..', '..')))];
+      if (roots.length && !roots.some((r) => store.isAppRepo(r))) {
+        store.clearRestartPending();
+        this.log(null, 'system', 'restart: this project merges into another repo — cleared stored restart state');
+      }
     }
     // What this RUNNING process was built from (t_7e590e54): the merge path reads it to express
     // restartPending.count as "commits behind". It lives in meta because merges run in whichever
@@ -721,6 +738,18 @@ class Orchestrator extends EventEmitter {
     await this.wakeRun(node, list, team, settings);
     return true;
   }
+  // t_2c11c485: a finished task wakes the team node that created it, once, so a lead's multi-step
+  // plan keeps going (idle wakes need open tasks; parent auto-close may leave none). Run-end is the
+  // one place every agent-driven done (worker or reviewer) passes through.
+  wakeCreatorOnDone(t) {
+    if (!t || t.status !== 'done' || !t.createdBy || t.createdBy === t.assignee || this.budgetStop) return;
+    if ((this._creatorWoken ||= new Set()).has(t.id)) return;
+    if (!this.store.getTeam().nodes.some((n) => n.id === t.createdBy)) return;
+    this._creatorWoken.add(t.id);
+    const m = this.store.sendMessage({ from: 'system', to: t.createdBy, text: `Task ${t.id} "${t.title}" is done. If your plan has more steps, create the next tasks now; otherwise stop.` });
+    this.wakeForHuman(t.createdBy, [m], { reason: 'task done', taskIds: [t.id], action: 'wake creator' })
+      .catch((e) => this.log(t.createdBy, 'error', 'creator wake: ' + e.message));
+  }
   // One background run delivering the messages (resumes the agent's last session when it has one).
   async wakeRun(node, msgs, team, settings) {
     // Single-run lock, enforced at the last choke point: never a second live run for one agent, even
@@ -1011,9 +1040,21 @@ class Orchestrator extends EventEmitter {
   // from the one the core was last woken for AND the per-agent wake gap has passed — deferred or
   // busy-suppressed digests stay pending and re-fire on a later tick. The delivery reuses the nudge
   // path (system message + wakeForHuman), so the single-run, budget and usage-pause guards all apply.
+  // Due task reminders -> a queued system status check to the assignee (any status, done included),
+  // then advance to the next repeat slot or clear. sendToAgent applies the usual wake rules.
+  sweepReminders() {
+    for (const t of this.store.listTasks()) {
+      if (!R.due(t) || !t.assignee) continue;
+      const nxt = R.next(t);
+      this.store.updateTask(t.id, nxt ? { remindAt: nxt } : { remindAt: null, remindEveryMin: null });
+      this.sendToAgent(t.assignee, R.text(t), t.id, { from: 'system', interrupt: false });
+    }
+  }
+
   sweepWatch() {
     const st = this.watch ||= { lastWatchAt: null, lastDigest: '', wokeDigest: null, active: null };
-    const active = !!(this.running && !this.userStopped && !this.dispatchPaused && this.procs.size > 0);
+    // Also active on a quiet board (no live run) that still has open tasks, so idle work wakes the core.
+    const active = !!(!this.userStopped && !this.dispatchPaused && (this.procs.size > 0 ? this.running : this.store.listTasks().some((t) => t.status !== 'done')));
     if (st.active !== active) {
       st.active = active;
       // Activation arms the first interval (a digest the moment work starts duplicates what the core
@@ -1722,6 +1763,7 @@ class Orchestrator extends EventEmitter {
           else { cwd = w.cwd; worktree = true; this.store.updateTaskSoon(task.id, { worktreePath: w.worktreePath, worktreeBranch: w.worktreeBranch }); }
         }
       }
+      const baseHead0 = worktree ? await WT.headSha(node.workdir || this.store.dir) : null; // gate-bypass guard, checked at run end
       const presets = settings.rolePresets || [];
       const unread = this.store.listMessages({ to: node.id }).filter((m) => !m.read).length;
       let cfg; let base = null; let baseDefer = null;
@@ -1852,6 +1894,12 @@ class Orchestrator extends EventEmitter {
         if (t && t.status !== 'in_progress') this.store.updateTaskSoon(task.id, { status: 'in_progress' });
       }
       const stoppedWhy = a.stopRequested; a.stopRequested = false;
+      // A worktree run must never land commits on the base itself (an agent that wrote through an
+      // absolute path to the main checkout): flag any non-gate commit that appeared meanwhile.
+      if (baseHead0) { try {
+        const stray = await WT.strayBaseCommits(node.workdir || this.store.dir, baseHead0);
+        if (stray.length) { const msg = `⚠ non-gate commit(s) landed on the base branch during this run (possible worktree escape): ${stray.join('; ')}`; this.log(node.id, 'error', msg); this.store.commentTask(task.id, 'system', msg); }
+      } catch {} }
       // A human stop (stopAgent; budget stops excluded — a.budgetStop is set for those) stamps the
       // task so the free-signal auto resume never brings it back (plan t_76da3303 C). The manual
       // button still works: only the auto path consults the stamp.
@@ -1904,6 +1952,7 @@ class Orchestrator extends EventEmitter {
         this.store.commentTask(task.id, 'orchestrator', `Agent exited (code ${code}) after moving this task to review during iteration ${i}; parked for a human because the run crashed.`);
       }
       const t2 = this.store.getTask(task.id);
+      this.wakeCreatorOnDone(t2);
       if (t2 && t2.awaitingApproval) { this.log(node.id, 'system', `⏸ "${task.title}" waits for human approval`); }
       this.log(node.id, 'system', `■ ${node.name} finished (exit ${code}, ${i} iteration(s), ${reason})`);
       this.changed();

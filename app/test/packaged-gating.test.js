@@ -85,6 +85,7 @@ test('packaged: merges past the restart cap hold no tasks and notify nobody', ()
   s.saveSettings({ restartCap: 2 });
   const orig = MG.gateMerge;
   const root = tmp('squad-pkg-root-');
+  s.appRoot = root;
   try {
     MG.gateMerge = () => ({ merged: true, base: 'master', root, gate: { state: 'green', tests: 1, flaky: [] } });
     for (let i = 0; i < 3; i++) {
