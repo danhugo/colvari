@@ -11,6 +11,9 @@ require('./procguard').install();
 // Every mkdtemp in a test-file process is tracked and removed at exit (t_8170a988). Loaded after
 // procguard so its exit hook (which kills spawned children) runs before the removal.
 require('./tmp').installGlobal();
+// Unit tests must not depend on the real machine's proxy setup: a shell ANTHROPIC_BASE_URL makes
+// run exits fetch real proxy spend logs (network + timers), breaking timer invariants.
+delete process.env.ANTHROPIC_BASE_URL;
 // Unit tests must not depend on the real machine's memory pressure (t_f56f1b22): a MemGuard with
 // no injected probe/execFile/freeMem reads "normal". Tests that inject their own keep their readings.
 {
